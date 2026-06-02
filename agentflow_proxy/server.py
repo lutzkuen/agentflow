@@ -45,6 +45,12 @@ MODEL_PRICES = {
     "claude-opus-4-5": (5.0, 25.0),
 }
 
+MODEL_ALIASES = {
+    "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+    "claude-sonnet-4.5": "claude-sonnet-4-5-20240620",
+    "claude-opus-4.5": "claude-opus-4-5",
+}
+
 HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
 SONNET_DEFAULT = os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
 OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
@@ -380,6 +386,8 @@ async def messages(request: Request) -> Response:
     raw_body = await request.json()
     stream = bool(raw_body.get("stream"))
     requested_model = str(raw_body.get("model") or "")
+    if requested_model in MODEL_ALIASES:
+        raw_body["model"] = MODEL_ALIASES[requested_model]
     error: Optional[str] = None
     status_code = 200
     crunch_meta: dict[str, Any] = {}

@@ -37,7 +37,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: calls table has non-null actual_input_tokens, actual_output_tokens columns;
   compare estimates vs. actuals to calibrate.
 
-- [READY] Session ID tracking
+- [DONE] Session ID tracking (2026-06-02)
   Details: Claude Code sends a stable session identifier in headers (check x-session-id,
   x-request-id patterns, or generate one per connected client IP+port). Group calls into
   sessions so we can track per-session cost, measure agentic workflow phases, and scope
@@ -166,3 +166,10 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 ## Agent Findings
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
+
+- [READY] Normalize dot-notation model aliases before forwarding
+  Details: Dot-notation aliases (claude-haiku-4.5, claude-sonnet-4.5, claude-opus-4.5) reach
+  Anthropic unchanged and return HTTP 404. Normalize them in the handler before forwarding:
+  claude-haiku-4.5 → claude-haiku-4-5-20251001, claude-sonnet-4.5 → claude-sonnet-4-5-20240620,
+  claude-opus-4.5 → claude-opus-4-5. Tester confirmed 16 prod calls failing with 404.
+  Metric: zero 404s from dot-notation aliases; router still routes correctly after normalization.
