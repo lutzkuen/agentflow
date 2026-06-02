@@ -16,9 +16,11 @@ RUN_ID=${RUN_ID:-$(date +%Y-%m-%d_%H-%M)}
 PROXY_URL=${ANTHROPIC_BASE_URL:-http://127.0.0.1:4000}
 PROXY_SERVICE=${AGENTFLOW_PROXY_SERVICE:-agentflow-claude-proxy.service}
 CLAUDE_BIN=${CLAUDE_BIN:-claude}
+CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-$HOME/.claude/projects/-home-lutz-agentflow}
 SMOKE_EXPECT="AGENTFLOW_SMOKE_OK"
 LOCK_FILE=${AGENTFLOW_ORCHESTRATOR_LOCK:-/tmp/agentflow-orchestrator.lock}
 RUN_LOG="$LOG_DIR/$RUN_ID.md"
+CLAUDE_SMOKE_OUTPUT=""
 
 export RUN_ID
 export ANTHROPIC_BASE_URL="$PROXY_URL"
@@ -56,6 +58,10 @@ append_diagnostics() {
     echo "### Recent Proxy Journal"
     journalctl --user -u "$PROXY_SERVICE" -n 80 --no-pager || true
   } >> "$RUN_LOG"
+}
+
+claude_output_is_transient_rate_limit() {
+  grep -Eiq 'temporarily limiting requests|account.s rate limit|rate limit.*try again later'
 }
 
 wait_for_health() {
@@ -105,14 +111,130 @@ claude_oauth_smoke() {
       "$CLAUDE_BIN" --print --no-session-persistence --model haiku \
       "Reply with exactly: $SMOKE_EXPECT" 2>&1
   ) || {
+    CLAUDE_SMOKE_OUTPUT="$output"
     printf '%s\n' "$output"
+    if printf '%s\n' "$output" | claude_output_is_transient_rate_limit; then
+      return 2
+    fi
     return 1
   }
 
+  CLAUDE_SMOKE_OUTPUT="$output"
   printf '%s\n' "$output" | grep -q "$SMOKE_EXPECT"
 }
 
-run_orchestrator() {
+run_log_has_transient_rate_limit() {
+  tail -120 "$RUN_LOG" 2>/dev/null | claude_output_is_transient_rate_limit
+}
+
+capture_claude_oauth_smoke() {
+  set +e
+  claude_oauth_smoke
+  smoke_status=$?
+  set -e
+}
+
+find_broken_token_session() {
+  python3 - "$CLAUDE_PROJECT_DIR" <<'PY'
+import glob
+import json
+import os
+import re
+import sys
+
+project_dir = sys.argv[1]
+patterns = [
+    r"out of tokens",
+    r"too many tokens",
+    r"token limit",
+    r"maximum[^\n]{0,80}tokens?",
+    r"context window",
+    r"context length",
+    r"prompt is too long",
+    r"input is too long",
+    r"exceeds?[^\n]{0,80}context",
+    r"session limit",
+    r"usage limit",
+    r"you'?ve hit your session limit",
+    r"rate[_ -]?limit",
+]
+problem_re = re.compile("|".join(patterns), re.IGNORECASE)
+
+
+def flatten_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(flatten_text(item) for item in value)
+    if isinstance(value, dict):
+        parts = []
+        for key in ("type", "text", "message", "content", "error", "status"):
+            if key in value:
+                parts.append(flatten_text(value[key]))
+        if value.get("isApiErrorMessage"):
+            parts.append("api error")
+        return "\n".join(parts)
+    return str(value)
+
+
+def file_candidate(path):
+    session_id = os.path.splitext(os.path.basename(path))[0]
+    last_problem = None
+    last_success = None
+    reason = ""
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for index, line in enumerate(handle):
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    event = {"raw": line}
+
+                session_id = event.get("sessionId") or session_id
+                text = flatten_text(event)
+                match = problem_re.search(text)
+                if match:
+                    last_problem = index
+                    reason = match.group(0)
+
+                message = event.get("message") if isinstance(event, dict) else None
+                if isinstance(message, dict):
+                    if message.get("role") == "assistant" and message.get("stop_reason") == "end_turn":
+                        last_success = index
+                    content_text = flatten_text(message.get("content"))
+                    if event.get("type") == "assistant" and message.get("role") == "assistant" and content_text:
+                        if not problem_re.search(content_text) and not event.get("isApiErrorMessage"):
+                            last_success = index
+    except OSError:
+        return None
+
+    if last_problem is None:
+        return None
+    if last_success is not None and last_success > last_problem:
+        return None
+    return (os.path.getmtime(path), session_id, reason, path)
+
+
+candidates = []
+for path in glob.glob(os.path.join(project_dir, "*.jsonl")):
+    candidate = file_candidate(path)
+    if candidate:
+        candidates.append(candidate)
+
+if not candidates:
+    raise SystemExit(1)
+
+candidates.sort(reverse=True)
+_, session_id, reason, path = candidates[0]
+print(session_id)
+print(f"Selected unresolved Claude token/session-limit session {session_id} ({reason}) from {path}", file=sys.stderr)
+PY
+}
+
+write_orchestrator_prompt() {
   {
     cat "$REPO/agents/orchestrator.md"
     echo ""
@@ -137,17 +259,51 @@ run_orchestrator() {
     echo ""
     echo "**Last run:**"
     ls -1t "$LOG_DIR"/*.md 2>/dev/null | grep -v "/$RUN_ID.md$" | head -1 | xargs tail -60 2>/dev/null || echo "(no previous runs)"
-  } | env \
+  }
+}
+
+run_claude_operator() {
+  local resume_session=${1:-}
+  local -a claude_args
+  claude_args=(
+    --print
+    --append-system-prompt
+    "Never kill, stop, restart, replace, or bind the AgentFlow prod middleware on port 4000. If prod appears broken, report it; the shell guard and Codex handle prod repair. If this run was started with --resume, inspect the existing session context first and continue the unfinished work instead of repeating completed work."
+    --allowedTools
+    "Bash,Read,Write,Edit"
+  )
+
+  if [[ -n "$resume_session" ]]; then
+    claude_args+=(--resume "$resume_session")
+  fi
+
+  write_orchestrator_prompt | env \
       -u ANTHROPIC_API_KEY \
       -u ANTHROPIC_AUTH_TOKEN \
       ANTHROPIC_BASE_URL="$PROXY_URL" \
-      "$CLAUDE_BIN" --print --no-session-persistence \
-      --append-system-prompt "Never kill, stop, restart, replace, or bind the AgentFlow prod middleware on port 4000. If prod appears broken, report it; the shell guard and Codex handle prod repair." \
-      --allowedTools "Bash,Read,Write,Edit" \
+      "$CLAUDE_BIN" "${claude_args[@]}" \
       2>&1 | tee -a "$RUN_LOG"
 }
 
+run_orchestrator() {
+  local resume_session
+  resume_session=$(find_broken_token_session 2>>"$RUN_LOG" || true)
+
+  if [[ -n "$resume_session" ]]; then
+    log "Running Claude orchestrator by resuming token-broken session $resume_session" | tee -a "$RUN_LOG"
+    run_claude_operator "$resume_session"
+  else
+    log "No unresolved token-broken Claude session found; starting a new operator session" | tee -a "$RUN_LOG"
+    run_claude_operator
+  fi
+}
+
 main() {
+  if [[ "${1:-}" == "--print-resume-candidate" ]]; then
+    find_broken_token_session
+    return $?
+  fi
+
   : > "$RUN_LOG"
 
   log "Preflight: ensuring proxy is healthy" | tee -a "$RUN_LOG"
@@ -159,10 +315,22 @@ main() {
   fi
 
   log "Preflight: smoke testing Claude OAuth through middleware" | tee -a "$RUN_LOG"
-  if ! claude_oauth_smoke; then
+  capture_claude_oauth_smoke
+  if (( smoke_status == 2 )); then
+    log "Claude upstream is temporarily rate-limiting requests; middleware is healthy, skipping repair" | tee -a "$RUN_LOG"
+    echo "CLAUDE_RATE_LIMITED: try this run again later." | tee -a "$RUN_LOG"
+    exit 23
+  fi
+  if (( smoke_status != 0 )); then
     log "OAuth smoke failed; attempting one proxy repair and retry" | tee -a "$RUN_LOG"
     repair_proxy_service || true
-    if ! claude_oauth_smoke; then
+    capture_claude_oauth_smoke
+    if (( smoke_status == 2 )); then
+      log "Claude upstream is temporarily rate-limiting requests after repair; middleware is healthy" | tee -a "$RUN_LOG"
+      echo "CLAUDE_RATE_LIMITED: try this run again later." | tee -a "$RUN_LOG"
+      exit 23
+    fi
+    if (( smoke_status != 0 )); then
       append_diagnostics "preflight Claude OAuth smoke failed"
       echo "CODEX_REQUIRED: Claude OAuth smoke failed through middleware." | tee -a "$RUN_LOG"
       exit 21
@@ -177,16 +345,44 @@ main() {
 
   log "Running Claude orchestrator" | tee -a "$RUN_LOG"
   if ! run_orchestrator; then
+    if run_log_has_transient_rate_limit; then
+      log "Claude orchestrator hit transient upstream rate limiting; checking proxy health only" | tee -a "$RUN_LOG"
+      if ensure_proxy_ready; then
+        echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
+        exit 23
+      fi
+    fi
     log "Claude orchestrator exited non-zero; continuing to postflight middleware check" | tee -a "$RUN_LOG"
   fi
 
   log "Postflight: checking whether Claude disturbed the middleware" | tee -a "$RUN_LOG"
-  if ! ensure_proxy_ready || ! claude_oauth_smoke; then
+  if ! ensure_proxy_ready; then
     log "Postflight failed; repairing and retrying smoke once" | tee -a "$RUN_LOG"
     repair_proxy_service || true
-    if ! ensure_proxy_ready || ! claude_oauth_smoke; then
+    if ! ensure_proxy_ready; then
       append_diagnostics "postflight middleware or Claude OAuth smoke failed"
       echo "CODEX_REQUIRED: Claude disturbed the middleware and shell repair did not restore it." | tee -a "$RUN_LOG"
+      exit 22
+    fi
+  fi
+  capture_claude_oauth_smoke
+  if (( smoke_status == 2 )); then
+    log "Postflight proxy is healthy; Claude upstream is temporarily rate-limiting smoke requests" | tee -a "$RUN_LOG"
+    echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
+    exit 23
+  fi
+  if (( smoke_status != 0 )); then
+    log "Postflight smoke failed; repairing and retrying smoke once" | tee -a "$RUN_LOG"
+    repair_proxy_service || true
+    capture_claude_oauth_smoke
+    if (( smoke_status == 2 )); then
+      log "Postflight proxy is healthy after repair; Claude upstream is temporarily rate-limiting smoke requests" | tee -a "$RUN_LOG"
+      echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
+      exit 23
+    fi
+    if (( smoke_status != 0 )); then
+      append_diagnostics "postflight Claude OAuth smoke failed"
+      echo "CODEX_REQUIRED: Claude OAuth smoke failed through middleware." | tee -a "$RUN_LOG"
       exit 22
     fi
   fi

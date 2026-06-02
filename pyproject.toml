@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 agentflow-claude-proxy = "agentflow_proxy.server:main"
+agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]
 packages = ["agentflow_proxy"]

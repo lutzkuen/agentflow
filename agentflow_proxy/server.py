@@ -267,6 +267,7 @@ class Store:
         """)
         self._ensure_column("calls", "actual_input_tokens", "integer")
         self._ensure_column("calls", "actual_output_tokens", "integer")
+        self._ensure_column("calls", "session_id", "text")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -295,7 +296,7 @@ class Store:
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
-            "cost_est_usd", "crunch_json", "routing_json", "error", "request_json", "response_json",
+            "cost_est_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
         ]
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
@@ -372,6 +373,10 @@ async def messages(request: Request) -> Response:
     started = time.time()
     call_id = str(uuid.uuid4())
     path = "/v1/messages"
+    client_ip = (request.client.host if request.client else "unknown")
+    session_id = request.headers.get("x-session-id") or hashlib.sha256(
+        (client_ip + datetime.now(timezone.utc).strftime("%Y-%m-%d")).encode()
+    ).hexdigest()[:16]
     raw_body = await request.json()
     stream = bool(raw_body.get("stream"))
     requested_model = str(raw_body.get("model") or "")
@@ -431,6 +436,7 @@ async def messages(request: Request) -> Response:
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
                         cost_est_usd=None, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
+                        session_id=session_id,
                     )
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -452,6 +458,7 @@ async def messages(request: Request) -> Response:
                     cost_est_usd=0.0, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(response_body) if LOG_BODIES else None,
+                    session_id=session_id,
                 )
                 return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -484,6 +491,7 @@ async def messages(request: Request) -> Response:
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
+            session_id=session_id,
         )
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -497,6 +505,7 @@ async def messages(request: Request) -> Response:
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
+            session_id=session_id,
         )
         return JSONResponse({"type": "error", "error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
 
