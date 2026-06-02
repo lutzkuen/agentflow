@@ -62,17 +62,6 @@ that isn't a route handler, it belongs in a module.
 7. **When splitting a module:** copy the code, update the import in server.py, delete the
    original function, restart dev, run tests. Commit only if tests pass.
 
-## Setup prerequisite
-
-The orchestrator (`agents/run_orchestrator.py`) uses the Anthropic Python SDK directly
-and needs `ANTHROPIC_API_KEY` set. Add it to `.env` (gitignored):
-
-```bash
-echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
-```
-
-`claude --print` subprocess calls inherit this from the shell. The proxy forwards it upstream.
-
 ## Running tests
 
 ```bash
