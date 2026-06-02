@@ -61,11 +61,27 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P1 — Better Measurement (know what's actually happening)
 
-- [READY] Fix streaming cost_est_usd (always null)
+- [DONE] Fix streaming cost_est_usd (always null) (2026-06-02)
   Details: In server.py streaming `finally` block, `cost_est_usd` is hardcoded to None even
   though `actual_in`/`actual_out` are now populated from SSE events. Fix: call `estimate_cost()`
   with actual tokens the same way the non-streaming path does (server.py:450-452).
   Metric: streaming calls have non-null cost_est_usd; dashboard cost totals include streaming.
+
+- [DONE] Fix dashboard time rendering as NaNd (2026-06-02)
+  Details: The dashboard currently shows time values as `NaNd`, which makes recent calls and
+  unattended cron/operator history hard to interpret. Inspect the timestamp format returned by
+  the stats endpoints and the dashboard JavaScript date formatting path; handle null/invalid
+  timestamps gracefully instead of rendering broken text.
+  Metric: dashboard time columns render valid local times or a clear placeholder, with no `NaN`
+  or `NaNd` values visible.
+
+- [READY] Dashboard 7-day statistics tab
+  Details: Add a tab or separate page on the read-only dashboard showing the last 7 days of
+  operational statistics: calls received, successful calls, errors, cache hits, average latency,
+  estimated cost, baseline cost, savings from routing/crunching/cache, and trends by day.
+  Include enough detail to understand what unattended cron/operator sessions did over time.
+  Metric: dashboard exposes a 7-day view with daily totals and aggregate success/error/savings
+  figures based on stored call data.
 
 - [READY] Cost comparison baseline
   Details: For every call, log what it would have cost at the requested model (before routing).

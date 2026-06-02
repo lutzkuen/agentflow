@@ -274,6 +274,7 @@ class Store:
         self._ensure_column("calls", "actual_input_tokens", "integer")
         self._ensure_column("calls", "actual_output_tokens", "integer")
         self._ensure_column("calls", "session_id", "text")
+        self._ensure_column("calls", "cost_baseline_usd", "real")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -302,7 +303,7 @@ class Store:
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
-            "cost_est_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
+            "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
         ]
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
@@ -695,7 +696,9 @@ function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
 function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
 function fmtTok(n){if(n==null)return'?';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
 function ago(ts){
-  const d=Math.floor((Date.now()-new Date(ts+'Z').getTime())/1000);
+  if(!ts)return'—';
+  const d=Math.floor((Date.now()-new Date(ts).getTime())/1000);
+  if(isNaN(d))return'—';
   if(d<60)return d+'s';if(d<3600)return Math.floor(d/60)+'m';
   if(d<86400)return Math.floor(d/3600)+'h';return Math.floor(d/86400)+'d';
 }
