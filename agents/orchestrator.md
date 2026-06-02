@@ -6,6 +6,11 @@ You are the AgentFlow orchestrator. You run every two hours to improve the Agent
 You have Bash, Read, Write, and Edit tools. You drive the full improvement cycle by invoking
 focused sub-agents as `claude --print` bash commands and acting on their output.
 
+The recurring shell guard owns prod middleware health. Never stop, kill, restart, replace,
+or bind the prod proxy on port 4000. If prod appears unhealthy, report it in the run
+summary and stop; Codex handles prod repair. Development and smoke tests happen on dev
+port 4001.
+
 ## Invoking sub-agents
 
 Each sub-agent is a separate `claude --print` process. Pipe the agent prompt plus task context in:
@@ -60,6 +65,7 @@ claude --print --allowedTools "Bash,Read,Write,Edit" \
 
 - Only commit after VERDICT: PASS.
 - One item per run. Do not attempt multiple items.
-- Never restart prod (port 4000) mid-development — dev runs on port 4001.
-  (Port 4001 may not exist yet; if so, note it in the run summary and skip prod promotion.)
+- Never restart prod (port 4000), never run `kill`/`pkill`/`fuser` against it, and never
+  launch Uvicorn on port 4000. Dev runs on port 4001.
+  (Port 4001 may not exist yet; if so, note it in the run summary.)
 - If blocked after two developer attempts, write a clear BLOCKED note and stop.

@@ -10,11 +10,31 @@ UNIT_DIR="$HOME/.config/systemd/user"
 
 mkdir -p "$UNIT_DIR"
 
-# ── Service unit ─────────────────────────────────────────────────────────────
+# ── Proxy service unit ───────────────────────────────────────────────────────
+cat > "$UNIT_DIR/agentflow-claude-proxy.service" << EOF
+[Unit]
+Description=AgentFlow Claude Proxy
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO
+ExecStartPre=-/usr/bin/fuser -k 4000/tcp
+ExecStart=$REPO/.venv/bin/python -m uvicorn agentflow_proxy.server:app --host 127.0.0.1 --port 4000
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+EOF
+
+# ── Orchestrator service unit ────────────────────────────────────────────────
 cat > "$UNIT_DIR/agentflow-orchestrator.service" << EOF
 [Unit]
 Description=AgentFlow Orchestrator
-After=network.target
+Wants=agentflow-claude-proxy.service
+After=network.target agentflow-claude-proxy.service
 
 [Service]
 Type=oneshot
@@ -42,10 +62,14 @@ WantedBy=timers.target
 EOF
 
 systemctl --user daemon-reload
+systemctl --user enable --now agentflow-claude-proxy.service
 systemctl --user enable --now agentflow-orchestrator.timer
 
 echo ""
 echo "Timer installed and started."
+echo ""
+echo "Proxy status:"
+systemctl --user status agentflow-claude-proxy.service --no-pager
 echo ""
 echo "Status:"
 systemctl --user status agentflow-orchestrator.timer --no-pager
@@ -61,4 +85,5 @@ echo "  journalctl --user -u agentflow-orchestrator.service -f"
 echo ""
 echo "To uninstall:"
 echo "  systemctl --user disable --now agentflow-orchestrator.timer"
-echo "  rm $UNIT_DIR/agentflow-orchestrator.{service,timer}"
+echo "  systemctl --user disable --now agentflow-claude-proxy.service"
+echo "  rm $UNIT_DIR/agentflow-orchestrator.{service,timer} $UNIT_DIR/agentflow-claude-proxy.service"

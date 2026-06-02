@@ -47,7 +47,8 @@ that isn't a route handler, it belongs in a module.
      python -m uvicorn agentflow_proxy.server:app --host 127.0.0.1 --port 4001 &
    ```
 
-3. **DB schema changes need migrations.** Use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+3. **DB schema changes need migrations.** Check existing columns with `PRAGMA table_info`
+   before `ALTER TABLE ... ADD COLUMN`; this repo's SQLite rejects `ADD COLUMN IF NOT EXISTS`.
    Never drop a column. Never rename a column. Add a new one.
 
 4. **No new dependencies without justification.** If adding a dep, explain in the commit
