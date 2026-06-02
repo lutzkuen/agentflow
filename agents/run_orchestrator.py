@@ -27,6 +27,7 @@ RUN_LOG = RUNS_DIR / f"{RUN_ID}.md"
 
 client = anthropic.Anthropic(
     base_url=os.getenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"),
+    api_key=os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN", "proxy-passthrough"),
 )
 
 # ── Sub-agent tool definitions ────────────────────────────────────────────────

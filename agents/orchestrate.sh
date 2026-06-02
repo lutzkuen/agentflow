@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+export PATH="/home/lutz/.local/bin:$PATH"
+
 REPO=/home/lutz/agentflow
 cd "$REPO"
 source .venv/bin/activate
