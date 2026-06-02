@@ -388,6 +388,12 @@ write_orchestrator_prompt() {
     echo "**Git log:**"
     git log --oneline -15
     echo ""
+    echo "**ARCHITECTURE.md:**"
+    cat "$REPO/ARCHITECTURE.md"
+    echo ""
+    echo "**NORTH_STAR.md:**"
+    cat "$REPO/NORTH_STAR.md"
+    echo ""
     echo "**BACKLOG.md:**"
     cat "$REPO/BACKLOG.md"
     echo ""

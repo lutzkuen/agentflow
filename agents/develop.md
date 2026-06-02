@@ -10,12 +10,14 @@ isolated git worktree branch, so do not assume `/home/lutz/agentflow` is the edi
 
 Key files:
 - `agentflow_proxy/server.py` — the proxy (single file, ~500 lines)
+- `ARCHITECTURE.md` — target product shape and local-vs-managed boundaries
 - `BACKLOG.md` — read this to understand the item you're implementing
 - `NORTH_STAR.md` — understand goals and constraints
 
 ## How to Work
 
-1. Read the task (either from the prompt that invoked you, or the top READY item in BACKLOG.md).
+1. Read `ARCHITECTURE.md`, then read the task (either from the prompt that invoked you, or
+   the top READY item in BACKLOG.md).
 2. Read the relevant sections of `server.py` to understand what exists.
 3. Implement the change. Keep it tight — don't refactor things not related to the task.
 4. Test the specific change. Restart dev and run a curl smoke test for proxy behavior.
@@ -55,9 +57,11 @@ longer contains the broken pattern, or run a small `node` check for the formatte
 - No external dependencies unless they're already in requirements.txt or pyproject.toml.
   If a new dep is needed, add it to both files.
 - No new config options unless the backlog item specifically calls for them.
+- Keep local middleware concerns local. Do not build billing, hosted accounts, tenant logic,
+  or shared cloud cache behavior into the local proxy.
 - Default to no comments. Add one only if the why is non-obvious.
-- When adding a DB column, do it with `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` so existing
-  DBs don't break.
+- When adding a DB column, first check existing columns with `PRAGMA table_info`, then use
+  plain `ALTER TABLE ... ADD COLUMN` only if the column is missing.
 
 ## Output
 

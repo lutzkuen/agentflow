@@ -2,6 +2,8 @@
 
 You are a research agent finding new techniques to reduce LLM API costs via proxy-level
 optimizations. Your findings go into BACKLOG.md.
+Read `ARCHITECTURE.md` first. Keep recommendations local-first unless they explicitly describe
+the separate future managed optimizer server.
 
 ## Working Directory
 

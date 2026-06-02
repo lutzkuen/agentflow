@@ -17,6 +17,16 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P0 — Foundation (do these first, everything else builds on them)
 
+- [DONE] Target architecture documentation (2026-06-02)
+  Details: Added `ARCHITECTURE.md` to define the intended split between the local Python
+  middleware module and the future managed optimizer server for paying users. The local module
+  owns Claude middleware, the read-only dashboard, SQLite logs/cache, and local manual rules
+  for model selection, crunching, and exact-match hash matching. The future server is separate,
+  opt-in, tenant-aware, and focused on better routing/crunching policies plus broader cache
+  and telemetry learning.
+  Metric: unattended agents read a clear architecture contract before choosing or implementing
+  backlog work.
+
 - [DONE] Dev/prod instance split
   Details: Prod is the proxy on port 4000 serving real Claude Code traffic — never restart
   it mid-development. Dev is a second instance on port 4001 pointing at a separate DB
@@ -75,7 +85,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: dashboard time columns render valid local times or a clear placeholder, with no `NaN`
   or `NaNd` values visible.
 
-- [READY] Dashboard 7-day statistics tab
+- [DONE] Dashboard 7-day statistics tab (2026-06-02)
   Details: Add a tab or separate page on the read-only dashboard showing the last 7 days of
   operational statistics: calls received, successful calls, errors, cache hits, average latency,
   estimated cost, baseline cost, savings from routing/crunching/cache, and trends by day.

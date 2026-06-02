@@ -14,6 +14,19 @@ It runs on `127.0.0.1`, accepts whatever auth header the client sends, forwards 
 
 This is a first prototype, not production software.
 
+## Target architecture
+
+The current product is the **local AgentFlow module**: a Python package that runs on the
+user's machine as Claude middleware, stores logs/cache locally, exposes a read-only dashboard,
+and will provide local manual rules for model selection, crunching, and exact-match hash cache
+matching.
+
+The future product is a separate **managed optimizer server** for paying users. It should be
+opt-in and tenant-aware, and should improve routing, crunching, and cache policy from broader
+aggregate learning. It is not a dependency for the local middleware.
+
+See `ARCHITECTURE.md` before making architectural changes.
+
 ## Install
 
 ```bash

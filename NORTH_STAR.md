@@ -7,6 +7,11 @@ and the Anthropic API. Its job is to continuously reduce the cost of running AI 
 without degrading result quality — and to improve its own ability to do that over time,
 driven by an autonomous agentic development loop.
 
+See `ARCHITECTURE.md` for the target architecture contract. In short: the local Python module
+must provide the Claude middleware, read-only dashboard, and local manual rules; a separate
+future managed optimizer can later serve paying users with better routing, crunching, and
+broader cache/policy learning.
+
 ## The Three Core Levers
 
 ### 1. Prompt Crunching
@@ -48,7 +53,7 @@ Target capabilities:
 
 ## The Dashboard
 
-A live web UI at `http://localhost:4000/agentflow/dashboard` showing:
+A read-only live web UI at `http://localhost:4002/agentflow/dashboard` showing:
 
 - Real-time request feed (model, route decision, cache hit/miss, latency, cost)
 - Cost totals: what was actually spent, what would have been spent without routing/crunching

@@ -5,7 +5,20 @@ Read this before making any change. It applies to human developers and agent run
 ## What this repo is
 
 A local Anthropic-compatible proxy that reduces API cost via crunching, routing, and caching.
-See `NORTH_STAR.md` for goals. See `BACKLOG.md` for what to work on.
+See `ARCHITECTURE.md` for the target product shape, `NORTH_STAR.md` for goals, and
+`BACKLOG.md` for what to work on.
+
+## Architecture contract
+
+AgentFlow has two planned layers:
+
+- the local Python module: localhost Claude middleware, read-only LAN dashboard, local SQLite
+  logs/cache, and local manual rules for model routing, crunching, and exact-match cache policy;
+- the future managed optimizer: a separate opt-in server for paying users that can provide
+  better routing/crunching policies and a wider policy/cache knowledge base.
+
+Do not build SaaS concerns into the local proxy. The local module may define clean interfaces
+for later policy import/export, but it must remain useful without a managed server.
 
 ## Ports
 
@@ -13,9 +26,12 @@ See `NORTH_STAR.md` for goals. See `BACKLOG.md` for what to work on.
 |----------|------|----|---------|
 | prod | 4000 | `~/.agentflow/agentflow.sqlite3` | Live traffic from Claude Code / Claude CLI |
 | dev  | 4001 | `~/.agentflow/dev.sqlite3` | Agent development and testing |
+| dashboard | 4002 | `~/.agentflow/agentflow.sqlite3` | Read-only LAN dashboard |
 
 **Never restart prod mid-development.** The developer agent works against port 4001.
 Only the orchestrator promotes to prod after tests pass.
+Never expose the Claude proxy endpoint on the LAN. Only the read-only dashboard may bind
+outside localhost.
 
 ## Module structure
 
@@ -30,6 +46,7 @@ agentflow_proxy/
   router.py        — route_model() and all routing logic
   cache.py         — cache key, get/set, TTL, semantic cache when added
   pricing.py       — MODEL_PRICES, estimate_cost()
+  config.py        — load file-backed local rules and defaults
   dashboard.py     — /agentflow/dashboard HTML endpoint
 ```
 
