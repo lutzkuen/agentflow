@@ -61,6 +61,12 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P1 — Better Measurement (know what's actually happening)
 
+- [READY] Fix streaming cost_est_usd (always null)
+  Details: In server.py streaming `finally` block, `cost_est_usd` is hardcoded to None even
+  though `actual_in`/`actual_out` are now populated from SSE events. Fix: call `estimate_cost()`
+  with actual tokens the same way the non-streaming path does (server.py:450-452).
+  Metric: streaming calls have non-null cost_est_usd; dashboard cost totals include streaming.
+
 - [READY] Cost comparison baseline
   Details: For every call, log what it would have cost at the requested model (before routing).
   This gives us `cost_without_agentflow` vs `cost_with_agentflow` so the dashboard can show
