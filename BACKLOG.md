@@ -17,6 +17,19 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P0 — Foundation (do these first, everything else builds on them)
 
+- [READY] Dev/prod instance split
+  Details: Prod is the proxy on port 4000 serving real Claude Code traffic — never restart
+  it mid-development. Dev is a second instance on port 4001 pointing at a separate DB
+  (~/.agentflow/dev.sqlite3). The developer agent edits code and tests exclusively against
+  the dev instance. Only after run_tester passes against dev does the orchestrator do a
+  rolling restart of prod (SIGTERM + start, not kill -9) and re-run a quick smoke test.
+  Implement as: AGENTFLOW_PORT env var already exists; add scripts/start_dev.sh that
+  launches port 4001 with AGENTFLOW_DB=~/.agentflow/dev.sqlite3. Update run_orchestrator.py
+  to target port 4001 for developer/tester agents and port 4000 only for the final prod
+  promotion step.
+  Metric: real traffic on port 4000 is uninterrupted during an orchestrator run; dev DB
+  is separate so test calls don't pollute prod stats.
+
 - [READY] Accurate token counting from API response headers
   Details: Parse `x-request-id`, `input-tokens`, `output-tokens` from Anthropic response.
   Currently using rough chars/4 estimate. Real counts are needed for accurate cost tracking
