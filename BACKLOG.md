@@ -17,7 +17,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P0 — Foundation (do these first, everything else builds on them)
 
-- [READY] Dev/prod instance split
+- [DONE] Dev/prod instance split
   Details: Prod is the proxy on port 4000 serving real Claude Code traffic — never restart
   it mid-development. Dev is a second instance on port 4001 pointing at a separate DB
   (~/.agentflow/dev.sqlite3). The developer agent edits code and tests exclusively against
@@ -30,7 +30,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: real traffic on port 4000 is uninterrupted during an orchestrator run; dev DB
   is separate so test calls don't pollute prod stats.
 
-- [READY] Accurate token counting from API response headers
+- [DONE] Accurate token counting from API response headers (2026-06-02)
   Details: Parse `x-request-id`, `input-tokens`, `output-tokens` from Anthropic response.
   Currently using rough chars/4 estimate. Real counts are needed for accurate cost tracking
   and for measuring whether routing/crunching actually saves tokens.
@@ -51,7 +51,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   - Auto-refresh every 5 seconds via meta refresh or fetch
   Metric: page loads, data is live, no external dependencies.
 
-- [READY] Streaming token tracking
+- [DONE] Streaming token tracking (2026-06-02)
   Details: Parse SSE stream events to extract usage data from the final `message_delta` event
   which contains `usage.output_tokens`. Store it in the DB. Currently streaming calls log
   no output tokens.

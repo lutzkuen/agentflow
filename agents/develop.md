@@ -22,18 +22,16 @@ Key files:
 
 ## Proxy Restart
 
+Always restart **dev (port 4001)**, never prod (port 4000).
+
 ```bash
-pkill -f "uvicorn agentflow_proxy" 2>/dev/null; sleep 1
-cd /home/lutz/agentflow && source .venv/bin/activate
-nohup python -m uvicorn agentflow_proxy.server:app --host 127.0.0.1 --port 4000 \
-  > /tmp/agentflow.log 2>&1 &
-sleep 2 && curl -s http://localhost:4000/health
+bash /home/lutz/agentflow/scripts/start_dev.sh
 ```
 
 ## Smoke Test
 
 ```bash
-curl -s -X POST http://localhost:4000/v1/messages \
+curl -s -X POST http://localhost:4001/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \

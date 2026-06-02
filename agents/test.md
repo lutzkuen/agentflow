@@ -10,19 +10,19 @@ You are a QA agent. Your job is to verify the proxy is working correctly and cat
 
 ### 1. Health check
 ```bash
-curl -s http://localhost:4000/health | python3 -m json.tool
+curl -s http://localhost:4001/health | python3 -m json.tool
 ```
 Expected: `{"ok": true, ...}`
 
 ### 2. Models endpoint
 ```bash
-curl -s http://localhost:4000/v1/models | python3 -m json.tool
+curl -s http://localhost:4001/v1/models | python3 -m json.tool
 ```
 Expected: list with haiku, sonnet, opus entries.
 
 ### 3. Basic non-streaming call
 ```bash
-curl -s -X POST http://localhost:4000/v1/messages \
+curl -s -X POST http://localhost:4001/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
@@ -36,13 +36,13 @@ Make the same non-streaming request twice, check second has `x-agentflow-cache: 
 
 ```bash
 REQ='{"model":"claude-haiku-4.5","max_tokens":20,"messages":[{"role":"user","content":"What is 2+2? One word answer."}]}'
-curl -sv -X POST http://localhost:4000/v1/messages \
+curl -sv -X POST http://localhost:4001/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -d "$REQ" 2>&1 | grep -E "agentflow-cache|PROXY"
 # wait a moment
-curl -sv -X POST http://localhost:4000/v1/messages \
+curl -sv -X POST http://localhost:4001/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
@@ -52,7 +52,7 @@ Expected: second call shows `x-agentflow-cache: hit`.
 
 ### 5. Routing header
 ```bash
-curl -sv -X POST http://localhost:4000/v1/messages \
+curl -sv -X POST http://localhost:4001/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
@@ -63,13 +63,13 @@ Expected: header present, value is likely sonnet (routing should downgrade small
 
 ### 6. Stats endpoint
 ```bash
-curl -s http://localhost:4000/agentflow/stats | python3 -m json.tool
+curl -s http://localhost:4001/agentflow/stats | python3 -m json.tool
 ```
 Expected: valid JSON with `calls`, `cache_hits`, `routing` fields.
 
 ### 7. Streaming passthrough
 ```bash
-curl -s -X POST http://localhost:4000/v1/messages \
+curl -s -X POST http://localhost:4001/v1/messages \
   -H "content-type: application/json" \
   -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
