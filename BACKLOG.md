@@ -167,7 +167,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
-- [READY] Normalize dot-notation model aliases before forwarding
+- [DONE] Normalize dot-notation model aliases before forwarding (2026-06-02)
   Details: Dot-notation aliases (claude-haiku-4.5, claude-sonnet-4.5, claude-opus-4.5) reach
   Anthropic unchanged and return HTTP 404. Normalize them in the handler before forwarding:
   claude-haiku-4.5 → claude-haiku-4-5-20251001, claude-sonnet-4.5 → claude-sonnet-4-5-20240620,

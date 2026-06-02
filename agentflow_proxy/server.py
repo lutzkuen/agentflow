@@ -436,13 +436,16 @@ async def messages(request: Request) -> Response:
                     yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
                 finally:
                     latency_ms = int((time.time() - started) * 1000)
+                    cost_in = actual_in if actual_in is not None else input_tokens
+                    cost_out = actual_out if actual_out is not None else 0
+                    cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
                         cache_hit=0, status_code=status_code, latency_ms=latency_ms,
                         input_tokens_est=input_tokens, output_tokens_est=None,
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
-                        cost_est_usd=None, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                        cost_est_usd=cost, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id,
                     )
