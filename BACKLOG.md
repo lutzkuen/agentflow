@@ -83,7 +83,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: dashboard exposes a 7-day view with daily totals and aggregate success/error/savings
   figures based on stored call data.
 
-- [READY] Cost comparison baseline
+- [DONE] Cost comparison baseline (2026-06-02)
   Details: For every call, log what it would have cost at the requested model (before routing).
   This gives us `cost_without_agentflow` vs `cost_with_agentflow` so the dashboard can show
   real savings.

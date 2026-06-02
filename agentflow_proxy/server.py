@@ -440,13 +440,15 @@ async def messages(request: Request) -> Response:
                     cost_in = actual_in if actual_in is not None else input_tokens
                     cost_out = actual_out if actual_out is not None else 0
                     cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
+                    cost_baseline = estimate_cost(requested_model, cost_in, cost_out)
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
                         cache_hit=0, status_code=status_code, latency_ms=latency_ms,
                         input_tokens_est=input_tokens, output_tokens_est=None,
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
-                        cost_est_usd=cost, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                        cost_est_usd=cost, cost_baseline_usd=cost_baseline,
+                        crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id,
                     )
@@ -462,12 +464,14 @@ async def messages(request: Request) -> Response:
                 response_body = cached
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(response_body))
+                cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
                 store.log_call(
                     id=call_id, created_at=utc_now(), path=path,
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
                     cache_hit=1, status_code=200, latency_ms=latency_ms,
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
-                    cost_est_usd=0.0, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(response_body) if LOG_BODIES else None,
                     session_id=session_id,
@@ -492,6 +496,7 @@ async def messages(request: Request) -> Response:
         cost_in = actual_in if actual_in is not None else input_tokens
         cost_out = actual_out if actual_out is not None else out_tokens
         cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
+        cost_baseline = estimate_cost(requested_model, cost_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
         store.log_call(
             id=call_id, created_at=utc_now(), path=path,
@@ -499,7 +504,8 @@ async def messages(request: Request) -> Response:
             cache_hit=0, status_code=status_code, latency_ms=latency_ms,
             input_tokens_est=input_tokens, output_tokens_est=out_tokens,
             actual_input_tokens=actual_in, actual_output_tokens=actual_out,
-            cost_est_usd=cost, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cost_est_usd=cost, cost_baseline_usd=cost_baseline,
+            crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
@@ -514,7 +520,7 @@ async def messages(request: Request) -> Response:
             id=call_id, created_at=utc_now(), path=path,
             requested_model=requested_model, routed_model=None, stream=int(stream), cache_hit=0,
             status_code=500, latency_ms=latency_ms,
-            input_tokens_est=None, output_tokens_est=None, cost_est_usd=None,
+            input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
             session_id=session_id,
@@ -616,6 +622,43 @@ async def stats_full() -> dict[str, Any]:
     }
 
 
+@app.get("/agentflow/stats/weekly")
+async def stats_weekly() -> dict[str, Any]:
+    conn = store.conn
+    rows = conn.execute("""
+        select
+            date(created_at) as day,
+            count(*) as total_calls,
+            sum(case when status_code = 200 then 1 else 0 end) as successful_calls,
+            sum(case when status_code >= 400 then 1 else 0 end) as errors,
+            sum(cache_hit) as cache_hits,
+            round(avg(latency_ms)) as avg_latency_ms,
+            round(sum(coalesce(cost_est_usd, 0)), 6) as cost_est_usd,
+            round(sum(coalesce(cost_baseline_usd, 0)), 6) as cost_baseline_usd
+        from calls
+        where date(created_at) >= date('now', '-6 days')
+        group by date(created_at)
+        order by day asc
+    """).fetchall()
+    days = []
+    for r in rows:
+        row = dict(r)
+        row["savings_usd"] = round((row["cost_baseline_usd"] or 0) - (row["cost_est_usd"] or 0), 6)
+        days.append(row)
+    totals = {
+        "day": "Total",
+        "total_calls": sum(r["total_calls"] for r in days),
+        "successful_calls": sum(r["successful_calls"] or 0 for r in days),
+        "errors": sum(r["errors"] or 0 for r in days),
+        "cache_hits": sum(r["cache_hits"] or 0 for r in days),
+        "avg_latency_ms": round(sum(r["avg_latency_ms"] or 0 for r in days) / len(days)) if days else None,
+        "cost_est_usd": round(sum(r["cost_est_usd"] or 0 for r in days), 6),
+        "cost_baseline_usd": round(sum(r["cost_baseline_usd"] or 0 for r in days), 6),
+        "savings_usd": round(sum(r["savings_usd"] for r in days), 6),
+    }
+    return {"days": days, "totals": totals}
+
+
 @app.get("/agentflow/dashboard", response_class=HTMLResponse)
 async def dashboard() -> str:
     return """<!doctype html>
@@ -641,6 +684,11 @@ async def dashboard() -> str:
   .card.green .value{color:#3fb950}
   .card.yellow .value{color:#d29922}
   .card.blue .value{color:#58a6ff}
+  .tabs{display:flex;padding:0 24px;border-bottom:1px solid #30363d}
+  .tab-btn{background:none;border:none;border-bottom:2px solid transparent;color:#8b949e;cursor:pointer;font-family:inherit;font-size:13px;margin-bottom:-1px;padding:10px 16px}
+  .tab-btn.active{border-bottom-color:#58a6ff;color:#f0f6fc}
+  .tab-panel{display:none}
+  .tab-panel.active{display:block}
   .section{padding:0 24px 24px}
   .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;margin-bottom:10px;padding-top:4px}
   table{width:100%;border-collapse:collapse}
@@ -661,6 +709,9 @@ async def dashboard() -> str:
   .tokens{color:#8b949e;font-variant-numeric:tabular-nums}
   .ts{color:#8b949e;font-size:11px}
   .err-row td{background:#1a0a0a}
+  .totals-row td{border-top:1px solid #30363d;font-weight:600}
+  .savings{color:#3fb950;font-variant-numeric:tabular-nums}
+  .baseline{color:#8b949e;font-variant-numeric:tabular-nums}
   #status{margin-left:auto;font-size:11px;color:#8b949e}
   .arrow{color:#8b949e;margin:0 3px}
 </style>
@@ -681,6 +732,12 @@ async def dashboard() -> str:
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
 </div>
 
+<div class="tabs">
+  <button class="tab-btn active" onclick="showTab('recent')">Recent calls</button>
+  <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
+</div>
+
+<div class="tab-panel active" id="tab-recent">
 <div class="section">
   <h2>Recent calls</h2>
   <table>
@@ -689,6 +746,19 @@ async def dashboard() -> str:
     </tr></thead>
     <tbody id="tbody"></tbody>
   </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-weekly">
+<div class="section">
+  <h2>7-day daily statistics</h2>
+  <table>
+    <thead><tr>
+      <th>Date</th><th>Calls</th><th>Success</th><th>Errors</th><th>Cache hits</th><th>Avg latency</th><th>Cost (actual)</th><th>Cost (baseline)</th><th>Savings</th>
+    </tr></thead>
+    <tbody id="weekly-tbody"></tbody>
+  </table>
+</div>
 </div>
 
 <script>
@@ -704,7 +774,40 @@ function ago(ts){
 }
 function shortModel(m){
   if(!m)return'—';
-  return m.replace('claude-','').replace(/-20\d{6}$/,'');
+  return m.replace('claude-','').replace(/-20\\d{6}$/,'');
+}
+
+function showTab(name){
+  ['recent','weekly'].forEach(t=>{
+    document.getElementById('tab-'+t).classList.toggle('active',t===name);
+  });
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>{
+    b.classList.toggle('active',['recent','weekly'][i]===name);
+  });
+}
+
+async function refreshWeekly(){
+  try{
+    const r=await fetch('/agentflow/stats/weekly');
+    const d=await r.json();
+    const tb=document.getElementById('weekly-tbody');
+    const rows=[...d.days,{...d.totals,_total:true}];
+    tb.innerHTML=rows.map(row=>{
+      const cls=row._total?' class="totals-row"':'';
+      const errColor=row.errors?'color:#f85149':'color:#8b949e';
+      return `<tr${cls}>
+        <td class="ts">${row.day}</td>
+        <td>${(row.total_calls??0).toLocaleString()}</td>
+        <td style="color:#3fb950">${(row.successful_calls??0).toLocaleString()}</td>
+        <td style="${errColor}">${(row.errors??0).toLocaleString()}</td>
+        <td>${(row.cache_hits??0).toLocaleString()}</td>
+        <td class="latency">${fmtMs(row.avg_latency_ms)}</td>
+        <td class="cost">${fmt(row.cost_est_usd,5)}</td>
+        <td class="baseline">${fmt(row.cost_baseline_usd,5)}</td>
+        <td class="savings">${fmt(row.savings_usd,5)}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){}
 }
 
 async function refresh(){
@@ -754,7 +857,9 @@ async function refresh(){
 }
 
 refresh();
+refreshWeekly();
 setInterval(refresh,5000);
+setInterval(refreshWeekly,30000);
 </script>
 </body>
 </html>"""
