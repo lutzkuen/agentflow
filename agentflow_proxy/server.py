@@ -18,14 +18,14 @@ from typing import Any, AsyncIterator, Dict, Iterable, Optional, Tuple
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 load_dotenv()
 
 DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
 DEFAULT_DB = os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
-DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "127.0.0.1")
+DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
 
 # Approximate public list prices in USD per million tokens. Update in config/env as needed.
 MODEL_PRICES = {
@@ -516,6 +516,225 @@ async def stats() -> dict[str, Any]:
         "routing": [dict(r) for r in routed],
         "recent": [dict(r) for r in recent],
     }
+
+
+@app.get("/agentflow/stats/full")
+async def stats_full() -> dict[str, Any]:
+    conn = store.conn
+
+    def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def s(sql: str, params: tuple = ()) -> Any:
+        row = conn.execute(sql, params).fetchone()
+        return row[0] if row else None
+
+    total_calls = s("select count(*) from calls") or 0
+    today_calls = s("select count(*) from calls where date(created_at) = date('now')") or 0
+    total_cost = s("select sum(cost_est_usd) from calls") or 0.0
+    today_cost = s("select sum(cost_est_usd) from calls where date(created_at) = date('now')") or 0.0
+    cache_hits = s("select count(*) from calls where cache_hit = 1") or 0
+    cache_cost_saved = s("select count(*) * 0.003 from calls where cache_hit = 1") or 0.0  # rough avg
+    avg_latency = s("select avg(latency_ms) from calls where latency_ms is not null") or 0
+    routed_count = s("select count(*) from calls where requested_model != routed_model and routed_model is not null") or 0
+    crunched_count = s("select count(*) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
+    errors = s("select count(*) from calls where status_code >= 400") or 0
+
+    # Estimate routing savings: calls where model was downgraded, cost diff
+    routing_savings = 0.0
+    downgraded = q("""
+        select requested_model, routed_model,
+               coalesce(actual_input_tokens, input_tokens_est, 0) as in_tok,
+               coalesce(actual_output_tokens, output_tokens_est, 0) as out_tok
+        from calls where requested_model != routed_model and routed_model is not null
+    """)
+    for row in downgraded:
+        req_cost = estimate_cost(row["requested_model"], row["in_tok"], row["out_tok"]) or 0
+        act_cost = estimate_cost(row["routed_model"], row["in_tok"], row["out_tok"]) or 0
+        routing_savings += max(0.0, req_cost - act_cost)
+
+    crunch_chars_saved = s("select sum(json_extract(crunch_json, '$.saved_chars')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
+
+    recent = q("""
+        select id, created_at, requested_model, routed_model, stream, cache_hit,
+               status_code, latency_ms,
+               coalesce(actual_input_tokens, input_tokens_est) as input_tokens,
+               coalesce(actual_output_tokens, output_tokens_est) as output_tokens,
+               cost_est_usd,
+               json_extract(crunch_json, '$.changed') as crunched,
+               json_extract(crunch_json, '$.saved_chars') as crunch_saved_chars,
+               json_extract(routing_json, '$.reason') as routing_reason,
+               error
+        from calls order by created_at desc limit 50
+    """)
+
+    routing_breakdown = q("""
+        select requested_model, routed_model, count(*) as count
+        from calls group by requested_model, routed_model order by count desc limit 15
+    """)
+
+    return {
+        "summary": {
+            "total_calls": total_calls,
+            "today_calls": today_calls,
+            "total_cost_usd": round(total_cost, 6),
+            "today_cost_usd": round(today_cost, 6),
+            "cache_hits": cache_hits,
+            "cache_hit_rate": round(cache_hits / total_calls, 4) if total_calls else 0,
+            "routing_savings_usd": round(routing_savings, 6),
+            "cache_savings_usd": round(cache_cost_saved, 6),
+            "total_savings_usd": round(routing_savings + cache_cost_saved, 6),
+            "avg_latency_ms": round(avg_latency),
+            "routed_count": routed_count,
+            "crunched_count": crunched_count,
+            "crunch_chars_saved": crunch_chars_saved,
+            "errors": errors,
+        },
+        "recent": recent,
+        "routing_breakdown": routing_breakdown,
+    }
+
+
+@app.get("/agentflow/dashboard", response_class=HTMLResponse)
+async def dashboard() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgentFlow</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:ui-monospace,monospace;background:#0d1117;color:#c9d1d9;font-size:13px}
+  a{color:#58a6ff;text-decoration:none}
+  header{background:#161b22;border-bottom:1px solid #30363d;padding:14px 24px;display:flex;align-items:center;gap:16px}
+  header h1{font-size:16px;font-weight:600;color:#f0f6fc}
+  header .sub{color:#8b949e;font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;margin-right:6px;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .cards{display:flex;gap:12px;padding:16px 24px;flex-wrap:wrap}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px;min-width:150px;flex:1}
+  .card .label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+  .card .value{font-size:22px;font-weight:600;color:#f0f6fc}
+  .card .sub{color:#8b949e;font-size:11px;margin-top:3px}
+  .card.green .value{color:#3fb950}
+  .card.yellow .value{color:#d29922}
+  .card.blue .value{color:#58a6ff}
+  .section{padding:0 24px 24px}
+  .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;margin-bottom:10px;padding-top:4px}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:6px 10px;border-bottom:1px solid #21262d;font-weight:400}
+  td{padding:6px 10px;border-bottom:1px solid #161b22;vertical-align:middle;white-space:nowrap}
+  tr:hover td{background:#161b22}
+  .badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:500}
+  .badge.hit{background:#1a3a1f;color:#3fb950}
+  .badge.miss{background:#1c1c1c;color:#8b949e}
+  .badge.stream{background:#1a2a3a;color:#58a6ff}
+  .badge.err{background:#3a1a1a;color:#f85149}
+  .badge.routed{background:#2d2208;color:#d29922}
+  .badge.crunched{background:#1a1a3a;color:#79c0ff}
+  .model{max-width:160px;overflow:hidden;text-overflow:ellipsis;color:#c9d1d9}
+  .model.downgraded{color:#d29922}
+  .cost{color:#3fb950;font-variant-numeric:tabular-nums}
+  .latency{color:#8b949e;font-variant-numeric:tabular-nums}
+  .tokens{color:#8b949e;font-variant-numeric:tabular-nums}
+  .ts{color:#8b949e;font-size:11px}
+  .err-row td{background:#1a0a0a}
+  #status{margin-left:auto;font-size:11px;color:#8b949e}
+  .arrow{color:#8b949e;margin:0 3px}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>AgentFlow</h1>
+  <span class="sub">Claude proxy · cost reduction dashboard</span>
+  <span id="status">loading...</span>
+</header>
+
+<div class="cards" id="cards">
+  <div class="card"><div class="label">Calls today</div><div class="value" id="c-today">—</div><div class="sub" id="c-total">— total</div></div>
+  <div class="card"><div class="label">Cost today</div><div class="value" id="c-cost">—</div><div class="sub" id="c-cost-total">— total</div></div>
+  <div class="card green"><div class="label">Saved by routing</div><div class="value" id="c-routing">—</div><div class="sub" id="c-routed-n">— calls routed</div></div>
+  <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
+  <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
+</div>
+
+<div class="section">
+  <h2>Recent calls</h2>
+  <table>
+    <thead><tr>
+      <th>Time</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script>
+function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
+function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
+function fmtTok(n){if(n==null)return'?';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
+function ago(ts){
+  const d=Math.floor((Date.now()-new Date(ts+'Z').getTime())/1000);
+  if(d<60)return d+'s';if(d<3600)return Math.floor(d/60)+'m';
+  if(d<86400)return Math.floor(d/3600)+'h';return Math.floor(d/86400)+'d';
+}
+function shortModel(m){
+  if(!m)return'—';
+  return m.replace('claude-','').replace(/-20\d{6}$/,'');
+}
+
+async function refresh(){
+  try{
+    const r=await fetch('/agentflow/stats/full');
+    const d=await r.json();
+    const s=d.summary;
+
+    document.getElementById('c-today').textContent=s.today_calls.toLocaleString();
+    document.getElementById('c-total').textContent=s.total_calls.toLocaleString()+' total';
+    document.getElementById('c-cost').textContent=fmt(s.today_cost_usd,4);
+    document.getElementById('c-cost-total').textContent=fmt(s.total_cost_usd,4)+' total';
+    document.getElementById('c-routing').textContent=fmt(s.routing_savings_usd,4);
+    document.getElementById('c-routed-n').textContent=s.routed_count+' calls routed';
+    document.getElementById('c-cache-saved').textContent=fmt(s.cache_savings_usd,4);
+    document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
+    document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
+    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched';
+
+    const tb=document.getElementById('tbody');
+    tb.innerHTML=d.recent.map(row=>{
+      const routed=row.routed_model&&row.routed_model!==row.requested_model;
+      const errClass=row.status_code>=400?'err-row':'';
+      const flags=[
+        row.cache_hit?'<span class="badge hit">cache</span>':'<span class="badge miss">miss</span>',
+        row.stream?'<span class="badge stream">stream</span>':'',
+        routed?'<span class="badge routed">routed</span>':'',
+        row.crunched?'<span class="badge crunched">crunched</span>':'',
+        row.status_code>=400?`<span class="badge err">${row.status_code}</span>`:'',
+      ].filter(Boolean).join(' ');
+      const usedModel=`<span class="model${routed?' downgraded':''}">${shortModel(row.routed_model||row.requested_model)}</span>`;
+      return `<tr class="${errClass}">
+        <td class="ts">${ago(row.created_at)}</td>
+        <td class="model">${shortModel(row.requested_model)}</td>
+        <td>${usedModel}</td>
+        <td class="tokens">${fmtTok(row.input_tokens)}<span class="arrow">/</span>${fmtTok(row.output_tokens)}</td>
+        <td class="cost">${fmt(row.cost_est_usd,5)}</td>
+        <td class="latency">${fmtMs(row.latency_ms)}</td>
+        <td>${flags}</td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
+  }catch(e){
+    document.getElementById('status').textContent='error: '+e.message;
+  }
+}
+
+refresh();
+setInterval(refresh,5000);
+</script>
+</body>
+</html>"""
 
 
 def main() -> None:
