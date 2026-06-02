@@ -10,13 +10,18 @@ set -Eeuo pipefail
 
 export PATH="/home/lutz/.local/bin:$PATH"
 
-REPO=${AGENTFLOW_REPO:-/home/lutz/agentflow}
-LOG_DIR="$REPO/runs"
+MAIN_REPO=${AGENTFLOW_REPO:-/home/lutz/agentflow}
+REPO=$MAIN_REPO
+LOG_DIR="$MAIN_REPO/runs"
 RUN_ID=${RUN_ID:-$(date +%Y-%m-%d_%H-%M)}
 PROXY_URL=${ANTHROPIC_BASE_URL:-http://127.0.0.1:4000}
 PROXY_SERVICE=${AGENTFLOW_PROXY_SERVICE:-agentflow-claude-proxy.service}
 CLAUDE_BIN=${CLAUDE_BIN:-claude}
 CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-$HOME/.claude/projects/-home-lutz-agentflow}
+WORKTREE_ROOT=${AGENTFLOW_WORKTREE_ROOT:-$HOME/agentflow-runs/worktrees}
+RUN_BRANCH=${AGENTFLOW_RUN_BRANCH:-agent/$RUN_ID}
+RUN_REPO="$WORKTREE_ROOT/$RUN_ID"
+BASE_SHA=""
 SMOKE_EXPECT="AGENTFLOW_SMOKE_OK"
 LOCK_FILE=${AGENTFLOW_ORCHESTRATOR_LOCK:-/tmp/agentflow-orchestrator.lock}
 RUN_LOG="$LOG_DIR/$RUN_ID.md"
@@ -24,9 +29,11 @@ CLAUDE_SMOKE_OUTPUT=""
 
 export RUN_ID
 export ANTHROPIC_BASE_URL="$PROXY_URL"
+export AGENTFLOW_MAIN_REPO="$MAIN_REPO"
+export AGENTFLOW_RUN_LOG="$RUN_LOG"
 
 mkdir -p "$LOG_DIR"
-cd "$REPO"
+cd "$MAIN_REPO"
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -132,6 +139,131 @@ capture_claude_oauth_smoke() {
   claude_oauth_smoke
   smoke_status=$?
   set -e
+}
+
+git_has_changes() {
+  git -C "$1" status --short --untracked-files=normal | grep -q .
+}
+
+save_worktree_state() {
+  local reason=$1
+  {
+    echo "Reason: $reason"
+    echo "Run ID: $RUN_ID"
+    echo "Branch: $RUN_BRANCH"
+    echo "Base SHA: $BASE_SHA"
+    echo "Worktree: $RUN_REPO"
+    echo ""
+    echo "## Status"
+    git -C "$RUN_REPO" status --short --branch --untracked-files=normal || true
+    echo ""
+    echo "## Commits Since Base"
+    git -C "$RUN_REPO" log --oneline "$BASE_SHA..HEAD" || true
+  } > "$LOG_DIR/$RUN_ID.status"
+
+  {
+    echo "# Patch for $RUN_ID"
+    echo "# Reason: $reason"
+    echo "# Branch: $RUN_BRANCH"
+    echo "# Base SHA: $BASE_SHA"
+    echo ""
+    git -C "$RUN_REPO" format-patch --stdout "$BASE_SHA..HEAD" || true
+    git -C "$RUN_REPO" diff --binary || true
+    git -C "$RUN_REPO" diff --binary --cached || true
+  } > "$LOG_DIR/$RUN_ID.patch"
+}
+
+has_unresolved_worktrees() {
+  local wt
+  local wt_head
+  local main_head
+  [[ -d "$WORKTREE_ROOT" ]] || return 1
+  main_head=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  while IFS= read -r -d '' wt; do
+    if git -C "$wt" status --short --untracked-files=normal | grep -q .; then
+      printf '%s\n' "$wt"
+      return 0
+    fi
+    wt_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)
+    if [[ -n "$wt_head" ]] && ! git -C "$MAIN_REPO" merge-base --is-ancestor "$wt_head" "$main_head"; then
+      printf '%s\n' "$wt"
+      return 0
+    fi
+  done < <(find "$WORKTREE_ROOT" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+  return 1
+}
+
+prepare_run_worktree() {
+  local unresolved
+  BASE_SHA=$(git -C "$MAIN_REPO" rev-parse HEAD)
+
+  if git_has_changes "$MAIN_REPO"; then
+    log "Main worktree is dirty; refusing to start unattended branch from ambiguous state" | tee -a "$RUN_LOG"
+    git -C "$MAIN_REPO" status --short --untracked-files=normal | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: main worktree is dirty. Commit, stash, or quarantine current work before unattended Claude runs." | tee -a "$RUN_LOG"
+    exit 30
+  fi
+
+  unresolved=$(has_unresolved_worktrees || true)
+  if [[ -n "$unresolved" ]]; then
+    log "Existing dirty AgentFlow run worktree found: $unresolved" | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: salvage or remove the dirty run worktree before starting a new unattended run." | tee -a "$RUN_LOG"
+    exit 31
+  fi
+
+  mkdir -p "$WORKTREE_ROOT"
+  if git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$RUN_BRANCH"; then
+    log "Run branch already exists: $RUN_BRANCH" | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: run branch already exists. Inspect $RUN_BRANCH before retrying." | tee -a "$RUN_LOG"
+    exit 32
+  fi
+  if [[ -e "$RUN_REPO" ]]; then
+    log "Run worktree path already exists: $RUN_REPO" | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: run worktree path already exists. Inspect it before retrying." | tee -a "$RUN_LOG"
+    exit 33
+  fi
+
+  log "Creating isolated run worktree $RUN_REPO on branch $RUN_BRANCH from $BASE_SHA" | tee -a "$RUN_LOG"
+  git -C "$MAIN_REPO" worktree add -b "$RUN_BRANCH" "$RUN_REPO" "$BASE_SHA" >> "$RUN_LOG" 2>&1
+  export AGENTFLOW_RUN_REPO="$RUN_REPO"
+  export AGENTFLOW_RUN_BRANCH="$RUN_BRANCH"
+  cd "$RUN_REPO"
+  REPO="$RUN_REPO"
+}
+
+finalize_run_worktree() {
+  local commits
+  commits=$(git -C "$RUN_REPO" rev-list --count "$BASE_SHA..HEAD")
+
+  if git_has_changes "$RUN_REPO"; then
+    log "Run worktree is dirty after Claude; preserving branch for Codex salvage" | tee -a "$RUN_LOG"
+    save_worktree_state "dirty worktree after Claude run"
+    echo "CODEX_REQUIRED: Claude left partial work in $RUN_REPO on $RUN_BRANCH. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
+    exit 34
+  fi
+
+  if (( commits == 0 )); then
+    log "Run branch made no commits; removing clean worktree" | tee -a "$RUN_LOG"
+    git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
+    git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
+    return 0
+  fi
+
+  if git_has_changes "$MAIN_REPO"; then
+    log "Main worktree became dirty before merge; preserving run branch" | tee -a "$RUN_LOG"
+    save_worktree_state "main dirty before merge"
+    echo "CODEX_REQUIRED: cannot merge $RUN_BRANCH because main worktree is dirty." | tee -a "$RUN_LOG"
+    exit 35
+  fi
+
+  log "Fast-forward merging $RUN_BRANCH into $(git -C "$MAIN_REPO" branch --show-current)" | tee -a "$RUN_LOG"
+  git -C "$MAIN_REPO" merge --ff-only "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || {
+    save_worktree_state "fast-forward merge failed"
+    echo "CODEX_REQUIRED: fast-forward merge failed for $RUN_BRANCH. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
+    exit 36
+  }
+  git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
+  git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
 }
 
 find_broken_token_session() {
@@ -245,6 +377,8 @@ write_orchestrator_prompt() {
     echo "The recurring shell guard already verified Claude OAuth through $PROXY_URL before this run."
     echo "Do not stop, kill, restart, replace, or bind anything on prod port 4000."
     echo "Use dev port 4001 for development and tests. The shell guard owns prod health."
+    echo "This run is isolated in git branch $RUN_BRANCH at $RUN_REPO."
+    echo "Main repo is $MAIN_REPO. Run log is $RUN_LOG."
     echo ""
     echo "**Proxy health:** $(curl -sf "$PROXY_URL/health" 2>/dev/null)"
     echo ""
@@ -286,22 +420,14 @@ run_claude_operator() {
 }
 
 run_orchestrator() {
-  local resume_session
-  resume_session=$(find_broken_token_session 2>>"$RUN_LOG" || true)
-
-  if [[ -n "$resume_session" ]]; then
-    log "Running Claude orchestrator by resuming token-broken session $resume_session" | tee -a "$RUN_LOG"
-    run_claude_operator "$resume_session"
-  else
-    log "No unresolved token-broken Claude session found; starting a new operator session" | tee -a "$RUN_LOG"
-    run_claude_operator
-  fi
+  log "Starting a fresh Claude operator session in isolated run branch $RUN_BRANCH" | tee -a "$RUN_LOG"
+  run_claude_operator
 }
 
 main() {
   if [[ "${1:-}" == "--print-resume-candidate" ]]; then
-    find_broken_token_session
-    return $?
+    echo "Claude session resume is disabled. Resume/salvage now happens via isolated run worktrees."
+    return 1
   fi
 
   : > "$RUN_LOG"
@@ -344,16 +470,27 @@ main() {
   fi
 
   log "Running Claude orchestrator" | tee -a "$RUN_LOG"
+  prepare_run_worktree
   if ! run_orchestrator; then
     if run_log_has_transient_rate_limit; then
       log "Claude orchestrator hit transient upstream rate limiting; checking proxy health only" | tee -a "$RUN_LOG"
       if ensure_proxy_ready; then
+        if [[ -d "$RUN_REPO/.git" || -f "$RUN_REPO/.git" ]]; then
+          if git_has_changes "$RUN_REPO" || (( $(git -C "$RUN_REPO" rev-list --count "$BASE_SHA..HEAD") > 0 )); then
+            save_worktree_state "transient Claude rate limit with partial run state"
+            echo "CODEX_REQUIRED: Claude was rate-limited after partial work in $RUN_REPO. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
+            exit 37
+          fi
+          git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
+          git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
+        fi
         echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
         exit 23
       fi
     fi
     log "Claude orchestrator exited non-zero; continuing to postflight middleware check" | tee -a "$RUN_LOG"
   fi
+  finalize_run_worktree
 
   log "Postflight: checking whether Claude disturbed the middleware" | tee -a "$RUN_LOG"
   if ! ensure_proxy_ready; then

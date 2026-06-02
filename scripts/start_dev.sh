@@ -4,6 +4,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV=${AGENTFLOW_VENV:-/home/lutz/agentflow/.venv}
 
 # Kill any existing port 4001 process
 pkill -f "uvicorn agentflow_proxy.*4001" 2>/dev/null || true
@@ -13,7 +14,7 @@ sleep 1
 mkdir -p "$HOME/.agentflow"
 
 cd "$REPO"
-source .venv/bin/activate
+source "$VENV/bin/activate"
 
 nohup env AGENTFLOW_PORT=4001 AGENTFLOW_DB="$HOME/.agentflow/dev.sqlite3" \
     python -m uvicorn agentflow_proxy.server:app --host 127.0.0.1 --port 4001 \

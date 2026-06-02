@@ -17,24 +17,32 @@ Each sub-agent is a separate `claude --print` process. Pipe the agent prompt plu
 
 ```bash
 # Developer — implements one backlog item (full tool access)
-(cat /home/lutz/agentflow/agents/develop.md
+(cat "$PWD/agents/develop.md"
  echo ""
  echo "# Your Task"
  echo "Item: <item title>"
  echo "Hint: <specific implementation approach>"
 ) | claude --print --allowedTools "Bash,Read,Write,Edit"
 
-# Tester — validates proxy, ends with VERDICT: PASS or VERDICT: FAIL — <reason>
-claude --print --allowedTools "Bash,Read" \
-  < /home/lutz/agentflow/agents/test.md
+# Tester — validates proxy and the specific item, ends with VERDICT: PASS or VERDICT: FAIL — <reason>
+(cat "$PWD/agents/test.md"
+ echo ""
+ echo "# Task Under Test"
+ echo "Item: <item title>"
+ echo "Acceptance metric: <metric from BACKLOG.md>"
+ echo ""
+ echo "# Current Diff"
+ git diff --stat
+ git diff -- <relevant files>
+) | claude --print --allowedTools "Bash,Read"
 
 # Analyzer — queries DB, appends findings to BACKLOG.md
 claude --print --allowedTools "Bash,Read,Write,Edit" \
-  < /home/lutz/agentflow/agents/analyze.md
+  < "$PWD/agents/analyze.md"
 
 # Researcher — finds new techniques, appends IDEAs to BACKLOG.md
 claude --print --allowedTools "Bash,Read,Write,Edit" \
-  < /home/lutz/agentflow/agents/research.md
+  < "$PWD/agents/research.md"
 ```
 
 ## What to do each run
@@ -46,7 +54,13 @@ claude --print --allowedTools "Bash,Read,Write,Edit" \
 2. **Invoke the developer.** Pass the item title and a specific implementation hint.
    Read its full output — it will tell you what it changed and whether it smoke-tested.
 
-3. **Invoke the tester.** Read the VERDICT line at the end of its output.
+3. **Invoke the tester with task context.** Include the item title, its acceptance metric,
+   and the relevant diff. Read the VERDICT line at the end of its output.
+   - Generic proxy smoke tests are not enough for PASS. The tester must explicitly check
+     the item-specific acceptance metric.
+   - For dashboard/UI items, the tester must check the served dashboard HTML/data endpoint,
+     not only source code. If the served page is stale, restart only the read-only dashboard
+     service on port 4002 or report that deployment is still required. Never restart port 4000.
    - `VERDICT: PASS` → commit: `git add -A && git commit -m "agent: <item>"`
    - `VERDICT: FAIL` → examine the reason. If a quick fix is obvious, invoke the developer
      again with a corrected hint. If it fails twice, stop and mark the item BLOCKED.
@@ -55,7 +69,8 @@ claude --print --allowedTools "Bash,Read,Write,Edit" \
    - PASS: change `[READY]` to `[DONE]` and append `(YYYY-MM-DD)`
    - FAIL twice: change to `[BLOCKED]` and append a short reason
 
-5. **Write run summary.** Create `runs/$RUN_ID.md` (the RUN_ID is in your environment):
+5. **Write run summary.** Append the summary to `$AGENTFLOW_RUN_LOG` if that environment
+   variable is set; otherwise create `runs/$RUN_ID.md` in the current worktree:
    ```bash
    echo $RUN_ID   # use this as the filename
    ```
@@ -65,7 +80,10 @@ claude --print --allowedTools "Bash,Read,Write,Edit" \
 
 - Only commit after VERDICT: PASS.
 - One item per run. Do not attempt multiple items.
+- Work only in the current working directory. It is an isolated git worktree for this run.
+  Do not edit `/home/lutz/agentflow` directly unless it is the current working directory.
 - Never restart prod (port 4000), never run `kill`/`pkill`/`fuser` against it, and never
   launch Uvicorn on port 4000. Dev runs on port 4001.
+  The read-only dashboard service on port 4002 may be restarted for dashboard-only changes.
   (Port 4001 may not exist yet; if so, note it in the run summary.)
 - If blocked after two developer attempts, write a clear BLOCKED note and stop.

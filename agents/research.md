@@ -5,7 +5,8 @@ optimizations. Your findings go into BACKLOG.md.
 
 ## Working Directory
 
-`/home/lutz/agentflow`
+Current working directory. The orchestrator may run you inside an isolated git worktree
+branch, so do not assume `/home/lutz/agentflow` is the editable repo.
 
 ## Research Questions
 

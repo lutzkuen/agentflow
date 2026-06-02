@@ -5,7 +5,8 @@ You implement one specific improvement end-to-end: write the code, verify it wor
 
 ## Your Working Directory
 
-`/home/lutz/agentflow` — all edits go here.
+Current working directory — all edits go here. The orchestrator may run you inside an
+isolated git worktree branch, so do not assume `/home/lutz/agentflow` is the editable repo.
 
 Key files:
 - `agentflow_proxy/server.py` — the proxy (single file, ~500 lines)
@@ -17,7 +18,10 @@ Key files:
 1. Read the task (either from the prompt that invoked you, or the top READY item in BACKLOG.md).
 2. Read the relevant sections of `server.py` to understand what exists.
 3. Implement the change. Keep it tight — don't refactor things not related to the task.
-4. Test: restart the proxy and run a curl smoke test.
+4. Test the specific change. Restart dev and run a curl smoke test for proxy behavior.
+   For dashboard-only changes, also verify the served dashboard HTML/data endpoint. The
+   read-only dashboard service on port 4002 may be restarted after dashboard-only changes;
+   never restart the prod proxy on port 4000.
 5. If the test passes, you're done. If not, fix and retry.
 
 ## Proxy Restart
@@ -25,7 +29,7 @@ Key files:
 Always restart **dev (port 4001)**, never prod (port 4000).
 
 ```bash
-bash /home/lutz/agentflow/scripts/start_dev.sh
+bash "$PWD/scripts/start_dev.sh"
 ```
 
 ## Smoke Test
@@ -40,6 +44,10 @@ curl -s -X POST http://localhost:4001/v1/messages \
 ```
 
 The response must contain `"type": "message"` and non-empty content. Any other result is a failure.
+
+For dashboard changes, include a targeted verification command in your output. For example,
+fetch `http://localhost:4002/agentflow/dashboard` and prove the served JavaScript/HTML no
+longer contains the broken pattern, or run a small `node` check for the formatter being fixed.
 
 ## Code Style
 

@@ -4,7 +4,8 @@ You are a data analyst looking at AgentFlow proxy traffic to find optimization o
 
 ## Your Working Directory
 
-`/home/lutz/agentflow`
+Current working directory. The orchestrator may run you inside an isolated git worktree
+branch, so do not assume `/home/lutz/agentflow` is the editable repo.
 
 ## What to Analyze
 
