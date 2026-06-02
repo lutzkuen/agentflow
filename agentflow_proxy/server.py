@@ -39,12 +39,15 @@ MODEL_PRICES = {
     "claude-3-5-sonnet": (3.0, 15.0),
     "claude-haiku-4.5": (1.0, 5.0),
     "claude-haiku-4-5": (1.0, 5.0),
+    "claude-haiku-4-5-20251001": (1.0, 5.0),
     "claude-3-5-haiku": (0.8, 4.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-opus-4-5": (5.0, 25.0),
 }
 
-HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4.5")
-SONNET_DEFAULT = os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4.5")
-OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4.5")
+HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+SONNET_DEFAULT = os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
+OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
 
 CACHE_ENABLED = os.getenv("AGENTFLOW_CACHE", "1") != "0"
 CRUNCH_ENABLED = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
@@ -262,7 +265,17 @@ class Store:
           response_json text
         )
         """)
+        self._ensure_column("calls", "actual_input_tokens", "integer")
+        self._ensure_column("calls", "actual_output_tokens", "integer")
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        existing = {
+            row["name"]
+            for row in self.conn.execute(f"pragma table_info({table})").fetchall()
+        }
+        if column not in existing:
+            self.conn.execute(f"alter table {table} add column {column} {definition}")
 
     def get_cache(self, key: str) -> Optional[dict[str, Any]]:
         row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
@@ -281,8 +294,8 @@ class Store:
     def log_call(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
-            "latency_ms", "input_tokens_est", "output_tokens_est", "cost_est_usd", "crunch_json", "routing_json",
-            "error", "request_json", "response_json",
+            "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
+            "cost_est_usd", "crunch_json", "routing_json", "error", "request_json", "response_json",
         ]
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
@@ -380,12 +393,31 @@ async def messages(request: Request) -> Response:
         if stream:
             async def gen() -> AsyncIterator[bytes]:
                 nonlocal status_code, error
+                actual_in: Optional[int] = None
+                actual_out: Optional[int] = None
+                sse_buf = ""
                 try:
                     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
                         async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
                             status_code = r.status_code
                             async for chunk in r.aiter_bytes():
                                 yield chunk
+                                sse_buf += chunk.decode("utf-8", errors="replace")
+                                while "\n" in sse_buf:
+                                    line, sse_buf = sse_buf.split("\n", 1)
+                                    if not line.startswith("data: "):
+                                        continue
+                                    try:
+                                        data = json.loads(line[6:])
+                                    except Exception:
+                                        continue
+                                    t = data.get("type")
+                                    if t == "message_start":
+                                        actual_in = (data.get("message") or {}).get("usage", {}).get("input_tokens")
+                                    elif t == "message_delta":
+                                        out = (data.get("usage") or {}).get("output_tokens")
+                                        if out is not None:
+                                            actual_out = out
                 except Exception as exc:
                     error = repr(exc)
                     yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
@@ -396,6 +428,7 @@ async def messages(request: Request) -> Response:
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
                         cache_hit=0, status_code=status_code, latency_ms=latency_ms,
                         input_tokens_est=input_tokens, output_tokens_est=None,
+                        actual_input_tokens=actual_in, actual_output_tokens=actual_out,
                         cost_est_usd=None, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                     )
@@ -433,14 +466,20 @@ async def messages(request: Request) -> Response:
         if r.status_code < 400 and can_cache and response_body is not None:
             store.set_cache(key, str(crunched.get("model")), len(stable_json(crunched)), response_body)
 
+        usage = (response_body or {}).get("usage") or {}
+        actual_in = usage.get("input_tokens")
+        actual_out = usage.get("output_tokens")
         out_tokens = estimate_tokens_from_text(response_output_text(response_body)) if response_body else 0
-        cost = estimate_cost(str(crunched.get("model")), input_tokens, out_tokens)
+        cost_in = actual_in if actual_in is not None else input_tokens
+        cost_out = actual_out if actual_out is not None else out_tokens
+        cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
         store.log_call(
             id=call_id, created_at=utc_now(), path=path,
             requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
             cache_hit=0, status_code=status_code, latency_ms=latency_ms,
             input_tokens_est=input_tokens, output_tokens_est=out_tokens,
+            actual_input_tokens=actual_in, actual_output_tokens=actual_out,
             cost_est_usd=cost, crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
