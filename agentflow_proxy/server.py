@@ -115,6 +115,25 @@ def has_tools(body: dict[str, Any]) -> bool:
     return "tool_use" in text or "tool_result" in text
 
 
+def categorize_request(body: dict[str, Any]) -> str:
+    tools = has_tools(body)
+    text_chars = len(extract_text(body))
+    msg_count = len(body.get("messages") or [])
+    has_code = "```" in extract_text(body)
+
+    if tools and text_chars > 16000:
+        return "tool-heavy"
+    if tools:
+        return "tool-light"
+    if text_chars > 32000:
+        return "long-context"
+    if text_chars < 1500 and msg_count <= 2:
+        return "short-completion"
+    if has_code:
+        return "code-gen"
+    return "chat"
+
+
 def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Conservative request cruncher.
 
@@ -275,6 +294,7 @@ class Store:
         self._ensure_column("calls", "actual_output_tokens", "integer")
         self._ensure_column("calls", "session_id", "text")
         self._ensure_column("calls", "cost_baseline_usd", "real")
+        self._ensure_column("calls", "category", "text")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -304,6 +324,7 @@ class Store:
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
+            "category",
         ]
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
@@ -396,6 +417,8 @@ async def messages(request: Request) -> Response:
     cache_hit = False
     response_body: Optional[dict[str, Any]] = None
 
+    category = categorize_request(raw_body)
+
     try:
         crunched, crunch_meta = crunch_body(raw_body)
         routed_model, routing_meta = route_model(crunched)
@@ -450,7 +473,7 @@ async def messages(request: Request) -> Response:
                         cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                         crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
-                        session_id=session_id,
+                        session_id=session_id, category=category,
                     )
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -474,7 +497,7 @@ async def messages(request: Request) -> Response:
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(response_body) if LOG_BODIES else None,
-                    session_id=session_id,
+                    session_id=session_id, category=category,
                 )
                 return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -509,7 +532,7 @@ async def messages(request: Request) -> Response:
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
-            session_id=session_id,
+            session_id=session_id, category=category,
         )
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -523,7 +546,7 @@ async def messages(request: Request) -> Response:
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
-            session_id=session_id,
+            session_id=session_id, category=category,
         )
         return JSONResponse({"type": "error", "error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
 
@@ -600,6 +623,13 @@ async def stats_full() -> dict[str, Any]:
         from calls group by requested_model, routed_model order by count desc limit 15
     """)
 
+    category_breakdown = q("""
+        select coalesce(category, 'unknown') as category, count(*) as count,
+               round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
+               sum(case when requested_model != routed_model and routed_model is not null then 1 else 0 end) as routed_count
+        from calls group by coalesce(category, 'unknown') order by count desc
+    """)
+
     return {
         "summary": {
             "total_calls": total_calls,
@@ -619,6 +649,7 @@ async def stats_full() -> dict[str, Any]:
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
+        "category_breakdown": category_breakdown,
     }
 
 
@@ -735,6 +766,7 @@ async def dashboard() -> str:
 <div class="tabs">
   <button class="tab-btn active" onclick="showTab('recent')">Recent calls</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
+  <button class="tab-btn" onclick="showTab('categories')">By category</button>
 </div>
 
 <div class="tab-panel active" id="tab-recent">
@@ -761,6 +793,18 @@ async def dashboard() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-categories">
+<div class="section">
+  <h2>Calls by request category</h2>
+  <table>
+    <thead><tr>
+      <th>Category</th><th>Calls</th><th>Cost</th><th>Routed</th>
+    </tr></thead>
+    <tbody id="cat-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <script>
 function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
 function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
@@ -778,11 +822,11 @@ function shortModel(m){
 }
 
 function showTab(name){
-  ['recent','weekly'].forEach(t=>{
+  ['recent','weekly','categories'].forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
-    b.classList.toggle('active',['recent','weekly'][i]===name);
+    b.classList.toggle('active',['recent','weekly','categories'][i]===name);
   });
 }
 
@@ -856,10 +900,31 @@ async function refresh(){
   }
 }
 
+async function refreshCategories(){
+  try{
+    const r=await fetch('/agentflow/stats/full');
+    const d=await r.json();
+    const tb=document.getElementById('cat-tbody');
+    const rows=d.category_breakdown||[];
+    const total=rows.reduce((s,r)=>s+(r.count||0),0)||1;
+    tb.innerHTML=rows.map(row=>{
+      const pct=Math.round((row.count/total)*100);
+      return `<tr>
+        <td><span class="badge miss">${row.category}</span></td>
+        <td>${(row.count||0).toLocaleString()} <span style="color:#8b949e;font-size:11px">(${pct}%)</span></td>
+        <td class="cost">${fmt(row.cost_usd,5)}</td>
+        <td class="tokens">${(row.routed_count||0).toLocaleString()}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="4" style="color:#8b949e">No data yet</td></tr>';
+  }catch(e){}
+}
+
 refresh();
 refreshWeekly();
+refreshCategories();
 setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
+setInterval(refreshCategories,30000);
 </script>
 </body>
 </html>"""
