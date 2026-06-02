@@ -44,7 +44,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   the cache safely.
   Metric: calls table has session_id; dashboard can show per-session cost.
 
-- [READY] Dashboard v1 — basic HTML page at /agentflow/dashboard
+- [DONE] Dashboard v1 — basic HTML page at /agentflow/dashboard (2026-06-02)
   Details: Serve a simple HTML page (no JS framework, vanilla JS + CSS) that shows:
   - Last 50 calls table (timestamp, model requested, model used, cache hit, latency, cost_est)
   - Summary stats: total calls, total cost, cache hit rate, total saved by routing
