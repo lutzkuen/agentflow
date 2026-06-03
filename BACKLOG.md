@@ -99,7 +99,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   real savings.
   Metric: dashboard shows "You saved $X today / $Y this week".
 
-- [READY] Crunch effectiveness metric
+- [DONE] Crunch effectiveness metric (2026-06-03)
   Details: Currently we log saved_chars but not saved_tokens. Add actual_tokens_before_crunch
   estimate using real token counts from similar uncrunched calls. Track crunch ratio over time.
   Metric: dashboard shows avg crunch ratio and tokens saved by crunching.
