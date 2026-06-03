@@ -285,6 +285,21 @@ def inject_prompt_cache(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return body, False
 
 
+def has_cache_control_blocks(body: dict[str, Any]) -> bool:
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("cache_control"):
+                return True
+    for msg in body.get("messages", []):
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("cache_control"):
+                    return True
+    return False
+
+
 def _load_routing_rules() -> list[dict]:
     p = Path(ROUTING_RULES_PATH)
     if p.exists():
@@ -570,7 +585,7 @@ async def messages(request: Request) -> Response:
         crunched["model"] = routed_model
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
         headers = build_forward_headers(request)
-        if prompt_cached:
+        if prompt_cached or has_cache_control_blocks(crunched):
             existing = headers.get("anthropic-beta", "")
             if "prompt-caching" not in existing:
                 headers["anthropic-beta"] = (existing + ",prompt-caching-2024-07-31" if existing else "prompt-caching-2024-07-31")
