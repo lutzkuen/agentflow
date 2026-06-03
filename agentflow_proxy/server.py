@@ -149,11 +149,17 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
     seen: dict[str, int] = {}
+    seen_shingles: list[tuple[frozenset, int]] = []
     replacements = 0
+    near_replacements = 0
     shortened = 0
 
+    def _shingles(text: str) -> frozenset:
+        words = text.split()
+        return frozenset(tuple(words[i:i + 4]) for i in range(len(words) - 3))
+
     def process_content(content: Any, allow_shorten: bool) -> Any:
-        nonlocal replacements, shortened
+        nonlocal replacements, near_replacements, shortened
         if isinstance(content, str):
             txt = normalize_text(content)
             h = sha256_text(txt)
@@ -161,6 +167,19 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
                 replacements += 1
                 return f"[AgentFlow: exact duplicate text block omitted; same as earlier block #{seen[h]} hash={h[:12]}]"
             seen[h] = len(seen) + 1
+            if len(txt) > 2000:
+                shingles = _shingles(txt)
+                matched_idx = None
+                for prev_shingles, prev_idx in seen_shingles:
+                    intersection = len(shingles & prev_shingles)
+                    union = len(shingles | prev_shingles)
+                    if union > 0 and intersection / union > 0.85:
+                        matched_idx = prev_idx
+                        break
+                if matched_idx is not None:
+                    near_replacements += 1
+                    return f"[AgentFlow: near-duplicate text block omitted; similar to earlier block #{matched_idx} jaccard>0.85; original_chars={len(txt)}]"
+                seen_shingles.append((shingles, len(seen)))
             if allow_shorten and len(txt) > 8000:
                 shortened += 1
                 return txt[:3500] + f"\n\n[AgentFlow: middle of long older text block omitted; hash={h[:12]}; original_chars={len(txt)}]\n\n" + txt[-2500:]
@@ -212,6 +231,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         "tokens_saved_est": (before - after) // TOKEN_CHARS,
         "crunch_ratio": round((before - after) / before, 4) if before > 0 else 0,
         "duplicate_blocks_replaced": replacements,
+        "near_duplicate_blocks_replaced": near_replacements,
         "long_blocks_shortened": shortened,
     }
 
