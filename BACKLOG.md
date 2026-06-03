@@ -230,7 +230,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: cache_creation_input_tokens > 0 on calls with large system prompts; dashboard prompt
   cache stats become non-zero; confirms or disproves actual prompt cache activity.
 
-- [IDEA] Fix session tracking: 70% of calls have null session_id (2026-06-03)
+- [DONE] Fix session tracking: 70% of calls have null session_id (2026-06-03)
   Details: Only 403 of 1,323 calls (30%) have a session_id. One session accounts for all of them.
   The other 920 calls from Claude Code CLI/API never receive a session_id. Current extraction likely
   depends on a header that is only present in certain connection modes.
@@ -251,7 +251,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   3 retries. Log backoff events in the calls table (new column: retry_count).
   Metric: 429+529 rate drops below 1%; no increase in p95 latency for successful calls.
 
-- [IDEA] Expand request categorization: 70% of calls uncategorized (2026-06-03)
+- [DONE] Expand request categorization: 70% of calls uncategorized (2026-06-03)
   Details: Only tool-heavy, code-gen, short-completion are assigned. 930 of 1,323 calls get
   category=NULL. Chat and long-context categories have no heuristics. Routing rules that target
   category can't function on uncategorized calls.
