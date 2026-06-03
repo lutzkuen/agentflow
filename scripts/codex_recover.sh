@@ -126,6 +126,9 @@ PROMPT
       status=81
     fi
   fi
+  if (( status == 0 )); then
+    rm -f "$LAST_ATTEMPT"
+  fi
 
   echo ""
   echo "Finished: $(date --iso-8601=seconds)"
@@ -138,6 +141,7 @@ if [[ -s "$SUMMARY_LOG" ]]; then
   echo ""
   echo "Codex recovery summary:"
   sed -n '1,120p' "$SUMMARY_LOG"
+  echo ""
 else
   echo "Codex recovery produced no summary. Last log lines:"
   tail -40 "$RECOVERY_LOG"
