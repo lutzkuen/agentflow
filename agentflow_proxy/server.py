@@ -315,7 +315,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     requested_l = requested.lower()
     text_chars = len(extract_text(body))
     tools = has_tools(body)
-    max_tokens = int(body.get("max_tokens") or 4096)
+    max_tokens = body.get("max_tokens")  # None when caller didn't set it
     category = categorize_request(body)
 
     for rule in ROUTING_RULES:
@@ -328,7 +328,8 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             continue
         if "has_tools" in cond and bool(cond["has_tools"]) != tools:
             continue
-        if "max_tokens_lte" in cond and not (max_tokens <= int(cond["max_tokens_lte"])):
+        # absent max_tokens means unconstrained — treat as matching any max_tokens_lte rule
+        if "max_tokens_lte" in cond and max_tokens is not None and not (int(max_tokens) <= int(cond["max_tokens_lte"])):
             continue
         if "category" in cond and cond["category"] != category:
             continue
