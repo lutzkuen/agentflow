@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 import uuid
+import yaml
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
 CACHE_ENABLED = os.getenv("AGENTFLOW_CACHE", "1") != "0"
 CRUNCH_ENABLED = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
 ROUTING_ENABLED = os.getenv("AGENTFLOW_ROUTING", "1") != "0"
+ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(Path.home() / ".agentflow" / "routing_rules.yaml"))
 LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
 # Avoid caching tool-using agent turns by default. Exact cache can be dangerous when tools reflect filesystem state.
 CACHE_TOOL_CALLS = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
@@ -236,6 +238,28 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     }
 
 
+def _load_routing_rules() -> list[dict]:
+    p = Path(ROUTING_RULES_PATH)
+    if p.exists():
+        with open(p) as f:
+            data = yaml.safe_load(f)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "rules" in data:
+            return list(data["rules"])
+    defaults = Path(__file__).parent / "routing_rules.yaml"
+    with open(defaults) as f:
+        data = yaml.safe_load(f)
+    if isinstance(data, list):
+        return data
+    return list(data.get("rules", []))
+
+
+ROUTING_RULES: list[dict] = _load_routing_rules()
+
+_TIER_MAP = {"haiku": HAIKU_DEFAULT, "sonnet": SONNET_DEFAULT, "opus": OPUS_DEFAULT}
+
+
 def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     if not ROUTING_ENABLED:
@@ -245,29 +269,41 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     text_chars = len(extract_text(body))
     tools = has_tools(body)
     max_tokens = int(body.get("max_tokens") or 4096)
+    category = categorize_request(body)
 
-    routed = requested
-    reason = "keep requested model"
+    for rule in ROUTING_RULES:
+        cond = rule.get("conditions") or {}
+        if "model_pattern" in cond and cond["model_pattern"].lower() not in requested_l:
+            continue
+        if "text_chars_lt" in cond and not (text_chars < int(cond["text_chars_lt"])):
+            continue
+        if "text_chars_gt" in cond and not (text_chars > int(cond["text_chars_gt"])):
+            continue
+        if "has_tools" in cond and bool(cond["has_tools"]) != tools:
+            continue
+        if "max_tokens_lte" in cond and not (max_tokens <= int(cond["max_tokens_lte"])):
+            continue
+        if "category" in cond and cond["category"] != category:
+            continue
 
-    # Conservative routing: don't downgrade tool-heavy Claude Code calls too aggressively.
-    if not tools:
-        if "opus" in requested_l and text_chars < 24000:
-            routed = SONNET_DEFAULT
-            reason = "non-tool Opus request under threshold routed to Sonnet"
-        elif "sonnet" in requested_l and text_chars < 6000 and max_tokens <= 2048:
-            routed = HAIKU_DEFAULT
-            reason = "small non-tool Sonnet request routed to Haiku"
-    else:
-        # Tool calls are likely agent-state-sensitive. Only route tiny tool-free-looking continuations.
-        if "opus" in requested_l and text_chars < 8000:
-            routed = SONNET_DEFAULT
-            reason = "small tool request Opus routed to Sonnet; disable with AGENTFLOW_ROUTING=0 if unsafe"
+        action = rule.get("action") or {}
+        route_key = str(action.get("route_to", ""))
+        routed = _TIER_MAP.get(route_key, route_key) if route_key else requested
+        reason = str(action.get("reason", "matched routing rule"))
+        return routed, {
+            "enabled": True,
+            "requested_model": requested,
+            "routed_model": routed,
+            "reason": reason,
+            "text_chars": text_chars,
+            "has_tools": tools,
+        }
 
-    return routed, {
+    return requested, {
         "enabled": True,
         "requested_model": requested,
-        "routed_model": routed,
-        "reason": reason,
+        "routed_model": requested,
+        "reason": "keep requested model",
         "text_chars": text_chars,
         "has_tools": tools,
     }

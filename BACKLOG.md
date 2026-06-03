@@ -139,7 +139,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P3 — Better Routing
 
-- [READY] YAML routing rules
+- [DONE] YAML routing rules (2026-06-03)
   Details: Replace hardcoded thresholds in route_model() with a routing_rules.yaml file.
   Schema: list of rules with conditions (model_pattern, text_chars_lt, has_tools, category)
   and action (route_to, reason). Rules evaluated top-to-bottom, first match wins.

@@ -1,0 +1,42 @@
+# AgentFlow default routing rules.
+# Copy to ~/.agentflow/routing_rules.yaml (or set AGENTFLOW_ROUTING_RULES) to customize.
+#
+# Rules are evaluated top-to-bottom; first match wins.
+# All conditions in a rule must match. Omitted conditions always match.
+#
+# Conditions:
+#   model_pattern   — case-insensitive substring match against the requested model name
+#   text_chars_lt   — total request text characters less than this value
+#   text_chars_gt   — total request text characters greater than this value
+#   has_tools       — true/false: whether the request includes tool definitions or tool blocks
+#   max_tokens_lte  — max_tokens field is <= this value
+#   category        — exact match: tool-heavy | tool-light | long-context | short-completion | code-gen | chat
+#
+# Action:
+#   route_to  — "haiku", "sonnet", "opus" (resolves to current default model), or a full model ID
+#   reason    — logged in routing metadata
+
+- conditions:
+    model_pattern: "opus"
+    text_chars_lt: 24000
+    has_tools: false
+  action:
+    route_to: sonnet
+    reason: "non-tool Opus request under threshold routed to Sonnet"
+
+- conditions:
+    model_pattern: "sonnet"
+    text_chars_lt: 6000
+    max_tokens_lte: 2048
+    has_tools: false
+  action:
+    route_to: haiku
+    reason: "small non-tool Sonnet request routed to Haiku"
+
+- conditions:
+    model_pattern: "opus"
+    text_chars_lt: 8000
+    has_tools: true
+  action:
+    route_to: sonnet
+    reason: "small tool request Opus routed to Sonnet; disable with AGENTFLOW_ROUTING=0 if unsafe"
