@@ -13,6 +13,7 @@ CODEX_BIN=${CODEX_BIN:-$DEFAULT_CODEX_BIN}
 RECOVERY_DIR="$REPO/logs/codex-recovery"
 STAMP=$(date +%Y-%m-%d_%H-%M-%S)
 RECOVERY_LOG="$RECOVERY_DIR/$STAMP.log"
+SUMMARY_LOG="$RECOVERY_DIR/$STAMP.summary"
 LATEST_LOG="$RECOVERY_DIR/latest.log"
 LAST_ATTEMPT="$RECOVERY_DIR/last_attempt"
 COOLDOWN_MINUTES=${AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES:-180}
@@ -28,7 +29,7 @@ log() {
 
 if [[ "$CODEX_AUTO" != "1" ]]; then
   log "Codex auto-recovery disabled (AGENTFLOW_CODEX_AUTO=$CODEX_AUTO)"
-  exit 0
+  exit 75
 fi
 
 if [[ -z "$FAILURE_LOG" || ! -f "$FAILURE_LOG" ]]; then
@@ -53,7 +54,7 @@ if [[ -f "$LAST_ATTEMPT" ]]; then
   cooldown=$((COOLDOWN_MINUTES * 60))
   if (( elapsed < cooldown )); then
     log "Codex recovery attempted ${elapsed}s ago; cooldown is ${cooldown}s"
-    exit 0
+    exit 75
   fi
 fi
 touch "$LAST_ATTEMPT"
@@ -102,6 +103,7 @@ PROMPT
     --cd "$REPO"
     --add-dir "$HOME/agentflow-runs"
     --sandbox danger-full-access
+    --output-last-message "$SUMMARY_LOG"
   )
   if [[ -n "$CODEX_MODEL" ]]; then
     codex_args+=(--model "$CODEX_MODEL")
@@ -113,11 +115,31 @@ PROMPT
   status=$?
   set -e
 
+  if (( status == 0 )); then
+    if git status --short --untracked-files=normal | grep -q .; then
+      echo "Recovery left main worktree dirty; treating as failed recovery"
+      git status --short --untracked-files=normal
+      status=80
+    elif find "$HOME/agentflow-runs/worktrees" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | grep -q .; then
+      echo "Recovery left AgentFlow run worktrees behind; treating as failed recovery"
+      find "$HOME/agentflow-runs/worktrees" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null
+      status=81
+    fi
+  fi
+
   echo ""
   echo "Finished: $(date --iso-8601=seconds)"
   echo "Exit: $status"
 } > "$RECOVERY_LOG" 2>&1
 
 ln -sfn "$RECOVERY_LOG" "$LATEST_LOG"
-cat "$RECOVERY_LOG"
+echo "Codex recovery log: $RECOVERY_LOG"
+if [[ -s "$SUMMARY_LOG" ]]; then
+  echo ""
+  echo "Codex recovery summary:"
+  sed -n '1,120p' "$SUMMARY_LOG"
+else
+  echo "Codex recovery produced no summary. Last log lines:"
+  tail -40 "$RECOVERY_LOG"
+fi
 exit "$status"

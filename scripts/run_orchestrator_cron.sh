@@ -37,6 +37,7 @@ mkdir -p "$LOG_DIR"
 } > "$LOG_FILE" 2>&1
 
 if (( status != 0 )) && grep -q "CODEX_REQUIRED" "$LOG_FILE"; then
+  recovery_status=0
   {
     echo ""
     echo "## Codex Recovery"
@@ -47,6 +48,9 @@ if (( status != 0 )) && grep -q "CODEX_REQUIRED" "$LOG_FILE"; then
     echo "Finished: $(date --iso-8601=seconds)"
     echo "Exit: $recovery_status"
   } >> "$LOG_FILE" 2>&1
+  if (( recovery_status == 0 )); then
+    status=0
+  fi
 fi
 
 ln -sfn "$LOG_FILE" "$LATEST_LOG"
