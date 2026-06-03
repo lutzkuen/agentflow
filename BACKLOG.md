@@ -163,7 +163,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P4 — Better Caching
 
-- [READY] Semantic cache for non-tool requests
+- [DONE] Semantic cache for non-tool requests (2026-06-03)
   Details: For non-tool, non-streaming requests, compute an embedding of the request text
   and check against cached embeddings. If cosine similarity > 0.95, return the cached response
   with a note. Use a lightweight local embedding model (e.g., all-MiniLM-L6-v2 via sentence-

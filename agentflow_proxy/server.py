@@ -65,6 +65,8 @@ LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
 CACHE_TOOL_CALLS = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
 CRUNCH_THRESHOLD_CHARS = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", "24000"))
 HTTP_TIMEOUT = float(os.getenv("AGENTFLOW_HTTP_TIMEOUT", "600"))
+SEMANTIC_CACHE_ENABLED = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
+SEMANTIC_CACHE_THRESHOLD = float(os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", "0.95"))
 
 TOKEN_CHARS = 4  # rough estimator only
 
@@ -115,6 +117,20 @@ def has_tools(body: dict[str, Any]) -> bool:
         return True
     text = stable_json(body.get("messages", []))
     return "tool_use" in text or "tool_result" in text
+
+
+def build_embedding(text: str) -> list[float]:
+    buckets = [0.0] * 256
+    for tok in re.findall(r"[a-z]+", text.lower()):
+        buckets[hashlib.sha256(tok.encode()).digest()[0]] += 1.0
+    norm = sum(x * x for x in buckets) ** 0.5
+    if norm > 0:
+        buckets = [x / norm for x in buckets]
+    return buckets
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right))
 
 
 def categorize_request(body: dict[str, Any]) -> str:
@@ -330,6 +346,16 @@ class Store:
         )
         """)
         cur.execute("""
+        create table if not exists semantic_cache (
+          cache_key text primary key,
+          created_at text not null,
+          model text not null,
+          embedding_json text not null,
+          response_json text not null,
+          request_chars integer
+        )
+        """)
+        cur.execute("""
         create table if not exists calls (
           id text primary key,
           created_at text not null,
@@ -376,6 +402,30 @@ class Store:
         self.conn.execute(
             "insert or replace into cache(cache_key, created_at, model, response_json, request_chars, response_chars) values (?, ?, ?, ?, ?, ?)",
             (key, utc_now(), model, response_json, request_chars, len(response_json)),
+        )
+        self.conn.commit()
+
+    def get_semantic_cache(self, embedding: list[float], model: str, threshold: float) -> Optional[dict[str, Any]]:
+        rows = self.conn.execute(
+            "select embedding_json, response_json from semantic_cache where model = ? limit 500",
+            (model,),
+        ).fetchall()
+        if not rows:
+            return None
+        best_sim = -1.0
+        best_resp: Optional[dict[str, Any]] = None
+        for row in rows:
+            stored = json.loads(row["embedding_json"])
+            sim = cosine_similarity(embedding, stored)
+            if sim >= threshold and sim > best_sim:
+                best_sim = sim
+                best_resp = json.loads(row["response_json"])
+        return best_resp
+
+    def set_semantic_cache(self, key: str, model: str, embedding: list[float], response: dict[str, Any], request_chars: int) -> None:
+        self.conn.execute(
+            "insert or replace into semantic_cache(cache_key, created_at, model, embedding_json, response_json, request_chars) values (?, ?, ?, ?, ?, ?)",
+            (key, utc_now(), model, json.dumps(embedding), stable_json(response), request_chars),
         )
         self.conn.commit()
 
@@ -540,6 +590,8 @@ async def messages(request: Request) -> Response:
 
         can_cache = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tools(crunched))
         key = cache_key_for(crunched, path)
+        can_semantic_cache = SEMANTIC_CACHE_ENABLED and not has_tools(crunched)
+        emb: Optional[list[float]] = None
         if can_cache:
             cached = store.get_cache(key)
             if cached is not None:
@@ -561,6 +613,26 @@ async def messages(request: Request) -> Response:
                 )
                 return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
+        if can_semantic_cache:
+            emb = build_embedding(extract_text(crunched))
+            sem_resp = store.get_semantic_cache(emb, str(crunched.get("model")), SEMANTIC_CACHE_THRESHOLD)
+            if sem_resp is not None:
+                latency_ms = int((time.time() - started) * 1000)
+                out_tokens = estimate_tokens_from_text(response_output_text(sem_resp))
+                cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
+                store.log_call(
+                    id=call_id, created_at=utc_now(), path=path,
+                    requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
+                    cache_hit=1, status_code=200, latency_ms=latency_ms,
+                    input_tokens_est=input_tokens, output_tokens_est=out_tokens,
+                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                    error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
+                    response_json=stable_json(sem_resp) if LOG_BODIES else None,
+                    session_id=session_id, category=category,
+                )
+                return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
         status_code = r.status_code
@@ -571,6 +643,8 @@ async def messages(request: Request) -> Response:
 
         if r.status_code < 400 and can_cache and response_body is not None:
             store.set_cache(key, str(crunched.get("model")), len(stable_json(crunched)), response_body)
+        if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
+            store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))
 
         usage = (response_body or {}).get("usage") or {}
         actual_in = usage.get("input_tokens")
