@@ -262,6 +262,8 @@ finalize_run_worktree() {
     echo "CODEX_REQUIRED: fast-forward merge failed for $RUN_BRANCH. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
     exit 36
   }
+  cd "$MAIN_REPO"
+  REPO="$MAIN_REPO"
   git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
   git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
 }

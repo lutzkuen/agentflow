@@ -6,5 +6,6 @@ __pycache__/
 *.sqlite3
 *.sqlite
 runs/
+logs/
 *.log
 .DS_Store

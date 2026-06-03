@@ -97,11 +97,11 @@ PROMPT
 )
 
   codex_args=(
+    --ask-for-approval never
     exec
     --cd "$REPO"
     --add-dir "$HOME/agentflow-runs"
     --sandbox danger-full-access
-    --ask-for-approval never
   )
   if [[ -n "$CODEX_MODEL" ]]; then
     codex_args+=(--model "$CODEX_MODEL")
