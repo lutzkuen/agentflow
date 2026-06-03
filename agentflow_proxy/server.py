@@ -207,6 +207,10 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         "before_chars": before,
         "after_chars": after,
         "saved_chars": before - after,
+        "tokens_before_est": before // TOKEN_CHARS,
+        "tokens_after_est": after // TOKEN_CHARS,
+        "tokens_saved_est": (before - after) // TOKEN_CHARS,
+        "crunch_ratio": round((before - after) / before, 4) if before > 0 else 0,
         "duplicate_blocks_replaced": replacements,
         "long_blocks_shortened": shortened,
     }
@@ -604,6 +608,8 @@ async def stats_full() -> dict[str, Any]:
         routing_savings += max(0.0, req_cost - act_cost)
 
     crunch_chars_saved = s("select sum(json_extract(crunch_json, '$.saved_chars')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
+    crunch_tokens_saved = s("select sum(json_extract(crunch_json, '$.tokens_saved_est')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
+    avg_crunch_ratio = s("select avg(json_extract(crunch_json, '$.crunch_ratio')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
 
     recent = q("""
         select id, created_at, requested_model, routed_model, stream, cache_hit,
@@ -645,6 +651,8 @@ async def stats_full() -> dict[str, Any]:
             "routed_count": routed_count,
             "crunched_count": crunched_count,
             "crunch_chars_saved": crunch_chars_saved,
+            "crunch_tokens_saved": int(crunch_tokens_saved),
+            "avg_crunch_ratio": round(avg_crunch_ratio, 4),
             "errors": errors,
         },
         "recent": recent,
@@ -869,7 +877,7 @@ async function refresh(){
     document.getElementById('c-cache-saved').textContent=fmt(s.cache_savings_usd,4);
     document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
-    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched';
+    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
 
     const tb=document.getElementById('tbody');
     tb.innerHTML=d.recent.map(row=>{
