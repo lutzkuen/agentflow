@@ -114,7 +114,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P2 — Better Crunching
 
-- [READY] Near-duplicate detection for text blocks
+- [DONE] Near-duplicate detection for text blocks (2026-06-03)
   Details: Instead of exact hash comparison, compute a 4-gram shingle similarity. If two
   text blocks share >85% 4-grams, treat them as duplicates and omit the older one.
   Important: be conservative — only apply to large blocks (>2000 chars) in older messages.
