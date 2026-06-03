@@ -104,7 +104,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   estimate using real token counts from similar uncrunched calls. Track crunch ratio over time.
   Metric: dashboard shows avg crunch ratio and tokens saved by crunching.
 
-- [READY] Request categorization
+- [DONE] Request categorization (2026-06-02)
   Details: Tag each call with a category: tool-heavy, code-gen, chat, short-completion, etc.
   Use simple heuristics: presence of tool blocks, length, system prompt patterns. This lets
   us see which categories benefit most from which optimizations.
