@@ -36,5 +36,18 @@ mkdir -p "$LOG_DIR"
   echo "Exit: $status"
 } > "$LOG_FILE" 2>&1
 
+if (( status != 0 )) && grep -q "CODEX_REQUIRED" "$LOG_FILE"; then
+  {
+    echo ""
+    echo "## Codex Recovery"
+    echo "Started: $(date --iso-8601=seconds)"
+    AGENTFLOW_REPO="$REPO" AGENTFLOW_FAILURE_LOG="$LOG_FILE" \
+      "$REPO/scripts/codex_recover.sh" "$LOG_FILE"
+    recovery_status=$?
+    echo "Finished: $(date --iso-8601=seconds)"
+    echo "Exit: $recovery_status"
+  } >> "$LOG_FILE" 2>&1
+fi
+
 ln -sfn "$LOG_FILE" "$LATEST_LOG"
 exit "$status"

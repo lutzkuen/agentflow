@@ -95,6 +95,20 @@ curl -s -X POST http://localhost:4001/v1/messages \
 claude --print --allowedTools "Bash,Read" < agents/test.md
 ```
 
+## Unattended recovery
+
+Hourly cron runs call `scripts/run_orchestrator_cron.sh`. If a run exits with `CODEX_REQUIRED`,
+the wrapper invokes `scripts/codex_recover.sh` once, subject to a cooldown, so preserved run
+worktrees are salvaged promptly instead of blocking later hours indefinitely.
+
+Controls:
+
+```bash
+export AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex recovery
+export AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
+export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit model
+```
+
 ## Commit message format
 
 ```
