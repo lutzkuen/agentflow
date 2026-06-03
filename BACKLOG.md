@@ -240,7 +240,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: >80% of calls have a non-null session_id; dashboard per-session cost table shows multiple
   active sessions.
 
-- [IDEA] Request pacing: 6.5% error rate from 429/529 bursts during agent runs (2026-06-03)
+- [DONE] Request pacing: 6.5% error rate from 429/529 bursts during agent runs (2026-06-03)
   Details: 68 rate limits (429) and 18 overloaded (529) across 2 days. Pattern: 26 rate limits
   in one hour during a June 2 agent run, 10 in another. Both Haiku and Sonnet affected. Agent runs
   send concurrent requests that collide in the same rate-limit window. Each 429 likely triggers a
