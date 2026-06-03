@@ -217,7 +217,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: >30 calls/day routed to Haiku on small non-tool Sonnet requests; routing_json.reason
   shows "small non-tool Sonnet request routed to Haiku"; zero increase in error rate.
 
-- [READY] Fix: streaming handler drops prompt cache stats when Claude Code injects cache headers (2026-06-03)
+- [DONE] Fix: streaming handler drops prompt cache stats when Claude Code injects cache headers (2026-06-03)
   Details: inject_prompt_cache() returns (body, False) when the incoming request already contains
   cache_control blocks (Claude Code sends them). The streaming handler (server.py ~line 583) then
   skips cache stat capture because `if prompt_cached:` is False. Result: all 1,323 calls have
