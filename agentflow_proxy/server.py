@@ -67,6 +67,8 @@ CRUNCH_THRESHOLD_CHARS = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", "2400
 HTTP_TIMEOUT = float(os.getenv("AGENTFLOW_HTTP_TIMEOUT", "600"))
 SEMANTIC_CACHE_ENABLED = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
 SEMANTIC_CACHE_THRESHOLD = float(os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", "0.95"))
+PROMPT_CACHE_ENABLED = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
+PROMPT_CACHE_MIN_CHARS = int(os.getenv("AGENTFLOW_PROMPT_CACHE_MIN_CHARS", "4096"))
 
 TOKEN_CHARS = 4  # rough estimator only
 
@@ -254,6 +256,35 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     }
 
 
+def inject_prompt_cache(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    if not PROMPT_CACHE_ENABLED:
+        return body, False
+    system = body.get("system")
+    if system is None:
+        return body, False
+    if isinstance(system, str):
+        if len(system) < PROMPT_CACHE_MIN_CHARS:
+            return body, False
+        new_body = copy.deepcopy(body)
+        new_body["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        return new_body, True
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("cache_control"):
+                return body, False
+        total_text = sum(len(b.get("text", "")) for b in system if isinstance(b, dict) and b.get("type") == "text")
+        if total_text < PROMPT_CACHE_MIN_CHARS:
+            return body, False
+        new_body = copy.deepcopy(body)
+        for i in range(len(new_body["system"]) - 1, -1, -1):
+            block = new_body["system"][i]
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["cache_control"] = {"type": "ephemeral"}
+                break
+        return new_body, True
+    return body, False
+
+
 def _load_routing_rules() -> list[dict]:
     p = Path(ROUTING_RULES_PATH)
     if p.exists():
@@ -381,6 +412,8 @@ class Store:
         self._ensure_column("calls", "session_id", "text")
         self._ensure_column("calls", "cost_baseline_usd", "real")
         self._ensure_column("calls", "category", "text")
+        self._ensure_column("calls", "cache_creation_input_tokens", "integer")
+        self._ensure_column("calls", "cache_read_input_tokens", "integer")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -434,7 +467,7 @@ class Store:
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
-            "category",
+            "category", "cache_creation_input_tokens", "cache_read_input_tokens",
         ]
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
@@ -531,10 +564,15 @@ async def messages(request: Request) -> Response:
 
     try:
         crunched, crunch_meta = crunch_body(raw_body)
+        crunched, prompt_cached = inject_prompt_cache(crunched)
         routed_model, routing_meta = route_model(crunched)
         crunched["model"] = routed_model
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
         headers = build_forward_headers(request)
+        if prompt_cached:
+            existing = headers.get("anthropic-beta", "")
+            if "prompt-caching" not in existing:
+                headers["anthropic-beta"] = (existing + ",prompt-caching-2024-07-31" if existing else "prompt-caching-2024-07-31")
 
         # Streaming is passed through and not cached, but still logged when the stream finishes.
         if stream:
@@ -542,6 +580,8 @@ async def messages(request: Request) -> Response:
                 nonlocal status_code, error
                 actual_in: Optional[int] = None
                 actual_out: Optional[int] = None
+                cache_creation_in: int = 0
+                cache_read_in: int = 0
                 sse_buf = ""
                 try:
                     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
@@ -560,7 +600,10 @@ async def messages(request: Request) -> Response:
                                         continue
                                     t = data.get("type")
                                     if t == "message_start":
-                                        actual_in = (data.get("message") or {}).get("usage", {}).get("input_tokens")
+                                        u = (data.get("message") or {}).get("usage", {})
+                                        actual_in = u.get("input_tokens")
+                                        cache_creation_in = u.get("cache_creation_input_tokens") or 0
+                                        cache_read_in = u.get("cache_read_input_tokens") or 0
                                     elif t == "message_delta":
                                         out = (data.get("usage") or {}).get("output_tokens")
                                         if out is not None:
@@ -574,6 +617,8 @@ async def messages(request: Request) -> Response:
                     cost_out = actual_out if actual_out is not None else 0
                     cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
                     cost_baseline = estimate_cost(requested_model, cost_in, cost_out)
+                    if cache_creation_in or cache_read_in:
+                        print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -584,6 +629,7 @@ async def messages(request: Request) -> Response:
                         crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id, category=category,
+                        cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
                     )
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -649,6 +695,10 @@ async def messages(request: Request) -> Response:
         usage = (response_body or {}).get("usage") or {}
         actual_in = usage.get("input_tokens")
         actual_out = usage.get("output_tokens")
+        cache_creation_in = usage.get("cache_creation_input_tokens") or 0
+        cache_read_in = usage.get("cache_read_input_tokens") or 0
+        if cache_creation_in or cache_read_in:
+            print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
         out_tokens = estimate_tokens_from_text(response_output_text(response_body)) if response_body else 0
         cost_in = actual_in if actual_in is not None else input_tokens
         cost_out = actual_out if actual_out is not None else out_tokens
@@ -667,6 +717,7 @@ async def messages(request: Request) -> Response:
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
             session_id=session_id, category=category,
+            cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
         )
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -740,6 +791,8 @@ async def stats_full() -> dict[str, Any]:
     crunch_chars_saved = s("select sum(json_extract(crunch_json, '$.saved_chars')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     crunch_tokens_saved = s("select sum(json_extract(crunch_json, '$.tokens_saved_est')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     avg_crunch_ratio = s("select avg(json_extract(crunch_json, '$.crunch_ratio')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
+    prompt_cache_creation_tokens = s("select sum(cache_creation_input_tokens) from calls") or 0
+    prompt_cache_read_tokens = s("select sum(cache_read_input_tokens) from calls") or 0
 
     recent = q("""
         select id, created_at, requested_model, routed_model, stream, cache_hit,
@@ -784,6 +837,8 @@ async def stats_full() -> dict[str, Any]:
             "crunch_tokens_saved": int(crunch_tokens_saved),
             "avg_crunch_ratio": round(avg_crunch_ratio, 4),
             "errors": errors,
+            "prompt_cache_creation_tokens": int(prompt_cache_creation_tokens),
+            "prompt_cache_read_tokens": int(prompt_cache_read_tokens),
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,

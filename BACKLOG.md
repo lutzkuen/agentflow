@@ -128,11 +128,16 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: token reduction on long sessions; no task completion regressions (measure via
   comparing tool call success rates with and without).
 
-- [IDEA] System prompt deduplication across calls
+- [DONE] System prompt deduplication across calls (2026-06-03)
   Details: Many Claude Code calls repeat the same long system prompt. Cache the system prompt
   separately, assign it a hash, and use Anthropic's prompt caching beta header to mark it as
   cacheable at the API level. This doesn't reduce what we send but reduces what Anthropic charges.
-  Metric: Anthropic cache_creation_input_tokens in response headers; cost reduction on repeated
+  Implementation: add AGENTFLOW_PROMPT_CACHE env flag (default on). In the /v1/messages handler,
+  after crunching, if system prompt is a string or list with total text > 4096 chars, transform it
+  to include cache_control: {type: ephemeral} on the last text block. Add anthropic-beta:
+  prompt-caching-2024-07-31 header. Parse cache_creation_input_tokens and cache_read_input_tokens
+  from usage in responses. Store in new DB columns. Show prompt cache hit rate in stats.
+  Metric: Anthropic cache_creation_input_tokens in response usage; cost reduction on repeated
   system prompts.
 
 ---
