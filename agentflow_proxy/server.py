@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import random
 import re
 import sqlite3
 import time
@@ -69,8 +70,24 @@ SEMANTIC_CACHE_ENABLED = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
 SEMANTIC_CACHE_THRESHOLD = float(os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", "0.95"))
 PROMPT_CACHE_ENABLED = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
 PROMPT_CACHE_MIN_CHARS = int(os.getenv("AGENTFLOW_PROMPT_CACHE_MIN_CHARS", "4096"))
+MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"))
 
 TOKEN_CHARS = 4  # rough estimator only
+
+_forward_lock = asyncio.Lock()
+_last_forward_time: float = 0.0
+
+
+async def _throttle_forward() -> None:
+    global _last_forward_time
+    if MIN_REQUEST_INTERVAL_MS <= 0:
+        return
+    async with _forward_lock:
+        now = time.time()
+        elapsed_ms = (now - _last_forward_time) * 1000
+        if elapsed_ms < MIN_REQUEST_INTERVAL_MS:
+            await asyncio.sleep((MIN_REQUEST_INTERVAL_MS - elapsed_ms) / 1000)
+        _last_forward_time = time.time()
 
 
 def utc_now() -> str:
@@ -430,6 +447,7 @@ class Store:
         self._ensure_column("calls", "category", "text")
         self._ensure_column("calls", "cache_creation_input_tokens", "integer")
         self._ensure_column("calls", "cache_read_input_tokens", "integer")
+        self._ensure_column("calls", "retry_count", "integer")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -483,7 +501,7 @@ class Store:
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
-            "category", "cache_creation_input_tokens", "cache_read_input_tokens",
+            "category", "cache_creation_input_tokens", "cache_read_input_tokens", "retry_count",
         ]
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
@@ -575,6 +593,7 @@ async def messages(request: Request) -> Response:
     routing_meta: dict[str, Any] = {}
     cache_hit = False
     response_body: Optional[dict[str, Any]] = None
+    retry_count = 0
 
     category = categorize_request(raw_body)
 
@@ -599,31 +618,41 @@ async def messages(request: Request) -> Response:
                 cache_creation_in: int = 0
                 cache_read_in: int = 0
                 sse_buf = ""
+                stream_retry_count = 0
                 try:
                     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                        async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
-                            status_code = r.status_code
-                            async for chunk in r.aiter_bytes():
-                                yield chunk
-                                sse_buf += chunk.decode("utf-8", errors="replace")
-                                while "\n" in sse_buf:
-                                    line, sse_buf = sse_buf.split("\n", 1)
-                                    if not line.startswith("data: "):
-                                        continue
-                                    try:
-                                        data = json.loads(line[6:])
-                                    except Exception:
-                                        continue
-                                    t = data.get("type")
-                                    if t == "message_start":
-                                        u = (data.get("message") or {}).get("usage", {})
-                                        actual_in = u.get("input_tokens")
-                                        cache_creation_in = u.get("cache_creation_input_tokens") or 0
-                                        cache_read_in = u.get("cache_read_input_tokens") or 0
-                                    elif t == "message_delta":
-                                        out = (data.get("usage") or {}).get("output_tokens")
-                                        if out is not None:
-                                            actual_out = out
+                        while True:
+                            await _throttle_forward()
+                            async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                status_code = r.status_code
+                                if status_code in (429, 529) and stream_retry_count < 3:
+                                    stream_retry_count += 1
+                                    delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
+                                    print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                    await asyncio.sleep(delay)
+                                    continue
+                                async for chunk in r.aiter_bytes():
+                                    yield chunk
+                                    sse_buf += chunk.decode("utf-8", errors="replace")
+                                    while "\n" in sse_buf:
+                                        line, sse_buf = sse_buf.split("\n", 1)
+                                        if not line.startswith("data: "):
+                                            continue
+                                        try:
+                                            data = json.loads(line[6:])
+                                        except Exception:
+                                            continue
+                                        t = data.get("type")
+                                        if t == "message_start":
+                                            u = (data.get("message") or {}).get("usage", {})
+                                            actual_in = u.get("input_tokens")
+                                            cache_creation_in = u.get("cache_creation_input_tokens") or 0
+                                            cache_read_in = u.get("cache_read_input_tokens") or 0
+                                        elif t == "message_delta":
+                                            out = (data.get("usage") or {}).get("output_tokens")
+                                            if out is not None:
+                                                actual_out = out
+                                    break
                 except Exception as exc:
                     error = repr(exc)
                     yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
@@ -646,6 +675,7 @@ async def messages(request: Request) -> Response:
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
+                        retry_count=stream_retry_count,
                     )
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -671,7 +701,7 @@ async def messages(request: Request) -> Response:
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(response_body) if LOG_BODIES else None,
-                    session_id=session_id, category=category,
+                    session_id=session_id, category=category, retry_count=0,
                 )
                 return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -691,12 +721,21 @@ async def messages(request: Request) -> Response:
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(sem_resp) if LOG_BODIES else None,
-                    session_id=session_id, category=category,
+                    session_id=session_id, category=category, retry_count=0,
                 )
                 return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+            while True:
+                await _throttle_forward()
+                r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+                if r.status_code in (429, 529) and retry_count < 3:
+                    retry_count += 1
+                    delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
+                    print(f"rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
+                    await asyncio.sleep(delay)
+                    continue
+                break
         status_code = r.status_code
         try:
             response_body = r.json()
@@ -734,6 +773,7 @@ async def messages(request: Request) -> Response:
             response_json=stable_json(response_body) if LOG_BODIES else None,
             session_id=session_id, category=category,
             cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
+            retry_count=retry_count,
         )
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -747,7 +787,7 @@ async def messages(request: Request) -> Response:
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
-            session_id=session_id, category=category,
+            session_id=session_id, category=category, retry_count=retry_count,
         )
         return JSONResponse({"type": "error", "error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
 
