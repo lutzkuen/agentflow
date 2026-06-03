@@ -204,3 +204,57 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   claude-haiku-4.5 → claude-haiku-4-5-20251001, claude-sonnet-4.5 → claude-sonnet-4-5-20240620,
   claude-opus-4.5 → claude-opus-4-5. Tester confirmed 16 prod calls failing with 404.
   Metric: zero 404s from dot-notation aliases; router still routes correctly after normalization.
+
+- [DONE] Fix routing rule: max_tokens_lte condition blocks Sonnet→Haiku routing (2026-06-03)
+  Details: The Sonnet→Haiku rule requires `max_tokens_lte: 2048`, but Claude Code never sets
+  max_tokens in requests — all 59 inspected non-tool Sonnet calls had max_tokens=NULL. NULL<=2048
+  is false, so the rule never fires. Only 1 of 1,323 calls was rerouted (0.08%).
+  Fix: remove `max_tokens_lte` from the Sonnet→Haiku rule in routing_rules.yaml, or update the
+  rule evaluator in agentflow_proxy/server.py to treat a missing max_tokens_lte condition as always-true (already
+  the case) AND treat an explicit max_tokens_lte condition as matching when request max_tokens is
+  absent (i.e., treat NULL max_tokens as unconstrained). The latter is safer. 37 calls with
+  text_chars<6000 and no tools should have gone to Haiku.
+  Metric: >30 calls/day routed to Haiku on small non-tool Sonnet requests; routing_json.reason
+  shows "small non-tool Sonnet request routed to Haiku"; zero increase in error rate.
+
+- [READY] Fix: streaming handler drops prompt cache stats when Claude Code injects cache headers (2026-06-03)
+  Details: inject_prompt_cache() returns (body, False) when the incoming request already contains
+  cache_control blocks (Claude Code sends them). The streaming handler (server.py ~line 583) then
+  skips cache stat capture because `if prompt_cached:` is False. Result: all 1,323 calls have
+  cache_creation_input_tokens=0, cache_read_input_tokens=0 even though Anthropic is almost certainly
+  returning non-zero values for the large tool-heavy calls (avg 25k chars each).
+  Fix: in the streaming handler, move cache token extraction to an unconditional block that always
+  reads cache_creation_input_tokens and cache_read_input_tokens from the final SSE usage event —
+  mirror what the non-streaming path does at lines 698-700. The `if prompt_cached:` guard should
+  only control whether AgentFlow adds the beta header, not whether we capture the stats.
+  Metric: cache_creation_input_tokens > 0 on calls with large system prompts; dashboard prompt
+  cache stats become non-zero; confirms or disproves actual prompt cache activity.
+
+- [IDEA] Fix session tracking: 70% of calls have null session_id (2026-06-03)
+  Details: Only 403 of 1,323 calls (30%) have a session_id. One session accounts for all of them.
+  The other 920 calls from Claude Code CLI/API never receive a session_id. Current extraction likely
+  depends on a header that is only present in certain connection modes.
+  Fix: audit the session_id extraction logic — check x-session-id, x-request-id, and client IP:port
+  extraction. Consider assigning a synthetic session_id based on a short time window + client IP
+  when no header is present (e.g., calls within 5 minutes from the same IP share a session).
+  Metric: >80% of calls have a non-null session_id; dashboard per-session cost table shows multiple
+  active sessions.
+
+- [IDEA] Request pacing: 6.5% error rate from 429/529 bursts during agent runs (2026-06-03)
+  Details: 68 rate limits (429) and 18 overloaded (529) across 2 days. Pattern: 26 rate limits
+  in one hour during a June 2 agent run, 10 in another. Both Haiku and Sonnet affected. Agent runs
+  send concurrent requests that collide in the same rate-limit window. Each 429 likely triggers a
+  client retry, doubling request count and cost for failed turns.
+  Fix: add AGENTFLOW_MIN_REQUEST_INTERVAL_MS (default 0, so no-op unless set) that imposes a
+  minimum delay between forwarded requests. Add exponential backoff with jitter when proxying a
+  429/529: wait and re-forward rather than returning the error immediately to the client. Cap at
+  3 retries. Log backoff events in the calls table (new column: retry_count).
+  Metric: 429+529 rate drops below 1%; no increase in p95 latency for successful calls.
+
+- [IDEA] Expand request categorization: 70% of calls uncategorized (2026-06-03)
+  Details: Only tool-heavy, code-gen, short-completion are assigned. 930 of 1,323 calls get
+  category=NULL. Chat and long-context categories have no heuristics. Routing rules that target
+  category can't function on uncategorized calls.
+  Fix: add heuristics for chat (no tools, no code fences, < 2000 chars) and long-context (> 20k
+  chars regardless of tools). Verify coverage against DB after deploy.
+  Metric: <20% NULL category across new calls; category breakdown visible in dashboard.
