@@ -158,6 +158,12 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ## P3 — Better Routing
 
+- [DONE] Extract router.py — route_model() and all routing logic into its own module (2026-06-04)
+  Details: Created agentflow_proxy/router.py (143 lines). Moved extract_text, has_tools,
+  categorize_request, _load_routing_rules, route_model and routing constants. server.py drops
+  from 1097 to 964 lines. Removed yaml import from server.py.
+  Metric: router.py 143 lines; server.py 964 lines; smoke test passes; no behavior change.
+
 - [DONE] YAML routing rules (2026-06-03)
   Details: Replace hardcoded thresholds in route_model() with a routing_rules.yaml file.
   Schema: list of rules with conditions (model_pattern, text_chars_lt, has_tools, category)
