@@ -611,6 +611,7 @@ async def messages(request: Request) -> Response:
         crunched, crunch_meta = crunch_body(raw_body)
         crunched, prompt_cached = inject_prompt_cache(crunched)
         routed_model, routing_meta = route_model(crunched)
+        resolved_requested_model = crunched.get("model", requested_model)
         crunched["model"] = routed_model
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
         headers = build_forward_headers(request)
@@ -663,6 +664,10 @@ async def messages(request: Request) -> Response:
                                     stream_retry_count += 1
                                     delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
                                     print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                    if stream_retry_count == 1 and routed_model != resolved_requested_model:
+                                        crunched["model"] = resolved_requested_model
+                                        routing_meta["fallback_reason"] = "rate_limited"
+                                        print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
                                     await asyncio.sleep(delay)
                                     continue
                                 async for chunk in r.aiter_bytes():
@@ -757,6 +762,10 @@ async def messages(request: Request) -> Response:
                     retry_count += 1
                     delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
                     print(f"rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
+                    if retry_count == 1 and routed_model != resolved_requested_model:
+                        crunched["model"] = resolved_requested_model
+                        routing_meta["fallback_reason"] = "rate_limited"
+                        print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
                     await asyncio.sleep(delay)
                     continue
                 break
