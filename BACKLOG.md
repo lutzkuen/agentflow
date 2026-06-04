@@ -171,6 +171,13 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   imports from pricing.py.
   Metric: pricing.py 39 lines; server.py 752 lines; smoke test passes.
 
+- [DONE] Extract cache.py — cache constants, cache_key_for, response_output_text (2026-06-04)
+  Details: Move CACHE_ENABLED, CACHE_TOOL_CALLS, SEMANTIC_CACHE_ENABLED,
+  SEMANTIC_CACHE_THRESHOLD, cache_key_for(), and response_output_text() from server.py
+  into agentflow_proxy/cache.py. server.py imports them. No behavior change.
+  This is the last module extraction needed to complete architecture priority #1.
+  Metric: cache.py exists; server.py drops by ~15 lines; smoke test passes on dev port 4001.
+
 ---
 
 ## P3 — Better Routing
