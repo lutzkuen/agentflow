@@ -335,7 +335,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: cost_est_usd within 5% of actual Anthropic invoice; dashboard shows real $ saved
   by prompt cache as a separate line item.
 
-- [READY] Dashboard: add prompt-cache savings line to cost summary (2026-06-04)
+- [DONE] Dashboard: add prompt-cache savings line to cost summary (2026-06-04)
   Details: Prompt cache is saving ~$133/day (49.2 M cache_read tokens × $2.70 savings per MTok
   vs full input price) but this is invisible in the dashboard. The "savings" section only shows
   routing savings (currently $0 since routing never fires).
