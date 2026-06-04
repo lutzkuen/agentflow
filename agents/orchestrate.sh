@@ -8,7 +8,28 @@
 
 set -Eeuo pipefail
 
+export HOME=${HOME:-/home/lutz}
 export PATH="/home/lutz/.local/bin:$PATH"
+
+resolve_claude_bin() {
+  local found
+  found=$(command -v claude 2>/dev/null || true)
+  if [[ -n "$found" && -x "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  found=$(find "$HOME/.vscode/extensions" -path '*/resources/native-binary/claude' -type f -perm -u+x 2>/dev/null | sort -V | tail -1)
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  found=$(find "$HOME/.config/Claude" \( -path '*/claude-code/*/claude' -o -path '*/claude-code-vm/*/claude' \) -type f -perm -u+x 2>/dev/null | sort -V | tail -1)
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  printf '%s\n' "claude"
+}
 
 MAIN_REPO=${AGENTFLOW_REPO:-/home/lutz/agentflow}
 REPO=$MAIN_REPO
@@ -16,7 +37,7 @@ LOG_DIR="$MAIN_REPO/runs"
 RUN_ID=${RUN_ID:-$(date +%Y-%m-%d_%H-%M)}
 PROXY_URL=${ANTHROPIC_BASE_URL:-http://127.0.0.1:4000}
 PROXY_SERVICE=${AGENTFLOW_PROXY_SERVICE:-agentflow-claude-proxy.service}
-CLAUDE_BIN=${CLAUDE_BIN:-claude}
+CLAUDE_BIN=${CLAUDE_BIN:-$(resolve_claude_bin)}
 CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-$HOME/.claude/projects/-home-lutz-agentflow}
 WORKTREE_ROOT=${AGENTFLOW_WORKTREE_ROOT:-$HOME/agentflow-runs/worktrees}
 RUN_BRANCH=${AGENTFLOW_RUN_BRANCH:-agent/$RUN_ID}

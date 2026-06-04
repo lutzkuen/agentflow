@@ -24,6 +24,9 @@ mkdir -p "$LOG_DIR"
     status=70
   else
     export PATH="/home/lutz/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+    export HOME=${HOME:-/home/lutz}
+    export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+    export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
     export ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-http://127.0.0.1:4000}
     export RUN_ID=${RUN_ID:-$STAMP}
 

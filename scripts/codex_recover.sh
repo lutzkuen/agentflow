@@ -3,12 +3,30 @@
 
 set -Eeuo pipefail
 
+export HOME=${HOME:-/home/lutz}
 REPO=${AGENTFLOW_REPO:-/home/lutz/agentflow}
 FAILURE_LOG=${1:-${AGENTFLOW_FAILURE_LOG:-}}
-DEFAULT_CODEX_BIN=$(command -v codex || true)
-if [[ -z "$DEFAULT_CODEX_BIN" && -x "$HOME/.vscode/extensions/openai.chatgpt-26.527.60818-linux-x64/bin/linux-x86_64/codex" ]]; then
-  DEFAULT_CODEX_BIN="$HOME/.vscode/extensions/openai.chatgpt-26.527.60818-linux-x64/bin/linux-x86_64/codex"
-fi
+
+resolve_codex_bin() {
+  local found
+  found=$(command -v codex 2>/dev/null || true)
+  if [[ -n "$found" && -x "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  found=$(find "$HOME/.vscode/extensions" -path '*/bin/linux-x86_64/codex' -type f -perm -u+x 2>/dev/null | sort -V | tail -1)
+  if [[ -n "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+  found=$(find "$HOME" -path '*/node_modules/.bin/codex' \( -type f -o -type l \) 2>/dev/null | sort -V | tail -1)
+  if [[ -n "$found" && -x "$found" ]]; then
+    printf '%s\n' "$found"
+    return 0
+  fi
+}
+
+DEFAULT_CODEX_BIN=$(resolve_codex_bin)
 CODEX_BIN=${CODEX_BIN:-$DEFAULT_CODEX_BIN}
 RECOVERY_DIR="$REPO/logs/codex-recovery"
 STAMP=$(date +%Y-%m-%d_%H-%M-%S)
