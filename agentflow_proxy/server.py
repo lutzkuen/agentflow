@@ -395,6 +395,19 @@ async def stats_full() -> dict[str, Any]:
     avg_crunch_ratio = s("select avg(json_extract(crunch_json, '$.crunch_ratio')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     prompt_cache_creation_tokens = s("select sum(cache_creation_input_tokens) from calls") or 0
     prompt_cache_read_tokens = s("select sum(cache_read_input_tokens) from calls") or 0
+    prompt_cache_hits = s("select count(*) from calls where cache_read_input_tokens > 0") or 0
+    prompt_cache_hit_rate = round(prompt_cache_hits / total_calls, 4) if total_calls else 0
+
+    prompt_cache_savings = 0.0
+    cache_read_by_model = q("""
+        select coalesce(routed_model, requested_model) as model,
+               sum(cache_read_input_tokens) as read_tok
+        from calls where cache_read_input_tokens > 0
+        group by coalesce(routed_model, requested_model)
+    """)
+    for row in cache_read_by_model:
+        full_cost = estimate_cost(row["model"], row["read_tok"], 0) or 0
+        prompt_cache_savings += 0.90 * full_cost
 
     recent = q("""
         select id, created_at, requested_model, routed_model, stream, cache_hit,
@@ -441,6 +454,8 @@ async def stats_full() -> dict[str, Any]:
             "errors": errors,
             "prompt_cache_creation_tokens": int(prompt_cache_creation_tokens),
             "prompt_cache_read_tokens": int(prompt_cache_read_tokens),
+            "prompt_cache_hit_rate": prompt_cache_hit_rate,
+            "prompt_cache_savings_usd": round(prompt_cache_savings, 6),
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
@@ -555,6 +570,7 @@ async def dashboard() -> str:
   <div class="card"><div class="label">Cost today</div><div class="value" id="c-cost">—</div><div class="sub" id="c-cost-total">— total</div></div>
   <div class="card green"><div class="label">Saved by routing</div><div class="value" id="c-routing">—</div><div class="sub" id="c-routed-n">— calls routed</div></div>
   <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
+  <div class="card green"><div class="label">Prompt cache saved</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— prompt hit rate</div></div>
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
 </div>
 
@@ -663,6 +679,8 @@ async function refresh(){
     document.getElementById('c-routed-n').textContent=s.routed_count+' calls routed';
     document.getElementById('c-cache-saved').textContent=fmt(s.cache_savings_usd,4);
     document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
+    document.getElementById('c-prompt-cache-saved').textContent=fmt(s.prompt_cache_savings_usd,4);
+    document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% prompt hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
     document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
 
