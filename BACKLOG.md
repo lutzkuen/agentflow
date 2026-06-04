@@ -67,6 +67,16 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   no output tokens.
   Metric: streaming calls have non-null output_tokens_est in DB.
 
+- [DONE] Extract Store class into store.py — architecture priority #1
+  Details: server.py is 1226 lines. ARCHITECTURE.md specifies splitting into modules.
+  First split: move utc_now(), stable_json(), cosine_similarity(), and the Store class
+  from server.py into agentflow_proxy/store.py. server.py imports them back with:
+    from agentflow_proxy.store import Store, utc_now, stable_json
+  cosine_similarity stays in store.py and is only used internally by Store.get_semantic_cache.
+  Follow CLAUDE.md rule 7: copy code, update import, delete original, restart dev, run tests.
+  Metric: server.py shrinks by ~130 lines; `python -c "from agentflow_proxy.store import Store"` passes;
+  smoke test against dev port 4001 returns valid JSON.
+
 ---
 
 ## P1 — Better Measurement (know what's actually happening)
