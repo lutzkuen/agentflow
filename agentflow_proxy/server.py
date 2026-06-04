@@ -26,30 +26,6 @@ DEFAULT_DB = os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentfl
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
 DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
 
-# Approximate public list prices in USD per million tokens. Update in config/env as needed.
-MODEL_PRICES = {
-    "claude-opus-4.5": (5.0, 25.0),
-    "claude-opus-4-5": (5.0, 25.0),
-    "claude-opus-4": (15.0, 75.0),
-    "claude-sonnet-4.5": (3.0, 15.0),
-    "claude-sonnet-4-5": (3.0, 15.0),
-    "claude-sonnet-4": (3.0, 15.0),
-    "claude-3-7-sonnet": (3.0, 15.0),
-    "claude-3-5-sonnet": (3.0, 15.0),
-    "claude-haiku-4.5": (1.0, 5.0),
-    "claude-haiku-4-5": (1.0, 5.0),
-    "claude-haiku-4-5-20251001": (1.0, 5.0),
-    "claude-3-5-haiku": (0.8, 4.0),
-    "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-opus-4-5": (5.0, 25.0),
-}
-
-MODEL_ALIASES = {
-    "claude-haiku-4.5": "claude-haiku-4-5-20251001",
-    "claude-sonnet-4.5": "claude-sonnet-4-5-20240620",
-    "claude-opus-4.5": "claude-opus-4-5",
-}
-
 CACHE_ENABLED = os.getenv("AGENTFLOW_CACHE", "1") != "0"
 LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
 # Avoid caching tool-using agent turns by default. Exact cache can be dangerous when tools reflect filesystem state.
@@ -76,6 +52,7 @@ async def _throttle_forward() -> None:
 
 
 from agentflow_proxy.store import Store, utc_now, stable_json
+from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_cost
 from agentflow_proxy.router import extract_text, has_tools, categorize_request, route_model, HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT
 from agentflow_proxy.crunch import (
     TOKEN_CHARS, sha256_text, estimate_tokens_from_text, build_embedding,
@@ -106,19 +83,6 @@ def build_forward_headers(request: Request) -> dict[str, str]:
 def cache_key_for(body: dict[str, Any], path: str) -> str:
     # Do not include auth. Include endpoint and body after crunch/routing.
     return sha256_text(path + "\n" + stable_json(body))
-
-
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
-    prices = None
-    ml = model.lower()
-    for name, val in MODEL_PRICES.items():
-        if name in ml:
-            prices = val
-            break
-    if not prices:
-        return None
-    in_per_m, out_per_m = prices
-    return (input_tokens / 1_000_000) * in_per_m + (output_tokens / 1_000_000) * out_per_m
 
 
 def response_output_text(resp: dict[str, Any]) -> str:
