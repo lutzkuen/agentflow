@@ -165,10 +165,11 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   CRUNCH_THRESHOLD_CHARS, PROMPT_CACHE_ENABLED, PROMPT_CACHE_MIN_CHARS.
   Metric: crunch.py 188 lines; server.py 788 lines; smoke test passes.
 
-- [READY] Extract pricing.py — MODEL_PRICES, MODEL_ALIASES, estimate_cost()
-  Details: Move MODEL_PRICES, MODEL_ALIASES, and estimate_cost() from server.py into
-  agentflow_proxy/pricing.py. server.py imports estimate_cost and MODEL_ALIASES from pricing.py.
-  Metric: pricing.py exists ~40 lines; server.py drops ~30 lines further; smoke test passes.
+- [DONE] Extract pricing.py — MODEL_PRICES, MODEL_ALIASES, estimate_cost() (2026-06-04)
+  Details: Created agentflow_proxy/pricing.py (39 lines). Moved MODEL_PRICES, MODEL_ALIASES,
+  estimate_cost(). Duplicate MODEL_PRICES key for claude-opus-4-5 removed. server.py
+  imports from pricing.py.
+  Metric: pricing.py 39 lines; server.py 752 lines; smoke test passes.
 
 ---
 
