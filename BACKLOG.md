@@ -254,6 +254,22 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   3 retries. Log backoff events in the calls table (new column: retry_count).
   Metric: 429+529 rate drops below 1%; no increase in p95 latency for successful calls.
 
+- [DONE] Rate-limit fallback routing: retry with original model on Haiku/routed-model 429s (2026-06-04)
+  Details: 116 429 errors in last 24h (16.3%) — well above the <1% target. Phase-aware routing
+  now funnels tool-result turns to Haiku, causing bursts on a model with lower rate limits.
+  Current backoff retries the SAME routed model (e.g., Haiku) up to 3 times with exponential
+  backoff, but if Haiku is broadly rate-limited during an agent burst, all retries fail too.
+  Pattern: retry_count=3 calls with 429 status in the DB have ~12s latency = all 3 retries burned.
+  Fix: in server.py, when a 429/529 occurs on a call where AgentFlow applied routing (routed_model
+  != requested_model), on the FIRST retry switch to the originally-requested model instead of the
+  routed one. Subsequent retries also use the requested model. Update routing_json to record the
+  fallback: add "fallback_reason": "rate_limited". This prevents Haiku saturation from cascading
+  into full failure — at worst we pay Sonnet prices instead of failing the call entirely.
+  For Sonnet 429s (where the requested model IS Sonnet), continue retrying as-is since there's
+  no cheaper fallback target that would help with rate limits.
+  Metric: 429+529 rate drops below 2%; retry_count=3 failures drop significantly; routing_json
+  shows fallback_reason=rate_limited for affected calls.
+
 - [DONE] Expand request categorization: 70% of calls uncategorized (2026-06-03)
   Details: Only tool-heavy, code-gen, short-completion are assigned. 930 of 1,323 calls get
   category=NULL. Chat and long-context categories have no heuristics. Routing rules that target
