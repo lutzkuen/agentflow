@@ -158,6 +158,16 @@ def categorize_request(body: dict[str, Any]) -> str:
     msg_count = len(body.get("messages") or [])
     has_code = "```" in extract_text(body)
 
+    messages = body.get("messages") or []
+    if messages:
+        last = messages[-1]
+        if last.get("role") == "user":
+            content = last.get("content", [])
+            if isinstance(content, list) and content and all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                return "tool-result"
+
     if tools and text_chars > 16000:
         return "tool-heavy"
     if tools:

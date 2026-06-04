@@ -10,7 +10,7 @@
 #   text_chars_gt   — total request text characters greater than this value
 #   has_tools       — true/false: whether the request includes tool definitions or tool blocks
 #   max_tokens_lte  — max_tokens field is <= this value
-#   category        — exact match: tool-heavy | tool-light | long-context | short-completion | code-gen | chat
+#   category        — exact match: tool-result | tool-heavy | tool-light | long-context | short-completion | code-gen | chat
 #
 # Action:
 #   route_to  — "haiku", "sonnet", "opus" (resolves to current default model), or a full model ID
@@ -23,6 +23,13 @@
   action:
     route_to: sonnet
     reason: "non-tool Opus request under threshold routed to Sonnet"
+
+- conditions:
+    model_pattern: "sonnet"
+    category: "tool-result"
+  action:
+    route_to: haiku
+    reason: "tool-result processing turn routed to Haiku"
 
 - conditions:
     model_pattern: "sonnet"

@@ -150,13 +150,16 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   and action (route_to, reason). Rules evaluated top-to-bottom, first match wins.
   Metric: routing config externalizable, no behavior change on existing defaults.
 
-- [IDEA] Phase-aware routing for agentic workflows
+- [DONE] Phase-aware routing for agentic workflows (2026-06-04)
   Details: Within a session, classify each turn as: planning, tool-execution, verification,
   or summary. Use Haiku for tool-execution and summary turns, Sonnet for verification,
   keep requested model for planning.
   Phase signals: presence of tool_result blocks = execution; short final turn = summary;
   long system prompt + no prior context = planning.
-  Metric: per-session cost reduction without increase in error/retry rate.
+  Implementation: added `tool-result` category in categorize_request() when the last message
+  is a user role message containing ONLY tool_result blocks. Added routing rule in
+  routing_rules.yaml: category=tool-result + model_pattern=sonnet → haiku.
+  Metric: >20% of tool-heavy agentic calls routed to Haiku; no increase in error/retry rate.
 
 - [IDEA] A/B routing experiment framework
   Details: Shadow a fraction of routed-down calls to both models, compare output similarity.
