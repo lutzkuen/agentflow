@@ -74,16 +74,26 @@ claude --print --allowedTools "Bash,Read,Write,Edit" \
    - PASS: change `[READY]` to `[DONE]` and append `(YYYY-MM-DD)`
    - FAIL twice: change to `[BLOCKED]` and append a short reason
 
-5. **Write run summary.** Append the summary to `$AGENTFLOW_RUN_LOG` if that environment
+5. **Finalize the worktree.** Run `git status --short` after backlog updates and before
+   declaring the run complete.
+   - If PASS left intended changes uncommitted, inspect them and commit them before writing
+     the final summary. Backlog-only follow-up commits are allowed.
+   - If any dirty files remain that you do not understand, do not say the run completed.
+     Report the dirty state in the run summary so Codex recovery can finish or roll back.
+   - A successful run ends with a clean `git status --short`.
+
+6. **Write run summary.** Append the summary to `$AGENTFLOW_RUN_LOG` if that environment
    variable is set; otherwise create `runs/$RUN_ID.md` in the current worktree:
    ```bash
    echo $RUN_ID   # use this as the filename
    ```
-   Include: what was worked on, what the developer changed, test verdict, next run focus.
+   Include: what was worked on, what the developer changed, test verdict, final worktree
+   status, next run focus.
 
 ## Constraints
 
 - Only commit after VERDICT: PASS.
+- Do not report "Run complete" unless the final worktree is clean.
 - One item per run. Do not attempt multiple items.
 - Work only in the current working directory. It is an isolated git worktree for this run.
   Do not edit `/home/lutz/agentflow` directly unless it is the current working directory.

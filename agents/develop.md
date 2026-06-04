@@ -25,6 +25,8 @@ Key files:
    read-only dashboard service on port 4002 may be restarted after dashboard-only changes;
    never restart the prod proxy on port 4000.
 5. If the test passes, you're done. If not, fix and retry.
+6. Before returning, run `git status --short` and include whether the worktree is clean.
+   If files are still dirty, list them and explain whether they are intentional.
 
 ## Proxy Restart
 
@@ -68,4 +70,5 @@ longer contains the broken pattern, or run a small `node` check for the formatte
 After implementing, print a short summary:
 - What you changed (file:line range)
 - What the smoke test returned
+- Final `git status --short`
 - Any caveats or follow-up items for the backlog
