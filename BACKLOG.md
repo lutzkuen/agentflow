@@ -156,6 +156,23 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 ---
 
+## P0 — Foundation (module extraction)
+
+- [READY] Extract crunch.py — crunch_body() and all text-reduction logic
+  Details: Move normalize_text, build_embedding, crunch_body, inject_prompt_cache,
+  has_cache_control_blocks, sha256_text, and the CRUNCH_ENABLED/PROMPT_CACHE_ENABLED/
+  CRUNCH_THRESHOLD_CHARS/PROMPT_CACHE_MIN_CHARS constants from server.py into
+  agentflow_proxy/crunch.py. server.py imports from crunch.py. TOKEN_CHARS and
+  estimate_tokens_from_text can move too since they are only used by crunch/log logic.
+  Metric: crunch.py exists and is ~120 lines; server.py drops to ~830 lines; smoke test passes.
+
+- [READY] Extract pricing.py — MODEL_PRICES, MODEL_ALIASES, estimate_cost()
+  Details: Move MODEL_PRICES, MODEL_ALIASES, and estimate_cost() from server.py into
+  agentflow_proxy/pricing.py. server.py imports estimate_cost and MODEL_ALIASES from pricing.py.
+  Metric: pricing.py exists ~40 lines; server.py drops ~30 lines further; smoke test passes.
+
+---
+
 ## P3 — Better Routing
 
 - [DONE] Extract router.py — route_model() and all routing logic into its own module (2026-06-04)
