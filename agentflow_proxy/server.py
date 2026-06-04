@@ -26,13 +26,8 @@ DEFAULT_DB = os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentfl
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
 DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
 
-CACHE_ENABLED = os.getenv("AGENTFLOW_CACHE", "1") != "0"
 LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
-# Avoid caching tool-using agent turns by default. Exact cache can be dangerous when tools reflect filesystem state.
-CACHE_TOOL_CALLS = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
 HTTP_TIMEOUT = float(os.getenv("AGENTFLOW_HTTP_TIMEOUT", "600"))
-SEMANTIC_CACHE_ENABLED = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
-SEMANTIC_CACHE_THRESHOLD = float(os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", "0.95"))
 MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"))
 
 _forward_lock = asyncio.Lock()
@@ -58,6 +53,10 @@ from agentflow_proxy.crunch import (
     TOKEN_CHARS, sha256_text, estimate_tokens_from_text, build_embedding,
     crunch_body, inject_prompt_cache, has_cache_control_blocks,
 )
+from agentflow_proxy.cache import (
+    CACHE_ENABLED, CACHE_TOOL_CALLS, SEMANTIC_CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
+    cache_key_for, response_output_text,
+)
 
 
 store = Store(DEFAULT_DB)
@@ -79,18 +78,6 @@ def build_forward_headers(request: Request) -> dict[str, str]:
     headers["content-type"] = "application/json"
     return headers
 
-
-def cache_key_for(body: dict[str, Any], path: str) -> str:
-    # Do not include auth. Include endpoint and body after crunch/routing.
-    return sha256_text(path + "\n" + stable_json(body))
-
-
-def response_output_text(resp: dict[str, Any]) -> str:
-    parts = []
-    for block in resp.get("content", []) or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-    return "\n".join(parts)
 
 
 @app.get("/health")
