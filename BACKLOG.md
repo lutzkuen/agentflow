@@ -67,15 +67,19 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   no output tokens.
   Metric: streaming calls have non-null output_tokens_est in DB.
 
-- [DONE] Extract Store class into store.py — architecture priority #1
-  Details: server.py is 1226 lines. ARCHITECTURE.md specifies splitting into modules.
-  First split: move utc_now(), stable_json(), cosine_similarity(), and the Store class
-  from server.py into agentflow_proxy/store.py. server.py imports them back with:
-    from agentflow_proxy.store import Store, utc_now, stable_json
-  cosine_similarity stays in store.py and is only used internally by Store.get_semantic_cache.
-  Follow CLAUDE.md rule 7: copy code, update import, delete original, restart dev, run tests.
-  Metric: server.py shrinks by ~130 lines; `python -c "from agentflow_proxy.store import Store"` passes;
-  smoke test against dev port 4001 returns valid JSON.
+- [DONE] Extract Store class into store.py — architecture priority #1 (2026-06-04)
+  Details: Moved utc_now(), stable_json(), cosine_similarity(), and Store class from server.py
+  into agentflow_proxy/store.py. server.py imports them via `from agentflow_proxy.store import Store, utc_now, stable_json`.
+  Metric: store.py is 141 lines; server.py reduced from 1226 to ~1095 lines; imports work.
+
+- [DONE] Fix tool-result categorization: mixed-content turns not detected (2026-06-04)
+  Details: categorize_request used `all(type == "tool_result")` but Claude Code injects system
+  reminders as text blocks alongside tool_result blocks. This caused 0% tool-result routing —
+  all tool-containing turns fell through to "tool-heavy" category. Fix: changed `all()` to `any()`
+  so any turn where the last user message contains at least one tool_result block is categorized
+  as "tool-result". Also added `category` field to routing_meta dict for observability in DB.
+  Metric: mixed tool_result+text turns now categorized as tool-result and routed to Haiku;
+  routing_json includes category field; non-tool-result turns unchanged.
 
 ---
 

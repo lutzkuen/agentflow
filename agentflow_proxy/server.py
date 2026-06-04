@@ -154,7 +154,7 @@ def categorize_request(body: dict[str, Any]) -> str:
         last = messages[-1]
         if last.get("role") == "user":
             content = last.get("content", [])
-            if isinstance(content, list) and content and all(
+            if isinstance(content, list) and content and any(
                 isinstance(b, dict) and b.get("type") == "tool_result" for b in content
             ):
                 return "tool-result"
@@ -378,6 +378,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "reason": reason,
             "text_chars": text_chars,
             "has_tools": tools,
+            "category": category,
         }
 
     return requested, {
@@ -387,6 +388,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "reason": "keep requested model",
         "text_chars": text_chars,
         "has_tools": tools,
+        "category": category,
     }
 
 
