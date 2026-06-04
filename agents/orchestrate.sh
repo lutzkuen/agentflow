@@ -265,6 +265,8 @@ finalize_run_worktree() {
 
   if (( commits == 0 )); then
     log "Run branch made no commits; removing clean worktree" | tee -a "$RUN_LOG"
+    cd "$MAIN_REPO"
+    REPO="$MAIN_REPO"
     git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
     git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
     return 0
@@ -510,6 +512,8 @@ main() {
             echo "CODEX_REQUIRED: Claude was rate-limited after partial work in $RUN_REPO. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
             exit 37
           fi
+          cd "$MAIN_REPO"
+          REPO="$MAIN_REPO"
           git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
           git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
         fi
