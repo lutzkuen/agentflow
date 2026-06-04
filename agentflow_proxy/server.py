@@ -617,8 +617,32 @@ async def messages(request: Request) -> Response:
                 actual_out: Optional[int] = None
                 cache_creation_in: int = 0
                 cache_read_in: int = 0
-                sse_buf = ""
+                sse_frame_buf = b""
                 stream_retry_count = 0
+
+                def parse_sse_usage(frame: bytes) -> None:
+                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in
+                    for line in frame.decode("utf-8", errors="replace").splitlines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:]
+                        if payload == "[DONE]":
+                            continue
+                        try:
+                            data = json.loads(payload)
+                        except Exception:
+                            continue
+                        t = data.get("type")
+                        if t == "message_start":
+                            u = (data.get("message") or {}).get("usage", {})
+                            actual_in = u.get("input_tokens")
+                            cache_creation_in = u.get("cache_creation_input_tokens") or 0
+                            cache_read_in = u.get("cache_read_input_tokens") or 0
+                        elif t == "message_delta":
+                            out = (data.get("usage") or {}).get("output_tokens")
+                            if out is not None:
+                                actual_out = out
+
                 try:
                     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
                         while True:
@@ -632,27 +656,17 @@ async def messages(request: Request) -> Response:
                                     await asyncio.sleep(delay)
                                     continue
                                 async for chunk in r.aiter_bytes():
-                                    yield chunk
-                                    sse_buf += chunk.decode("utf-8", errors="replace")
-                                    while "\n" in sse_buf:
-                                        line, sse_buf = sse_buf.split("\n", 1)
-                                        if not line.startswith("data: "):
-                                            continue
-                                        try:
-                                            data = json.loads(line[6:])
-                                        except Exception:
-                                            continue
-                                        t = data.get("type")
-                                        if t == "message_start":
-                                            u = (data.get("message") or {}).get("usage", {})
-                                            actual_in = u.get("input_tokens")
-                                            cache_creation_in = u.get("cache_creation_input_tokens") or 0
-                                            cache_read_in = u.get("cache_read_input_tokens") or 0
-                                        elif t == "message_delta":
-                                            out = (data.get("usage") or {}).get("output_tokens")
-                                            if out is not None:
-                                                actual_out = out
-                                    break
+                                    sse_frame_buf += chunk
+                                    while b"\n\n" in sse_frame_buf:
+                                        frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
+                                        event_bytes = frame + b"\n\n"
+                                        yield event_bytes
+                                        parse_sse_usage(frame)
+                                if sse_frame_buf:
+                                    yield sse_frame_buf
+                                    parse_sse_usage(sse_frame_buf)
+                                    sse_frame_buf = b""
+                                break
                 except Exception as exc:
                     error = repr(exc)
                     yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
