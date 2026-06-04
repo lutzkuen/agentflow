@@ -321,3 +321,44 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Fix: add heuristics for chat (no tools, no code fences, < 2000 chars) and long-context (> 20k
   chars regardless of tools). Verify coverage against DB after deploy.
   Metric: <20% NULL category across new calls; category breakdown visible in dashboard.
+
+- [DONE] Fix cost_est_usd: missing prompt-cache token costs understates actual bill by ~4.4× (2026-06-04)
+  Details: estimate_cost() receives only actual_input_tokens (uncached portion, avg 281 tokens)
+  and actual_output_tokens. It ignores cache_creation_input_tokens and cache_read_input_tokens.
+  Over 24 h: 3.08 M cache_creation tokens (cost 1.25× input rate = $11.54) and 49.2 M
+  cache_read tokens (cost 0.10× input rate = $14.77) are invisible to the cost model.
+  Dashboard shows $7.75/day; actual Anthropic bill is ~$34/day.
+  Fix: add optional cache_creation and cache_read parameters to estimate_cost() in pricing.py.
+  In both streaming and non-streaming handlers, pass the DB-stored cache token counts when
+  computing cost_est_usd and cost_baseline_usd. Also fix cost_baseline_usd to include what
+  the cache tokens would have cost without prompt caching (baseline = all tokens at full price).
+  Metric: cost_est_usd within 5% of actual Anthropic invoice; dashboard shows real $ saved
+  by prompt cache as a separate line item.
+
+- [READY] Dashboard: add prompt-cache savings line to cost summary (2026-06-04)
+  Details: Prompt cache is saving ~$133/day (49.2 M cache_read tokens × $2.70 savings per MTok
+  vs full input price) but this is invisible in the dashboard. The "savings" section only shows
+  routing savings (currently $0 since routing never fires).
+  Fix: after fixing cost_est_usd, add a "Prompt cache saved" row to the dashboard summary
+  section: SUM(cache_read_input_tokens) × (input_price − cache_read_price). Also show prompt
+  cache hit rate (calls where cache_read_input_tokens > 0 / total calls).
+  Metric: dashboard shows prompt cache savings ≥ $100/day; cache hit rate ≥ 40%.
+
+- [IDEA] Tool-result turns: verify routing fires after prod restart and add coverage metric (2026-06-04)
+  Details: 0 of 2,047 calls have category=tool-result despite the fix being committed at 11:31.
+  After prod is restarted with the new code, verify that tool-result turns are detected and routed.
+  If still 0, inspect actual last-message content structure from a sample streaming call — the
+  `any(type == "tool_result")` check may be failing if content is a string rather than a list
+  in some Claude Code versions.
+  Add a DB query or dashboard metric: calls where category=tool-result / total tool-heavy calls.
+  Metric: ≥10% of tool-heavy calls classified as tool-result; routing_json.reason shows
+  "tool-result processing turn routed to Haiku" for those calls.
+
+- [IDEA] Remove max_tokens_lte from small-Sonnet-→-Haiku routing rule (2026-06-04)
+  Details: routing_rules.yaml still contains `max_tokens_lte: 2048` on the small non-tool
+  Sonnet rule. The evaluator treats absent max_tokens as unconstrained (matching), so this
+  condition only blocks calls that explicitly set max_tokens > 2048. Currently 100% of Sonnet
+  calls have has_tools=true so the rule can't fire anyway, but once tool-result routing
+  separates tool-result turns the non-tool rule becomes relevant again.
+  Fix: remove the max_tokens_lte condition from the Sonnet→Haiku rule in routing_rules.yaml.
+  Metric: rule fires on short, non-tool Sonnet calls (any that appear); no new errors.
