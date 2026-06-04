@@ -26,7 +26,13 @@ MODEL_ALIASES = {
 }
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
+def estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation: int = 0,
+    cache_read: int = 0,
+) -> Optional[float]:
     prices = None
     ml = model.lower()
     for name, val in MODEL_PRICES.items():
@@ -36,4 +42,9 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> Optional
     if not prices:
         return None
     in_per_m, out_per_m = prices
-    return (input_tokens / 1_000_000) * in_per_m + (output_tokens / 1_000_000) * out_per_m
+    return (
+        (input_tokens / 1_000_000) * in_per_m
+        + (output_tokens / 1_000_000) * out_per_m
+        + (cache_creation / 1_000_000) * in_per_m * 1.25
+        + (cache_read / 1_000_000) * in_per_m * 0.10
+    )

@@ -202,8 +202,8 @@ async def messages(request: Request) -> Response:
                     latency_ms = int((time.time() - started) * 1000)
                     cost_in = actual_in if actual_in is not None else input_tokens
                     cost_out = actual_out if actual_out is not None else 0
-                    cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
-                    cost_baseline = estimate_cost(requested_model, cost_in, cost_out)
+                    cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_creation_in, cache_read_in)
+                    cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
                     if cache_creation_in or cache_read_in:
                         print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
                     store.log_call(
@@ -303,8 +303,8 @@ async def messages(request: Request) -> Response:
         out_tokens = estimate_tokens_from_text(response_output_text(response_body)) if response_body else 0
         cost_in = actual_in if actual_in is not None else input_tokens
         cost_out = actual_out if actual_out is not None else out_tokens
-        cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out)
-        cost_baseline = estimate_cost(requested_model, cost_in, cost_out)
+        cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_creation_in, cache_read_in)
+        cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
         store.log_call(
             id=call_id, created_at=utc_now(), path=path,
