@@ -245,6 +245,30 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
+- [DONE] Retry on network errors (ConnectError/DNS) to fix ~15 transient 500s/day (2026-06-05)
+  Details: Analysis 2026-06-05: 15 500s in last 2 days all have error="ConnectError('[Errno -3]
+  Temporary failure in name resolution')", clustered at midnight during unattended cron runs. The
+  current retry logic only handles 429/529 — network-level failures propagate immediately as 500.
+  Fix: in both the streaming and non-streaming forwarding paths in server.py, catch httpx.NetworkError
+  inside the while-True retry loop. On NetworkError, sleep 2s and retry up to 2 times before re-raising.
+  Use a separate net_retries counter (don't conflate with rate-limit retry_count). Print a
+  "network_error: ... retry=N" log line for observability.
+  Metric: zero ConnectError 500s on subsequent runs; net_retries logged when retries fire.
+
+- [IDEA] Route tool-light Sonnet calls to Haiku
+  Details: 4 tool-light calls/day on Sonnet at avg 9247 chars. Category "tool-light" = has tools
+  but <16k chars and last message is not a tool_result turn. These are small tool-setup or short
+  responses that don't need Sonnet reasoning power. Add routing_rules.yaml rule:
+  model_pattern=sonnet, category=tool-light → route_to: haiku.
+  Metric: tool-light calls routed to Haiku; no increase in error rate.
+
+- [IDEA] Raise small-Sonnet-→-Haiku text threshold from 6000 to 10000 chars
+  Details: 25 code-gen calls/day on Sonnet, avg 7010 chars, none routed. Current non-tool
+  Sonnet rule fires at text_chars_lt: 6000. Raising to 10000 would catch these code-gen calls.
+  However, code quality from Haiku may be lower — needs monitoring. Consider adding category
+  exclusion: only route if category != "code-gen" to avoid routing code generation.
+  Metric: more non-tool Sonnet calls routed; no regression in code quality signals.
+
 - [DONE] Normalize dot-notation model aliases before forwarding (2026-06-02)
   Details: Dot-notation aliases (claude-haiku-4.5, claude-sonnet-4.5, claude-opus-4.5) reach
   Anthropic unchanged and return HTTP 404. Normalize them in the handler before forwarding:

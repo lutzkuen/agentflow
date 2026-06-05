@@ -188,6 +188,7 @@ async def messages(request: Request) -> Response:
     cache_hit = False
     response_body: Optional[dict[str, Any]] = None
     retry_count = 0
+    net_retries = 0
 
     category = categorize_request(raw_body)
 
@@ -214,6 +215,7 @@ async def messages(request: Request) -> Response:
                 cache_read_in: int = 0
                 sse_frame_buf = b""
                 stream_retry_count = 0
+                stream_net_retries = 0
 
                 def parse_sse_usage(frame: bytes) -> None:
                     nonlocal actual_in, actual_out, cache_creation_in, cache_read_in
@@ -243,31 +245,39 @@ async def messages(request: Request) -> Response:
                         while True:
                             await _await_tier_backoff(crunched["model"])
                             await _throttle_forward()
-                            async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
-                                status_code = r.status_code
-                                if status_code in (429, 529) and stream_retry_count < 3:
-                                    stream_retry_count += 1
-                                    delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
-                                    print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
-                                    await _record_tier_backoff(crunched["model"], r.headers)
-                                    if stream_retry_count == 1 and routed_model != resolved_requested_model:
-                                        crunched["model"] = resolved_requested_model
-                                        routing_meta["fallback_reason"] = "rate_limited"
-                                        print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
-                                    await asyncio.sleep(delay)
+                            try:
+                                async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                    status_code = r.status_code
+                                    if status_code in (429, 529) and stream_retry_count < 3:
+                                        stream_retry_count += 1
+                                        delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
+                                        print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                        await _record_tier_backoff(crunched["model"], r.headers)
+                                        if stream_retry_count == 1 and routed_model != resolved_requested_model:
+                                            crunched["model"] = resolved_requested_model
+                                            routing_meta["fallback_reason"] = "rate_limited"
+                                            print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                                        await asyncio.sleep(delay)
+                                        continue
+                                    async for chunk in r.aiter_bytes():
+                                        sse_frame_buf += chunk
+                                        while b"\n\n" in sse_frame_buf:
+                                            frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
+                                            event_bytes = frame + b"\n\n"
+                                            yield event_bytes
+                                            parse_sse_usage(frame)
+                                    if sse_frame_buf:
+                                        yield sse_frame_buf
+                                        parse_sse_usage(sse_frame_buf)
+                                        sse_frame_buf = b""
+                                    break
+                            except httpx.NetworkError as exc:
+                                if stream_net_retries < 2:
+                                    stream_net_retries += 1
+                                    print(f"network_error: {exc!r} retry={stream_net_retries}", flush=True)
+                                    await asyncio.sleep(2.0)
                                     continue
-                                async for chunk in r.aiter_bytes():
-                                    sse_frame_buf += chunk
-                                    while b"\n\n" in sse_frame_buf:
-                                        frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
-                                        event_bytes = frame + b"\n\n"
-                                        yield event_bytes
-                                        parse_sse_usage(frame)
-                                if sse_frame_buf:
-                                    yield sse_frame_buf
-                                    parse_sse_usage(sse_frame_buf)
-                                    sse_frame_buf = b""
-                                break
+                                raise
                 except TierBackoffActive as exc:
                     status_code = 429
                     error = exc.message
@@ -349,7 +359,15 @@ async def messages(request: Request) -> Response:
             while True:
                 await _await_tier_backoff(crunched["model"])
                 await _throttle_forward()
-                r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+                try:
+                    r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+                except httpx.NetworkError as exc:
+                    if net_retries < 2:
+                        net_retries += 1
+                        print(f"network_error: {exc!r} retry={net_retries}", flush=True)
+                        await asyncio.sleep(2.0)
+                        continue
+                    raise
                 if r.status_code in (429, 529) and retry_count < 3:
                     retry_count += 1
                     delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
