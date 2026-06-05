@@ -502,16 +502,23 @@ async def stats_full() -> dict[str, Any]:
 
     # Estimate routing savings: calls where model was downgraded, cost diff
     routing_savings = 0.0
+    today_routing_savings = 0.0
     downgraded = q("""
         select requested_model, routed_model,
                coalesce(actual_input_tokens, input_tokens_est, 0) as in_tok,
-               coalesce(actual_output_tokens, output_tokens_est, 0) as out_tok
+               coalesce(actual_output_tokens, output_tokens_est, 0) as out_tok,
+               (date(created_at) = date('now')) as is_today
         from calls where requested_model != routed_model and routed_model is not null
     """)
     for row in downgraded:
         req_cost = estimate_cost(row["requested_model"], row["in_tok"], row["out_tok"]) or 0
         act_cost = estimate_cost(row["routed_model"], row["in_tok"], row["out_tok"]) or 0
-        routing_savings += max(0.0, req_cost - act_cost)
+        delta = max(0.0, req_cost - act_cost)
+        routing_savings += delta
+        if row["is_today"]:
+            today_routing_savings += delta
+
+    today_cache_savings = s("select count(*) * 0.003 from calls where cache_hit = 1 and date(created_at) = date('now')") or 0.0
 
     crunch_chars_saved = s("select sum(json_extract(crunch_json, '$.saved_chars')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     crunch_tokens_saved = s("select sum(json_extract(crunch_json, '$.tokens_saved_est')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
@@ -522,15 +529,19 @@ async def stats_full() -> dict[str, Any]:
     prompt_cache_hit_rate = round(prompt_cache_hits / total_calls, 4) if total_calls else 0
 
     prompt_cache_savings = 0.0
+    today_prompt_cache_savings = 0.0
     cache_read_by_model = q("""
         select coalesce(routed_model, requested_model) as model,
-               sum(cache_read_input_tokens) as read_tok
+               sum(cache_read_input_tokens) as read_tok,
+               sum(case when date(created_at) = date('now') then cache_read_input_tokens else 0 end) as today_read_tok
         from calls where cache_read_input_tokens > 0
         group by coalesce(routed_model, requested_model)
     """)
     for row in cache_read_by_model:
         full_cost = estimate_cost(row["model"], row["read_tok"], 0) or 0
         prompt_cache_savings += 0.90 * full_cost
+        today_full_cost = estimate_cost(row["model"], row["today_read_tok"] or 0, 0) or 0
+        today_prompt_cache_savings += 0.90 * today_full_cost
 
     recent = q("""
         select id, created_at, requested_model, routed_model, stream, cache_hit,
@@ -566,7 +577,9 @@ async def stats_full() -> dict[str, Any]:
             "cache_hits": cache_hits,
             "cache_hit_rate": round(cache_hits / total_calls, 4) if total_calls else 0,
             "routing_savings_usd": round(routing_savings, 6),
+            "today_routing_savings_usd": round(today_routing_savings, 6),
             "cache_savings_usd": round(cache_cost_saved, 6),
+            "today_cache_savings_usd": round(today_cache_savings, 6),
             "total_savings_usd": round(routing_savings + cache_cost_saved, 6),
             "avg_latency_ms": round(avg_latency),
             "routed_count": routed_count,
@@ -579,6 +592,7 @@ async def stats_full() -> dict[str, Any]:
             "prompt_cache_read_tokens": int(prompt_cache_read_tokens),
             "prompt_cache_hit_rate": prompt_cache_hit_rate,
             "prompt_cache_savings_usd": round(prompt_cache_savings, 6),
+            "today_prompt_cache_savings_usd": round(today_prompt_cache_savings, 6),
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
@@ -830,11 +844,11 @@ async function refresh(){
     document.getElementById('c-total').textContent=s.total_calls.toLocaleString()+' total';
     document.getElementById('c-cost').textContent=fmt(s.today_cost_usd,4);
     document.getElementById('c-cost-total').textContent=fmt(s.total_cost_usd,4)+' total';
-    document.getElementById('c-routing').textContent=fmt(s.routing_savings_usd,4);
+    document.getElementById('c-routing').textContent=fmt(s.today_routing_savings_usd,4);
     document.getElementById('c-routed-n').textContent=s.routed_count+' calls routed';
-    document.getElementById('c-cache-saved').textContent=fmt(s.cache_savings_usd,4);
+    document.getElementById('c-cache-saved').textContent=fmt(s.today_cache_savings_usd,4);
     document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
-    document.getElementById('c-prompt-cache-saved').textContent=fmt(s.prompt_cache_savings_usd,4);
+    document.getElementById('c-prompt-cache-saved').textContent=fmt(s.today_prompt_cache_savings_usd,4);
     document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% prompt hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
     document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
