@@ -605,6 +605,25 @@ async def stats_weekly() -> dict[str, Any]:
     return {"days": days, "totals": totals}
 
 
+@app.get("/agentflow/stats/sessions")
+async def stats_sessions() -> dict[str, Any]:
+    conn = store.conn
+    rows = conn.execute("""
+        SELECT SUBSTR(session_id,1,8) as sid, session_id, COUNT(*) as calls,
+            ROUND(SUM(cost_est_usd),6) as cost_usd,
+            SUM(CASE WHEN category='tool-result' THEN 1 ELSE 0 END) as tool_result,
+            SUM(CASE WHEN category='tool-heavy' THEN 1 ELSE 0 END) as tool_heavy,
+            SUM(CASE WHEN category='short-completion' THEN 1 ELSE 0 END) as short_completion,
+            SUM(CASE WHEN category='code-gen' THEN 1 ELSE 0 END) as code_gen,
+            SUM(CASE WHEN category='chat' THEN 1 ELSE 0 END) as chat,
+            SUM(CASE WHEN category IS NULL OR category NOT IN ('tool-result','tool-heavy','short-completion','code-gen','chat') THEN 1 ELSE 0 END) as other
+        FROM calls
+        WHERE DATE(created_at) = DATE('now') AND session_id IS NOT NULL
+        GROUP BY session_id ORDER BY cost_usd DESC LIMIT 20
+    """).fetchall()
+    return {"sessions": [dict(r) for r in rows]}
+
+
 @app.get("/agentflow/dashboard", response_class=HTMLResponse)
 async def dashboard() -> str:
     return """<!doctype html>
@@ -683,6 +702,7 @@ async def dashboard() -> str:
   <button class="tab-btn active" onclick="showTab('recent')">Recent calls</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
+  <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
 <div class="tab-panel active" id="tab-recent">
@@ -721,6 +741,18 @@ async def dashboard() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-sessions">
+<div class="section">
+  <h2>Sessions today</h2>
+  <table>
+    <thead><tr>
+      <th>Session</th><th>Calls</th><th>Cost</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
+    </tr></thead>
+    <tbody id="sess-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <script>
 function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
 function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
@@ -738,11 +770,11 @@ function shortModel(m){
 }
 
 function showTab(name){
-  ['recent','weekly','categories'].forEach(t=>{
+  ['recent','weekly','categories','sessions'].forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
-    b.classList.toggle('active',['recent','weekly','categories'][i]===name);
+    b.classList.toggle('active',['recent','weekly','categories','sessions'][i]===name);
   });
 }
 
@@ -837,12 +869,34 @@ async function refreshCategories(){
   }catch(e){}
 }
 
+async function refreshSessions(){
+  try{
+    const r=await fetch('/agentflow/stats/sessions');
+    const d=await r.json();
+    const tb=document.getElementById('sess-tbody');
+    const rows=d.sessions||[];
+    tb.innerHTML=rows.map(row=>`<tr>
+      <td class="ts">${row.sid}</td>
+      <td>${(row.calls||0).toLocaleString()}</td>
+      <td class="cost">${fmt(row.cost_usd,5)}</td>
+      <td class="tokens">${row.tool_result||0}</td>
+      <td class="tokens">${row.tool_heavy||0}</td>
+      <td class="tokens">${row.short_completion||0}</td>
+      <td class="tokens">${row.code_gen||0}</td>
+      <td class="tokens">${row.chat||0}</td>
+      <td class="tokens">${row.other||0}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No sessions today</td></tr>';
+  }catch(e){}
+}
+
 refresh();
 refreshWeekly();
 refreshCategories();
+refreshSessions();
 setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
+setInterval(refreshSessions,30000);
 </script>
 </body>
 </html>"""

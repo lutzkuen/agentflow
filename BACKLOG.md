@@ -387,19 +387,19 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: zero 400 errors with "adaptive thinking" message; tool-result routing fires without
   failure on non-thinking sessions; routing_json reflects correct reason.
 
-- [IDEA] Investigate zero exact-match cache hit rate (2026-06-05)
-  Details: 2,390 total calls, 0 cache hits. The semantic and exact-match caches are enabled
-  but have never returned a hit. Possible causes: (a) cache table is empty or keys never
-  match due to session context always changing, (b) streaming calls bypass the cache lookup
-  (92% of calls are streaming), (c) cache TTL expires before repeated calls arrive.
-  Investigate: count rows in cache table, check whether any cache keys repeat across calls,
-  verify the streaming path hits the cache lookup. If caching only applies to non-streaming
-  calls, add a note to the dashboard and consider whether streaming cache replay is worth
-  implementing.
-  Metric: understand why hit rate is 0%; either confirm caching is structurally inapplicable
-  to current traffic or find a fixable bypass.
+- [DONE] Investigate zero exact-match cache hit rate (2026-06-05)
+  Details: Investigated 2026-06-05. Findings: (a) 92% of calls are streaming — streaming
+  path returns early before cache lookup (by design, line 207 comment). (b) CACHE_TOOL_CALLS
+  defaults to "0" — tool-heavy and tool-result calls (majority of non-streaming) skip cache.
+  (c) SEMANTIC_CACHE_ENABLED defaults to "0" — semantic cache is disabled entirely.
+  (d) 18 cache entries exist but never match because every request body contains unique
+  session/message history context. Conclusion: caching is structurally inapplicable to
+  current streaming + tool-heavy traffic. Exact cache would only help for repeated identical
+  short non-tool requests, which don't occur in agentic workflows. The streaming cache IDEA
+  would be the path to meaningful hit rates; file-watch invalidation would be a prerequisite.
+  Metric: confirmed — caching is structurally inapplicable to current traffic pattern.
 
-- [IDEA] Dashboard: show per-session cost and phase breakdown for today (2026-06-05)
+- [DONE] Dashboard: show per-session cost and phase breakdown for today (2026-06-05)
   Details: Session tracking is working (3 sessions identified, largest at $8.60 over 168 calls
   in one day). The dashboard currently shows per-session cost but not phase breakdown (how
   many calls were tool-result, tool-heavy, thinking, etc. per session). Adding this would
