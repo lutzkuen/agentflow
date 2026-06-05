@@ -34,7 +34,6 @@
 - conditions:
     model_pattern: "sonnet"
     text_chars_lt: 6000
-    max_tokens_lte: 2048
     has_tools: false
   action:
     route_to: haiku
