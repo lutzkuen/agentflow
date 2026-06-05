@@ -351,7 +351,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Effective non-thinking routing rate: 10/10 = 100%.
   Metric: met — routing fires correctly; unrouted calls all have valid thinking-mode reason.
 
-- [IDEA] Global tier backoff using retry-after header to fix persistent ~5% rate-limit rate (2026-06-05)
+- [READY] Global tier backoff using retry-after header to fix persistent ~5% rate-limit rate
   Details: Rate limits remain at ~5% (40 in last 24h, 40 exhausting all 3 retries). Pattern:
   agent bursts send 4 concurrent requests simultaneously; all hit 429 and all retry independently
   without coordination, so retries collide again. Per-call exponential backoff does not help when

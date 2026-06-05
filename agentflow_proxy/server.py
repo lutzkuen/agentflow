@@ -32,6 +32,38 @@ MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
+_tier_backoff_until: dict[str, float] = {}
+_tier_backoff_update_lock = asyncio.Lock()
+
+
+def _model_tier(model: str) -> str:
+    m = model.lower()
+    if "haiku" in m:
+        return "haiku"
+    if "opus" in m:
+        return "opus"
+    return "sonnet"
+
+
+async def _await_tier_backoff(model: str) -> None:
+    tier = _model_tier(model)
+    remaining = _tier_backoff_until.get(tier, 0.0) - time.time()
+    if remaining > 0:
+        print(f"tier_backoff: tier={tier} waiting={remaining:.1f}s")
+        await asyncio.sleep(remaining)
+
+
+async def _record_tier_backoff(model: str, response_headers: Any, default_seconds: float = 60.0) -> None:
+    tier = _model_tier(model)
+    raw = response_headers.get("retry-after")
+    try:
+        delay = float(raw) if raw else default_seconds
+    except (ValueError, TypeError):
+        delay = default_seconds
+    new_until = time.time() + delay
+    async with _tier_backoff_update_lock:
+        if new_until > _tier_backoff_until.get(tier, 0.0):
+            _tier_backoff_until[tier] = new_until
 
 
 async def _throttle_forward() -> None:
@@ -170,6 +202,7 @@ async def messages(request: Request) -> Response:
                 try:
                     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
                         while True:
+                            await _await_tier_backoff(crunched["model"])
                             await _throttle_forward()
                             async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
                                 status_code = r.status_code
@@ -177,6 +210,7 @@ async def messages(request: Request) -> Response:
                                     stream_retry_count += 1
                                     delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
                                     print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                    await _record_tier_backoff(crunched["model"], r.headers)
                                     if stream_retry_count == 1 and routed_model != resolved_requested_model:
                                         crunched["model"] = resolved_requested_model
                                         routing_meta["fallback_reason"] = "rate_limited"
@@ -269,12 +303,14 @@ async def messages(request: Request) -> Response:
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             while True:
+                await _await_tier_backoff(crunched["model"])
                 await _throttle_forward()
                 r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
                 if r.status_code in (429, 529) and retry_count < 3:
                     retry_count += 1
                     delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
                     print(f"rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
+                    await _record_tier_backoff(crunched["model"], r.headers)
                     if retry_count == 1 and routed_model != resolved_requested_model:
                         crunched["model"] = resolved_requested_model
                         routing_meta["fallback_reason"] = "rate_limited"
