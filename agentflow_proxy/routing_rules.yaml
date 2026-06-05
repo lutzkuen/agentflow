@@ -33,6 +33,13 @@
 
 - conditions:
     model_pattern: "sonnet"
+    category: "tool-light"
+  action:
+    route_to: haiku
+    reason: "tool-light Sonnet request routed to Haiku"
+
+- conditions:
+    model_pattern: "sonnet"
     text_chars_lt: 6000
     has_tools: false
   action:
