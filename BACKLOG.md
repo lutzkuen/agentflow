@@ -27,7 +27,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: unattended agents read a clear architecture contract before choosing or implementing
   backlog work.
 
-- [READY] Define free-vs-premium policy bundle boundary
+- [DONE] Define free-vs-premium policy bundle boundary (2026-06-05)
   Details: Turn the architecture's product tier boundary into concrete policy metadata and
   file/interface shapes. The free local package should expose low-level manual controls and
   conservative deterministic savings. The premium managed service should own learned policy
