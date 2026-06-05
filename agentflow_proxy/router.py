@@ -71,11 +71,16 @@ def categorize_request(body: dict[str, Any]) -> str:
 
 def uses_thinking(body: dict[str, Any]) -> bool:
     thinking = body.get("thinking")
-    if not thinking:
-        return False
-    if isinstance(thinking, dict) and str(thinking.get("type", "")).lower() == "disabled":
-        return False
-    return True
+    if thinking:
+        if isinstance(thinking, dict) and str(thinking.get("type", "")).lower() == "disabled":
+            pass
+        else:
+            return True
+    for msg in body.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+            if any(isinstance(b, dict) and b.get("type") == "thinking" for b in msg["content"]):
+                return True
+    return False
 
 
 def _load_routing_rules() -> list[dict]:

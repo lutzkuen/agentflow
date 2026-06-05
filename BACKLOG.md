@@ -370,3 +370,39 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   separates tool-result turns the non-tool rule becomes relevant again.
   Fix: remove the max_tokens_lte condition from the Sonnet→Haiku rule in routing_rules.yaml.
   Metric: rule fires on short, non-tool Sonnet calls (any that appear); no new errors.
+
+- [DONE] Fix tool-result routing: 100% failure rate when sessions have thinking blocks in message history (2026-06-05)
+  Details: 10/10 tool-result turns routed to Haiku today returned HTTP 400 with
+  "adaptive thinking is not supported on this model". Root cause: uses_thinking() in router.py
+  checks only the top-level body["thinking"] param. When a session uses extended thinking,
+  Sonnet's responses include {"type":"thinking","thinking":"..."} content blocks in assistant
+  messages. On the next tool-result turn the client may omit or disable the top-level
+  "thinking" param (no new thinking needed), but the message history still contains those
+  blocks. Haiku rejects the request on receipt.
+  Fix: extend uses_thinking(body) to also scan body["messages"] for any assistant message
+  whose content list contains a block with type=="thinking". If found, treat the request as
+  a thinking session and keep it on the requested model.
+  Example check: any(isinstance(b,dict) and b.get("type")=="thinking" for msg in
+  body.get("messages",[]) if isinstance(msg.get("content"), list) for b in msg["content"])
+  Metric: zero 400 errors with "adaptive thinking" message; tool-result routing fires without
+  failure on non-thinking sessions; routing_json reflects correct reason.
+
+- [IDEA] Investigate zero exact-match cache hit rate (2026-06-05)
+  Details: 2,390 total calls, 0 cache hits. The semantic and exact-match caches are enabled
+  but have never returned a hit. Possible causes: (a) cache table is empty or keys never
+  match due to session context always changing, (b) streaming calls bypass the cache lookup
+  (92% of calls are streaming), (c) cache TTL expires before repeated calls arrive.
+  Investigate: count rows in cache table, check whether any cache keys repeat across calls,
+  verify the streaming path hits the cache lookup. If caching only applies to non-streaming
+  calls, add a note to the dashboard and consider whether streaming cache replay is worth
+  implementing.
+  Metric: understand why hit rate is 0%; either confirm caching is structurally inapplicable
+  to current traffic or find a fixable bypass.
+
+- [IDEA] Dashboard: show per-session cost and phase breakdown for today (2026-06-05)
+  Details: Session tracking is working (3 sessions identified, largest at $8.60 over 168 calls
+  in one day). The dashboard currently shows per-session cost but not phase breakdown (how
+  many calls were tool-result, tool-heavy, thinking, etc. per session). Adding this would
+  make it easier to spot sessions with unusually high thinking overhead or tool-call density.
+  Metric: per-session panel shows call count by category; helps identify expensive agentic
+  patterns worth targeting with routing or crunching rules.
