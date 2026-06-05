@@ -486,3 +486,54 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   make it easier to spot sessions with unusually high thinking overhead or tool-call density.
   Metric: per-session panel shows call count by category; helps identify expensive agentic
   patterns worth targeting with routing or crunching rules.
+
+- [READY] Capture error body for all non-200 responses (promote from IDEA, 2026-06-05)
+  Details: 5 non-200 calls today have NULL error field. 4 are pre-fix thinking-routing 400s;
+  1 is a post-restart code-gen→Haiku 400 at 18:18 UTC with completely unknown cause because
+  the error body was not stored. Audit the non-streaming error capture path: ensure the
+  response body is read and stored in the `error` column for ALL non-200 status codes.
+  Metric: zero non-200 calls with NULL error field going forward; the 18:18 Haiku 400 root
+  cause can be identified from DB after fix.
+
+- [DONE] Implement per-tier concurrency cap (2026-06-05)
+  Details: Error rate at 6.9% (7-day), 6.4% today despite global tier backoff. 8 calls today
+  burned all 3 retries (avg 30.9s latency). Some 429 responses carry retry-after of 2769s
+  (46 min) — tier is being fully exhausted before backoff can prevent collisions. Fix: add
+  asyncio.Semaphore per tier (haiku/sonnet) with default 2 concurrent forwarded requests;
+  configurable via AGENTFLOW_MAX_CONCURRENT_PER_TIER. Queue behind semaphore rather than
+  racing to the API.
+  Metric: 429+529 rate drops below 3%; retry_count=3 exhausted failures drop significantly.
+
+- [IDEA] Dashboard: thinking budget visibility as a cost line item (2026-06-05)
+  Details: Analysis 2026-06-05: extended thinking is 84% of today's $35 cost ($32.66),
+  yet it appears nowhere as a named line item in the dashboard. A single agentic session
+  with thinking enabled ran 647 thinking-blocked calls today. Users have no signal to
+  adjust budget_tokens or question whether extended thinking is needed for routine turns.
+  Fix: add a "Thinking sessions" row to the per-session cost table showing: calls with
+  thinking blocks / total calls, and estimated cost attributable to thinking output tokens
+  (calls where uses_thinking = true: SUM(actual_output_tokens × output_price)).
+  Separately surface total thinking output tokens vs non-thinking output tokens per session.
+  This is local observability only — no new API calls needed.
+  Metric: dashboard shows thinking output token count and cost per session; users can see
+  when a session's thinking tokens exceed non-thinking output by >3×.
+
+- [IDEA] Session cost alert: log warning when session exceeds daily $ threshold (2026-06-05)
+  Details: Analysis 2026-06-05: one session cost $34 of today's $35 bill. The user has no
+  real-time signal that a session is burning unusually high budget. Fix: in server.py, after
+  storing each call, check the rolling per-session cost for today. If it exceeds a configurable
+  threshold (AGENTFLOW_SESSION_COST_ALERT_USD, default 5.0), log a WARNING line with session
+  ID, current cost, and call count. This is a local log-only alert — no external notification,
+  no SaaS dependency. The threshold should default to a high-enough value ($5) that it only
+  fires for genuinely expensive sessions, not normal usage.
+  Metric: WARNING log emitted when a session crosses the threshold; visible in server logs
+  during unattended runs; does not fire on typical <$1 sessions.
+
+- [IDEA] Raise small-Sonnet-→-Haiku text threshold from 6000 to 8000 chars for code-gen (2026-06-05)
+  Details: Analysis 2026-06-05: the small-non-tool rule fires at <6000 chars. Post-restart,
+  2 code-gen calls at 6614 and 9048 chars stay on Sonnet. Raising the threshold to 8000
+  (not 10000 as previously IDEAd) would catch the 6614-char call without reaching into the
+  range where code quality risk is unknown. Exclude category=code-gen from an 8k-10k range
+  until Haiku code quality on that window is measured, or add a separate code-gen rule with
+  a lower confidence threshold.
+  Metric: additional code-gen calls routed at 6k-8k chars; no increase in error rate or
+  quality complaints on short code-gen tasks.
