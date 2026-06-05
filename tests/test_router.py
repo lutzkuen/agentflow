@@ -1,5 +1,11 @@
+import importlib
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+import agentflow_proxy.router as router_module
 from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, route_model
 
 
@@ -19,6 +25,7 @@ class RouterTest(unittest.TestCase):
 
         self.assertEqual(routed, HAIKU_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
+        self.assertEqual(meta["policy_source"], "local-default")
 
     def test_thinking_tool_result_keeps_requested_model(self):
         body = {
@@ -37,6 +44,7 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertEqual(meta["policy_source"], "local-default")
 
     def test_tool_result_with_assistant_thinking_history_keeps_requested_model(self):
         body = {
@@ -61,6 +69,43 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
+
+    def test_manual_routing_source_reported_for_thinking_keep(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+    action:
+      route_to: haiku
+      reason: manual test rule
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "thinking": {"type": "enabled", "budget_tokens": 4096},
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["reason"], "keep requested model for thinking request")
+                    self.assertEqual(meta["policy_source"], "local-manual")
+            finally:
+                importlib.reload(router_module)
 
     def test_disabled_thinking_with_assistant_thinking_history_keeps_requested_model(self):
         body = {

@@ -83,24 +83,24 @@ def uses_thinking(body: dict[str, Any]) -> bool:
     return False
 
 
-def _load_routing_rules() -> list[dict]:
+def _load_routing_rules() -> tuple[list[dict], str]:
     p = Path(ROUTING_RULES_PATH)
     if p.exists():
         with open(p) as f:
             data = yaml.safe_load(f)
         if isinstance(data, list):
-            return data
+            return data, "local-manual"
         if isinstance(data, dict) and "rules" in data:
-            return list(data["rules"])
+            return list(data["rules"]), "local-manual"
     defaults = Path(__file__).parent / "routing_rules.yaml"
     with open(defaults) as f:
         data = yaml.safe_load(f)
     if isinstance(data, list):
-        return data
-    return list(data.get("rules", []))
+        return data, "local-default"
+    return list(data.get("rules", [])), "local-default"
 
 
-ROUTING_RULES: list[dict] = _load_routing_rules()
+ROUTING_RULES, ROUTING_RULES_SOURCE = _load_routing_rules()
 
 _TIER_MAP = {"haiku": HAIKU_DEFAULT, "sonnet": SONNET_DEFAULT, "opus": OPUS_DEFAULT}
 
@@ -108,7 +108,7 @@ _TIER_MAP = {"haiku": HAIKU_DEFAULT, "sonnet": SONNET_DEFAULT, "opus": OPUS_DEFA
 def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     if not ROUTING_ENABLED:
-        return requested, {"enabled": False, "requested_model": requested, "routed_model": requested, "reason": "routing disabled"}
+        return requested, {"enabled": False, "requested_model": requested, "routed_model": requested, "reason": "routing disabled", "policy_source": "local-default"}
 
     requested_l = requested.lower()
     text_chars = len(extract_text(body))
@@ -125,6 +125,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "text_chars": text_chars,
             "has_tools": tools,
             "category": category,
+            "policy_source": ROUTING_RULES_SOURCE,
         }
 
     for rule in ROUTING_RULES:
@@ -155,6 +156,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "text_chars": text_chars,
             "has_tools": tools,
             "category": category,
+            "policy_source": ROUTING_RULES_SOURCE,
         }
 
     return requested, {
@@ -165,4 +167,5 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "text_chars": text_chars,
         "has_tools": tools,
         "category": category,
+        "policy_source": ROUTING_RULES_SOURCE,
     }

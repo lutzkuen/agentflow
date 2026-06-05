@@ -52,7 +52,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     - if extremely large, compress older non-tool text blocks to bounded heads/tails
     """
     if not CRUNCH_ENABLED:
-        return body, {"enabled": False, "changed": False}
+        return body, {"enabled": False, "changed": False, "policy_source": "local-default"}
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
@@ -141,6 +141,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         "duplicate_blocks_replaced": replacements,
         "near_duplicate_blocks_replaced": near_replacements,
         "long_blocks_shortened": shortened,
+        "policy_source": "local-default",
     }
 
 
