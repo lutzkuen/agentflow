@@ -267,6 +267,40 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
+- [READY] Strip model-incompatible params when routing Sonnet→Haiku (2026-06-05)
+  Details: Analysis 2026-06-05: a Sonnet→Haiku routed code-gen call returned 400
+  "This model does not support the effort parameter". The `effort` param (sent by
+  Claude Code CLI for Sonnet 4.6) is forwarded unchanged to Haiku, which rejects it.
+  Fix: in server.py or router.py, after route_model() returns a different model than
+  requested, strip known Haiku-incompatible top-level params from the request body
+  before forwarding. Known incompatible: `effort`. Also strip `thinking` / `budget_tokens`
+  as a defense-in-depth (uses_thinking() guards routing but stripping is a safe belt-and-
+  suspenders for future code paths). Do not strip params for calls staying on their
+  requested model. Log stripped params in routing_json for observability.
+  Metric: zero 400 "does not support" errors on Haiku-routed calls; routing_json records
+  stripped params when they are removed.
+
+- [IDEA] Per-tier concurrency cap to prevent initial burst collisions (2026-06-05)
+  Details: Rate limits at 7.6% (94/1233 calls today) despite global tier backoff. Pattern:
+  4 concurrent agent calls hit the same tier simultaneously, all receive 429, and the
+  backoff then serializes retries — but the initial burst already consumed quota. Per-call
+  backoff doesn't prevent concurrent requests from colliding before any 429 is seen.
+  Fix: add an asyncio.Semaphore per tier (haiku/sonnet) with a max of 2 concurrent
+  forwarded requests. Requests queue behind the semaphore rather than racing to the API.
+  This adds some latency for bursts but trades it for fewer exhausted-retry failures.
+  The semaphore limit should be configurable via env var (AGENTFLOW_MAX_CONCURRENT_PER_TIER,
+  default 2). No new dependencies required.
+  Metric: 429 rate drops below 3%; retry_count=3 exhausted failures drop significantly.
+
+- [IDEA] Capture error body for all non-200 responses (2026-06-05)
+  Details: 6 of 12 today's 400 errors have error=NULL in the DB. These are the pre-fix
+  "adaptive thinking not supported" cases but the error text wasn't saved. Audit the
+  non-streaming error capture path: ensure the response body is read and stored in the
+  `error` column for ALL non-200 status codes, not just some. If the current code only
+  saves error text for certain paths (e.g. after raise), add a catch-all that reads
+  response.text and stores it before returning the error to the client.
+  Metric: zero non-200 calls with NULL error field going forward.
+
 - [DONE] Retry on network errors (ConnectError/DNS) to fix ~15 transient 500s/day (2026-06-05)
   Details: Analysis 2026-06-05: 15 500s in last 2 days all have error="ConnectError('[Errno -3]
   Temporary failure in name resolution')", clustered at midnight during unattended cron runs. The

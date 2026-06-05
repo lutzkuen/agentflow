@@ -198,6 +198,12 @@ async def messages(request: Request) -> Response:
         routed_model, routing_meta = route_model(crunched)
         resolved_requested_model = crunched.get("model", requested_model)
         crunched["model"] = routed_model
+        if routed_model != resolved_requested_model:
+            _incompatible = [k for k in ("effort", "thinking", "budget_tokens") if k in crunched]
+            for k in _incompatible:
+                del crunched[k]
+            if _incompatible:
+                routing_meta["stripped_params"] = _incompatible
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
         headers = build_forward_headers(request)
         if prompt_cached or has_cache_control_blocks(crunched):
