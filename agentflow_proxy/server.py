@@ -29,11 +29,26 @@ DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
 LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
 HTTP_TIMEOUT = float(os.getenv("AGENTFLOW_HTTP_TIMEOUT", "600"))
 MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"))
+MAX_TIER_BACKOFF_WAIT = float(os.getenv("AGENTFLOW_MAX_TIER_BACKOFF_WAIT", "30"))
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
 _tier_backoff_until: dict[str, float] = {}
 _tier_backoff_update_lock = asyncio.Lock()
+
+
+@dataclass(frozen=True)
+class TierBackoffActive(Exception):
+    tier: str
+    remaining: float
+
+    @property
+    def retry_after(self) -> int:
+        return max(1, int(self.remaining + 0.999))
+
+    @property
+    def message(self) -> str:
+        return f"temporarily limiting requests for {self.tier} tier; retry after {self.retry_after}s"
 
 
 def _model_tier(model: str) -> str:
@@ -48,9 +63,33 @@ def _model_tier(model: str) -> str:
 async def _await_tier_backoff(model: str) -> None:
     tier = _model_tier(model)
     remaining = _tier_backoff_until.get(tier, 0.0) - time.time()
-    if remaining > 0:
-        print(f"tier_backoff: tier={tier} waiting={remaining:.1f}s")
-        await asyncio.sleep(remaining)
+    if remaining <= 0:
+        return
+    if remaining > MAX_TIER_BACKOFF_WAIT:
+        print(
+            f"tier_backoff: tier={tier} remaining={remaining:.1f}s "
+            f"exceeds_max_wait={MAX_TIER_BACKOFF_WAIT:.1f}s"
+        )
+        raise TierBackoffActive(tier=tier, remaining=remaining)
+    print(f"tier_backoff: tier={tier} waiting={remaining:.1f}s")
+    await asyncio.sleep(remaining)
+
+
+def _tier_backoff_payload(exc: TierBackoffActive) -> dict[str, Any]:
+    return {
+        "type": "error",
+        "error": {
+            "type": "rate_limit_error",
+            "message": exc.message,
+        },
+    }
+
+
+def _tier_backoff_headers(exc: TierBackoffActive, model: str) -> dict[str, str]:
+    return {
+        "retry-after": str(exc.retry_after),
+        "x-agentflow-routed-model": model,
+    }
 
 
 async def _record_tier_backoff(model: str, response_headers: Any, default_seconds: float = 60.0) -> None:
@@ -229,6 +268,11 @@ async def messages(request: Request) -> Response:
                                     parse_sse_usage(sse_frame_buf)
                                     sse_frame_buf = b""
                                 break
+                except TierBackoffActive as exc:
+                    status_code = 429
+                    error = exc.message
+                    payload = _tier_backoff_payload(exc)
+                    yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
                 except Exception as exc:
                     error = repr(exc)
                     yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
@@ -359,6 +403,31 @@ async def messages(request: Request) -> Response:
         )
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
+    except TierBackoffActive as exc:
+        routed_model_for_log: Optional[str] = None
+        try:
+            routed_model_for_log = str(crunched.get("model"))
+        except Exception:
+            routed_model_for_log = None
+        error = exc.message
+        status_code = 429
+        response_body = _tier_backoff_payload(exc)
+        latency_ms = int((time.time() - started) * 1000)
+        store.log_call(
+            id=call_id, created_at=utc_now(), path=path,
+            requested_model=requested_model, routed_model=routed_model_for_log, stream=int(stream), cache_hit=0,
+            status_code=status_code, latency_ms=latency_ms,
+            input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
+            crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            error=error, request_json=stable_json(raw_body) if LOG_BODIES else None,
+            response_json=stable_json(response_body) if LOG_BODIES else None,
+            session_id=session_id, category=category, retry_count=retry_count,
+        )
+        return JSONResponse(
+            response_body,
+            status_code=status_code,
+            headers=_tier_backoff_headers(exc, routed_model_for_log or ""),
+        )
     except Exception as exc:
         error = repr(exc)
         latency_ms = int((time.time() - started) * 1000)
