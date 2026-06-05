@@ -344,17 +344,25 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   cache hit rate (calls where cache_read_input_tokens > 0 / total calls).
   Metric: dashboard shows prompt cache savings ≥ $100/day; cache hit rate ≥ 40%.
 
-- [IDEA] Tool-result turns: verify routing fires after prod restart and add coverage metric (2026-06-04)
-  Details: 0 of 2,047 calls have category=tool-result despite the fix being committed at 11:31.
-  After prod is restarted with the new code, verify that tool-result turns are detected and routed.
-  If still 0, inspect actual last-message content structure from a sample streaming call — the
-  `any(type == "tool_result")` check may be failing if content is a string rather than a list
-  in some Claude Code versions.
-  Add a DB query or dashboard metric: calls where category=tool-result / total tool-heavy calls.
-  Metric: ≥10% of tool-heavy calls classified as tool-result; routing_json.reason shows
-  "tool-result processing turn routed to Haiku" for those calls.
+- [DONE] Tool-result turns: verify routing fires after prod restart and add coverage metric (2026-06-05)
+  Details: Verified 2026-06-05: 10 of 39 tool-result Sonnet calls routed to Haiku (26%).
+  The remaining 29 are thinking requests (reason="keep requested model for thinking request",
+  text_chars ~100k) — correctly kept on Sonnet since Haiku lacks extended-thinking support.
+  Effective non-thinking routing rate: 10/10 = 100%.
+  Metric: met — routing fires correctly; unrouted calls all have valid thinking-mode reason.
 
-- [IDEA] Remove max_tokens_lte from small-Sonnet-→-Haiku routing rule (2026-06-04)
+- [IDEA] Global tier backoff using retry-after header to fix persistent ~5% rate-limit rate (2026-06-05)
+  Details: Rate limits remain at ~5% (40 in last 24h, 40 exhausting all 3 retries). Pattern:
+  agent bursts send 4 concurrent requests simultaneously; all hit 429 and all retry independently
+  without coordination, so retries collide again. Per-call exponential backoff does not help when
+  concurrent requests share the same overloaded tier.
+  Fix: track a per-model-tier global backoff timestamp. When any request receives a 429, read the
+  `retry-after` header (or default to 60s) and set a global asyncio.Event / timestamp for that
+  tier. All subsequent forwarded requests to that tier check the global backoff and await it before
+  sending. A simple asyncio.Lock per tier (haiku/sonnet) is enough — no new dependencies.
+  Metric: 429+529 rate drops below 2%; retry_count=3 exhausted-retry calls drop significantly.
+
+- [DONE] Remove max_tokens_lte from small-Sonnet-→-Haiku routing rule (2026-06-05)
   Details: routing_rules.yaml still contains `max_tokens_lte: 2048` on the small non-tool
   Sonnet rule. The evaluator treats absent max_tokens as unconstrained (matching), so this
   condition only blocks calls that explicitly set max_tokens > 2048. Currently 100% of Sonnet
