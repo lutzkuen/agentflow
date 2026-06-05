@@ -47,6 +47,10 @@ SMOKE_EXPECT="AGENTFLOW_SMOKE_OK"
 LOCK_FILE=${AGENTFLOW_ORCHESTRATOR_LOCK:-/tmp/agentflow-orchestrator.lock}
 RUN_LOG="$LOG_DIR/$RUN_ID.md"
 CLAUDE_SMOKE_OUTPUT=""
+STATE_DIR=${AGENTFLOW_STATE_DIR:-$HOME/.agentflow}
+RATE_LIMIT_STATE_DIR="$STATE_DIR/orchestrator"
+RATE_LIMIT_UNTIL_FILE="$RATE_LIMIT_STATE_DIR/claude-rate-limit-until"
+RATE_LIMIT_COOLDOWN_MINUTES=${AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES:-90}
 
 export RUN_ID
 export ANTHROPIC_BASE_URL="$PROXY_URL"
@@ -90,6 +94,40 @@ append_diagnostics() {
 
 claude_output_is_transient_rate_limit() {
   grep -Eiq 'temporarily limiting requests|account.s rate limit|rate limit.*try again later'
+}
+
+format_epoch_local() {
+  date -d "@$1" '+%Y-%m-%d %H:%M:%S %Z'
+}
+
+record_claude_rate_limit() {
+  local until
+  until=$(( $(date +%s) + RATE_LIMIT_COOLDOWN_MINUTES * 60 ))
+  mkdir -p "$RATE_LIMIT_STATE_DIR"
+  printf '%s\n' "$until" > "$RATE_LIMIT_UNTIL_FILE"
+  log "Recorded Claude rate-limit cooldown until $(format_epoch_local "$until")"
+}
+
+claude_rate_limit_cooldown_active() {
+  local until
+  local now
+  [[ -f "$RATE_LIMIT_UNTIL_FILE" ]] || return 1
+  until=$(cat "$RATE_LIMIT_UNTIL_FILE" 2>/dev/null || true)
+  [[ "$until" =~ ^[0-9]+$ ]] || {
+    rm -f "$RATE_LIMIT_UNTIL_FILE"
+    return 1
+  }
+  now=$(date +%s)
+  if (( now < until )); then
+    printf '%s\n' "$until"
+    return 0
+  fi
+  rm -f "$RATE_LIMIT_UNTIL_FILE"
+  return 1
+}
+
+clear_claude_rate_limit_cooldown() {
+  rm -f "$RATE_LIMIT_UNTIL_FILE"
 }
 
 wait_for_health() {
@@ -471,9 +509,17 @@ main() {
     exit 20
   fi
 
+  cooldown_until=$(claude_rate_limit_cooldown_active || true)
+  if [[ -n "$cooldown_until" ]]; then
+    log "Recent Claude rate-limit cooldown is active until $(format_epoch_local "$cooldown_until"); proxy is healthy, skipping Claude calls this run" | tee -a "$RUN_LOG"
+    echo "CLAUDE_RATE_LIMITED: cooldown active after recent upstream rate limit; try this run again later." | tee -a "$RUN_LOG"
+    exit 23
+  fi
+
   log "Preflight: smoke testing Claude OAuth through middleware" | tee -a "$RUN_LOG"
   capture_claude_oauth_smoke
   if (( smoke_status == 2 )); then
+    record_claude_rate_limit | tee -a "$RUN_LOG"
     log "Claude upstream is temporarily rate-limiting requests; middleware is healthy, skipping repair" | tee -a "$RUN_LOG"
     echo "CLAUDE_RATE_LIMITED: try this run again later." | tee -a "$RUN_LOG"
     exit 23
@@ -483,6 +529,7 @@ main() {
     repair_proxy_service || true
     capture_claude_oauth_smoke
     if (( smoke_status == 2 )); then
+      record_claude_rate_limit | tee -a "$RUN_LOG"
       log "Claude upstream is temporarily rate-limiting requests after repair; middleware is healthy" | tee -a "$RUN_LOG"
       echo "CLAUDE_RATE_LIMITED: try this run again later." | tee -a "$RUN_LOG"
       exit 23
@@ -509,6 +556,7 @@ main() {
         if [[ -d "$RUN_REPO/.git" || -f "$RUN_REPO/.git" ]]; then
           if git_has_changes "$RUN_REPO" || (( $(git -C "$RUN_REPO" rev-list --count "$BASE_SHA..HEAD") > 0 )); then
             save_worktree_state "transient Claude rate limit with partial run state"
+            record_claude_rate_limit | tee -a "$RUN_LOG"
             echo "CODEX_REQUIRED: Claude was rate-limited after partial work in $RUN_REPO. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
             exit 37
           fi
@@ -517,6 +565,7 @@ main() {
           git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
           git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
         fi
+        record_claude_rate_limit | tee -a "$RUN_LOG"
         echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
         exit 23
       fi
@@ -537,6 +586,7 @@ main() {
   fi
   capture_claude_oauth_smoke
   if (( smoke_status == 2 )); then
+    record_claude_rate_limit | tee -a "$RUN_LOG"
     log "Postflight proxy is healthy; Claude upstream is temporarily rate-limiting smoke requests" | tee -a "$RUN_LOG"
     echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
     exit 23
@@ -546,6 +596,7 @@ main() {
     repair_proxy_service || true
     capture_claude_oauth_smoke
     if (( smoke_status == 2 )); then
+      record_claude_rate_limit | tee -a "$RUN_LOG"
       log "Postflight proxy is healthy after repair; Claude upstream is temporarily rate-limiting smoke requests" | tee -a "$RUN_LOG"
       echo "CLAUDE_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
       exit 23
@@ -558,6 +609,7 @@ main() {
   fi
 
   log "Postflight smoke passed" | tee -a "$RUN_LOG"
+  clear_claude_rate_limit_cooldown
   echo "" | tee -a "$RUN_LOG"
   echo "Run log: $RUN_LOG" | tee -a "$RUN_LOG"
 }

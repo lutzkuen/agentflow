@@ -97,9 +97,11 @@ claude --print --allowedTools "Bash,Read" < agents/test.md
 
 ## Unattended recovery
 
-Hourly cron runs call `scripts/run_orchestrator_cron.sh`. If a run exits with `CODEX_REQUIRED`,
-the wrapper invokes `scripts/codex_recover.sh` once, subject to a cooldown, so preserved run
-worktrees are salvaged promptly instead of blocking later hours indefinitely.
+Hourly cron runs call `scripts/run_orchestrator_cron.sh`. The shell guard records a cooldown
+after Claude upstream rate limits, so hourly runs keep checking local proxy health but skip
+Claude calls until the cooldown expires. If a run exits with `CODEX_REQUIRED`, the wrapper
+invokes `scripts/codex_recover.sh` once, subject to a cooldown, so preserved run worktrees are
+salvaged promptly instead of blocking later hours indefinitely.
 
 Controls:
 
@@ -107,6 +109,7 @@ Controls:
 export AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex recovery
 export AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
 export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit model
+export AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Claude retry cooldown
 ```
 
 ## Commit message format

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Install hourly AgentFlow orchestrator cron retry.
+# The orchestrator itself records a cooldown after Claude rate limits, so hourly
+# cron remains a health heartbeat without necessarily spending a Claude call.
 
 set -euo pipefail
 
@@ -38,6 +40,7 @@ awk -v start="$START_MARK" -v end="$END_MARK" '
 
 echo "Installed hourly AgentFlow cron retry:"
 echo "  $CRON_MINUTE * * * * $WRAPPER"
+echo "  Claude rate-limit cooldown defaults to 90 minutes between upstream retry attempts."
 echo ""
 echo "Cron stdout/stderr logs:"
 echo "  $REPO/logs/orchestrator/"
