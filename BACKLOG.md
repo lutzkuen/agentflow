@@ -255,7 +255,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   "network_error: ... retry=N" log line for observability.
   Metric: zero ConnectError 500s on subsequent runs; net_retries logged when retries fire.
 
-- [IDEA] Route tool-light Sonnet calls to Haiku
+- [DONE] Route tool-light Sonnet calls to Haiku (2026-06-05)
   Details: 4 tool-light calls/day on Sonnet at avg 9247 chars. Category "tool-light" = has tools
   but <16k chars and last message is not a tool_result turn. These are small tool-setup or short
   responses that don't need Sonnet reasoning power. Add routing_rules.yaml rule:
