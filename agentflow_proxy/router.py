@@ -69,6 +69,15 @@ def categorize_request(body: dict[str, Any]) -> str:
     return "chat"
 
 
+def uses_thinking(body: dict[str, Any]) -> bool:
+    thinking = body.get("thinking")
+    if not thinking:
+        return False
+    if isinstance(thinking, dict) and str(thinking.get("type", "")).lower() == "disabled":
+        return False
+    return True
+
+
 def _load_routing_rules() -> list[dict]:
     p = Path(ROUTING_RULES_PATH)
     if p.exists():
@@ -101,6 +110,17 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     tools = has_tools(body)
     max_tokens = body.get("max_tokens")  # None when caller didn't set it
     category = categorize_request(body)
+
+    if uses_thinking(body):
+        return requested, {
+            "enabled": True,
+            "requested_model": requested,
+            "routed_model": requested,
+            "reason": "keep requested model for thinking request",
+            "text_chars": text_chars,
+            "has_tools": tools,
+            "category": category,
+        }
 
     for rule in ROUTING_RULES:
         cond = rule.get("conditions") or {}
