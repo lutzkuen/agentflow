@@ -310,6 +310,8 @@ async def messages(request: Request) -> Response:
                     cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
                     if cache_creation_in or cache_read_in:
                         print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
+                    if status_code >= 400 and error is None:
+                        error = f"upstream_error: status={status_code}"
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -405,6 +407,24 @@ async def messages(request: Request) -> Response:
         try:
             response_body = r.json()
         except Exception:
+            latency_ms = int((time.time() - started) * 1000)
+            cost = estimate_cost(str(crunched.get("model")), input_tokens, 0)
+            cost_baseline = estimate_cost(requested_model, input_tokens, 0)
+            store.log_call(
+                id=call_id, created_at=utc_now(), path=path,
+                requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
+                cache_hit=0, status_code=status_code, latency_ms=latency_ms,
+                input_tokens_est=input_tokens, output_tokens_est=None,
+                actual_input_tokens=None, actual_output_tokens=None,
+                cost_est_usd=cost, cost_baseline_usd=cost_baseline,
+                crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+                error=r.text[:1000],
+                request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
+                session_id=session_id, category=category,
+                cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                retry_count=retry_count,
+            )
             return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "text/plain"))
 
         if r.status_code < 400 and can_cache and response_body is not None:

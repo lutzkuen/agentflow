@@ -487,11 +487,14 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: per-session panel shows call count by category; helps identify expensive agentic
   patterns worth targeting with routing or crunching rules.
 
-- [READY] Capture error body for all non-200 responses (promote from IDEA, 2026-06-05)
+- [DONE] Capture error body for all non-200 responses (2026-06-05)
   Details: 5 non-200 calls today have NULL error field. 4 are pre-fix thinking-routing 400s;
   1 is a post-restart code-gen→Haiku 400 at 18:18 UTC with completely unknown cause because
   the error body was not stored. Audit the non-streaming error capture path: ensure the
   response body is read and stored in the `error` column for ALL non-200 status codes.
+  Two gaps fixed: (1) non-streaming non-JSON error responses now log to calls before returning;
+  (2) streaming finally block now sets error="upstream_error: status=N" when status >= 400 and
+  no exception was raised.
   Metric: zero non-200 calls with NULL error field going forward; the 18:18 Haiku 400 root
   cause can be identified from DB after fix.
 
