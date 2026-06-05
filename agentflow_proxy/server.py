@@ -30,11 +30,20 @@ LOG_BODIES = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
 HTTP_TIMEOUT = float(os.getenv("AGENTFLOW_HTTP_TIMEOUT", "600"))
 MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"))
 MAX_TIER_BACKOFF_WAIT = float(os.getenv("AGENTFLOW_MAX_TIER_BACKOFF_WAIT", "30"))
+# 0 = disabled (unlimited concurrency). Default 2 prevents burst collisions before global backoff coordinates.
+MAX_CONCURRENT_PER_TIER = int(os.getenv("AGENTFLOW_MAX_CONCURRENT_PER_TIER", "2"))
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
 _tier_backoff_until: dict[str, float] = {}
 _tier_backoff_update_lock = asyncio.Lock()
+# Per-tier semaphores cap concurrent in-flight forwarded requests. Requests queue rather than racing.
+_sem_value = MAX_CONCURRENT_PER_TIER if MAX_CONCURRENT_PER_TIER > 0 else 9999
+_tier_semaphores: dict[str, asyncio.Semaphore] = {
+    "haiku": asyncio.Semaphore(_sem_value),
+    "sonnet": asyncio.Semaphore(_sem_value),
+    "opus": asyncio.Semaphore(_sem_value),
+}
 
 
 @dataclass(frozen=True)
@@ -247,43 +256,44 @@ async def messages(request: Request) -> Response:
                                 actual_out = out
 
                 try:
-                    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                        while True:
-                            await _await_tier_backoff(crunched["model"])
-                            await _throttle_forward()
-                            try:
-                                async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
-                                    status_code = r.status_code
-                                    if status_code in (429, 529) and stream_retry_count < 3:
-                                        stream_retry_count += 1
-                                        delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
-                                        print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
-                                        await _record_tier_backoff(crunched["model"], r.headers)
-                                        if stream_retry_count == 1 and routed_model != resolved_requested_model:
-                                            crunched["model"] = resolved_requested_model
-                                            routing_meta["fallback_reason"] = "rate_limited"
-                                            print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
-                                        await asyncio.sleep(delay)
+                    async with _tier_semaphores[_model_tier(crunched["model"])]:
+                        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                            while True:
+                                await _await_tier_backoff(crunched["model"])
+                                await _throttle_forward()
+                                try:
+                                    async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                        status_code = r.status_code
+                                        if status_code in (429, 529) and stream_retry_count < 3:
+                                            stream_retry_count += 1
+                                            delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
+                                            print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                            await _record_tier_backoff(crunched["model"], r.headers)
+                                            if stream_retry_count == 1 and routed_model != resolved_requested_model:
+                                                crunched["model"] = resolved_requested_model
+                                                routing_meta["fallback_reason"] = "rate_limited"
+                                                print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                                            await asyncio.sleep(delay)
+                                            continue
+                                        async for chunk in r.aiter_bytes():
+                                            sse_frame_buf += chunk
+                                            while b"\n\n" in sse_frame_buf:
+                                                frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
+                                                event_bytes = frame + b"\n\n"
+                                                yield event_bytes
+                                                parse_sse_usage(frame)
+                                        if sse_frame_buf:
+                                            yield sse_frame_buf
+                                            parse_sse_usage(sse_frame_buf)
+                                            sse_frame_buf = b""
+                                        break
+                                except httpx.NetworkError as exc:
+                                    if stream_net_retries < 2:
+                                        stream_net_retries += 1
+                                        print(f"network_error: {exc!r} retry={stream_net_retries}", flush=True)
+                                        await asyncio.sleep(2.0)
                                         continue
-                                    async for chunk in r.aiter_bytes():
-                                        sse_frame_buf += chunk
-                                        while b"\n\n" in sse_frame_buf:
-                                            frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
-                                            event_bytes = frame + b"\n\n"
-                                            yield event_bytes
-                                            parse_sse_usage(frame)
-                                    if sse_frame_buf:
-                                        yield sse_frame_buf
-                                        parse_sse_usage(sse_frame_buf)
-                                        sse_frame_buf = b""
-                                    break
-                            except httpx.NetworkError as exc:
-                                if stream_net_retries < 2:
-                                    stream_net_retries += 1
-                                    print(f"network_error: {exc!r} retry={stream_net_retries}", flush=True)
-                                    await asyncio.sleep(2.0)
-                                    continue
-                                raise
+                                    raise
                 except TierBackoffActive as exc:
                     status_code = 429
                     error = exc.message
@@ -365,31 +375,32 @@ async def messages(request: Request) -> Response:
                 )
                 return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            while True:
-                await _await_tier_backoff(crunched["model"])
-                await _throttle_forward()
-                try:
-                    r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
-                except httpx.NetworkError as exc:
-                    if net_retries < 2:
-                        net_retries += 1
-                        print(f"network_error: {exc!r} retry={net_retries}", flush=True)
-                        await asyncio.sleep(2.0)
+        async with _tier_semaphores[_model_tier(crunched["model"])]:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                while True:
+                    await _await_tier_backoff(crunched["model"])
+                    await _throttle_forward()
+                    try:
+                        r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+                    except httpx.NetworkError as exc:
+                        if net_retries < 2:
+                            net_retries += 1
+                            print(f"network_error: {exc!r} retry={net_retries}", flush=True)
+                            await asyncio.sleep(2.0)
+                            continue
+                        raise
+                    if r.status_code in (429, 529) and retry_count < 3:
+                        retry_count += 1
+                        delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
+                        print(f"rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
+                        await _record_tier_backoff(crunched["model"], r.headers)
+                        if retry_count == 1 and routed_model != resolved_requested_model:
+                            crunched["model"] = resolved_requested_model
+                            routing_meta["fallback_reason"] = "rate_limited"
+                            print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                        await asyncio.sleep(delay)
                         continue
-                    raise
-                if r.status_code in (429, 529) and retry_count < 3:
-                    retry_count += 1
-                    delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
-                    print(f"rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
-                    await _record_tier_backoff(crunched["model"], r.headers)
-                    if retry_count == 1 and routed_model != resolved_requested_model:
-                        crunched["model"] = resolved_requested_model
-                        routing_meta["fallback_reason"] = "rate_limited"
-                        print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
-                    await asyncio.sleep(delay)
-                    continue
-                break
+                    break
         status_code = r.status_code
         try:
             response_body = r.json()
