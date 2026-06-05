@@ -126,7 +126,7 @@ from agentflow_proxy.crunch import (
 )
 from agentflow_proxy.cache import (
     CACHE_ENABLED, CACHE_TOOL_CALLS, SEMANTIC_CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
-    cache_key_for, response_output_text,
+    cache_decision_meta, cache_key_for, response_output_text,
 )
 
 
@@ -308,6 +308,7 @@ async def messages(request: Request) -> Response:
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
                         cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                         crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                        cache_json=stable_json(cache_decision_meta("skip-streaming")),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
@@ -319,6 +320,7 @@ async def messages(request: Request) -> Response:
         can_cache = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tools(crunched))
         key = cache_key_for(crunched, path)
         can_semantic_cache = SEMANTIC_CACHE_ENABLED and not has_tools(crunched)
+        _cache_miss_type = "miss" if can_cache or can_semantic_cache else ("skip-tools" if CACHE_ENABLED else "skip-disabled")
         emb: Optional[list[float]] = None
         if can_cache:
             cached = store.get_cache(key)
@@ -335,6 +337,7 @@ async def messages(request: Request) -> Response:
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                    cache_json=stable_json(cache_decision_meta("exact")),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(response_body) if LOG_BODIES else None,
                     session_id=session_id, category=category, retry_count=0,
@@ -355,6 +358,7 @@ async def messages(request: Request) -> Response:
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                    cache_json=stable_json(cache_decision_meta("semantic")),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(sem_resp) if LOG_BODIES else None,
                     session_id=session_id, category=category, retry_count=0,
@@ -418,6 +422,7 @@ async def messages(request: Request) -> Response:
             actual_input_tokens=actual_in, actual_output_tokens=actual_out,
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
@@ -443,6 +448,7 @@ async def messages(request: Request) -> Response:
             status_code=status_code, latency_ms=latency_ms,
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cache_json=stable_json(cache_decision_meta("miss")),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
             session_id=session_id, category=category, retry_count=retry_count,
@@ -461,6 +467,7 @@ async def messages(request: Request) -> Response:
             status_code=500, latency_ms=latency_ms,
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cache_json=stable_json(cache_decision_meta("miss")),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
         )

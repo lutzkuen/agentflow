@@ -78,6 +78,7 @@ class Store:
         self._ensure_column("calls", "cache_creation_input_tokens", "integer")
         self._ensure_column("calls", "cache_read_input_tokens", "integer")
         self._ensure_column("calls", "retry_count", "integer")
+        self._ensure_column("calls", "cache_json", "text")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -130,7 +131,7 @@ class Store:
         cols = [
             "id", "created_at", "path", "requested_model", "routed_model", "stream", "cache_hit", "status_code",
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
-            "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "error", "request_json", "response_json", "session_id",
+            "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "cache_json", "error", "request_json", "response_json", "session_id",
             "category", "cache_creation_input_tokens", "cache_read_input_tokens", "retry_count",
         ]
         values = [kwargs.get(c) for c in cols]

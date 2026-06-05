@@ -13,6 +13,11 @@ SEMANTIC_CACHE_ENABLED = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
 SEMANTIC_CACHE_THRESHOLD = float(os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", "0.95"))
 
 
+def cache_decision_meta(hit_type: str) -> dict[str, Any]:
+    # policy_source is always local-default: cache policy comes from env vars, not user YAML
+    return {"policy_source": "local-default", "hit_type": hit_type}
+
+
 def cache_key_for(body: dict[str, Any], path: str) -> str:
     # Do not include auth. Include endpoint and body after crunch/routing.
     return sha256_text(path + "\n" + stable_json(body))
