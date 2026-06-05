@@ -124,6 +124,14 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   us see which categories benefit most from which optimizations.
   Metric: calls table has `category` column; routing stats broken down by category.
 
+- [READY] Potential bug: dashboard cache savings looks implausibly high
+  Details: On 2026-06-05 the dashboard showed about `$266` saved by cache for today, which
+  seems too high for current local usage. Inspect the prompt-cache/exact-cache savings formula,
+  daily time window, aggregation joins, and whether cache_read_input_tokens are being multiplied
+  by the wrong model price or counted more than once.
+  Metric: dashboard cache savings reconciles with DB token totals and Anthropic pricing within
+  a small tolerance; if `$266` is correct, document the calculation in the dashboard/backlog.
+
 ---
 
 ## P2 — Better Crunching
