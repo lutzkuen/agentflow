@@ -507,18 +507,16 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   racing to the API.
   Metric: 429+529 rate drops below 3%; retry_count=3 exhausted failures drop significantly.
 
-- [IDEA] Dashboard: thinking budget visibility as a cost line item (2026-06-05)
-  Details: Analysis 2026-06-05: extended thinking is 84% of today's $35 cost ($32.66),
-  yet it appears nowhere as a named line item in the dashboard. A single agentic session
-  with thinking enabled ran 647 thinking-blocked calls today. Users have no signal to
-  adjust budget_tokens or question whether extended thinking is needed for routine turns.
-  Fix: add a "Thinking sessions" row to the per-session cost table showing: calls with
-  thinking blocks / total calls, and estimated cost attributable to thinking output tokens
-  (calls where uses_thinking = true: SUM(actual_output_tokens × output_price)).
-  Separately surface total thinking output tokens vs non-thinking output tokens per session.
-  This is local observability only — no new API calls needed.
-  Metric: dashboard shows thinking output token count and cost per session; users can see
-  when a session's thinking tokens exceed non-thinking output by >3×.
+- [DONE] Dashboard: thinking budget visibility as a cost line item (2026-06-06)
+  Details: Added `thinking_output_tokens` column to the `calls` table. For non-streaming
+  calls: thinking chars parsed from response body content blocks. For streaming calls:
+  `thinking_delta` SSE events accumulated during stream, token count estimated at TOKEN_CHARS
+  chars/token. stats_full() now returns thinking_output_tokens, today_thinking_output_tokens,
+  thinking_cost_usd, today_thinking_cost_usd (computed per model via estimate_cost). Dashboard
+  summary panel gains a yellow "Thinking cost today" card showing today's thinking token count
+  and estimated cost.
+  Metric: stats_full returns thinking_output_tokens and thinking_cost_usd > 0 when the DB has
+  thinking-session rows; dashboard shows Thinking cost line item.
 
 - [IDEA] Session cost alert: log warning when session exceeds daily $ threshold (2026-06-05)
   Details: Analysis 2026-06-05: one session cost $34 of today's $35 bill. The user has no

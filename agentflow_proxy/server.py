@@ -143,6 +143,14 @@ store = Store(DEFAULT_DB)
 app = FastAPI(title="AgentFlow Claude Proxy", version="0.1.0")
 
 
+def _count_thinking_chars(response_body: dict) -> int:
+    total = 0
+    for block in (response_body or {}).get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "thinking":
+            total += len(block.get("thinking") or "")
+    return total
+
+
 def build_forward_headers(request: Request) -> dict[str, str]:
     # Pass auth through. This server does not require/store credentials.
     allowed = {
@@ -228,12 +236,13 @@ async def messages(request: Request) -> Response:
                 actual_out: Optional[int] = None
                 cache_creation_in: int = 0
                 cache_read_in: int = 0
+                thinking_chars: int = 0
                 sse_frame_buf = b""
                 stream_retry_count = 0
                 stream_net_retries = 0
 
                 def parse_sse_usage(frame: bytes) -> None:
-                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in
+                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in, thinking_chars
                     for line in frame.decode("utf-8", errors="replace").splitlines():
                         if not line.startswith("data: "):
                             continue
@@ -254,6 +263,10 @@ async def messages(request: Request) -> Response:
                             out = (data.get("usage") or {}).get("output_tokens")
                             if out is not None:
                                 actual_out = out
+                        elif t == "content_block_delta":
+                            delta = (data.get("delta") or {})
+                            if delta.get("type") == "thinking_delta":
+                                thinking_chars += len(delta.get("thinking") or "")
 
                 try:
                     async with _tier_semaphores[_model_tier(crunched["model"])]:
@@ -325,6 +338,7 @@ async def messages(request: Request) -> Response:
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
                         retry_count=stream_retry_count,
+                        thinking_output_tokens=thinking_chars // TOKEN_CHARS if thinking_chars else None,
                     )
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -439,6 +453,7 @@ async def messages(request: Request) -> Response:
         cache_read_in = usage.get("cache_read_input_tokens") or 0
         if cache_creation_in or cache_read_in:
             print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
+        thinking_chars = _count_thinking_chars(response_body) if response_body else 0
         out_tokens = estimate_tokens_from_text(response_output_text(response_body)) if response_body else 0
         cost_in = actual_in if actual_in is not None else input_tokens
         cost_out = actual_out if actual_out is not None else out_tokens
@@ -460,6 +475,7 @@ async def messages(request: Request) -> Response:
             session_id=session_id, category=category,
             cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
             retry_count=retry_count,
+            thinking_output_tokens=thinking_chars // TOKEN_CHARS if thinking_chars else None,
         )
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -587,6 +603,21 @@ async def stats_full() -> dict[str, Any]:
         today_full_cost = estimate_cost(row["model"], row["today_read_tok"] or 0, 0) or 0
         today_prompt_cache_savings += 0.90 * today_full_cost
 
+    thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls") or 0)
+    today_thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls where date(created_at) = date('now')") or 0)
+    thinking_cost = 0.0
+    today_thinking_cost = 0.0
+    thinking_by_model = q("""
+        select coalesce(routed_model, requested_model) as model,
+               sum(thinking_output_tokens) as think_tok,
+               sum(case when date(created_at) = date('now') then coalesce(thinking_output_tokens, 0) else 0 end) as today_think_tok
+        from calls where thinking_output_tokens > 0
+        group by coalesce(routed_model, requested_model)
+    """)
+    for row in thinking_by_model:
+        thinking_cost += estimate_cost(row["model"], 0, row["think_tok"] or 0) or 0
+        today_thinking_cost += estimate_cost(row["model"], 0, row["today_think_tok"] or 0) or 0
+
     recent = q("""
         select id, created_at, requested_model, routed_model, stream, cache_hit,
                status_code, latency_ms,
@@ -637,6 +668,10 @@ async def stats_full() -> dict[str, Any]:
             "prompt_cache_hit_rate": prompt_cache_hit_rate,
             "prompt_cache_savings_usd": round(prompt_cache_savings, 6),
             "today_prompt_cache_savings_usd": round(today_prompt_cache_savings, 6),
+            "thinking_output_tokens": thinking_output_tokens,
+            "today_thinking_output_tokens": today_thinking_output_tokens,
+            "thinking_cost_usd": round(thinking_cost, 6),
+            "today_thinking_cost_usd": round(today_thinking_cost, 6),
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
@@ -772,6 +807,7 @@ async def dashboard() -> str:
   <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
   <div class="card green"><div class="label">Prompt cache saved</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— prompt hit rate</div></div>
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
+  <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
 </div>
 
 <div class="tabs">
@@ -896,6 +932,8 @@ async function refresh(){
     document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% prompt hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
     document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
+    document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
+    document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
 
     const tb=document.getElementById('tbody');
     tb.innerHTML=d.recent.map(row=>{
