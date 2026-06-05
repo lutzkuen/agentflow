@@ -267,7 +267,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
-- [READY] Strip model-incompatible params when routing Sonnet→Haiku (2026-06-05)
+- [DONE] Strip model-incompatible params when routing Sonnet→Haiku (2026-06-05)
   Details: Analysis 2026-06-05: a Sonnet→Haiku routed code-gen call returned 400
   "This model does not support the effort parameter". The `effort` param (sent by
   Claude Code CLI for Sonnet 4.6) is forwarded unchanged to Haiku, which rejects it.
