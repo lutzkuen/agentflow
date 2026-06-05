@@ -16,6 +16,24 @@ AgentFlow has two related products:
 The local module must remain useful and safe without the managed optimizer. The future server
 is an optional extension point, not a dependency for basic Claude middleware behavior.
 
+## Product Tier Boundary
+
+AgentFlow should be valuable as a free/local Python package, but the highest-leverage savings
+should come from the future premium managed optimizer.
+
+The target value split is approximate, not a hard billing promise:
+
+- **Free local package:** exposes the low-level middleware, observability, and manual controls
+  needed to capture the first useful slice of savings, roughly 20% of the attainable opportunity
+  for a typical user. It should make savings understandable and auditable.
+- **Premium managed optimizer:** captures the harder remaining opportunity through better
+  policy learning, wider cache/policy knowledge, quality evaluation, and continuously updated
+  recommendations.
+
+The free package should avoid becoming "crippled" software. It must still be safe, useful,
+and transparent. The premium service earns its value by doing work that is difficult to do
+well from one local installation alone.
+
 ## Runtime Topology
 
 | Component | Bind | Purpose | Exposure |
@@ -41,6 +59,11 @@ The local module owns the user-facing middleware experience:
   - crunching rules,
   - exact-match hash cache rules.
 - Apply only conservative defaults. Savings must not come at the cost of broken tool calls.
+- Include basic deterministic optimizations that are easy to explain and safe to audit:
+  - manual YAML routing rules,
+  - conservative whitespace/exact-duplicate crunching,
+  - exact local hash caching with explicit bypass/invalidation controls,
+  - local dashboard measurements and savings estimates.
 - Work fully offline except for forwarding the user's Anthropic requests upstream.
 
 Manual controls should be stored locally in versionable files, not hidden in the database:
@@ -79,6 +102,9 @@ It should provide:
 - better model routing based on aggregate outcomes,
 - better crunching strategies and policy evaluation,
 - a wider base for safe cache hits and repeated prompt structures,
+- continuously updated premium policy bundles for routing, crunching, and cache matching,
+- quality/risk scoring for aggressive optimizations before they are applied,
+- cross-install pattern learning that does not require raw prompt upload,
 - tenant-aware policy distribution,
 - fleet-level dashboards and billing,
 - privacy controls for what telemetry may leave a local machine.
@@ -100,6 +126,16 @@ Build routing, crunching, and caching around explicit policy interfaces:
 Every decision must produce machine-readable metadata. The dashboard and analyzer should be
 able to answer: what changed, why, how much it saved, and whether errors increased.
 
+Policy metadata should also record its source:
+
+- `local-default`: bundled safe behavior in the free package.
+- `local-manual`: user-owned rules edited locally.
+- `managed-recommended`: imported premium recommendation, still user-approved or opt-in.
+- `managed-enforced`: future premium policy applied automatically under an explicit paid plan.
+
+This source boundary lets the free package remain transparent while leaving room for premium
+optimization without mixing billing or tenant concerns into the local proxy.
+
 ## Development Priorities
 
 Near-term unattended runs should build toward this order:
@@ -108,7 +144,8 @@ Near-term unattended runs should build toward this order:
 2. Add file-backed manual rules for routing, crunching, and exact-match caching.
 3. Show effective rules and decision reasons in the dashboard.
 4. Add safe local edit/reload flow for rules, while keeping the LAN dashboard read-only.
-5. Define export/import policy bundle shapes for the future managed optimizer.
+5. Define free-vs-premium policy tiers and export/import policy bundle shapes for the future
+   managed optimizer.
 6. Only then prototype the managed optimizer server.
 
 Do not start by building the managed server. The local module needs clean interfaces first.

@@ -18,7 +18,10 @@ AgentFlow has two planned layers:
   better routing/crunching policies and a wider policy/cache knowledge base.
 
 Do not build SaaS concerns into the local proxy. The local module may define clean interfaces
-for later policy import/export, but it must remain useful without a managed server.
+for later policy import/export, but it must remain useful without a managed server. Keep the
+free/local package focused on low-level manual controls and conservative deterministic savings;
+reserve learned, cross-install, aggressive, or continuously optimized policies for the future
+premium managed service.
 
 ## Ports
 

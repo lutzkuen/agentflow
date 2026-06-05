@@ -27,6 +27,17 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: unattended agents read a clear architecture contract before choosing or implementing
   backlog work.
 
+- [READY] Define free-vs-premium policy bundle boundary
+  Details: Turn the architecture's product tier boundary into concrete policy metadata and
+  file/interface shapes. The free local package should expose low-level manual controls and
+  conservative deterministic savings. The premium managed service should own learned policy
+  bundles, quality/risk scoring, broader cache/policy intelligence, and continuously updated
+  recommendations. Add fields such as policy_source (`local-default`, `local-manual`,
+  `managed-recommended`, `managed-enforced`) to decision metadata where appropriate, without
+  adding billing, tenant, account, or hosted-server logic to the local proxy.
+  Metric: routing/crunch/cache decisions can report policy source; architecture docs and
+  code interfaces make clear which savings levers belong to free local vs premium managed.
+
 - [DONE] Dev/prod instance split
   Details: Prod is the proxy on port 4000 serving real Claude Code traffic — never restart
   it mid-development. Dev is a second instance on port 4001 pointing at a separate DB

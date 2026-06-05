@@ -25,6 +25,13 @@ The future product is a separate **managed optimizer server** for paying users. 
 opt-in and tenant-aware, and should improve routing, crunching, and cache policy from broader
 aggregate learning. It is not a dependency for the local middleware.
 
+The intended product split is:
+
+- free local package: low-level middleware, dashboard, local logs/cache, manual YAML rules,
+  and conservative deterministic savings;
+- premium managed optimizer: learned policy bundles, broader cache/policy intelligence,
+  quality evaluation, and the strongest cost-saving recommendations.
+
 See `ARCHITECTURE.md` before making architectural changes.
 
 ## Install

@@ -12,6 +12,12 @@ must provide the Claude middleware, read-only dashboard, and local manual rules;
 future managed optimizer can later serve paying users with better routing, crunching, and
 broader cache/policy learning.
 
+The product split is intentional: the free local package should provide transparent low-level
+controls and conservative deterministic savings, roughly the first 20% of the attainable value.
+The premium managed optimizer should provide the strongest savings through learned policies,
+quality evaluation, and broader cache/policy intelligence that one local install cannot build
+well on its own.
+
 ## The Three Core Levers
 
 ### 1. Prompt Crunching
