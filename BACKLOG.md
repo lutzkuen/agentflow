@@ -321,12 +321,16 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   cap vs typical 10000-50000 in traffic. Caveat: may reduce task quality.
   Metric: thinking output tokens/call decrease; no increase in task failure rate.
 
-- [IDEA] Dashboard: per-session thinking token breakdown (2026-06-06)
+- [DONE] Dashboard: per-session thinking token breakdown (2026-06-07)
   Details: The per-session table shows cost and call count but not thinking-token
   consumption. Add thinking_tokens and thinking_cost columns to the per-session panel
   (requires thinking_output_tokens column, active after next prod restart). Lets the
   user see which sessions are thinking-heavy and why costs spiked.
   Metric: per-session dashboard shows thinking_tokens and estimated thinking cost.
+  Verified 2026-06-07: stats_sessions() now returns per-session thinking_tokens and
+  provider-aware thinking_cost_usd. The read-only Sessions tab renders Thinking and
+  Thinking cost columns. Unit coverage and a served temporary dev check confirmed the
+  JSON endpoint and dashboard HTML.
 
 - [IDEA] Crunch: thinking block near-duplicate deduplication (2026-06-06)
   Details: Tool-result calls in thinking sessions average 118k chars; the near-duplicate

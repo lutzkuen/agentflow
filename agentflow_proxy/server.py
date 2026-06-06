@@ -1515,7 +1515,37 @@ async def stats_sessions() -> dict[str, Any]:
         WHERE DATE(created_at) = DATE('now') AND session_id IS NOT NULL
         GROUP BY session_id ORDER BY cost_usd DESC LIMIT 20
     """).fetchall()
-    return {"sessions": [dict(r) for r in rows]}
+    sessions = [dict(r) for r in rows]
+    session_ids = [row["session_id"] for row in sessions]
+    thinking_by_session: dict[str, dict[str, float | int]] = {
+        sid: {"thinking_tokens": 0, "thinking_cost_usd": 0.0}
+        for sid in session_ids
+    }
+    if session_ids:
+        placeholders = ",".join("?" for _ in session_ids)
+        thinking_rows = conn.execute(f"""
+            SELECT session_id,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(routed_model, requested_model) as model,
+                   SUM(coalesce(thinking_output_tokens, 0)) as thinking_tokens
+            FROM calls
+            WHERE DATE(created_at) = DATE('now')
+              AND session_id IN ({placeholders})
+              AND coalesce(thinking_output_tokens, 0) > 0
+            GROUP BY session_id, coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
+        """, tuple(session_ids)).fetchall()
+        for row in thinking_rows:
+            sid = row["session_id"]
+            tokens = int(row["thinking_tokens"] or 0)
+            thinking_by_session[sid]["thinking_tokens"] = int(thinking_by_session[sid]["thinking_tokens"]) + tokens
+            thinking_by_session[sid]["thinking_cost_usd"] = float(thinking_by_session[sid]["thinking_cost_usd"]) + (
+                estimate_cost(row["model"], 0, tokens, provider=row["provider"]) or 0.0
+            )
+    for row in sessions:
+        thinking = thinking_by_session.get(row["session_id"], {})
+        row["thinking_tokens"] = int(thinking.get("thinking_tokens", 0) or 0)
+        row["thinking_cost_usd"] = round(float(thinking.get("thinking_cost_usd", 0.0) or 0.0), 6)
+    return {"sessions": sessions}
 
 
 @app.get("/agentflow/dashboard", response_class=HTMLResponse)
@@ -1669,7 +1699,7 @@ async def dashboard() -> str:
   <h2>Sessions today</h2>
   <table>
     <thead><tr>
-      <th>Session</th><th>Calls</th><th>Cost</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
+      <th>Session</th><th>Calls</th><th>Cost</th><th>Thinking</th><th>Thinking cost</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
     </tr></thead>
     <tbody id="sess-tbody"></tbody>
   </table>
@@ -1850,13 +1880,15 @@ async function refreshSessions(){
       <td class="ts">${row.sid}</td>
       <td>${(row.calls||0).toLocaleString()}</td>
       <td class="cost">${fmt(row.cost_usd,5)}</td>
+      <td class="tokens">${fmtTok(row.thinking_tokens||0)}</td>
+      <td class="cost">${fmt(row.thinking_cost_usd||0,5)}</td>
       <td class="tokens">${row.tool_result||0}</td>
       <td class="tokens">${row.tool_heavy||0}</td>
       <td class="tokens">${row.short_completion||0}</td>
       <td class="tokens">${row.code_gen||0}</td>
       <td class="tokens">${row.chat||0}</td>
       <td class="tokens">${row.other||0}</td>
-    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No sessions today</td></tr>';
+    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No sessions today</td></tr>';
   }catch(e){}
 }
 

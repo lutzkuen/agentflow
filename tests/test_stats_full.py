@@ -113,6 +113,46 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_sessions_include_thinking_token_breakdown(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.02,
+            cost_baseline_usd=0.02,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-thinking",
+            category="tool-heavy",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            thinking_output_tokens=1_000,
+            provider="anthropic",
+        )
+
+        result = asyncio.run(server.stats_sessions())
+        [session] = result["sessions"]
+
+        self.assertEqual(session["session_id"], "session-thinking")
+        self.assertEqual(session["thinking_tokens"], 1_000)
+        self.assertAlmostEqual(session["thinking_cost_usd"], 0.015, places=6)
+        json.dumps(result)
+
 
 if __name__ == "__main__":
     unittest.main()
