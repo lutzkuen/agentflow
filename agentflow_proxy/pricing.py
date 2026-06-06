@@ -89,3 +89,56 @@ def estimate_cost(
         + (cache_creation / 1_000_000) * in_per_m * 1.25
         + (cache_read / 1_000_000) * in_per_m * 0.10
     )
+
+
+def input_price_per_million(model: str, provider: str = "anthropic", cache_read: bool = False) -> Optional[float]:
+    provider = provider.lower()
+    ml = model.lower()
+    if provider == "openai":
+        for name, val in OPENAI_MODEL_PRICES.items():
+            if name in ml:
+                return val[2] if cache_read else val[0]
+        return None
+
+    for name, val in ANTHROPIC_MODEL_PRICES.items():
+        if name in ml:
+            in_per_m = val[0]
+            return in_per_m * 0.10 if cache_read else in_per_m
+    return None
+
+
+def blended_input_price_per_million(
+    model: str,
+    input_tokens: int,
+    cache_read_tokens: int,
+    provider: str = "anthropic",
+) -> Optional[float]:
+    input_price = input_price_per_million(model, provider=provider, cache_read=False)
+    cache_read_price = input_price_per_million(model, provider=provider, cache_read=True)
+    if input_price is None or cache_read_price is None:
+        return None
+
+    input_tokens = max(input_tokens, 0)
+    cache_read_tokens = max(cache_read_tokens, 0)
+    total = input_tokens + cache_read_tokens
+    if total <= 0:
+        return input_price
+    return ((input_tokens * input_price) + (cache_read_tokens * cache_read_price)) / total
+
+
+def estimate_blended_input_savings(
+    model: str,
+    tokens_saved: int,
+    input_tokens: int,
+    cache_read_tokens: int,
+    provider: str = "anthropic",
+) -> Optional[float]:
+    price = blended_input_price_per_million(
+        model,
+        input_tokens=input_tokens,
+        cache_read_tokens=cache_read_tokens,
+        provider=provider,
+    )
+    if price is None:
+        return None
+    return (max(tokens_saved, 0) / 1_000_000) * price

@@ -186,7 +186,7 @@ async def _check_session_cost_alert(sid: str) -> None:
 
 
 from agentflow_proxy.store import Store, utc_now, stable_json
-from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_cost
+from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_blended_input_savings, estimate_cost
 from agentflow_proxy.router import (
     extract_text, has_tools, categorize_request, route_model,
     HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT,
@@ -1240,6 +1240,36 @@ async def stats_full() -> dict[str, Any]:
     crunch_chars_saved = s("select sum(json_extract(crunch_json, '$.saved_chars')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     crunch_tokens_saved = s("select sum(json_extract(crunch_json, '$.tokens_saved_est')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     avg_crunch_ratio = s("select avg(json_extract(crunch_json, '$.crunch_ratio')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
+    crunch_savings = 0.0
+    today_crunch_savings = 0.0
+    crunch_by_model = q("""
+        select coalesce(provider, 'anthropic') as provider,
+               coalesce(routed_model, requested_model) as model,
+               sum(coalesce(json_extract(crunch_json, '$.tokens_saved_est'), 0)) as saved_tok,
+               sum(coalesce(actual_input_tokens, input_tokens_est, 0)) as input_tok,
+               sum(coalesce(cache_read_input_tokens, 0)) as cache_read_tok,
+               sum(case when date(created_at) = date('now') then coalesce(json_extract(crunch_json, '$.tokens_saved_est'), 0) else 0 end) as today_saved_tok,
+               sum(case when date(created_at) = date('now') then coalesce(actual_input_tokens, input_tokens_est, 0) else 0 end) as today_input_tok,
+               sum(case when date(created_at) = date('now') then coalesce(cache_read_input_tokens, 0) else 0 end) as today_cache_read_tok
+        from calls
+        where json_extract(crunch_json, '$.changed') = 1
+        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
+    """)
+    for row in crunch_by_model:
+        crunch_savings += estimate_blended_input_savings(
+            row["model"],
+            tokens_saved=int(row["saved_tok"] or 0),
+            input_tokens=int(row["input_tok"] or 0),
+            cache_read_tokens=int(row["cache_read_tok"] or 0),
+            provider=row["provider"],
+        ) or 0
+        today_crunch_savings += estimate_blended_input_savings(
+            row["model"],
+            tokens_saved=int(row["today_saved_tok"] or 0),
+            input_tokens=int(row["today_input_tok"] or 0),
+            cache_read_tokens=int(row["today_cache_read_tok"] or 0),
+            provider=row["provider"],
+        ) or 0
     prompt_cache_creation_tokens = s("select sum(cache_creation_input_tokens) from calls") or 0
     prompt_cache_read_tokens = s("select sum(cache_read_input_tokens) from calls") or 0
     prompt_cache_hits = s("select count(*) from calls where cache_read_input_tokens > 0") or 0
@@ -1362,6 +1392,8 @@ async def stats_full() -> dict[str, Any]:
             "crunched_count": crunched_count,
             "crunch_chars_saved": crunch_chars_saved,
             "crunch_tokens_saved": int(crunch_tokens_saved),
+            "crunch_savings_usd": round(crunch_savings, 6),
+            "today_crunch_savings_usd": round(today_crunch_savings, 6),
             "avg_crunch_ratio": round(avg_crunch_ratio, 4),
             "errors": errors,
             "prompt_cache_creation_tokens": int(prompt_cache_creation_tokens),
@@ -1663,7 +1695,7 @@ async function refresh(){
     document.getElementById('c-prompt-cache-saved').textContent=fmt(s.today_prompt_cache_savings_usd,4);
     document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% provider cache hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
-    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
+    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · '+fmt(s.today_crunch_savings_usd||0,4)+' today · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
     document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
     document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
     document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';

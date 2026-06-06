@@ -297,7 +297,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: routing fires on thinking-history tool-result calls; daily cost drops by ~$30+; error
   rate does not increase with AGENTFLOW_STRIP_THINKING_HISTORY=1.
 
-- [IDEA] Dashboard: correct crunch savings estimate to use cache-blended token rate (2026-06-06)
+- [DONE] Dashboard: correct crunch savings estimate to use cache-blended token rate (2026-06-06)
   Details: The dashboard shows crunch savings using full input rate ($3/MTok). For
   thinking sessions where 80-90% of input is served from prompt cache ($0.30/MTok),
   this overstates savings by ~10x. Fix: in stats_full(), compute a blended rate for
@@ -305,6 +305,12 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   (cache_read_input_tokens + actual_input_tokens + 0.001) per MTok, then multiply
   tokens_saved_est by that blended rate instead of the flat input rate.
   Metric: crunch savings estimate within 20% of true value on thinking sessions.
+  Verified 2026-06-06: added cache-blended input pricing helpers and stats_full()
+  summary fields for all-time/today crunch savings. Unit coverage verifies a 90%
+  provider-cache-read Sonnet mix prices 1,000 saved tokens at $0.00057 rather than
+  the full-rate $0.003 estimate. Served dashboard ports 4001/4002 were checked but
+  were still running older code, so dashboard service deployment/restart is still
+  required for the live page to display the new field.
 
 - [DONE] Thinking budget throttle: configurable per-turn budget_tokens cap (2026-06-06)
   Details: Extended thinking sessions cost $44/day vs $5/day without thinking. No
