@@ -267,6 +267,89 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
+- [IDEA] Dashboard: correct crunch savings estimate to use cache-blended token rate (2026-06-06)
+  Details: The dashboard shows crunch savings using full input rate ($3/MTok). For
+  thinking sessions where 80-90% of input is served from prompt cache ($0.30/MTok),
+  this overstates savings by ~10x. Fix: in stats_full(), compute a blended rate for
+  crunch savings = (cache_read_input_tokens * 0.30 + actual_input_tokens * 3.0) /
+  (cache_read_input_tokens + actual_input_tokens + 0.001) per MTok, then multiply
+  tokens_saved_est by that blended rate instead of the flat input rate.
+  Metric: crunch savings estimate within 20% of true value on thinking sessions.
+
+- [IDEA] Thinking budget throttle: configurable per-turn budget_tokens cap (2026-06-06)
+  Details: Extended thinking sessions cost $44/day vs $5/day without thinking. No
+  ceiling exists on per-turn budget_tokens. Add AGENTFLOW_MAX_THINKING_BUDGET_TOKENS
+  (default: no cap). In server.py, after crunching, if body["thinking"]["budget_tokens"]
+  > threshold, reduce to threshold and log in routing_json as "thinking_capped": true.
+  This directly reduces output token cost for thinking calls. Start at 16000 as a safe
+  cap vs typical 10000-50000 in traffic. Caveat: may reduce task quality.
+  Metric: thinking output tokens/call decrease; no increase in task failure rate.
+
+- [IDEA] Dashboard: per-session thinking token breakdown (2026-06-06)
+  Details: The per-session table shows cost and call count but not thinking-token
+  consumption. Add thinking_tokens and thinking_cost columns to the per-session panel
+  (requires thinking_output_tokens column, active after next prod restart). Lets the
+  user see which sessions are thinking-heavy and why costs spiked.
+  Metric: per-session dashboard shows thinking_tokens and estimated thinking cost.
+
+- [IDEA] Crunch: thinking block near-duplicate deduplication (2026-06-06)
+  Details: Tool-result calls in thinking sessions average 118k chars; the near-duplicate
+  detector covers type=="text" blocks but not type=="thinking" blocks. Thinking blocks
+  can be 10-50k chars of reasoning repeated across turns. Before enabling, audit whether
+  thinking blocks carry semantic state that later tool_use depends on. If safe, extend
+  near-duplicate detection to type=="thinking" blocks at >0.95 jaccard (more conservative
+  than the 0.85 used for text blocks). Estimate: additional 5-10% crunch ratio on
+  thinking sessions, saving ~$0.30-0.60/day at cache-read rates.
+  Metric: additional saved_chars on thinking sessions; zero tool-call failures.
+
+- [READY] Capture actual input tokens for streaming calls — currently 0 for ~400 calls/day (2026-06-06)
+  Details: Analysis 2026-06-06: 392 successful streaming calls (status=200, stream=1) have
+  actual_input_tokens=0. The streaming SSE path extracts output tokens from message_delta events,
+  but input tokens may not be parsed from the message_start event (which carries usage.input_tokens).
+  Without actual_input_tokens, cost_est_usd for streaming calls relies on the pre-call estimate
+  (chars/4), causing a systematic undercount for calls where crunching changed the payload.
+  Fix: in the streaming handler, parse the first SSE event (type="message_start") and extract
+  usage.input_tokens. Store it to actual_input_tokens. This mirrors how the non-streaming path
+  reads the response usage block.
+  Metric: actual_input_tokens > 0 on >95% of streaming calls; cost_est_usd drift vs estimate
+  shrinks for crunched streaming calls.
+
+- [IDEA] Dashboard: show prompt-cache write vs read ratio and cost to warm cache (2026-06-06)
+  Details: Analysis 2026-06-06: prompt cache is the dominant savings driver — $24.5 savings on
+  June 5, $15.8 on June 4. But cache write tokens cost 3.75× input rate; June 6 shows 523 M
+  write tokens vs 17 M read tokens (ratio 30:1 write-heavy), meaning the cache may not yet be
+  paying for itself on shorter sessions. Surfacing write/read ratio per session would help identify
+  sessions that write large caches but terminate before the reads recover the cost.
+  Fix: add a "Prompt cache write/read ratio" metric to the per-session breakdown in the dashboard.
+  Show cache_creation_cost / cache_read_savings per session so expensive cache warmups are visible.
+  Metric: dashboard shows per-session write/read cost ratio; identifies sessions where cache warmup
+  was not recouped.
+
+- [IDEA] Routing rule: route non-thinking Sonnet calls with text_chars 8k–30k and no tools to Haiku (2026-06-06)
+  Details: Analysis 2026-06-06: 23 non-tool Sonnet calls in the 15k–30k char range and 11 in
+  the 8k–15k range stayed on Sonnet (total ~34 calls, cost ~$0.27). These are "keep requested
+  model" calls that passed the tool check but exceeded the 8k threshold raised in the last run.
+  The large-context but non-tool calls in this band are most likely context-heavy tool_result
+  processing that was not caught by the tool_result category, or long-context reads (grep output,
+  file contents). Routing them to Haiku risks quality on complex reasoning but likely fine for
+  read/summarize tasks. Suggest adding a new rule: non-tool Sonnet, category NOT in (code-gen,
+  thinking), text_chars 8000–30000 → haiku. Gate behind a separate AGENTFLOW_ROUTE_MIDSIZE env
+  flag initially, so it can be disabled if quality issues appear.
+  Metric: 30+ additional calls/day routed to Haiku; monitor error rate and quality signals before
+  making permanent.
+
+- [IDEA] Per-session spending summary in daily log output (2026-06-06)
+  Details: Analysis 2026-06-06: session 360d cost $44 on June 5 (217k tokens saved by prompt cache
+  but still expensive). The session cost alert LOG WARNING fires at $5 threshold, but there's no
+  end-of-day summary that lists total per-session cost with breakdown (thinking cost, routing
+  savings, cache savings). This makes it hard to review unattended run impact without opening the
+  dashboard.
+  Fix: at server startup and on SIGTERM/graceful shutdown, emit a one-line summary per session
+  active in the last 24h: session_id[:8], call count, actual cost, savings breakdown. Output to
+  stderr so it's captured by the cron wrapper log.
+  Metric: cron log shows per-session cost lines on shutdown; operator can audit cost without
+  opening the dashboard.
+
 - [DONE] Strip model-incompatible params when routing Sonnet→Haiku (2026-06-05)
   Details: Analysis 2026-06-05: a Sonnet→Haiku routed code-gen call returned 400
   "This model does not support the effort parameter". The `effort` param (sent by
