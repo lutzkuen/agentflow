@@ -18,6 +18,7 @@ dependencies = [
 agentflow-proxy = "agentflow_proxy.server:main"
 agentflow-claude-proxy = "agentflow_proxy.server:main"
 agentflow-codex-app-proxy = "agentflow_proxy.codex_app_proxy:main"
+agentflow-codex-app-client = "agentflow_proxy.codex_app_client:main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]

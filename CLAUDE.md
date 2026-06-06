@@ -119,24 +119,29 @@ deletes quota-only orchestrator logs older than 24 hours and moves work/action l
 completed work logs after a short age buffer so active cron logs stay at their original path
 until the wrapper has finished recovery checks.
 
-Controls:
+Controls live in `$REPO/.env` for cron and systemd runs:
 
 ```bash
-export AGENTFLOW_WORKER=codex                         # default; set to claude to switch back
-export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit Codex worker model
-export AGENTFLOW_CODEX_OPENAI_BASE_URL=              # leave empty for Codex OAuth/subscription quota
-export AGENTFLOW_OPENAI_AUTH_MODE=client              # preserve client auth when testing API-compatible OpenAI proxying
-export AGENTFLOW_OPENAI_API_KEY=sk-...                # optional, only used when AGENTFLOW_OPENAI_AUTH_MODE=proxy
-export AGENTFLOW_CODEX_SANDBOX=danger-full-access     # default; avoids bwrap user-namespace failures in unattended Codex
-export AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=0 # default recovery uses Codex's own profile/auth
-export AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL=https://api.openai.com/v1
-export AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex recovery
-export AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
-export AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Claude retry cooldown
-export AGENTFLOW_CODEX_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Codex retry cooldown
-export AGENTFLOW_ARCHIVE_CRON_HOUR=2                  # default nightly archive hour
-export AGENTFLOW_ARCHIVE_CRON_MINUTE=7                # default nightly archive minute
-export AGENTFLOW_WORK_LOG_ARCHIVE_MIN_AGE_HOURS=2     # default active-log safety buffer
+AGENTFLOW_WORKER=codex                         # default; set to claude to switch back
+AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit Codex worker model
+AGENTFLOW_CODEX_TRANSPORT=app-server           # set exec to switch back to direct codex exec
+AGENTFLOW_CODEX_APP_URL=ws://127.0.0.1:4013    # app-server relay URL
+AGENTFLOW_CODEX_APP_AUTO_APPROVE=1             # default yes to app-server command/file approval requests
+AGENTFLOW_CODEX_APP_MODEL=                     # optional app-server model override; blank uses server default
+AGENTFLOW_CODEX_APP_EFFORT=high                # app-server turn effort
+AGENTFLOW_CODEX_OPENAI_BASE_URL=               # leave empty for Codex OAuth/subscription quota
+AGENTFLOW_OPENAI_AUTH_MODE=client              # preserve client auth when testing API-compatible OpenAI proxying
+AGENTFLOW_OPENAI_API_KEY=sk-...                # optional, only used when AGENTFLOW_OPENAI_AUTH_MODE=proxy
+AGENTFLOW_CODEX_SANDBOX=danger-full-access     # default; avoids bwrap user-namespace failures in unattended Codex
+AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=0 # default recovery uses Codex's own profile/auth
+AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL=https://api.openai.com/v1
+AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex recovery
+AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
+AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Claude retry cooldown
+AGENTFLOW_CODEX_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Codex retry cooldown
+AGENTFLOW_ARCHIVE_CRON_HOUR=2                  # default nightly archive hour
+AGENTFLOW_ARCHIVE_CRON_MINUTE=7                # default nightly archive minute
+AGENTFLOW_WORK_LOG_ARCHIVE_MIN_AGE_HOURS=2     # default active-log safety buffer
 ```
 
 Run provider proxies as separate processes so the served API surface is explicit:
@@ -156,12 +161,15 @@ OpenAI API `/v1/responses` path. Use the experimental app-server relay instead:
 ```bash
 codex app-server --listen ws://127.0.0.1:4014
 agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
+printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.0.1:4013 --cd "$PWD"
 ```
 
-The app-server relay is currently pass-through telemetry only. It records JSON-RPC method names,
-message sizes, input item counts, thread IDs, and latency in `codex_app_events`, but it does not
-store raw prompts or auth-bearing payloads. Prompt crunching should only be enabled later for a
-small allowlist such as `turn/start` after we validate the observed protocol shape.
+The app-server relay is currently pass-through telemetry only. The app-server client/harness can
+drive unattended Codex turns through that relay with `AGENTFLOW_CODEX_TRANSPORT=app-server`. It
+records JSON-RPC method names, message sizes, input item counts, thread IDs, and latency in
+`codex_app_events`, but it does not store raw prompts or auth-bearing payloads. Prompt crunching
+should only be enabled later for a small allowlist such as `turn/start` after we validate the
+observed protocol shape.
 
 ## Commit message format
 

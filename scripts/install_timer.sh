@@ -116,8 +116,8 @@ EOF
 cat > "$UNIT_DIR/agentflow-orchestrator.service" << EOF
 [Unit]
 Description=AgentFlow Orchestrator
-Wants=agentflow-claude-proxy.service agentflow-openai-proxy.service
-After=network.target agentflow-claude-proxy.service agentflow-openai-proxy.service
+Wants=agentflow-claude-proxy.service agentflow-openai-proxy.service agentflow-codex-app-upstream.service agentflow-codex-app-proxy.service
+After=network.target agentflow-claude-proxy.service agentflow-openai-proxy.service agentflow-codex-app-upstream.service agentflow-codex-app-proxy.service
 
 [Service]
 Type=oneshot

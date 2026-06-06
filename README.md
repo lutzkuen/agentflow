@@ -118,6 +118,19 @@ or the safer experimental Codex app-server protocol:
 ```bash
 codex app-server --listen ws://127.0.0.1:4014
 agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
+printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.0.1:4013 --cd "$PWD"
+```
+
+The unattended orchestrator reads `$REPO/.env`, so put the transport setting there without
+changing the Claude fallback:
+
+```bash
+AGENTFLOW_WORKER=codex
+AGENTFLOW_CODEX_TRANSPORT=app-server
+AGENTFLOW_CODEX_APP_URL=ws://127.0.0.1:4013
+AGENTFLOW_CODEX_APP_AUTO_APPROVE=1
+# Optional. Leave unset to use the app-server account default model.
+AGENTFLOW_CODEX_APP_MODEL=
 ```
 
 This relay is pass-through telemetry first. It records redacted JSON-RPC method names and sizes

@@ -58,6 +58,10 @@ codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never \
 If the live context says the configured worker is Claude, replace the `codex exec ...` examples
 with `claude --print --allowedTools ...` equivalents.
 
+If the live context says Codex app-server transport is active, do not use the direct
+`codex exec ...` examples. Complete the developer/tester loop in the current session unless
+the live context explicitly provides an app-server helper for sub-agents.
+
 ## What to do each run
 
 1. **Pick work.** Read `ARCHITECTURE.md`, then read the backlog from the context below.

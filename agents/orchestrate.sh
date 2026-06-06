@@ -54,6 +54,10 @@ resolve_codex_bin() {
 
 MAIN_REPO=${AGENTFLOW_REPO:-/home/lutz/agentflow}
 REPO=$MAIN_REPO
+PYTHON_BIN=${AGENTFLOW_PYTHON:-$MAIN_REPO/.venv/bin/python}
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN=$(command -v python3)
+fi
 LOG_DIR="$MAIN_REPO/runs"
 RUN_ID=${RUN_ID:-$(date +%Y-%m-%d_%H-%M)}
 WORKER=${AGENTFLOW_WORKER:-codex}
@@ -63,6 +67,14 @@ CLAUDE_BIN=${CLAUDE_BIN:-$(resolve_claude_bin)}
 CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-$HOME/.claude/projects/-home-lutz-agentflow}
 CODEX_BIN=${CODEX_BIN:-$(resolve_codex_bin)}
 CODEX_MODEL=${AGENTFLOW_CODEX_MODEL:-}
+CODEX_TRANSPORT=${AGENTFLOW_CODEX_TRANSPORT:-exec}
+CODEX_APP_URL=${AGENTFLOW_CODEX_APP_URL:-ws://127.0.0.1:4013}
+CODEX_APP_HEALTH_URL=${AGENTFLOW_CODEX_APP_HEALTH_URL:-http://127.0.0.1:4013/health}
+CODEX_APP_PROXY_SERVICE=${AGENTFLOW_CODEX_APP_PROXY_SERVICE:-agentflow-codex-app-proxy.service}
+CODEX_APP_MODEL=${AGENTFLOW_CODEX_APP_MODEL:-}
+CODEX_APP_EFFORT=${AGENTFLOW_CODEX_APP_EFFORT:-high}
+CODEX_APP_TIMEOUT_SECONDS=${AGENTFLOW_CODEX_APP_TIMEOUT_SECONDS:-7200}
+CODEX_APP_AUTO_APPROVE=${AGENTFLOW_CODEX_APP_AUTO_APPROVE:-1}
 CODEX_SANDBOX=${AGENTFLOW_CODEX_SANDBOX:-danger-full-access}
 CODEX_APPROVAL=${AGENTFLOW_CODEX_APPROVAL:-never}
 CODEX_OPENAI_BASE_URL=${AGENTFLOW_CODEX_OPENAI_BASE_URL:-}
@@ -87,6 +99,13 @@ case "$WORKER" in
     RATE_LIMIT_COOLDOWN_MINUTES=${AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES:-90}
     ;;
   codex)
+    case "$CODEX_TRANSPORT" in
+      exec|app-server) ;;
+      *)
+        echo "Unsupported AGENTFLOW_CODEX_TRANSPORT=$CODEX_TRANSPORT (expected exec or app-server)" >&2
+        exit 78
+        ;;
+    esac
     RATE_LIMIT_UNTIL_FILE="$RATE_LIMIT_STATE_DIR/codex-rate-limit-until"
     RATE_LIMIT_COOLDOWN_MINUTES=${AGENTFLOW_CODEX_RATE_LIMIT_COOLDOWN_MINUTES:-90}
     ;;
@@ -141,6 +160,14 @@ append_diagnostics() {
       echo ""
       echo "### Recent Codex OpenAI Proxy Journal"
       journalctl --user -u "$CODEX_PROXY_SERVICE" -n 80 --no-pager || true
+    fi
+    if local_codex_app_configured; then
+      echo ""
+      echo "### Codex App-Server Proxy Service"
+      systemctl --user status "$CODEX_APP_PROXY_SERVICE" --no-pager || true
+      echo ""
+      echo "### Recent Codex App-Server Proxy Journal"
+      journalctl --user -u "$CODEX_APP_PROXY_SERVICE" -n 80 --no-pager || true
     fi
   } >> "$RUN_LOG"
 }
@@ -236,6 +263,12 @@ local_codex_proxy_configured() {
   [[ "$CODEX_OPENAI_BASE_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]
 }
 
+local_codex_app_configured() {
+  [[ "$WORKER" == "codex" ]] || return 1
+  [[ "$CODEX_TRANSPORT" == "app-server" ]] || return 1
+  [[ "$CODEX_APP_URL" =~ ^ws://(127\.0\.0\.1|localhost)(:|/) ]]
+}
+
 wait_for_codex_proxy_health() {
   local deadline=$((SECONDS + 30))
   until curl -sf "$CODEX_PROXY_URL/health" >/dev/null 2>&1; do
@@ -260,6 +293,32 @@ ensure_codex_proxy_ready() {
     return 0
   fi
   repair_codex_proxy_service
+}
+
+wait_for_codex_app_health() {
+  local deadline=$((SECONDS + 30))
+  until curl -sf "$CODEX_APP_HEALTH_URL" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+repair_codex_app_proxy_service() {
+  log "Repairing Codex app-server proxy service"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$CODEX_APP_PROXY_SERVICE" >/dev/null 2>&1 || true
+  systemctl --user restart "$CODEX_APP_PROXY_SERVICE"
+  wait_for_codex_app_health
+}
+
+ensure_codex_app_ready() {
+  local_codex_app_configured || return 0
+  if curl -sf "$CODEX_APP_HEALTH_URL" >/dev/null 2>&1; then
+    return 0
+  fi
+  repair_codex_app_proxy_service
 }
 
 claude_oauth_smoke() {
@@ -301,6 +360,41 @@ append_codex_config_args() {
 codex_smoke() {
   local output
   local -a codex_args
+  if [[ "$CODEX_TRANSPORT" == "app-server" ]]; then
+    codex_args=(
+      -m agentflow_proxy.codex_app_client
+      --url "$CODEX_APP_URL"
+      --cd "$MAIN_REPO"
+      --sandbox "$CODEX_SANDBOX"
+      --approval-policy never
+      --effort low
+      --timeout 180
+    )
+    if [[ "$CODEX_APP_AUTO_APPROVE" == "0" ]]; then
+      codex_args+=(--no-auto-approve-server-requests)
+    else
+      codex_args+=(--auto-approve-server-requests)
+    fi
+    if [[ -n "$CODEX_APP_MODEL" ]]; then
+      codex_args+=(--model "$CODEX_APP_MODEL")
+    fi
+
+    output=$(
+      printf 'Reply with exactly: %s\n' "$SMOKE_EXPECT" | "$PYTHON_BIN" "${codex_args[@]}" 2>&1
+    ) || {
+      WORKER_SMOKE_OUTPUT="$output"
+      printf '%s\n' "$output"
+      if printf '%s\n' "$output" | worker_output_is_transient_rate_limit; then
+        return 2
+      fi
+      return 1
+    }
+
+    WORKER_SMOKE_OUTPUT="$output"
+    printf '%s\n' "$output" | grep -q "$SMOKE_EXPECT"
+    return
+  fi
+
   codex_args=(
     --ask-for-approval never
     exec
@@ -592,6 +686,17 @@ write_orchestrator_prompt() {
     echo "Configured worker: $WORKER."
     if [[ "$WORKER" == "codex" ]]; then
       echo "Codex sandbox: $CODEX_SANDBOX. Codex approval mode: $CODEX_APPROVAL."
+      echo "Codex transport: $CODEX_TRANSPORT."
+      if [[ "$CODEX_TRANSPORT" == "app-server" ]]; then
+        echo "Codex app-server URL: $CODEX_APP_URL."
+        echo "Codex app-server auto-approve requests: $CODEX_APP_AUTO_APPROVE."
+        if [[ -n "$CODEX_APP_MODEL" ]]; then
+          echo "Codex app-server model override: $CODEX_APP_MODEL."
+        else
+          echo "Codex app-server model override: none; server default is used."
+        fi
+        echo "Codex app-server sub-agent guard: do not spawn direct codex exec sub-agents in this run; use the current session directly unless an app-server helper is explicitly provided."
+      fi
       if [[ -n "$CODEX_OPENAI_BASE_URL" ]]; then
         echo "Codex OpenAI base URL override: $CODEX_OPENAI_BASE_URL."
       else
@@ -649,27 +754,57 @@ run_codex_operator() {
   local codex_output="$LOG_DIR/$RUN_ID.codex-output.log"
   local codex_summary="$LOG_DIR/$RUN_ID.codex-summary"
   local status
-  codex_args=(
-    --ask-for-approval "$CODEX_APPROVAL"
-    exec
-    --cd "$RUN_REPO"
-    --add-dir "$HOME/.agentflow"
-    --add-dir "$WORKTREE_ROOT"
-    --add-dir "$MAIN_REPO/.git"
-    --sandbox "$CODEX_SANDBOX"
-    --output-last-message "$codex_summary"
-  )
-  if [[ -n "$CODEX_MODEL" ]]; then
-    codex_args+=(--model "$CODEX_MODEL")
+  if [[ "$CODEX_TRANSPORT" == "app-server" ]]; then
+    codex_args=(
+      -m agentflow_proxy.codex_app_client
+      --url "$CODEX_APP_URL"
+      --cd "$RUN_REPO"
+      --add-dir "$HOME/.agentflow"
+      --add-dir "$WORKTREE_ROOT"
+      --add-dir "$MAIN_REPO/.git"
+      --sandbox "$CODEX_SANDBOX"
+      --approval-policy "$CODEX_APPROVAL"
+      --effort "$CODEX_APP_EFFORT"
+      --timeout "$CODEX_APP_TIMEOUT_SECONDS"
+      --output-last-message "$codex_summary"
+    )
+    if [[ "$CODEX_APP_AUTO_APPROVE" == "0" ]]; then
+      codex_args+=(--no-auto-approve-server-requests)
+    else
+      codex_args+=(--auto-approve-server-requests)
+    fi
+    if [[ -n "$CODEX_APP_MODEL" ]]; then
+      codex_args+=(--model "$CODEX_APP_MODEL")
+    fi
+  else
+    codex_args=(
+      --ask-for-approval "$CODEX_APPROVAL"
+      exec
+      --cd "$RUN_REPO"
+      --add-dir "$HOME/.agentflow"
+      --add-dir "$WORKTREE_ROOT"
+      --add-dir "$MAIN_REPO/.git"
+      --sandbox "$CODEX_SANDBOX"
+      --output-last-message "$codex_summary"
+    )
+    if [[ -n "$CODEX_MODEL" ]]; then
+      codex_args+=(--model "$CODEX_MODEL")
+    fi
+    append_codex_config_args codex_args
   fi
-  append_codex_config_args codex_args
 
+  echo "Codex transport: $CODEX_TRANSPORT" | tee -a "$RUN_LOG"
   echo "Codex raw output: $codex_output" | tee -a "$RUN_LOG"
   echo "Codex summary: $codex_summary" | tee -a "$RUN_LOG"
 
   set +e
-  write_orchestrator_prompt | "$CODEX_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
-  status=${PIPESTATUS[1]}
+  if [[ "$CODEX_TRANSPORT" == "app-server" ]]; then
+    write_orchestrator_prompt | "$PYTHON_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
+    status=${PIPESTATUS[1]}
+  else
+    write_orchestrator_prompt | "$CODEX_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
+    status=${PIPESTATUS[1]}
+  fi
   set -e
 
   if [[ -s "$codex_summary" ]]; then
@@ -721,6 +856,12 @@ main() {
     echo "CODEX_REQUIRED: Codex OpenAI proxy preflight failed. Debug and repair the middleware before running Codex." | tee -a "$RUN_LOG"
     exit 20
   fi
+  if ! ensure_codex_app_ready; then
+    log "Preflight failed: Codex app-server proxy could not be repaired by shell guard" | tee -a "$RUN_LOG"
+    append_diagnostics "preflight Codex app-server proxy repair failed"
+    echo "CODEX_REQUIRED: Codex app-server proxy preflight failed. Debug and repair the middleware before running Codex." | tee -a "$RUN_LOG"
+    exit 20
+  fi
 
   cooldown_until=$(worker_rate_limit_cooldown_active || true)
   if [[ -n "$cooldown_until" ]]; then
@@ -742,6 +883,9 @@ main() {
     repair_proxy_service || true
     if local_codex_proxy_configured; then
       repair_codex_proxy_service || true
+    fi
+    if local_codex_app_configured; then
+      repair_codex_app_proxy_service || true
     fi
     capture_worker_smoke
     if (( smoke_status == 2 )); then
@@ -826,6 +970,9 @@ main() {
     repair_proxy_service || true
     if local_codex_proxy_configured; then
       repair_codex_proxy_service || true
+    fi
+    if local_codex_app_configured; then
+      repair_codex_app_proxy_service || true
     fi
     capture_worker_smoke
     if (( smoke_status == 2 )); then

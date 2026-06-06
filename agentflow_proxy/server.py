@@ -1277,6 +1277,15 @@ async def stats_full() -> dict[str, Any]:
         thinking_cost += estimate_cost(row["model"], 0, row["think_tok"] or 0, provider=row["provider"]) or 0
         today_thinking_cost += estimate_cost(row["model"], 0, row["today_think_tok"] or 0, provider=row["provider"]) or 0
 
+    codex_app_total_events = int(s("select count(*) from codex_app_events") or 0)
+    codex_app_today_events = int(s("select count(*) from codex_app_events where date(created_at) = date('now')") or 0)
+    codex_app_sessions = int(s("select count(distinct session_id) from codex_app_events where session_id is not null") or 0)
+    codex_app_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed'") or 0)
+    codex_app_today_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed' and date(created_at) = date('now')") or 0)
+    codex_app_last_event_at = s("select max(created_at) from codex_app_events")
+    codex_app_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start'") or 0)
+    codex_app_avg_latency = s("select avg(latency_ms) from codex_app_events where latency_ms is not null") or 0
+
     recent = q("""
         select id, coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, stream, cache_hit,
                status_code, latency_ms,
@@ -1308,6 +1317,32 @@ async def stats_full() -> dict[str, Any]:
                sum(case when requested_model != routed_model and routed_model is not null then 1 else 0 end) as routed_count
         from calls group by coalesce(provider, 'anthropic') order by count desc
     """)
+    if codex_app_total_events:
+        provider_breakdown.append({
+            "provider": "codex-app",
+            "count": codex_app_turns,
+            "cost_usd": None,
+            "routed_count": 0,
+            "events": codex_app_total_events,
+        })
+
+    codex_app_methods = q("""
+        select direction, coalesce(method, '(response)') as method, count(*) as count,
+               round(avg(latency_ms)) as avg_latency_ms,
+               sum(coalesce(input_text_chars, 0)) as input_text_chars
+        from codex_app_events
+        group by direction, coalesce(method, '(response)')
+        order by count desc
+        limit 20
+    """)
+    codex_app_recent = q("""
+        select created_at, direction, coalesce(method, '(response)') as method,
+               request_id, thread_id, message_chars, input_items, input_text_chars,
+               result_chars, error_code, error_message, latency_ms, session_id
+        from codex_app_events
+        order by created_at desc
+        limit 50
+    """)
 
     return {
         "summary": {
@@ -1338,11 +1373,21 @@ async def stats_full() -> dict[str, Any]:
             "today_thinking_output_tokens": today_thinking_output_tokens,
             "thinking_cost_usd": round(thinking_cost, 6),
             "today_thinking_cost_usd": round(today_thinking_cost, 6),
+            "codex_app_total_events": codex_app_total_events,
+            "codex_app_today_events": codex_app_today_events,
+            "codex_app_sessions": codex_app_sessions,
+            "codex_app_turns": codex_app_turns,
+            "codex_app_today_turns": codex_app_today_turns,
+            "codex_app_last_event_at": codex_app_last_event_at,
+            "codex_app_input_text_chars": codex_app_input_text_chars,
+            "codex_app_avg_latency_ms": round(codex_app_avg_latency),
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
         "provider_breakdown": provider_breakdown,
+        "codex_app_methods": codex_app_methods,
+        "codex_app_recent": codex_app_recent,
     }
 
 
@@ -1476,10 +1521,12 @@ async def dashboard() -> str:
   <div class="card green"><div class="label">Provider cache discount</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— provider cache hit rate</div></div>
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
   <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
+  <div class="card blue"><div class="label">Codex app-server</div><div class="value" id="c-codex-app-turns">—</div><div class="sub" id="c-codex-app-events">— events</div></div>
 </div>
 
 <div class="tabs">
   <button class="tab-btn active" onclick="showTab('recent')">Recent calls</button>
+  <button class="tab-btn" onclick="showTab('codex')">Codex app</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
@@ -1493,6 +1540,18 @@ async def dashboard() -> str:
       <th>Time</th><th>Provider</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
     </tr></thead>
     <tbody id="tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-codex">
+<div class="section">
+  <h2>Codex app-server telemetry</h2>
+  <table>
+    <thead><tr>
+      <th>Time</th><th>Direction</th><th>Method</th><th>Chars</th><th>Input</th><th>Latency</th><th>Session</th>
+    </tr></thead>
+    <tbody id="codex-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -1554,11 +1613,12 @@ function shortProvider(p){
 }
 
 function showTab(name){
-  ['recent','weekly','categories','sessions'].forEach(t=>{
+  const tabs=['recent','codex','weekly','categories','sessions'];
+  tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
-    b.classList.toggle('active',['recent','weekly','categories','sessions'][i]===name);
+    b.classList.toggle('active',tabs[i]===name);
   });
 }
 
@@ -1606,6 +1666,8 @@ async function refresh(){
     document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
     document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
     document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
+    document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';
+    document.getElementById('c-codex-app-events').textContent=(s.codex_app_today_events||0).toLocaleString()+' events · last '+ago(s.codex_app_last_event_at);
 
     const tb=document.getElementById('tbody');
     tb.innerHTML=d.recent.map(row=>{
@@ -1656,6 +1718,28 @@ async function refreshCategories(){
   }catch(e){}
 }
 
+async function refreshCodexApp(){
+  try{
+    const r=await fetch('/agentflow/stats/full');
+    const d=await r.json();
+    const tb=document.getElementById('codex-tbody');
+    const rows=d.codex_app_recent||[];
+    tb.innerHTML=rows.map(row=>{
+      const err=row.error_code?` <span class="badge err">${row.error_code}</span>`:'';
+      const sid=(row.session_id||'').slice(0,8);
+      return `<tr>
+        <td class="ts">${ago(row.created_at)}</td>
+        <td><span class="badge provider">${row.direction}</span></td>
+        <td class="model">${row.method}${err}</td>
+        <td class="tokens">${fmtTok(row.message_chars)}</td>
+        <td class="tokens">${fmtTok(row.input_text_chars)}</td>
+        <td class="latency">${fmtMs(row.latency_ms)}</td>
+        <td class="ts">${sid}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="7" style="color:#8b949e">No Codex app-server telemetry yet</td></tr>';
+  }catch(e){}
+}
+
 async function refreshSessions(){
   try{
     const r=await fetch('/agentflow/stats/sessions');
@@ -1677,10 +1761,12 @@ async function refreshSessions(){
 }
 
 refresh();
+refreshCodexApp();
 refreshWeekly();
 refreshCategories();
 refreshSessions();
 setInterval(refresh,5000);
+setInterval(refreshCodexApp,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshSessions,30000);
