@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import random
 import sqlite3
@@ -32,6 +33,7 @@ MIN_REQUEST_INTERVAL_MS = int(os.getenv("AGENTFLOW_MIN_REQUEST_INTERVAL_MS", "0"
 MAX_TIER_BACKOFF_WAIT = float(os.getenv("AGENTFLOW_MAX_TIER_BACKOFF_WAIT", "30"))
 # 0 = disabled (unlimited concurrency). Default 2 prevents burst collisions before global backoff coordinates.
 MAX_CONCURRENT_PER_TIER = int(os.getenv("AGENTFLOW_MAX_CONCURRENT_PER_TIER", "2"))
+SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
@@ -124,6 +126,21 @@ async def _throttle_forward() -> None:
         if elapsed_ms < MIN_REQUEST_INTERVAL_MS:
             await asyncio.sleep((MIN_REQUEST_INTERVAL_MS - elapsed_ms) / 1000)
         _last_forward_time = time.time()
+
+
+async def _check_session_cost_alert(sid: str) -> None:
+    row = store.conn.execute(
+        "SELECT COALESCE(SUM(cost_est_usd), 0.0) as cost, COUNT(*) as calls "
+        "FROM calls WHERE session_id = ? AND date(created_at) = date('now')",
+        (sid,),
+    ).fetchone()
+    cost = float(row["cost"]) if row else 0.0
+    calls = int(row["calls"]) if row else 0
+    if cost >= SESSION_COST_ALERT_USD:
+        logging.warning(
+            "Session %s daily cost $%.2f (%d calls) exceeds alert threshold $%.2f",
+            sid[:8], cost, calls, SESSION_COST_ALERT_USD,
+        )
 
 
 from agentflow_proxy.store import Store, utc_now, stable_json
@@ -340,6 +357,7 @@ async def messages(request: Request) -> Response:
                         retry_count=stream_retry_count,
                         thinking_output_tokens=thinking_chars // TOKEN_CHARS if thinking_chars else None,
                     )
+                    await _check_session_cost_alert(session_id)
 
             return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -477,6 +495,7 @@ async def messages(request: Request) -> Response:
             retry_count=retry_count,
             thinking_output_tokens=thinking_chars // TOKEN_CHARS if thinking_chars else None,
         )
+        await _check_session_cost_alert(session_id)
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
 
     except TierBackoffActive as exc:

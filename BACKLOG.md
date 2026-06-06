@@ -518,7 +518,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: stats_full returns thinking_output_tokens and thinking_cost_usd > 0 when the DB has
   thinking-session rows; dashboard shows Thinking cost line item.
 
-- [IDEA] Session cost alert: log warning when session exceeds daily $ threshold (2026-06-05)
+- [DONE] Session cost alert: log warning when session exceeds daily $ threshold (2026-06-06)
   Details: Analysis 2026-06-05: one session cost $34 of today's $35 bill. The user has no
   real-time signal that a session is burning unusually high budget. Fix: in server.py, after
   storing each call, check the rolling per-session cost for today. If it exceeds a configurable
