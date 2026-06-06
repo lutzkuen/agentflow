@@ -34,6 +34,8 @@ MAX_TIER_BACKOFF_WAIT = float(os.getenv("AGENTFLOW_MAX_TIER_BACKOFF_WAIT", "30")
 # 0 = disabled (unlimited concurrency). Default 2 prevents burst collisions before global backoff coordinates.
 MAX_CONCURRENT_PER_TIER = int(os.getenv("AGENTFLOW_MAX_CONCURRENT_PER_TIER", "2"))
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
+# 0 = disabled (no cap). Set to a positive int to cap thinking budget_tokens per turn.
+MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
@@ -238,6 +240,17 @@ async def messages(request: Request) -> Response:
                 del crunched[k]
             if _incompatible:
                 routing_meta["stripped_params"] = _incompatible
+        _thinking_param = crunched.get("thinking")
+        if (
+            MAX_THINKING_BUDGET_TOKENS > 0
+            and isinstance(_thinking_param, dict)
+            and isinstance(_thinking_param.get("budget_tokens"), int)
+            and _thinking_param["budget_tokens"] > MAX_THINKING_BUDGET_TOKENS
+        ):
+            _original_budget = _thinking_param["budget_tokens"]
+            crunched["thinking"]["budget_tokens"] = MAX_THINKING_BUDGET_TOKENS
+            routing_meta["thinking_capped"] = True
+            print(f"thinking_cap: original={_original_budget} cap={MAX_THINKING_BUDGET_TOKENS}", flush=True)
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
         headers = build_forward_headers(request)
         if prompt_cached or has_cache_control_blocks(crunched):

@@ -276,7 +276,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   tokens_saved_est by that blended rate instead of the flat input rate.
   Metric: crunch savings estimate within 20% of true value on thinking sessions.
 
-- [IDEA] Thinking budget throttle: configurable per-turn budget_tokens cap (2026-06-06)
+- [DONE] Thinking budget throttle: configurable per-turn budget_tokens cap (2026-06-06)
   Details: Extended thinking sessions cost $44/day vs $5/day without thinking. No
   ceiling exists on per-turn budget_tokens. Add AGENTFLOW_MAX_THINKING_BUDGET_TOKENS
   (default: no cap). In server.py, after crunching, if body["thinking"]["budget_tokens"]
