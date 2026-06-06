@@ -302,7 +302,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   thinking sessions, saving ~$0.30-0.60/day at cache-read rates.
   Metric: additional saved_chars on thinking sessions; zero tool-call failures.
 
-- [READY] Capture actual input tokens for streaming calls — currently 0 for ~400 calls/day (2026-06-06)
+- [DONE] Capture actual input tokens for streaming calls — currently 0 for ~400 calls/day (2026-06-06)
   Details: Analysis 2026-06-06: 392 successful streaming calls (status=200, stream=1) have
   actual_input_tokens=0. The streaming SSE path extracts output tokens from message_delta events,
   but input tokens may not be parsed from the message_start event (which carries usage.input_tokens).
@@ -313,6 +313,10 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   reads the response usage block.
   Metric: actual_input_tokens > 0 on >95% of streaming calls; cost_est_usd drift vs estimate
   shrinks for crunched streaming calls.
+  Verified 2026-06-06: fix was already applied (parse_sse_usage in server.py parses message_start).
+  281/281 (100%) of today's successful streaming calls have actual_input_tokens > 0.
+  The 392 historical successful streaming calls with 0 were from June 2-5, mostly before
+  the SSE parsing code was active in production. (2026-06-06)
 
 - [IDEA] Dashboard: show prompt-cache write vs read ratio and cost to warm cache (2026-06-06)
   Details: Analysis 2026-06-06: prompt cache is the dominant savings driver — $24.5 savings on
