@@ -106,6 +106,12 @@ Claude calls until the cooldown expires. If a run exits with `CODEX_REQUIRED`, t
 invokes `scripts/codex_recover.sh` once, subject to a cooldown, so preserved run worktrees are
 salvaged promptly instead of blocking later hours indefinitely.
 
+The same cron installer also adds a nightly log archive job. `scripts/archive_orchestrator_logs.py`
+deletes quota-only orchestrator logs older than 24 hours and moves work/action logs into
+`logs/orchestrator/YYYY/MM/DD/` using only deterministic marker checks. It only archives
+completed work logs after a short age buffer so active cron logs stay at their original path
+until the wrapper has finished recovery checks.
+
 Controls:
 
 ```bash
@@ -113,6 +119,9 @@ export AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex 
 export AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
 export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit model
 export AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Claude retry cooldown
+export AGENTFLOW_ARCHIVE_CRON_HOUR=2                  # default nightly archive hour
+export AGENTFLOW_ARCHIVE_CRON_MINUTE=7                # default nightly archive minute
+export AGENTFLOW_WORK_LOG_ARCHIVE_MIN_AGE_HOURS=2     # default active-log safety buffer
 ```
 
 ## Commit message format
