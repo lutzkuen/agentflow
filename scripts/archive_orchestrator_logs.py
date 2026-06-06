@@ -24,7 +24,10 @@ LOG_NAME_RE = re.compile(
 )
 QUOTA_MARKERS = (
     "CLAUDE_RATE_LIMITED",
+    "WORKER_RATE_LIMITED",
     "Recent Claude rate-limit cooldown is active",
+    "Recent Codex rate-limit cooldown is active",
+    "Recent worker rate-limit cooldown is active",
     "temporarily rate-limiting requests",
     "temporarily limiting requests",
     "account's rate limit",
@@ -32,7 +35,9 @@ QUOTA_MARKERS = (
 )
 WORK_MARKERS = (
     "Running Claude orchestrator",
+    "Running Codex orchestrator",
     "Starting a fresh Claude operator session",
+    "Starting a fresh Codex operator session",
     "Creating isolated run worktree",
     "Run complete.",
     "CODEX_REQUIRED",

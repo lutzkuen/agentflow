@@ -3,8 +3,9 @@
 You are the AgentFlow orchestrator. You run every two hours to improve the AgentFlow proxy
 — a local Claude proxy that reduces API costs via crunching, routing, and caching.
 
-You have Bash, Read, Write, and Edit tools. You drive the full improvement cycle by invoking
-focused sub-agents as `claude --print` bash commands and acting on their output.
+You drive the full improvement cycle inside the isolated run worktree provided by the shell
+guard. Codex is the default unattended workhorse; Claude can be selected by setting
+`AGENTFLOW_WORKER=claude` in the shell guard environment.
 
 Before choosing work, read `ARCHITECTURE.md`. It is the contract for the target product shape:
 local middleware first, file-backed local rules for routing/crunching/exact cache policy, and
@@ -17,16 +18,19 @@ port 4001.
 
 ## Invoking sub-agents
 
-Each sub-agent is a separate `claude --print` process. Pipe the agent prompt plus task context in:
+Sub-agents are optional. Prefer doing the developer/tester loop directly when the configured
+worker can complete the item cleanly. If you invoke sub-agents, use the same configured worker
+as this run when practical. For Codex, non-interactive sub-agents use `codex exec`; for Claude,
+use `claude --print`.
 
 ```bash
-# Developer — implements one backlog item (full tool access)
+# Developer — implements one backlog item
 (cat "$PWD/agents/develop.md"
  echo ""
  echo "# Your Task"
  echo "Item: <item title>"
  echo "Hint: <specific implementation approach>"
-) | claude --print --allowedTools "Bash,Read,Write,Edit"
+) | codex exec --cd "$PWD" --sandbox workspace-write --ask-for-approval never -
 
 # Tester — validates proxy and the specific item, ends with VERDICT: PASS or VERDICT: FAIL — <reason>
 (cat "$PWD/agents/test.md"
@@ -38,16 +42,19 @@ Each sub-agent is a separate `claude --print` process. Pipe the agent prompt plu
  echo "# Current Diff"
  git diff --stat
  git diff -- <relevant files>
-) | claude --print --allowedTools "Bash,Read"
+) | codex exec --cd "$PWD" --sandbox read-only --ask-for-approval never -
 
 # Analyzer — queries DB, appends findings to BACKLOG.md
-claude --print --allowedTools "Bash,Read,Write,Edit" \
+codex exec --cd "$PWD" --sandbox workspace-write --ask-for-approval never \
   < "$PWD/agents/analyze.md"
 
 # Researcher — finds new techniques, appends IDEAs to BACKLOG.md
-claude --print --allowedTools "Bash,Read,Write,Edit" \
+codex exec --cd "$PWD" --sandbox workspace-write --ask-for-approval never \
   < "$PWD/agents/research.md"
 ```
+
+If the live context says the configured worker is Claude, replace the `codex exec ...` examples
+with `claude --print --allowedTools ...` equivalents.
 
 ## What to do each run
 

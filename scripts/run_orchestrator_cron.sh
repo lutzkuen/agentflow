@@ -4,6 +4,7 @@
 set -uo pipefail
 
 REPO=${AGENTFLOW_REPO:-/home/lutz/agentflow}
+CONFIG_FILE=${AGENTFLOW_CONFIG:-$REPO/.env}
 LOG_DIR="$REPO/logs/orchestrator"
 STAMP=$(date +%Y-%m-%d_%H-%M-%S)
 LOG_FILE="$LOG_DIR/$STAMP.log"
@@ -12,12 +13,20 @@ status=0
 
 mkdir -p "$LOG_DIR"
 
+if [[ -f "$CONFIG_FILE" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+  set +a
+fi
+
 {
   echo "## AgentFlow Cron Run"
   echo "Started: $(date --iso-8601=seconds)"
   echo "Host: $(hostname)"
   echo "Repo: $REPO"
   echo "Run ID: ${RUN_ID:-$STAMP}"
+  echo "Worker: ${AGENTFLOW_WORKER:-codex}"
   echo ""
 
   if ! cd "$REPO"; then

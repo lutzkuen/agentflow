@@ -37,6 +37,8 @@ LAST_ATTEMPT="$RECOVERY_DIR/last_attempt"
 COOLDOWN_MINUTES=${AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES:-180}
 CODEX_AUTO=${AGENTFLOW_CODEX_AUTO:-1}
 CODEX_MODEL=${AGENTFLOW_CODEX_MODEL:-}
+CODEX_RECOVERY_USE_ORIGINAL_OPENAI=${AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI:-1}
+CODEX_ORIGINAL_OPENAI_BASE_URL=${AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL:-https://api.openai.com/v1}
 status=0
 
 mkdir -p "$RECOVERY_DIR"
@@ -83,6 +85,11 @@ touch "$LAST_ATTEMPT"
   echo "Repo: $REPO"
   echo "Failure log: $FAILURE_LOG"
   echo "Codex: $CODEX_BIN"
+  if [[ "$CODEX_RECOVERY_USE_ORIGINAL_OPENAI" == "1" ]]; then
+    echo "Codex recovery OpenAI base URL: $CODEX_ORIGINAL_OPENAI_BASE_URL"
+  else
+    echo "Codex recovery OpenAI base URL: Codex default/profile"
+  fi
   echo ""
 
   cd "$REPO"
@@ -125,6 +132,10 @@ PROMPT
   )
   if [[ -n "$CODEX_MODEL" ]]; then
     codex_args+=(--model "$CODEX_MODEL")
+  fi
+  if [[ "$CODEX_RECOVERY_USE_ORIGINAL_OPENAI" == "1" ]]; then
+    codex_args+=(--config 'model_provider="openai"')
+    codex_args+=(--config "openai_base_url=\"$CODEX_ORIGINAL_OPENAI_BASE_URL\"")
   fi
   codex_args+=("$prompt")
 

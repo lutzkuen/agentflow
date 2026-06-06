@@ -21,7 +21,7 @@ Exit: 0
 
 class OrchestratorLogArchiveTest(unittest.TestCase):
     def test_quota_log_detection_excludes_partial_work(self):
-        quota_text = HEADER + "CLAUDE_RATE_LIMITED: cooldown active after recent upstream rate limit.\n" + FOOTER
+        quota_text = HEADER + "WORKER_RATE_LIMITED: cooldown active after recent upstream rate limit.\n" + FOOTER
         partial_work_text = quota_text + "CODEX_REQUIRED: Claude was rate-limited after partial work.\n"
 
         self.assertTrue(is_quota_only_log(quota_text))
@@ -32,7 +32,7 @@ class OrchestratorLogArchiveTest(unittest.TestCase):
             log_dir = Path(tmp)
             old_quota = log_dir / "2026-06-05_01-17-01.log"
             old_quota.write_text(
-                HEADER + "CLAUDE_RATE_LIMITED: cooldown active after recent upstream rate limit.\n" + FOOTER,
+                HEADER + "WORKER_RATE_LIMITED: cooldown active after recent upstream rate limit.\n" + FOOTER,
                 encoding="utf-8",
             )
 
@@ -50,7 +50,7 @@ class OrchestratorLogArchiveTest(unittest.TestCase):
             log_dir = Path(tmp)
             recent_quota = log_dir / "2026-06-06_01-17-01.log"
             recent_quota.write_text(
-                HEADER + "CLAUDE_RATE_LIMITED: cooldown active after recent upstream rate limit.\n" + FOOTER,
+                HEADER + "WORKER_RATE_LIMITED: cooldown active after recent upstream rate limit.\n" + FOOTER,
                 encoding="utf-8",
             )
 
@@ -90,7 +90,7 @@ class OrchestratorLogArchiveTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
             work_log = log_dir / "2026-06-06_06-17-01.log"
-            work_log.write_text(HEADER + "[2026-06-06 06:17:07] Running Claude orchestrator\n" + FOOTER, encoding="utf-8")
+            work_log.write_text(HEADER + "[2026-06-06 06:17:07] Running Codex orchestrator\n" + FOOTER, encoding="utf-8")
 
             result = archive_orchestrator_logs(
                 log_dir,

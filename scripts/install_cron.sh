@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install hourly AgentFlow orchestrator cron retry.
-# The orchestrator itself records a cooldown after Claude rate limits, so hourly
-# cron remains a health heartbeat without necessarily spending a Claude call.
+# The orchestrator itself records a cooldown after worker rate limits, so hourly
+# cron remains a health heartbeat without necessarily spending a model call.
 
 set -euo pipefail
 
@@ -45,7 +45,8 @@ awk -v start="$START_MARK" -v end="$END_MARK" '
 
 echo "Installed hourly AgentFlow cron retry:"
 echo "  $CRON_MINUTE * * * * $WRAPPER"
-echo "  Claude rate-limit cooldown defaults to 90 minutes between upstream retry attempts."
+echo "  Worker defaults to Codex; set AGENTFLOW_WORKER=claude in $REPO/.env to switch back."
+echo "  Worker rate-limit cooldown defaults to 90 minutes between upstream retry attempts."
 echo ""
 echo "Installed nightly AgentFlow orchestrator log archive:"
 echo "  $ARCHIVE_CRON_MINUTE $ARCHIVE_CRON_HOUR * * * $ARCHIVER --log-dir $REPO/logs/orchestrator"

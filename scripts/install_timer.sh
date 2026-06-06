@@ -58,11 +58,12 @@ After=network.target agentflow-claude-proxy.service
 [Service]
 Type=oneshot
 WorkingDirectory=$REPO
+EnvironmentFile=-$REPO/.env
 Environment=ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 ExecStart=/usr/bin/env bash $REPO/agents/orchestrate.sh
 StandardOutput=journal
 StandardError=journal
-# Keep PATH that includes claude CLI
+# Keep PATH that includes Codex/Claude CLI
 Environment=PATH=/home/$USER/.local/bin:/usr/local/bin:/usr/bin:/bin
 EOF
 

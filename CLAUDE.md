@@ -100,11 +100,15 @@ claude --print --allowedTools "Bash,Read" < agents/test.md
 
 ## Unattended recovery
 
-Hourly cron runs call `scripts/run_orchestrator_cron.sh`. The shell guard records a cooldown
-after Claude upstream rate limits, so hourly runs keep checking local proxy health but skip
-Claude calls until the cooldown expires. If a run exits with `CODEX_REQUIRED`, the wrapper
-invokes `scripts/codex_recover.sh` once, subject to a cooldown, so preserved run worktrees are
-salvaged promptly instead of blocking later hours indefinitely.
+Hourly cron runs call `scripts/run_orchestrator_cron.sh`. The shell guard uses Codex as the
+default unattended workhorse; set `AGENTFLOW_WORKER=claude` to switch back to Claude. The
+guard records a per-worker cooldown after upstream rate limits, so hourly runs keep checking
+local proxy health but skip worker calls until the cooldown expires. If a run exits with
+`CODEX_REQUIRED`, the wrapper invokes `scripts/codex_recover.sh` once, subject to a cooldown,
+so preserved run worktrees are salvaged promptly instead of blocking later hours indefinitely.
+Codex recovery defaults to the original OpenAI base URL even if normal Codex work is routed
+through a proxy. Cron and the systemd timer both load `$REPO/.env` before each run when that
+file exists, so local worker settings can live there without editing scheduler definitions.
 
 The same cron installer also adds a nightly log archive job. `scripts/archive_orchestrator_logs.py`
 deletes quota-only orchestrator logs older than 24 hours and moves work/action logs into
@@ -115,10 +119,16 @@ until the wrapper has finished recovery checks.
 Controls:
 
 ```bash
+export AGENTFLOW_WORKER=codex                         # default; set to claude to switch back
+export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit Codex worker model
+export AGENTFLOW_CODEX_OPENAI_BASE_URL=               # optional Codex proxy URL override
+export AGENTFLOW_CODEX_SANDBOX=workspace-write        # default Codex worker sandbox
+export AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=1 # default recovery bypasses proxies
+export AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL=https://api.openai.com/v1
 export AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex recovery
 export AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
-export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit model
 export AGENTFLOW_CLAUDE_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Claude retry cooldown
+export AGENTFLOW_CODEX_RATE_LIMIT_COOLDOWN_MINUTES=90 # default Codex retry cooldown
 export AGENTFLOW_ARCHIVE_CRON_HOUR=2                  # default nightly archive hour
 export AGENTFLOW_ARCHIVE_CRON_MINUTE=7                # default nightly archive minute
 export AGENTFLOW_WORK_LOG_ARCHIVE_MIN_AGE_HOURS=2     # default active-log safety buffer
