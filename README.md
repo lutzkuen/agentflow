@@ -1,13 +1,14 @@
-# AgentFlow Claude Proxy v0.1
+# AgentFlow Proxy v0.1
 
-A local Anthropic-compatible proxy for Claude Code / Claude CLI experiments.
+A local provider-specific proxy for Claude Code / Claude CLI and Codex experiments.
 
-It runs on `127.0.0.1`, accepts whatever auth header the client sends, forwards that auth upstream to Anthropic, and adds:
+It runs on `127.0.0.1`, accepts whatever auth header the client sends, forwards that auth upstream to the selected provider, and adds:
 
 - `/v1/messages` Anthropic-compatible proxy
+- `/v1/responses` and `/v1/chat/completions` OpenAI-compatible proxy
 - streaming pass-through
 - conservative prompt crunching
-- simple model routing among Claude model tiers
+- provider-local model routing
 - exact SQLite caching for non-stream, non-tool requests
 - SQLite call logging
 - `/agentflow/stats` endpoint
@@ -17,7 +18,7 @@ This is a first prototype, not production software.
 ## Target architecture
 
 The current product is the **local AgentFlow module**: a Python package that runs on the
-user's machine as Claude middleware, stores logs/cache locally, exposes a read-only dashboard,
+user's machine as provider-specific middleware, stores logs/cache locally, exposes a read-only dashboard,
 and will provide local manual rules for model selection, crunching, and exact-match hash cache
 matching.
 
@@ -51,15 +52,18 @@ pip install -r requirements.txt
 
 ## Run
 
+Claude / Anthropic mode:
+
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-agentflow-claude-proxy --host 127.0.0.1 --port 4000
+agentflow-proxy --provider anthropic --host 127.0.0.1 --port 4000
 ```
 
-Alternative:
+Codex / OpenAI mode:
 
 ```bash
-python -m uvicorn agentflow_proxy.server:app --host 127.0.0.1 --port 4000
+export OPENAI_API_KEY="sk-..."
+agentflow-proxy --provider openai --host 127.0.0.1 --port 4003
 ```
 
 Health check:
@@ -87,6 +91,20 @@ claude
 ```
 
 The proxy does not require local auth. It simply forwards incoming `authorization`, `x-api-key`, `anthropic-version`, and `anthropic-beta` headers to Anthropic.
+
+## Point Codex at it
+
+Run the OpenAI proxy on a separate port and point Codex at the OpenAI-compatible `/v1` base URL:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+agentflow-proxy --provider openai --host 127.0.0.1 --port 4003
+codex exec --config 'openai_base_url="http://127.0.0.1:4003/v1"' "Reply with ok"
+```
+
+Provider modes are intentionally separate. An Anthropic-mode process serves `/v1/messages`;
+an OpenAI-mode process serves `/v1/responses` and `/v1/chat/completions`. Cross-provider
+routing is not supported.
 
 If your client refuses `ANTHROPIC_AUTH_TOKEN`, try keeping `ANTHROPIC_API_KEY` set. The proxy accepts both header styles.
 

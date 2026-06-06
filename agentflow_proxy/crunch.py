@@ -118,6 +118,10 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     # System can be string or list of blocks.
     if "system" in new_body:
         new_body["system"] = process_content(new_body["system"], allow_shorten=False)
+    if "instructions" in new_body:
+        new_body["instructions"] = process_content(new_body["instructions"], allow_shorten=False)
+    if "input" in new_body:
+        new_body["input"] = process_content(new_body["input"], allow_shorten=False)
 
     messages = new_body.get("messages") or []
     huge = before > CRUNCH_THRESHOLD_CHARS

@@ -11,8 +11,12 @@ from agentflow_proxy.store import stable_json
 HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
 SONNET_DEFAULT = os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
 OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
+OPENAI_LARGE_DEFAULT = os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex")
+OPENAI_SMALL_DEFAULT = os.getenv("AGENTFLOW_OPENAI_SMALL_MODEL", "gpt-5-mini")
+OPENAI_TINY_DEFAULT = os.getenv("AGENTFLOW_OPENAI_TINY_MODEL", "gpt-5-nano")
 
 ROUTING_ENABLED = os.getenv("AGENTFLOW_ROUTING", "1") != "0"
+OPENAI_ROUTING_ENABLED = os.getenv("AGENTFLOW_OPENAI_ROUTING", "0") == "1"
 ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(Path.home() / ".agentflow" / "routing_rules.yaml"))
 STRIP_THINKING_HISTORY = os.getenv("AGENTFLOW_STRIP_THINKING_HISTORY", "0") == "1"
 
@@ -201,3 +205,45 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "category": category,
         "policy_source": ROUTING_RULES_SOURCE,
     }
+
+
+def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    requested = str(body.get("model") or OPENAI_LARGE_DEFAULT)
+    text_chars = len(extract_text(body))
+    tools = bool(body.get("tools"))
+    category = categorize_request(body)
+    meta = {
+        "enabled": OPENAI_ROUTING_ENABLED,
+        "requested_model": requested,
+        "routed_model": requested,
+        "reason": "openai routing disabled",
+        "text_chars": text_chars,
+        "has_tools": tools,
+        "category": category,
+        "policy_source": "local-default",
+        "provider": "openai",
+    }
+    if not ROUTING_ENABLED or not OPENAI_ROUTING_ENABLED:
+        return requested, meta
+
+    requested_l = requested.lower()
+    if tools:
+        meta["reason"] = "keep requested OpenAI model for tool request"
+        meta["enabled"] = True
+        return requested, meta
+
+    routed = requested
+    reason = "keep requested OpenAI model"
+    if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < int(os.getenv("AGENTFLOW_OPENAI_SMALL_TEXT_CHARS_LT", "6000")):
+        routed = OPENAI_SMALL_DEFAULT
+        reason = "small non-tool OpenAI request"
+    elif requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < int(os.getenv("AGENTFLOW_OPENAI_TINY_TEXT_CHARS_LT", "1500")):
+        routed = OPENAI_TINY_DEFAULT
+        reason = "tiny non-tool OpenAI request"
+
+    meta.update({
+        "enabled": True,
+        "routed_model": routed,
+        "reason": reason,
+    })
+    return routed, meta

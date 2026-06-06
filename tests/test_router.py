@@ -132,6 +132,33 @@ rules:
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
 
+    def test_openai_routing_is_disabled_by_default(self):
+        routed, meta = router_module.route_openai_model({
+            "model": "gpt-5-codex",
+            "input": "small task",
+        })
+
+        self.assertEqual(routed, "gpt-5-codex")
+        self.assertFalse(meta["enabled"])
+        self.assertEqual(meta["provider"], "openai")
+
+    def test_openai_routing_stays_inside_openai_models(self):
+        try:
+            with patch.dict(os.environ, {"AGENTFLOW_OPENAI_ROUTING": "1"}):
+                manual_router = importlib.reload(router_module)
+
+                routed, meta = manual_router.route_openai_model({
+                    "model": manual_router.OPENAI_LARGE_DEFAULT,
+                    "input": "small task",
+                })
+
+                self.assertEqual(routed, manual_router.OPENAI_SMALL_DEFAULT)
+                self.assertTrue(meta["enabled"])
+                self.assertEqual(meta["provider"], "openai")
+                self.assertNotIn("claude", routed)
+        finally:
+            importlib.reload(router_module)
+
 
 if __name__ == "__main__":
     unittest.main()

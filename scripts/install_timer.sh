@@ -20,8 +20,31 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=$REPO
+EnvironmentFile=-$REPO/.env
 ExecStartPre=-/usr/bin/fuser -k 4000/tcp
-ExecStart=$REPO/.venv/bin/python -m uvicorn agentflow_proxy.server:app --host 127.0.0.1 --port 4000
+ExecStart=$REPO/.venv/bin/python -m agentflow_proxy.server --provider anthropic --host 127.0.0.1 --port 4000
+Environment=AGENTFLOW_PROVIDER=anthropic
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+EOF
+
+# ── OpenAI proxy service unit ────────────────────────────────────────────────
+cat > "$UNIT_DIR/agentflow-openai-proxy.service" << EOF
+[Unit]
+Description=AgentFlow OpenAI Proxy
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO
+EnvironmentFile=-$REPO/.env
+ExecStartPre=-/usr/bin/fuser -k 4003/tcp
+ExecStart=$REPO/.venv/bin/python -m agentflow_proxy.server --provider openai --host 127.0.0.1 --port 4003
+Environment=AGENTFLOW_PROVIDER=openai
 Restart=always
 RestartSec=1
 
@@ -33,7 +56,7 @@ EOF
 cat > "$UNIT_DIR/agentflow-dashboard.service" << EOF
 [Unit]
 Description=AgentFlow Read-Only Dashboard
-After=network-online.target agentflow-claude-proxy.service
+After=network-online.target agentflow-claude-proxy.service agentflow-openai-proxy.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -52,8 +75,8 @@ EOF
 cat > "$UNIT_DIR/agentflow-orchestrator.service" << EOF
 [Unit]
 Description=AgentFlow Orchestrator
-Wants=agentflow-claude-proxy.service
-After=network.target agentflow-claude-proxy.service
+Wants=agentflow-claude-proxy.service agentflow-openai-proxy.service
+After=network.target agentflow-claude-proxy.service agentflow-openai-proxy.service
 
 [Service]
 Type=oneshot
@@ -83,6 +106,7 @@ EOF
 
 systemctl --user daemon-reload
 systemctl --user enable --now agentflow-claude-proxy.service
+systemctl --user enable --now agentflow-openai-proxy.service
 systemctl --user enable --now agentflow-dashboard.service
 systemctl --user enable --now agentflow-orchestrator.timer
 
@@ -94,6 +118,9 @@ systemctl --user status agentflow-claude-proxy.service --no-pager
 echo ""
 echo "Dashboard status:"
 systemctl --user status agentflow-dashboard.service --no-pager
+echo ""
+echo "OpenAI proxy status:"
+systemctl --user status agentflow-openai-proxy.service --no-pager
 echo ""
 echo "Status:"
 systemctl --user status agentflow-orchestrator.timer --no-pager
@@ -110,5 +137,6 @@ echo ""
 echo "To uninstall:"
 echo "  systemctl --user disable --now agentflow-orchestrator.timer"
 echo "  systemctl --user disable --now agentflow-claude-proxy.service"
+echo "  systemctl --user disable --now agentflow-openai-proxy.service"
 echo "  systemctl --user disable --now agentflow-dashboard.service"
-echo "  rm $UNIT_DIR/agentflow-orchestrator.{service,timer} $UNIT_DIR/agentflow-claude-proxy.service $UNIT_DIR/agentflow-dashboard.service"
+echo "  rm $UNIT_DIR/agentflow-orchestrator.{service,timer} $UNIT_DIR/agentflow-claude-proxy.service $UNIT_DIR/agentflow-openai-proxy.service $UNIT_DIR/agentflow-dashboard.service"

@@ -66,6 +66,8 @@ CODEX_MODEL=${AGENTFLOW_CODEX_MODEL:-}
 CODEX_SANDBOX=${AGENTFLOW_CODEX_SANDBOX:-workspace-write}
 CODEX_APPROVAL=${AGENTFLOW_CODEX_APPROVAL:-never}
 CODEX_OPENAI_BASE_URL=${AGENTFLOW_CODEX_OPENAI_BASE_URL:-}
+CODEX_PROXY_SERVICE=${AGENTFLOW_CODEX_PROXY_SERVICE:-agentflow-openai-proxy.service}
+CODEX_PROXY_URL=${AGENTFLOW_CODEX_PROXY_URL:-${CODEX_OPENAI_BASE_URL%/v1}}
 CODEX_MODEL_PROVIDER=${AGENTFLOW_CODEX_MODEL_PROVIDER:-}
 CODEX_NETWORK_ACCESS=${AGENTFLOW_CODEX_NETWORK_ACCESS:-1}
 WORKTREE_ROOT=${AGENTFLOW_WORKTREE_ROOT:-$HOME/agentflow-runs/worktrees}
@@ -132,6 +134,14 @@ append_diagnostics() {
     echo ""
     echo "### Recent Proxy Journal"
     journalctl --user -u "$PROXY_SERVICE" -n 80 --no-pager || true
+    if local_codex_proxy_configured; then
+      echo ""
+      echo "### Codex OpenAI Proxy Service"
+      systemctl --user status "$CODEX_PROXY_SERVICE" --no-pager || true
+      echo ""
+      echo "### Recent Codex OpenAI Proxy Journal"
+      journalctl --user -u "$CODEX_PROXY_SERVICE" -n 80 --no-pager || true
+    fi
   } >> "$RUN_LOG"
 }
 
@@ -143,6 +153,9 @@ worker_label() {
 }
 
 worker_output_is_transient_rate_limit() {
+  if grep -Eiq '401 unauthorized|insufficient permissions|missing scopes|invalid api key|permission denied'; then
+    return 1
+  fi
   grep -Eiq 'temporarily limiting requests|account.s rate limit|rate limit.*try again later|rate limit|quota|429|too many requests'
 }
 
@@ -217,6 +230,38 @@ ensure_proxy_ready() {
   repair_proxy_service
 }
 
+local_codex_proxy_configured() {
+  [[ "$WORKER" == "codex" ]] || return 1
+  [[ -n "$CODEX_OPENAI_BASE_URL" ]] || return 1
+  [[ "$CODEX_OPENAI_BASE_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]
+}
+
+wait_for_codex_proxy_health() {
+  local deadline=$((SECONDS + 30))
+  until curl -sf "$CODEX_PROXY_URL/health" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+repair_codex_proxy_service() {
+  log "Repairing Codex OpenAI proxy service"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$CODEX_PROXY_SERVICE" >/dev/null 2>&1 || true
+  systemctl --user restart "$CODEX_PROXY_SERVICE"
+  wait_for_codex_proxy_health
+}
+
+ensure_codex_proxy_ready() {
+  local_codex_proxy_configured || return 0
+  if curl -sf "$CODEX_PROXY_URL/health" >/dev/null 2>&1; then
+    return 0
+  fi
+  repair_codex_proxy_service
+}
+
 claude_oauth_smoke() {
   local output
   output=$(
@@ -257,10 +302,10 @@ codex_smoke() {
   local output
   local -a codex_args
   codex_args=(
+    --ask-for-approval never
     exec
     --cd "$MAIN_REPO"
     --sandbox read-only
-    --ask-for-approval never
     --ephemeral
   )
   if [[ -n "$CODEX_MODEL" ]]; then
@@ -602,13 +647,13 @@ run_claude_operator() {
 run_codex_operator() {
   local -a codex_args
   codex_args=(
+    --ask-for-approval "$CODEX_APPROVAL"
     exec
     --cd "$RUN_REPO"
     --add-dir "$HOME/.agentflow"
     --add-dir "$WORKTREE_ROOT"
     --add-dir "$MAIN_REPO/.git"
     --sandbox "$CODEX_SANDBOX"
-    --ask-for-approval "$CODEX_APPROVAL"
     --output-last-message "$LOG_DIR/$RUN_ID.codex-summary"
   )
   if [[ -n "$CODEX_MODEL" ]]; then
@@ -642,6 +687,12 @@ main() {
     echo "CODEX_REQUIRED: proxy preflight failed. Debug and repair the middleware before running $(worker_label)." | tee -a "$RUN_LOG"
     exit 20
   fi
+  if ! ensure_codex_proxy_ready; then
+    log "Preflight failed: Codex OpenAI proxy could not be repaired by shell guard" | tee -a "$RUN_LOG"
+    append_diagnostics "preflight Codex OpenAI proxy repair failed"
+    echo "CODEX_REQUIRED: Codex OpenAI proxy preflight failed. Debug and repair the middleware before running Codex." | tee -a "$RUN_LOG"
+    exit 20
+  fi
 
   cooldown_until=$(worker_rate_limit_cooldown_active || true)
   if [[ -n "$cooldown_until" ]]; then
@@ -661,6 +712,9 @@ main() {
   if (( smoke_status != 0 )); then
     log "$(worker_label) smoke failed; attempting one proxy repair and retry" | tee -a "$RUN_LOG"
     repair_proxy_service || true
+    if local_codex_proxy_configured; then
+      repair_codex_proxy_service || true
+    fi
     capture_worker_smoke
     if (( smoke_status == 2 )); then
       record_worker_rate_limit | tee -a "$RUN_LOG"
@@ -742,6 +796,9 @@ main() {
   if (( smoke_status != 0 )); then
     log "Postflight smoke failed; repairing and retrying smoke once" | tee -a "$RUN_LOG"
     repair_proxy_service || true
+    if local_codex_proxy_configured; then
+      repair_codex_proxy_service || true
+    fi
     capture_worker_smoke
     if (( smoke_status == 2 )); then
       record_worker_rate_limit | tee -a "$RUN_LOG"

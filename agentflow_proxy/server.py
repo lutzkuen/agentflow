@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
@@ -10,19 +11,29 @@ import random
 import sqlite3
 import time
 import uuid
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterable, Optional, Tuple
 
 import httpx
+import websockets
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, Request, Response
+from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+try:
+    import zstandard as zstd
+except Exception:  # pragma: no cover - optional runtime dependency
+    zstd = None
 
 load_dotenv()
 
-DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
+PROVIDER = os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
+ANTHROPIC_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
+OPENAI_UPSTREAM = os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com")
+DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
 DEFAULT_DB = os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
 DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
@@ -36,6 +47,14 @@ MAX_CONCURRENT_PER_TIER = int(os.getenv("AGENTFLOW_MAX_CONCURRENT_PER_TIER", "2"
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
 # 0 = disabled (no cap). Set to a positive int to cap thinking budget_tokens per turn.
 MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
+OPENAI_MODEL_LIST = list(dict.fromkeys([
+    os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex"),
+    os.getenv("AGENTFLOW_OPENAI_SMALL_MODEL", "gpt-5-mini"),
+    os.getenv("AGENTFLOW_OPENAI_TINY_MODEL", "gpt-5-nano"),
+    "gpt-5.5",
+    "gpt-5.2-codex",
+    "gpt-5-codex",
+]))
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
@@ -150,6 +169,7 @@ from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_cost
 from agentflow_proxy.router import (
     extract_text, has_tools, categorize_request, route_model,
     HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT,
+    route_openai_model,
     STRIP_THINKING_HISTORY, _has_top_level_thinking, strip_thinking_history_blocks,
 )
 from agentflow_proxy.crunch import (
@@ -163,7 +183,19 @@ from agentflow_proxy.cache import (
 
 
 store = Store(DEFAULT_DB)
-app = FastAPI(title="AgentFlow Claude Proxy", version="0.1.0")
+app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
+
+
+def configure_provider(provider: str, anthropic_upstream: str = ANTHROPIC_UPSTREAM, openai_upstream: str = OPENAI_UPSTREAM) -> None:
+    global PROVIDER, ANTHROPIC_UPSTREAM, OPENAI_UPSTREAM, DEFAULT_UPSTREAM
+    provider = provider.lower()
+    if provider not in {"anthropic", "openai"}:
+        raise ValueError("provider must be 'anthropic' or 'openai'")
+    PROVIDER = provider
+    ANTHROPIC_UPSTREAM = anthropic_upstream
+    OPENAI_UPSTREAM = openai_upstream
+    DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
+    app.title = f"AgentFlow {PROVIDER.title()} Proxy"
 
 
 def _count_thinking_chars(response_body: dict) -> int:
@@ -172,6 +204,18 @@ def _count_thinking_chars(response_body: dict) -> int:
         if isinstance(block, dict) and block.get("type") == "thinking":
             total += len(block.get("thinking") or "")
     return total
+
+
+def provider_disabled_response(expected: str) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "message": f"AgentFlow is running in {PROVIDER!r} provider mode, not {expected!r}.",
+                "type": "provider_mismatch",
+            }
+        },
+        status_code=404,
+    )
 
 
 def build_forward_headers(request: Request) -> dict[str, str]:
@@ -190,14 +234,134 @@ def build_forward_headers(request: Request) -> dict[str, str]:
     return headers
 
 
+def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
+    allowed = {
+        "authorization", "openai-organization", "openai-project",
+        "content-type", "content-encoding", "accept", "user-agent",
+    }
+    headers: dict[str, str] = {}
+    for k, v in request.headers.items():
+        if k.lower() in allowed:
+            headers[k] = v
+    if "authorization" not in {k.lower() for k in headers}:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            headers["authorization"] = f"Bearer {api_key}"
+    if force_json:
+        headers.pop("content-encoding", None)
+        headers.pop("Content-Encoding", None)
+        headers["content-type"] = "application/json"
+    return headers
+
+
+async def read_openai_json_body(request: Request) -> Optional[dict[str, Any]]:
+    body = await request.body()
+    encoding = (request.headers.get("content-encoding") or "").lower().strip()
+    try:
+        if encoding in {"zstd", "zstandard"}:
+            if zstd is None:
+                return None
+            body = zstd.ZstdDecompressor().decompress(body)
+        elif encoding == "gzip":
+            body = gzip.decompress(body)
+        elif encoding in {"deflate", "zlib"}:
+            body = zlib.decompress(body)
+        elif encoding:
+            return None
+        parsed = json.loads(body)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def build_openai_websocket_headers(websocket: WebSocket) -> dict[str, str]:
+    allowed = {"authorization", "openai-organization", "openai-project", "accept", "user-agent"}
+    headers: dict[str, str] = {}
+    for k, v in websocket.headers.items():
+        if k.lower() in allowed:
+            headers[k] = v
+    if "authorization" not in {k.lower() for k in headers}:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            headers["authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def openai_websocket_url(path: str) -> str:
+    base = OPENAI_UPSTREAM.rstrip("/")
+    if base.startswith("https://"):
+        base = "wss://" + base[len("https://"):]
+    elif base.startswith("http://"):
+        base = "ws://" + base[len("http://"):]
+    return base + path
+
+
+def openai_usage_tokens(body: dict[str, Any]) -> tuple[Optional[int], Optional[int], int, int]:
+    usage = (body or {}).get("usage") or {}
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
+    output_details = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
+    cached_tokens = int(input_details.get("cached_tokens") or 0)
+    reasoning_tokens = int(output_details.get("reasoning_tokens") or 0)
+    return input_tokens, output_tokens, cached_tokens, reasoning_tokens
+
+
+def openai_response_output_text(resp: dict[str, Any]) -> str:
+    if not isinstance(resp, dict):
+        return ""
+    if isinstance(resp.get("output_text"), str):
+        return resp["output_text"]
+    parts: list[str] = []
+    for item in resp.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for block in item.get("content") or []:
+            if isinstance(block, dict):
+                if isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+    for choice in resp.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        msg = choice.get("message") or {}
+        if isinstance(msg.get("content"), str):
+            parts.append(msg["content"])
+        delta = choice.get("delta") or {}
+        if isinstance(delta.get("content"), str):
+            parts.append(delta["content"])
+    return "\n".join(parts)
+
+
+def _openai_passthrough_media_type(headers: httpx.Headers) -> Optional[str]:
+    content_type = headers.get("content-type")
+    if content_type:
+        return content_type.split(";", 1)[0]
+    return None
+
+
+def _openai_headers_for_client(headers: httpx.Headers) -> dict[str, str]:
+    excluded = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+    return {k: v for k, v in headers.items() if k.lower() not in excluded}
+
+
+def _openai_session_id(request: Request) -> str:
+    client_ip = request.client.host if request.client else "unknown"
+    return request.headers.get("x-session-id") or hashlib.sha256(
+        (client_ip + datetime.now(timezone.utc).strftime("%Y-%m-%d")).encode()
+    ).hexdigest()[:16]
+
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "db": DEFAULT_DB, "upstream": DEFAULT_UPSTREAM, "time": utc_now()}
+    return {"ok": True, "provider": PROVIDER, "db": DEFAULT_DB, "upstream": DEFAULT_UPSTREAM, "time": utc_now()}
 
 
 @app.get("/v1/models")
 async def models() -> dict[str, Any]:
+    if PROVIDER == "openai":
+        return {"object": "list", "data": [{"id": model, "object": "model"} for model in OPENAI_MODEL_LIST]}
     return {
         "data": [
             {"id": HAIKU_DEFAULT, "type": "model"},
@@ -209,6 +373,8 @@ async def models() -> dict[str, Any]:
 
 @app.post("/v1/messages")
 async def messages(request: Request) -> Response:
+    if PROVIDER != "anthropic":
+        return provider_disabled_response("anthropic")
     started = time.time()
     call_id = str(uuid.uuid4())
     path = "/v1/messages"
@@ -325,7 +491,7 @@ async def messages(request: Request) -> Response:
                                 await _await_tier_backoff(crunched["model"])
                                 await _throttle_forward()
                                 try:
-                                    async with client.stream("POST", DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                    async with client.stream("POST", ANTHROPIC_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
                                         status_code = r.status_code
                                         if status_code in (429, 529) and stream_retry_count < 3:
                                             stream_retry_count += 1
@@ -448,7 +614,7 @@ async def messages(request: Request) -> Response:
                     await _await_tier_backoff(crunched["model"])
                     await _throttle_forward()
                     try:
-                        r = await client.post(DEFAULT_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+                        r = await client.post(ANTHROPIC_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
                     except httpx.NetworkError as exc:
                         if net_retries < 2:
                             net_retries += 1
@@ -573,13 +739,401 @@ async def messages(request: Request) -> Response:
         return JSONResponse({"type": "error", "error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
 
 
+async def openai_optimized(request: Request, path: str) -> Response:
+    if PROVIDER != "openai":
+        return provider_disabled_response("openai")
+
+    started = time.time()
+    call_id = str(uuid.uuid4())
+    session_id = _openai_session_id(request)
+    raw_body = await read_openai_json_body(request)
+    if raw_body is None:
+        return await openai_passthrough(request, path)
+    stream = bool(raw_body.get("stream"))
+    requested_model = str(raw_body.get("model") or OPENAI_MODEL_LIST[0])
+    raw_body.setdefault("model", requested_model)
+    category = categorize_request(raw_body)
+    status_code = 200
+    error: Optional[str] = None
+    crunch_meta: dict[str, Any] = {}
+    routing_meta: dict[str, Any] = {}
+    retry_count = 0
+    net_retries = 0
+
+    try:
+        crunched, crunch_meta = crunch_body(raw_body)
+        routed_model, routing_meta = route_openai_model(crunched)
+        resolved_requested_model = str(crunched.get("model") or requested_model)
+        crunched["model"] = routed_model
+        input_tokens = estimate_tokens_from_text(extract_text(crunched))
+        headers = build_openai_forward_headers(request)
+
+        if stream:
+            async def gen() -> AsyncIterator[bytes]:
+                nonlocal status_code, error
+                actual_in: Optional[int] = None
+                actual_out: Optional[int] = None
+                cache_read_in = 0
+                reasoning_tokens = 0
+                sse_frame_buf = b""
+                stream_retry_count = 0
+                stream_net_retries = 0
+
+                def parse_sse_usage(frame: bytes) -> None:
+                    nonlocal actual_in, actual_out, cache_read_in, reasoning_tokens
+                    for line in frame.decode("utf-8", errors="replace").splitlines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:]
+                        if payload == "[DONE]":
+                            continue
+                        try:
+                            data = json.loads(payload)
+                        except Exception:
+                            continue
+                        if data.get("type") == "response.completed":
+                            data = data.get("response") or data
+                        in_tok, out_tok, cached_tok, reason_tok = openai_usage_tokens(data)
+                        if in_tok is not None:
+                            actual_in = in_tok
+                        if out_tok is not None:
+                            actual_out = out_tok
+                        cache_read_in = max(cache_read_in, cached_tok)
+                        reasoning_tokens = max(reasoning_tokens, reason_tok)
+
+                try:
+                    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                        while True:
+                            await _throttle_forward()
+                            try:
+                                async with client.stream("POST", OPENAI_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                    status_code = r.status_code
+                                    if status_code in (429, 529) and stream_retry_count < 3:
+                                        stream_retry_count += 1
+                                        delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
+                                        print(f"openai_rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                        if stream_retry_count == 1 and routed_model != resolved_requested_model:
+                                            crunched["model"] = resolved_requested_model
+                                            routing_meta["fallback_reason"] = "rate_limited"
+                                            print(f"openai_rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                                        await asyncio.sleep(delay)
+                                        continue
+                                    async for chunk in r.aiter_bytes():
+                                        sse_frame_buf += chunk
+                                        while b"\n\n" in sse_frame_buf:
+                                            frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
+                                            event_bytes = frame + b"\n\n"
+                                            yield event_bytes
+                                            parse_sse_usage(frame)
+                                    if sse_frame_buf:
+                                        yield sse_frame_buf
+                                        parse_sse_usage(sse_frame_buf)
+                                        sse_frame_buf = b""
+                                    break
+                            except httpx.NetworkError as exc:
+                                if stream_net_retries < 2:
+                                    stream_net_retries += 1
+                                    print(f"openai_network_error: {exc!r} retry={stream_net_retries}", flush=True)
+                                    await asyncio.sleep(2.0)
+                                    continue
+                                raise
+                except Exception as exc:
+                    error = repr(exc)
+                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
+                finally:
+                    latency_ms = int((time.time() - started) * 1000)
+                    cost_in = actual_in if actual_in is not None else input_tokens
+                    cost_out = actual_out if actual_out is not None else 0
+                    cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai")
+                    cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
+                    if status_code >= 400 and error is None:
+                        error = f"upstream_error: status={status_code}"
+                    store.log_call(
+                        id=call_id, created_at=utc_now(), path=path, provider="openai",
+                        requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
+                        cache_hit=0, status_code=status_code, latency_ms=latency_ms,
+                        input_tokens_est=input_tokens, output_tokens_est=None,
+                        actual_input_tokens=actual_in, actual_output_tokens=actual_out,
+                        cost_est_usd=cost, cost_baseline_usd=cost_baseline,
+                        crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                        cache_json=stable_json(cache_decision_meta("skip-streaming")),
+                        error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
+                        session_id=session_id, category=category,
+                        cache_creation_input_tokens=0, cache_read_input_tokens=cache_read_in,
+                        retry_count=stream_retry_count,
+                        thinking_output_tokens=reasoning_tokens or None,
+                    )
+                    await _check_session_cost_alert(session_id)
+
+            return StreamingResponse(
+                gen(),
+                media_type="text/event-stream",
+                headers={"x-agentflow-cache": "skip-streaming", "x-agentflow-routed-model": str(crunched.get("model"))},
+            )
+
+        can_cache = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tools(crunched))
+        key = cache_key_for(crunched, path)
+        can_semantic_cache = SEMANTIC_CACHE_ENABLED and not has_tools(crunched)
+        _cache_miss_type = "miss" if can_cache or can_semantic_cache else ("skip-tools" if CACHE_ENABLED else "skip-disabled")
+        emb: Optional[list[float]] = None
+        if can_cache:
+            cached = store.get_cache(key)
+            if cached is not None:
+                latency_ms = int((time.time() - started) * 1000)
+                out_tokens = estimate_tokens_from_text(openai_response_output_text(cached))
+                cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens, provider="openai")
+                store.log_call(
+                    id=call_id, created_at=utc_now(), path=path, provider="openai",
+                    requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
+                    cache_hit=1, status_code=200, latency_ms=latency_ms,
+                    input_tokens_est=input_tokens, output_tokens_est=out_tokens,
+                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                    cache_json=stable_json(cache_decision_meta("exact")),
+                    error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
+                    response_json=stable_json(cached) if LOG_BODIES else None,
+                    session_id=session_id, category=category, retry_count=0,
+                )
+                return JSONResponse(cached, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+
+        if can_semantic_cache:
+            emb = build_embedding(extract_text(crunched))
+            sem_resp = store.get_semantic_cache(emb, str(crunched.get("model")), SEMANTIC_CACHE_THRESHOLD)
+            if sem_resp is not None:
+                latency_ms = int((time.time() - started) * 1000)
+                out_tokens = estimate_tokens_from_text(openai_response_output_text(sem_resp))
+                cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens, provider="openai")
+                store.log_call(
+                    id=call_id, created_at=utc_now(), path=path, provider="openai",
+                    requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
+                    cache_hit=1, status_code=200, latency_ms=latency_ms,
+                    input_tokens_est=input_tokens, output_tokens_est=out_tokens,
+                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                    cache_json=stable_json(cache_decision_meta("semantic")),
+                    error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
+                    response_json=stable_json(sem_resp) if LOG_BODIES else None,
+                    session_id=session_id, category=category, retry_count=0,
+                )
+                return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
+
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            while True:
+                await _throttle_forward()
+                try:
+                    r = await client.post(OPENAI_UPSTREAM.rstrip("/") + path, headers=headers, json=crunched)
+                except httpx.NetworkError as exc:
+                    if net_retries < 2:
+                        net_retries += 1
+                        print(f"openai_network_error: {exc!r} retry={net_retries}", flush=True)
+                        await asyncio.sleep(2.0)
+                        continue
+                    raise
+                if r.status_code in (429, 529) and retry_count < 3:
+                    retry_count += 1
+                    delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
+                    print(f"openai_rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
+                    if retry_count == 1 and routed_model != resolved_requested_model:
+                        crunched["model"] = resolved_requested_model
+                        routing_meta["fallback_reason"] = "rate_limited"
+                        print(f"openai_rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                    await asyncio.sleep(delay)
+                    continue
+                break
+
+        status_code = r.status_code
+        try:
+            response_body = r.json()
+        except Exception:
+            latency_ms = int((time.time() - started) * 1000)
+            cost = estimate_cost(str(crunched.get("model")), input_tokens, 0, provider="openai")
+            cost_baseline = estimate_cost(requested_model, input_tokens, 0, provider="openai")
+            store.log_call(
+                id=call_id, created_at=utc_now(), path=path, provider="openai",
+                requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
+                cache_hit=0, status_code=status_code, latency_ms=latency_ms,
+                input_tokens_est=input_tokens, output_tokens_est=None,
+                actual_input_tokens=None, actual_output_tokens=None,
+                cost_est_usd=cost, cost_baseline_usd=cost_baseline,
+                crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+                error=r.text[:1000],
+                request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
+                session_id=session_id, category=category,
+                cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                retry_count=retry_count,
+            )
+            return Response(
+                r.content,
+                status_code=status_code,
+                media_type=_openai_passthrough_media_type(r.headers),
+                headers=_openai_headers_for_client(r.headers),
+            )
+
+        if r.status_code < 400 and can_cache and response_body is not None:
+            store.set_cache(key, str(crunched.get("model")), len(stable_json(crunched)), response_body)
+        if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
+            store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))
+
+        actual_in, actual_out, cache_read_in, reasoning_tokens = openai_usage_tokens(response_body)
+        out_tokens = estimate_tokens_from_text(openai_response_output_text(response_body)) if response_body else 0
+        cost_in = actual_in if actual_in is not None else input_tokens
+        cost_out = actual_out if actual_out is not None else out_tokens
+        cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai")
+        cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
+        latency_ms = int((time.time() - started) * 1000)
+        store.log_call(
+            id=call_id, created_at=utc_now(), path=path, provider="openai",
+            requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
+            cache_hit=0, status_code=status_code, latency_ms=latency_ms,
+            input_tokens_est=input_tokens, output_tokens_est=out_tokens,
+            actual_input_tokens=actual_in, actual_output_tokens=actual_out,
+            cost_est_usd=cost, cost_baseline_usd=cost_baseline,
+            crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+            error=None if status_code < 400 else stable_json(response_body)[:1000],
+            request_json=stable_json(crunched) if LOG_BODIES else None,
+            response_json=stable_json(response_body) if LOG_BODIES else None,
+            session_id=session_id, category=category,
+            cache_creation_input_tokens=0, cache_read_input_tokens=cache_read_in,
+            retry_count=retry_count,
+            thinking_output_tokens=reasoning_tokens or None,
+        )
+        await _check_session_cost_alert(session_id)
+        return JSONResponse(
+            response_body,
+            status_code=status_code,
+            headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))},
+        )
+    except Exception as exc:
+        error = repr(exc)
+        latency_ms = int((time.time() - started) * 1000)
+        store.log_call(
+            id=call_id, created_at=utc_now(), path=path, provider="openai",
+            requested_model=requested_model, routed_model=None, stream=int(stream), cache_hit=0,
+            status_code=500, latency_ms=latency_ms,
+            input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
+            crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cache_json=stable_json(cache_decision_meta("miss")),
+            error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
+            session_id=session_id, category=category, retry_count=retry_count,
+        )
+        return JSONResponse({"error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
+
+
+async def openai_passthrough(request: Request, path: str) -> Response:
+    if PROVIDER != "openai":
+        return provider_disabled_response("openai")
+    headers = build_openai_forward_headers(request, force_json=False)
+    content = await request.body()
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.request(
+            request.method,
+            OPENAI_UPSTREAM.rstrip("/") + path,
+            headers=headers,
+            content=content if content else None,
+            params=dict(request.query_params),
+        )
+    return Response(
+        r.content,
+        status_code=r.status_code,
+        media_type=_openai_passthrough_media_type(r.headers),
+        headers=_openai_headers_for_client(r.headers),
+    )
+
+
+@app.post("/v1/responses")
+async def openai_responses(request: Request) -> Response:
+    return await openai_optimized(request, "/v1/responses")
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request) -> Response:
+    return await openai_optimized(request, "/v1/chat/completions")
+
+
+@app.websocket("/v1/responses")
+async def openai_responses_websocket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    if PROVIDER != "openai":
+        await websocket.close(code=1008, reason="provider mismatch")
+        return
+
+    headers = build_openai_websocket_headers(websocket)
+    upstream_url = openai_websocket_url("/v1/responses")
+    try:
+        async with websockets.connect(upstream_url, additional_headers=headers) as upstream:
+            async def client_to_upstream() -> None:
+                while True:
+                    msg = await websocket.receive()
+                    msg_type = msg.get("type")
+                    if msg_type == "websocket.disconnect":
+                        await upstream.close()
+                        return
+                    if "text" in msg and msg["text"] is not None:
+                        await upstream.send(msg["text"])
+                    elif "bytes" in msg and msg["bytes"] is not None:
+                        await upstream.send(msg["bytes"])
+
+            async def upstream_to_client() -> None:
+                async for msg in upstream:
+                    if isinstance(msg, bytes):
+                        await websocket.send_bytes(msg)
+                    else:
+                        await websocket.send_text(msg)
+
+            tasks = {
+                asyncio.create_task(client_to_upstream()),
+                asyncio.create_task(upstream_to_client()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                exc = task.exception()
+                if exc is not None and not isinstance(exc, WebSocketDisconnect):
+                    raise exc
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.close(code=1011, reason=str(exc)[:120])
+        except Exception:
+            pass
+
+
+@app.api_route("/v1/responses/{rest:path}", methods=["GET", "POST", "DELETE"])
+async def openai_responses_passthrough(request: Request, rest: str) -> Response:
+    return await openai_passthrough(request, f"/v1/responses/{rest}")
+
+
+@app.api_route("/v1/files", methods=["GET", "POST", "DELETE"])
+async def openai_files_root_passthrough(request: Request) -> Response:
+    return await openai_passthrough(request, "/v1/files")
+
+
+@app.api_route("/v1/files/{rest:path}", methods=["GET", "POST", "DELETE"])
+async def openai_files_passthrough(request: Request, rest: str) -> Response:
+    return await openai_passthrough(request, f"/v1/files/{rest}")
+
+
+@app.api_route("/v1/uploads", methods=["GET", "POST", "DELETE"])
+async def openai_uploads_root_passthrough(request: Request) -> Response:
+    return await openai_passthrough(request, "/v1/uploads")
+
+
+@app.api_route("/v1/uploads/{rest:path}", methods=["GET", "POST", "DELETE"])
+async def openai_uploads_passthrough(request: Request, rest: str) -> Response:
+    return await openai_passthrough(request, f"/v1/uploads/{rest}")
+
+
 @app.get("/agentflow/stats")
 async def stats() -> dict[str, Any]:
     conn = store.conn
     calls = conn.execute("select count(*) c from calls").fetchone()["c"]
     cache_hits = conn.execute("select count(*) c from calls where cache_hit = 1").fetchone()["c"]
-    routed = conn.execute("select requested_model, routed_model, count(*) c from calls group by requested_model, routed_model order by c desc limit 20").fetchall()
-    recent = conn.execute("select created_at, requested_model, routed_model, cache_hit, status_code, latency_ms, cost_est_usd from calls order by created_at desc limit 20").fetchall()
+    routed = conn.execute("select coalesce(provider, 'anthropic') as provider, requested_model, routed_model, count(*) c from calls group by coalesce(provider, 'anthropic'), requested_model, routed_model order by c desc limit 20").fetchall()
+    recent = conn.execute("select coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, cache_hit, status_code, latency_ms, cost_est_usd from calls order by created_at desc limit 20").fetchall()
     return {
         "calls": calls,
         "cache_hits": cache_hits,
@@ -616,15 +1170,15 @@ async def stats_full() -> dict[str, Any]:
     routing_savings = 0.0
     today_routing_savings = 0.0
     downgraded = q("""
-        select requested_model, routed_model,
+        select coalesce(provider, 'anthropic') as provider, requested_model, routed_model,
                coalesce(actual_input_tokens, input_tokens_est, 0) as in_tok,
                coalesce(actual_output_tokens, output_tokens_est, 0) as out_tok,
                (date(created_at) = date('now')) as is_today
         from calls where requested_model != routed_model and routed_model is not null
     """)
     for row in downgraded:
-        req_cost = estimate_cost(row["requested_model"], row["in_tok"], row["out_tok"]) or 0
-        act_cost = estimate_cost(row["routed_model"], row["in_tok"], row["out_tok"]) or 0
+        req_cost = estimate_cost(row["requested_model"], row["in_tok"], row["out_tok"], provider=row["provider"]) or 0
+        act_cost = estimate_cost(row["routed_model"], row["in_tok"], row["out_tok"], provider=row["provider"]) or 0
         delta = max(0.0, req_cost - act_cost)
         routing_savings += delta
         if row["is_today"]:
@@ -645,14 +1199,15 @@ async def stats_full() -> dict[str, Any]:
     cache_read_by_model = q("""
         select coalesce(routed_model, requested_model) as model,
                sum(cache_read_input_tokens) as read_tok,
-               sum(case when date(created_at) = date('now') then cache_read_input_tokens else 0 end) as today_read_tok
+               sum(case when date(created_at) = date('now') then cache_read_input_tokens else 0 end) as today_read_tok,
+               coalesce(provider, 'anthropic') as provider
         from calls where cache_read_input_tokens > 0
-        group by coalesce(routed_model, requested_model)
+        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
     """)
     for row in cache_read_by_model:
-        full_cost = estimate_cost(row["model"], row["read_tok"], 0) or 0
+        full_cost = estimate_cost(row["model"], row["read_tok"], 0, provider=row["provider"]) or 0
         prompt_cache_savings += 0.90 * full_cost
-        today_full_cost = estimate_cost(row["model"], row["today_read_tok"] or 0, 0) or 0
+        today_full_cost = estimate_cost(row["model"], row["today_read_tok"] or 0, 0, provider=row["provider"]) or 0
         today_prompt_cache_savings += 0.90 * today_full_cost
 
     thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls") or 0)
@@ -662,16 +1217,17 @@ async def stats_full() -> dict[str, Any]:
     thinking_by_model = q("""
         select coalesce(routed_model, requested_model) as model,
                sum(thinking_output_tokens) as think_tok,
-               sum(case when date(created_at) = date('now') then coalesce(thinking_output_tokens, 0) else 0 end) as today_think_tok
+               sum(case when date(created_at) = date('now') then coalesce(thinking_output_tokens, 0) else 0 end) as today_think_tok,
+               coalesce(provider, 'anthropic') as provider
         from calls where thinking_output_tokens > 0
-        group by coalesce(routed_model, requested_model)
+        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
     """)
     for row in thinking_by_model:
-        thinking_cost += estimate_cost(row["model"], 0, row["think_tok"] or 0) or 0
-        today_thinking_cost += estimate_cost(row["model"], 0, row["today_think_tok"] or 0) or 0
+        thinking_cost += estimate_cost(row["model"], 0, row["think_tok"] or 0, provider=row["provider"]) or 0
+        today_thinking_cost += estimate_cost(row["model"], 0, row["today_think_tok"] or 0, provider=row["provider"]) or 0
 
     recent = q("""
-        select id, created_at, requested_model, routed_model, stream, cache_hit,
+        select id, coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, stream, cache_hit,
                status_code, latency_ms,
                coalesce(actual_input_tokens, input_tokens_est) as input_tokens,
                coalesce(actual_output_tokens, output_tokens_est) as output_tokens,
@@ -684,15 +1240,22 @@ async def stats_full() -> dict[str, Any]:
     """)
 
     routing_breakdown = q("""
-        select requested_model, routed_model, count(*) as count
-        from calls group by requested_model, routed_model order by count desc limit 15
+        select coalesce(provider, 'anthropic') as provider, requested_model, routed_model, count(*) as count
+        from calls group by coalesce(provider, 'anthropic'), requested_model, routed_model order by count desc limit 15
     """)
 
     category_breakdown = q("""
-        select coalesce(category, 'unknown') as category, count(*) as count,
+        select coalesce(provider, 'anthropic') as provider, coalesce(category, 'unknown') as category, count(*) as count,
                round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
                sum(case when requested_model != routed_model and routed_model is not null then 1 else 0 end) as routed_count
-        from calls group by coalesce(category, 'unknown') order by count desc
+        from calls group by coalesce(provider, 'anthropic'), coalesce(category, 'unknown') order by count desc
+    """)
+
+    provider_breakdown = q("""
+        select coalesce(provider, 'anthropic') as provider, count(*) as count,
+               round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
+               sum(case when requested_model != routed_model and routed_model is not null then 1 else 0 end) as routed_count
+        from calls group by coalesce(provider, 'anthropic') order by count desc
     """)
 
     return {
@@ -728,6 +1291,7 @@ async def stats_full() -> dict[str, Any]:
         "recent": recent,
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
+        "provider_breakdown": provider_breakdown,
     }
 
 
@@ -830,6 +1394,7 @@ async def dashboard() -> str:
   .badge.err{background:#3a1a1a;color:#f85149}
   .badge.routed{background:#2d2208;color:#d29922}
   .badge.crunched{background:#1a1a3a;color:#79c0ff}
+  .badge.provider{background:#20242b;color:#c9d1d9}
   .model{max-width:160px;overflow:hidden;text-overflow:ellipsis;color:#c9d1d9}
   .model.downgraded{color:#d29922}
   .cost{color:#3fb950;font-variant-numeric:tabular-nums}
@@ -848,7 +1413,7 @@ async def dashboard() -> str:
 <header>
   <span class="dot"></span>
   <h1>AgentFlow</h1>
-  <span class="sub">Claude proxy · cost reduction dashboard</span>
+  <span class="sub">provider-aware proxy · cost reduction dashboard</span>
   <span id="status">loading...</span>
 </header>
 
@@ -857,7 +1422,7 @@ async def dashboard() -> str:
   <div class="card"><div class="label">Cost today</div><div class="value" id="c-cost">—</div><div class="sub" id="c-cost-total">— total</div></div>
   <div class="card green"><div class="label">Saved by routing</div><div class="value" id="c-routing">—</div><div class="sub" id="c-routed-n">— calls routed</div></div>
   <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
-  <div class="card green"><div class="label">Prompt cache saved</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— prompt hit rate</div></div>
+  <div class="card green"><div class="label">Provider cache discount</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— provider cache hit rate</div></div>
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
   <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
 </div>
@@ -874,7 +1439,7 @@ async def dashboard() -> str:
   <h2>Recent calls</h2>
   <table>
     <thead><tr>
-      <th>Time</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
+      <th>Time</th><th>Provider</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
     </tr></thead>
     <tbody id="tbody"></tbody>
   </table>
@@ -932,6 +1497,10 @@ function shortModel(m){
   if(!m)return'—';
   return m.replace('claude-','').replace(/-20\\d{6}$/,'');
 }
+function shortProvider(p){
+  if(!p)return'—';
+  return p==='anthropic'?'Claude':p.charAt(0).toUpperCase()+p.slice(1);
+}
 
 function showTab(name){
   ['recent','weekly','categories','sessions'].forEach(t=>{
@@ -981,7 +1550,7 @@ async function refresh(){
     document.getElementById('c-cache-saved').textContent=fmt(s.today_cache_savings_usd,4);
     document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
     document.getElementById('c-prompt-cache-saved').textContent=fmt(s.today_prompt_cache_savings_usd,4);
-    document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% prompt hit rate';
+    document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% provider cache hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
     document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
     document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
@@ -1001,6 +1570,7 @@ async function refresh(){
       const usedModel=`<span class="model${routed?' downgraded':''}">${shortModel(row.routed_model||row.requested_model)}</span>`;
       return `<tr class="${errClass}">
         <td class="ts">${ago(row.created_at)}</td>
+        <td><span class="badge provider">${shortProvider(row.provider)}</span></td>
         <td class="model">${shortModel(row.requested_model)}</td>
         <td>${usedModel}</td>
         <td class="tokens">${fmtTok(row.input_tokens)}<span class="arrow">/</span>${fmtTok(row.output_tokens)}</td>
@@ -1026,7 +1596,7 @@ async function refreshCategories(){
     tb.innerHTML=rows.map(row=>{
       const pct=Math.round((row.count/total)*100);
       return `<tr>
-        <td><span class="badge miss">${row.category}</span></td>
+        <td><span class="badge provider">${shortProvider(row.provider)}</span> <span class="badge miss">${row.category}</span></td>
         <td>${(row.count||0).toLocaleString()} <span style="color:#8b949e;font-size:11px">(${pct}%)</span></td>
         <td class="cost">${fmt(row.cost_usd,5)}</td>
         <td class="tokens">${(row.routed_count||0).toLocaleString()}</td>
@@ -1069,13 +1639,23 @@ setInterval(refreshSessions,30000);
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="AgentFlow Claude-compatible local proxy")
+    parser = argparse.ArgumentParser(description="AgentFlow provider-specific local proxy")
+    parser.add_argument("--provider", choices=("anthropic", "openai"), default=PROVIDER)
+    parser.add_argument("--anthropic-upstream", default=ANTHROPIC_UPSTREAM)
+    parser.add_argument("--openai-upstream", default=OPENAI_UPSTREAM)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
+    os.environ["AGENTFLOW_PROVIDER"] = args.provider
+    os.environ["AGENTFLOW_ANTHROPIC_UPSTREAM"] = args.anthropic_upstream
+    os.environ["AGENTFLOW_OPENAI_UPSTREAM"] = args.openai_upstream
+    configure_provider(args.provider, args.anthropic_upstream, args.openai_upstream)
     import uvicorn
-    uvicorn.run("agentflow_proxy.server:app", host=args.host, port=args.port, reload=args.reload)
+    if args.reload:
+        uvicorn.run("agentflow_proxy.server:app", host=args.host, port=args.port, reload=True)
+    else:
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

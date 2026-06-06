@@ -4,7 +4,7 @@ Read this before making any change. It applies to human developers and agent run
 
 ## What this repo is
 
-A local Anthropic-compatible proxy that reduces API cost via crunching, routing, and caching.
+A local provider-specific proxy that reduces API cost via crunching, routing, and caching.
 See `ARCHITECTURE.md` for the target product shape, `NORTH_STAR.md` for goals, and
 `BACKLOG.md` for what to work on.
 
@@ -12,7 +12,7 @@ See `ARCHITECTURE.md` for the target product shape, `NORTH_STAR.md` for goals, a
 
 AgentFlow has two planned layers:
 
-- the local Python module: localhost Claude middleware, read-only LAN dashboard, local SQLite
+- the local Python module: localhost provider middleware, read-only LAN dashboard, local SQLite
   logs/cache, and local manual rules for model routing, crunching, and exact-match cache policy;
 - the future managed optimizer: a separate opt-in server for paying users that can provide
   better routing/crunching policies and a wider policy/cache knowledge base.
@@ -30,10 +30,11 @@ premium managed service.
 | prod | 4000 | `~/.agentflow/agentflow.sqlite3` | Live traffic from Claude Code / Claude CLI |
 | dev  | 4001 | `~/.agentflow/dev.sqlite3` | Agent development and testing |
 | dashboard | 4002 | `~/.agentflow/agentflow.sqlite3` | Read-only LAN dashboard |
+| OpenAI proxy | 4003 | `~/.agentflow/agentflow.sqlite3` | Localhost-only Codex/Codex extension proxy |
 
 **Never restart prod mid-development.** The developer agent works against port 4001.
 Only the orchestrator promotes to prod after tests pass.
-Never expose the Claude proxy endpoint on the LAN. Only the read-only dashboard may bind
+Never expose provider proxy endpoints on the LAN. Only the read-only dashboard may bind
 outside localhost.
 
 ## Module structure
@@ -121,7 +122,7 @@ Controls:
 ```bash
 export AGENTFLOW_WORKER=codex                         # default; set to claude to switch back
 export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit Codex worker model
-export AGENTFLOW_CODEX_OPENAI_BASE_URL=               # optional Codex proxy URL override
+export AGENTFLOW_CODEX_OPENAI_BASE_URL=http://127.0.0.1:4003/v1 # route normal Codex through AgentFlow OpenAI proxy
 export AGENTFLOW_CODEX_SANDBOX=workspace-write        # default Codex worker sandbox
 export AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=1 # default recovery bypasses proxies
 export AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL=https://api.openai.com/v1
@@ -133,6 +134,17 @@ export AGENTFLOW_ARCHIVE_CRON_HOUR=2                  # default nightly archive 
 export AGENTFLOW_ARCHIVE_CRON_MINUTE=7                # default nightly archive minute
 export AGENTFLOW_WORK_LOG_ARCHIVE_MIN_AGE_HOURS=2     # default active-log safety buffer
 ```
+
+Run provider proxies as separate processes so the served API surface is explicit:
+
+```bash
+agentflow-proxy --provider anthropic --host 127.0.0.1 --port 4000
+agentflow-proxy --provider openai --host 127.0.0.1 --port 4003
+```
+
+OpenAI-mode proxying supports the OpenAI-compatible `/v1/responses` and
+`/v1/chat/completions` endpoints plus Responses/file/upload passthrough routes. Routing stays
+within OpenAI models only; cross-provider routing is deliberately out of scope.
 
 ## Commit message format
 
