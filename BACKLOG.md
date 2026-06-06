@@ -267,7 +267,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
-- [READY] Fix effort parameter stripping: deep-scan request body for nested "effort" key (2026-06-06)
+- [DONE] Fix effort parameter stripping: deep-scan request body for nested "effort" key (2026-06-06)
   Details: Analysis 2026-06-06: 10+ Haiku-routed calls per day fail with HTTP 400
   "This model does not support the effort parameter." The stripping code (server.py ~line 238)
   checks `"effort" in crunched` (top-level only) and finds nothing — `stripped_params` is NULL
