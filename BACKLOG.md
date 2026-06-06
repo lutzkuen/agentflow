@@ -655,3 +655,39 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   a lower confidence threshold.
   Metric: additional code-gen calls routed at 6k-8k chars; no increase in error rate or
   quality complaints on short code-gen tasks.
+
+- [IDEA] Dashboard: context plateau detector for repeated agent sessions (2026-06-06)
+  Details: Analysis 2026-06-06: 2,233 consecutive call pairs have text_chars within 3% of
+  the previous call while still carrying >=8k chars. The highest-cost sessions show hundreds
+  of these plateaus: session 360d58e2 has 617 adjacent near-same-size calls, median 108k chars,
+  $44.05 cost; session 83da67c has 449 pairs, median 121k chars, $30.85 cost. Add a dashboard
+  panel that flags sessions with repeated context plateaus, showing session_id, call count,
+  median/p90 text_chars, adjacent plateau count, cost, prompt-cache read savings, and crunch
+  saved_chars. This is local observability only, but it gives a clean interface for choosing
+  manual summarization, stricter crunch rules, or future managed optimizer policies.
+  Metric: dashboard identifies sessions with >50 adjacent near-same-size large calls; operator
+  can see estimated dollars attached to repeated-context plateaus.
+
+- [IDEA] Populate cache_json with explicit cache decision metadata on every call (2026-06-06)
+  Details: Analysis 2026-06-06: cache_hit is 0/3,801 and cache_json is missing on 100% of calls,
+  even though the schema already has a cache_json column. Exact normalized duplicate analysis
+  found 0 duplicate miss groups, so the zero hit rate is probably expected for streaming and
+  tool-heavy agent traffic. Still, the analyzer and dashboard cannot tell whether a call skipped
+  cache because it was streaming, had tools, semantic cache was disabled, tool-call caching was
+  disabled, or it was a true miss. Record cache_json like
+  {"enabled": true, "status": "skipped", "reason": "streaming", "policy_source": "local-default"}
+  for every request, and use "miss"/"hit"/"bypass" statuses where appropriate.
+  Metric: >=95% of new calls have non-null cache_json; dashboard can break cache outcomes down
+  by skipped-streaming, skipped-tools, disabled, miss, and hit.
+
+- [IDEA] Dashboard: show active tier cooldown/backoff state from local rate limiter (2026-06-06)
+  Details: Analysis 2026-06-06: 247/3,801 calls are 4xx/5xx, dominated by 429s. Some local
+  rate-limit responses now say "temporarily limiting requests" with retry-after windows as long
+  as 12,744s for Sonnet and 3,176s for Haiku. The per-tier backoff/concurrency work may be
+  correct, but the operator has no read-only view of whether a tier is currently cooling down,
+  when it will resume, how many calls were queued/rejected, or which tier is the bottleneck.
+  Add a dashboard status card backed by in-memory limiter state and recent DB rows: tier,
+  cooldown_until, seconds_remaining, last_upstream_429, queued count if available, and recent
+  local throttled responses.
+  Metric: during a 429 burst, dashboard shows the active tier cooldown and remaining wait time;
+  operators can distinguish upstream quota exhaustion from proxy or network failures.
