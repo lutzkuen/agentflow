@@ -147,7 +147,11 @@ async def _check_session_cost_alert(sid: str) -> None:
 
 from agentflow_proxy.store import Store, utc_now, stable_json
 from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_cost
-from agentflow_proxy.router import extract_text, has_tools, categorize_request, route_model, HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT
+from agentflow_proxy.router import (
+    extract_text, has_tools, categorize_request, route_model,
+    HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT,
+    STRIP_THINKING_HISTORY, _has_top_level_thinking, strip_thinking_history_blocks,
+)
 from agentflow_proxy.crunch import (
     TOKEN_CHARS, sha256_text, estimate_tokens_from_text, build_embedding,
     crunch_body, inject_prompt_cache, has_cache_control_blocks,
@@ -231,7 +235,17 @@ async def messages(request: Request) -> Response:
     try:
         crunched, crunch_meta = crunch_body(raw_body)
         crunched, prompt_cached = inject_prompt_cache(crunched)
+        if STRIP_THINKING_HISTORY and category == "tool-result" and not _has_top_level_thinking(crunched):
+            tokens_before = estimate_tokens_from_text(extract_text(crunched))
+            crunched, _n_stripped = strip_thinking_history_blocks(crunched)
+            if _n_stripped > 0:
+                tokens_after = estimate_tokens_from_text(extract_text(crunched))
+                print(f"strip_thinking_history: blocks={_n_stripped} tokens_before={tokens_before} tokens_after={tokens_after}", flush=True)
+        else:
+            _n_stripped = 0
         routed_model, routing_meta = route_model(crunched)
+        if _n_stripped > 0:
+            routing_meta["thinking_history_stripped"] = _n_stripped
         resolved_requested_model = crunched.get("model", requested_model)
         crunched["model"] = routed_model
         if routed_model != resolved_requested_model:

@@ -14,6 +14,7 @@ OPUS_DEFAULT = os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
 
 ROUTING_ENABLED = os.getenv("AGENTFLOW_ROUTING", "1") != "0"
 ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(Path.home() / ".agentflow" / "routing_rules.yaml"))
+STRIP_THINKING_HISTORY = os.getenv("AGENTFLOW_STRIP_THINKING_HISTORY", "0") == "1"
 
 
 def extract_text(obj: Any) -> str:
@@ -85,6 +86,33 @@ def uses_thinking(body: dict[str, Any]) -> bool:
             if any(isinstance(b, dict) and b.get("type") == "thinking" for b in msg["content"]):
                 return True
     return False
+
+
+def _has_top_level_thinking(body: dict[str, Any]) -> bool:
+    if body.get("effort"):
+        return True
+    if body.get("interleaved_thinking"):
+        return True
+    thinking = body.get("thinking")
+    if thinking:
+        if isinstance(thinking, dict) and str(thinking.get("type", "")).lower() == "disabled":
+            pass
+        else:
+            return True
+    return False
+
+
+def strip_thinking_history_blocks(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Remove type=='thinking' blocks from assistant messages; returns (modified_body, n_stripped)."""
+    import copy
+    body = copy.deepcopy(body)
+    n_stripped = 0
+    for msg in body.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+            filtered = [b for b in msg["content"] if not (isinstance(b, dict) and b.get("type") == "thinking")]
+            n_stripped += len(msg["content"]) - len(filtered)
+            msg["content"] = filtered
+    return body, n_stripped
 
 
 def _load_routing_rules() -> tuple[list[dict], str]:
