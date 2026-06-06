@@ -40,7 +40,7 @@
 
 - conditions:
     model_pattern: "sonnet"
-    text_chars_lt: 6000
+    text_chars_lt: 8000
     has_tools: false
   action:
     route_to: haiku
