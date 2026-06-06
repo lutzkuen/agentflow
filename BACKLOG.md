@@ -281,7 +281,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: zero 400 "effort parameter" errors on Haiku-routed calls; routing_json stripped_params
   non-empty when effort-like params are removed.
 
-- [IDEA] Strip historical thinking blocks before Haiku routing to unlock $33/day savings (2026-06-06)
+- [DONE] Strip historical thinking blocks before Haiku routing to unlock $33/day savings (2026-06-06)
   Details: Analysis 2026-06-06: 1,150 Sonnet calls/day (96%) are blocked from Haiku routing by
   uses_thinking() finding type=="thinking" blocks in message history. These calls have
   thinking_output_tokens=0 — no new thinking is occurring. They are tool-result turns from an
