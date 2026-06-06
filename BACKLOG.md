@@ -267,6 +267,36 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
+- [READY] Fix effort parameter stripping: deep-scan request body for nested "effort" key (2026-06-06)
+  Details: Analysis 2026-06-06: 10+ Haiku-routed calls per day fail with HTTP 400
+  "This model does not support the effort parameter." The stripping code (server.py ~line 238)
+  checks `"effort" in crunched` (top-level only) and finds nothing — `stripped_params` is NULL
+  in all affected routing_json records — yet Haiku still receives the parameter.
+  The `effort` key is not at the top level of the request body as the proxy processes it.
+  Two-part fix: (1) enable AGENTFLOW_LOG_BODIES=1 on dev during a cron run to capture the raw
+  request structure and identify where `effort` lives; (2) replace the flat top-level check with
+  a recursive deep-scan or targeted nested check (e.g., also inspect body["thinking"] for an
+  "effort" subkey and strip it there). Also add `interleaved_thinking` to the incompatible list
+  as a defensive measure.
+  Metric: zero 400 "effort parameter" errors on Haiku-routed calls; routing_json stripped_params
+  non-empty when effort-like params are removed.
+
+- [IDEA] Strip historical thinking blocks before Haiku routing to unlock $33/day savings (2026-06-06)
+  Details: Analysis 2026-06-06: 1,150 Sonnet calls/day (96%) are blocked from Haiku routing by
+  uses_thinking() finding type=="thinking" blocks in message history. These calls have
+  thinking_output_tokens=0 — no new thinking is occurring. They are tool-result turns from an
+  ongoing thinking-session agent. Haiku rejects requests with thinking blocks in history.
+  Potential fix: when routing to Haiku, strip type=="thinking" content blocks from all assistant
+  messages in body["messages"] before forwarding. The tool_use/tool_result blocks and text context
+  remain; only the model's internal reasoning chain is removed.
+  Estimated savings: ~$0.029/call × 1,150 calls/day = ~$33/day.
+  Risk: thinking blocks carry the model's reasoning chain. Stripping them could cause Haiku to
+  lose coherence in complex multi-turn sessions. Gate behind AGENTFLOW_STRIP_THINKING_HISTORY
+  (default: 0, off). Validate on a non-critical session before enabling in prod. Monitor error
+  rate and retry count carefully.
+  Metric: routing fires on thinking-history tool-result calls; daily cost drops by ~$30+; error
+  rate does not increase with AGENTFLOW_STRIP_THINKING_HISTORY=1.
+
 - [IDEA] Dashboard: correct crunch savings estimate to use cache-blended token rate (2026-06-06)
   Details: The dashboard shows crunch savings using full input rate ($3/MTok). For
   thinking sessions where 80-90% of input is served from prompt cache ($0.30/MTok),

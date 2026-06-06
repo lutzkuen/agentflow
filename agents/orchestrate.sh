@@ -579,8 +579,10 @@ main() {
 
   if [[ "$main_head_after" != "$main_head_before" ]]; then
     log "Deploying merged commits: restarting prod service" | tee -a "$RUN_LOG"
-    systemctl --user restart "$PROXY_SERVICE"
-    if ! wait_for_health; then
+    if ! systemctl --user restart "$PROXY_SERVICE"; then
+      log "Prod restart command failed; attempting repair" | tee -a "$RUN_LOG"
+      repair_proxy_service || true
+    elif ! wait_for_health; then
       log "Prod did not come healthy after restart; attempting repair" | tee -a "$RUN_LOG"
       repair_proxy_service || true
     fi
