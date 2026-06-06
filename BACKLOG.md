@@ -674,7 +674,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: dashboard identifies sessions with >50 adjacent near-same-size large calls; operator
   can see estimated dollars attached to repeated-context plateaus.
 
-- [IDEA] Populate cache_json with explicit cache decision metadata on every call (2026-06-06)
+- [DONE] Populate cache_json with explicit cache decision metadata on every call (2026-06-06)
   Details: Analysis 2026-06-06: cache_hit is 0/3,801 and cache_json is missing on 100% of calls,
   even though the schema already has a cache_json column. Exact normalized duplicate analysis
   found 0 duplicate miss groups, so the zero hit rate is probably expected for streaming and
@@ -685,6 +685,10 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   for every request, and use "miss"/"hit"/"bypass" statuses where appropriate.
   Metric: >=95% of new calls have non-null cache_json; dashboard can break cache outcomes down
   by skipped-streaming, skipped-tools, disabled, miss, and hit.
+  Verified 2026-06-06: cache_json now records explicit status, reason, enabled flags,
+  hit_type, and policy_source for Anthropic and OpenAI optimized request paths. stats_full()
+  exposes cache_decision_breakdown and the read-only dashboard has a Cache tab for the
+  breakdown. Served checks on a temp dev port confirmed the dashboard HTML and stats JSON.
 
 - [IDEA] Dashboard: show active tier cooldown/backoff state from local rate limiter (2026-06-06)
   Details: Analysis 2026-06-06: 247/3,801 calls are 4xx/5xx, dominated by 429s. Some local

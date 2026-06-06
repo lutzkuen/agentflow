@@ -198,8 +198,8 @@ from agentflow_proxy.crunch import (
     crunch_body, inject_prompt_cache, has_cache_control_blocks,
 )
 from agentflow_proxy.cache import (
-    CACHE_ENABLED, CACHE_TOOL_CALLS, SEMANTIC_CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
-    cache_decision_meta, cache_key_for, response_output_text,
+    SEMANTIC_CACHE_THRESHOLD,
+    cache_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
 )
 
 
@@ -442,6 +442,7 @@ async def messages(request: Request) -> Response:
     status_code = 200
     crunch_meta: dict[str, Any] = {}
     routing_meta: dict[str, Any] = {}
+    cache_meta: dict[str, Any] = cache_decision_meta("skipped", "not-evaluated")
     cache_hit = False
     response_body: Optional[dict[str, Any]] = None
     retry_count = 0
@@ -600,7 +601,7 @@ async def messages(request: Request) -> Response:
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
                         cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                         crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                        cache_json=stable_json(cache_decision_meta("skip-streaming")),
+                        cache_json=stable_json(cache_decision_meta("skipped", "streaming")),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
@@ -611,10 +612,9 @@ async def messages(request: Request) -> Response:
 
             return StreamingResponse(gen(), media_type="text/event-stream")
 
-        can_cache = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tools(crunched))
+        has_tool_blocks = has_tools(crunched)
+        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)
         key = cache_key_for(crunched, path)
-        can_semantic_cache = SEMANTIC_CACHE_ENABLED and not has_tools(crunched)
-        _cache_miss_type = "miss" if can_cache or can_semantic_cache else ("skip-tools" if CACHE_ENABLED else "skip-disabled")
         emb: Optional[list[float]] = None
         if can_cache:
             cached = store.get_cache(key)
@@ -631,7 +631,13 @@ async def messages(request: Request) -> Response:
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta("exact")),
+                    cache_json=stable_json(cache_decision_meta(
+                        "hit",
+                        "exact-match",
+                        hit_type="exact",
+                        exact_enabled=can_cache,
+                        semantic_enabled=can_semantic_cache,
+                    )),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(response_body) if LOG_BODIES else None,
                     session_id=session_id, category=category, retry_count=0,
@@ -652,7 +658,13 @@ async def messages(request: Request) -> Response:
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta("semantic")),
+                    cache_json=stable_json(cache_decision_meta(
+                        "hit",
+                        "semantic-match",
+                        hit_type="semantic",
+                        exact_enabled=can_cache,
+                        semantic_enabled=can_semantic_cache,
+                    )),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(sem_resp) if LOG_BODIES else None,
                     session_id=session_id, category=category, retry_count=0,
@@ -700,7 +712,7 @@ async def messages(request: Request) -> Response:
                 actual_input_tokens=None, actual_output_tokens=None,
                 cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+                cache_json=stable_json(cache_meta),
                 error=r.text[:1000],
                 request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                 session_id=session_id, category=category,
@@ -736,7 +748,7 @@ async def messages(request: Request) -> Response:
             actual_input_tokens=actual_in, actual_output_tokens=actual_out,
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-            cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+            cache_json=stable_json(cache_meta),
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
@@ -764,7 +776,7 @@ async def messages(request: Request) -> Response:
             status_code=status_code, latency_ms=latency_ms,
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-            cache_json=stable_json(cache_decision_meta("miss")),
+            cache_json=stable_json(cache_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
             session_id=session_id, category=category, retry_count=retry_count,
@@ -783,7 +795,7 @@ async def messages(request: Request) -> Response:
             status_code=500, latency_ms=latency_ms,
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-            cache_json=stable_json(cache_decision_meta("miss")),
+            cache_json=stable_json(cache_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
         )
@@ -808,6 +820,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
     error: Optional[str] = None
     crunch_meta: dict[str, Any] = {}
     routing_meta: dict[str, Any] = {}
+    cache_meta: dict[str, Any] = cache_decision_meta("skipped", "not-evaluated")
     retry_count = 0
     net_retries = 0
 
@@ -907,7 +920,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
                         cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                         crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                        cache_json=stable_json(cache_decision_meta("skip-streaming")),
+                        cache_json=stable_json(cache_decision_meta("skipped", "streaming")),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=0, cache_read_input_tokens=cache_read_in,
@@ -922,10 +935,9 @@ async def openai_optimized(request: Request, path: str) -> Response:
                 headers={"x-agentflow-cache": "skip-streaming", "x-agentflow-routed-model": str(crunched.get("model"))},
             )
 
-        can_cache = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tools(crunched))
+        has_tool_blocks = has_tools(crunched)
+        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)
         key = cache_key_for(crunched, path)
-        can_semantic_cache = SEMANTIC_CACHE_ENABLED and not has_tools(crunched)
-        _cache_miss_type = "miss" if can_cache or can_semantic_cache else ("skip-tools" if CACHE_ENABLED else "skip-disabled")
         emb: Optional[list[float]] = None
         if can_cache:
             cached = store.get_cache(key)
@@ -940,7 +952,13 @@ async def openai_optimized(request: Request, path: str) -> Response:
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta("exact")),
+                    cache_json=stable_json(cache_decision_meta(
+                        "hit",
+                        "exact-match",
+                        hit_type="exact",
+                        exact_enabled=can_cache,
+                        semantic_enabled=can_semantic_cache,
+                    )),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(cached) if LOG_BODIES else None,
                     session_id=session_id, category=category, retry_count=0,
@@ -961,7 +979,13 @@ async def openai_optimized(request: Request, path: str) -> Response:
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta("semantic")),
+                    cache_json=stable_json(cache_decision_meta(
+                        "hit",
+                        "semantic-match",
+                        hit_type="semantic",
+                        exact_enabled=can_cache,
+                        semantic_enabled=can_semantic_cache,
+                    )),
                     error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
                     response_json=stable_json(sem_resp) if LOG_BODIES else None,
                     session_id=session_id, category=category, retry_count=0,
@@ -1007,7 +1031,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
                 actual_input_tokens=None, actual_output_tokens=None,
                 cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+                cache_json=stable_json(cache_meta),
                 error=r.text[:1000],
                 request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                 session_id=session_id, category=category,
@@ -1041,7 +1065,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
             actual_input_tokens=actual_in, actual_output_tokens=actual_out,
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-            cache_json=stable_json(cache_decision_meta(_cache_miss_type)),
+            cache_json=stable_json(cache_meta),
             error=None if status_code < 400 else stable_json(response_body)[:1000],
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
@@ -1065,7 +1089,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
             status_code=500, latency_ms=latency_ms,
             input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-            cache_json=stable_json(cache_decision_meta("miss")),
+            cache_json=stable_json(cache_meta),
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
         )
@@ -1341,6 +1365,20 @@ async def stats_full() -> dict[str, Any]:
         from calls group by coalesce(provider, 'anthropic'), coalesce(category, 'unknown') order by count desc
     """)
 
+    cache_decision_breakdown = q("""
+        select coalesce(json_extract(cache_json, '$.status'), 'missing') as status,
+               coalesce(json_extract(cache_json, '$.reason'), 'unknown') as reason,
+               coalesce(json_extract(cache_json, '$.hit_type'), '') as hit_type,
+               coalesce(json_extract(cache_json, '$.policy_source'), 'unknown') as policy_source,
+               count(*) as count
+        from calls
+        group by coalesce(json_extract(cache_json, '$.status'), 'missing'),
+                 coalesce(json_extract(cache_json, '$.reason'), 'unknown'),
+                 coalesce(json_extract(cache_json, '$.hit_type'), ''),
+                 coalesce(json_extract(cache_json, '$.policy_source'), 'unknown')
+        order by count desc
+    """)
+
     provider_breakdown = q("""
         select coalesce(provider, 'anthropic') as provider, count(*) as count,
                round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
@@ -1417,6 +1455,7 @@ async def stats_full() -> dict[str, Any]:
         "recent": recent,
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
+        "cache_decision_breakdown": cache_decision_breakdown,
         "provider_breakdown": provider_breakdown,
         "codex_app_methods": codex_app_methods,
         "codex_app_recent": codex_app_recent,
@@ -1561,6 +1600,7 @@ async def dashboard() -> str:
   <button class="tab-btn" onclick="showTab('codex')">Codex app</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
+  <button class="tab-btn" onclick="showTab('cache')">Cache</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
@@ -1612,6 +1652,18 @@ async def dashboard() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-cache">
+<div class="section">
+  <h2>Cache decisions</h2>
+  <table>
+    <thead><tr>
+      <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
+    </tr></thead>
+    <tbody id="cache-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <div class="tab-panel" id="tab-sessions">
 <div class="section">
   <h2>Sessions today</h2>
@@ -1645,7 +1697,7 @@ function shortProvider(p){
 }
 
 function showTab(name){
-  const tabs=['recent','codex','weekly','categories','sessions'];
+  const tabs=['recent','codex','weekly','categories','cache','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -1750,6 +1802,22 @@ async function refreshCategories(){
   }catch(e){}
 }
 
+async function refreshCache(){
+  try{
+    const r=await fetch('/agentflow/stats/full');
+    const d=await r.json();
+    const tb=document.getElementById('cache-tbody');
+    const rows=d.cache_decision_breakdown||[];
+    tb.innerHTML=rows.map(row=>`<tr>
+      <td><span class="badge ${row.status==='hit'?'hit':row.status==='miss'?'miss':'stream'}">${row.status}</span></td>
+      <td class="model">${row.reason||'unknown'}</td>
+      <td class="tokens">${row.hit_type||'—'}</td>
+      <td><span class="badge provider">${row.policy_source||'unknown'}</span></td>
+      <td>${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="5" style="color:#8b949e">No cache decision data yet</td></tr>';
+  }catch(e){}
+}
+
 async function refreshCodexApp(){
   try{
     const r=await fetch('/agentflow/stats/full');
@@ -1796,11 +1864,13 @@ refresh();
 refreshCodexApp();
 refreshWeekly();
 refreshCategories();
+refreshCache();
 refreshSessions();
 setInterval(refresh,5000);
 setInterval(refreshCodexApp,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
+setInterval(refreshCache,30000);
 setInterval(refreshSessions,30000);
 </script>
 </body>
