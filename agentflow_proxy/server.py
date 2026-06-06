@@ -235,9 +235,15 @@ async def messages(request: Request) -> Response:
         resolved_requested_model = crunched.get("model", requested_model)
         crunched["model"] = routed_model
         if routed_model != resolved_requested_model:
-            _incompatible = [k for k in ("effort", "thinking", "budget_tokens") if k in crunched]
+            _incompatible = [k for k in ("effort", "thinking", "budget_tokens", "interleaved_thinking") if k in crunched]
             for k in _incompatible:
                 del crunched[k]
+            # Also strip effort nested inside a thinking dict (e.g. {"type": "disabled", "effort": "high"})
+            _thinking_block = crunched.get("thinking")
+            if isinstance(_thinking_block, dict) and "effort" in _thinking_block:
+                del crunched["thinking"]["effort"]
+                if "thinking.effort" not in _incompatible:
+                    _incompatible.append("thinking.effort")
             if _incompatible:
                 routing_meta["stripped_params"] = _incompatible
         _thinking_param = crunched.get("thinking")

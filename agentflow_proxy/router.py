@@ -70,6 +70,10 @@ def categorize_request(body: dict[str, Any]) -> str:
 
 
 def uses_thinking(body: dict[str, Any]) -> bool:
+    if body.get("effort"):
+        return True
+    if body.get("interleaved_thinking"):
+        return True
     thinking = body.get("thinking")
     if thinking:
         if isinstance(thinking, dict) and str(thinking.get("type", "")).lower() == "disabled":
