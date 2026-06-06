@@ -358,7 +358,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   The 392 historical successful streaming calls with 0 were from June 2-5, mostly before
   the SSE parsing code was active in production. (2026-06-06)
 
-- [IDEA] Dashboard: show prompt-cache write vs read ratio and cost to warm cache (2026-06-06)
+- [DONE] Dashboard: show prompt-cache write vs read ratio and cost to warm cache (2026-06-07)
   Details: Analysis 2026-06-06: prompt cache is the dominant savings driver — $24.5 savings on
   June 5, $15.8 on June 4. But cache write tokens cost 3.75× input rate; June 6 shows 523 M
   write tokens vs 17 M read tokens (ratio 30:1 write-heavy), meaning the cache may not yet be
@@ -368,6 +368,10 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Show cache_creation_cost / cache_read_savings per session so expensive cache warmups are visible.
   Metric: dashboard shows per-session write/read cost ratio; identifies sessions where cache warmup
   was not recouped.
+  Verified 2026-06-07: `/agentflow/stats/sessions` now returns per-session prompt-cache
+  creation/read tokens, token write/read ratio, cache creation cost, cache read savings, and
+  warmup payback ratio. The read-only Sessions tab renders those fields. Unit coverage and a
+  served temporary dev check on port 4011 confirmed the JSON endpoint and dashboard HTML.
 
 - [IDEA] Routing rule: route non-thinking Sonnet calls with text_chars 8k–30k and no tools to Haiku (2026-06-06)
   Details: Analysis 2026-06-06: 23 non-tool Sonnet calls in the 15k–30k char range and 11 in

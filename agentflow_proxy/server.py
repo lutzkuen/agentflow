@@ -1521,6 +1521,15 @@ async def stats_sessions() -> dict[str, Any]:
         sid: {"thinking_tokens": 0, "thinking_cost_usd": 0.0}
         for sid in session_ids
     }
+    prompt_cache_by_session: dict[str, dict[str, float | int]] = {
+        sid: {
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_cost_usd": 0.0,
+            "cache_read_savings_usd": 0.0,
+        }
+        for sid in session_ids
+    }
     if session_ids:
         placeholders = ",".join("?" for _ in session_ids)
         thinking_rows = conn.execute(f"""
@@ -1541,10 +1550,66 @@ async def stats_sessions() -> dict[str, Any]:
             thinking_by_session[sid]["thinking_cost_usd"] = float(thinking_by_session[sid]["thinking_cost_usd"]) + (
                 estimate_cost(row["model"], 0, tokens, provider=row["provider"]) or 0.0
             )
+        prompt_cache_rows = conn.execute(f"""
+            SELECT session_id,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(routed_model, requested_model) as model,
+                   SUM(coalesce(cache_creation_input_tokens, 0)) as cache_creation_tokens,
+                   SUM(coalesce(cache_read_input_tokens, 0)) as cache_read_tokens
+            FROM calls
+            WHERE DATE(created_at) = DATE('now')
+              AND session_id IN ({placeholders})
+              AND (
+                  coalesce(cache_creation_input_tokens, 0) > 0
+                  OR coalesce(cache_read_input_tokens, 0) > 0
+              )
+            GROUP BY session_id, coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
+        """, tuple(session_ids)).fetchall()
+        for row in prompt_cache_rows:
+            sid = row["session_id"]
+            creation_tokens = int(row["cache_creation_tokens"] or 0)
+            read_tokens = int(row["cache_read_tokens"] or 0)
+            bucket = prompt_cache_by_session[sid]
+            bucket["cache_creation_tokens"] = int(bucket["cache_creation_tokens"]) + creation_tokens
+            bucket["cache_read_tokens"] = int(bucket["cache_read_tokens"]) + read_tokens
+
+            creation_cost = estimate_cost(
+                row["model"],
+                0,
+                0,
+                cache_creation=creation_tokens,
+                provider=row["provider"],
+            ) or 0.0
+            provider = str(row["provider"]).lower()
+            full_read_cost = estimate_cost(row["model"], read_tokens, 0, provider=provider) or 0.0
+            cached_read_input_tokens = read_tokens if provider == "openai" else 0
+            cached_read_cost = estimate_cost(
+                row["model"],
+                cached_read_input_tokens,
+                0,
+                cache_read=read_tokens,
+                provider=provider,
+            ) or 0.0
+            bucket["cache_creation_cost_usd"] = float(bucket["cache_creation_cost_usd"]) + creation_cost
+            bucket["cache_read_savings_usd"] = float(bucket["cache_read_savings_usd"]) + max(
+                full_read_cost - cached_read_cost,
+                0.0,
+            )
     for row in sessions:
         thinking = thinking_by_session.get(row["session_id"], {})
         row["thinking_tokens"] = int(thinking.get("thinking_tokens", 0) or 0)
         row["thinking_cost_usd"] = round(float(thinking.get("thinking_cost_usd", 0.0) or 0.0), 6)
+        prompt_cache = prompt_cache_by_session.get(row["session_id"], {})
+        creation_tokens = int(prompt_cache.get("cache_creation_tokens", 0) or 0)
+        read_tokens = int(prompt_cache.get("cache_read_tokens", 0) or 0)
+        creation_cost = float(prompt_cache.get("cache_creation_cost_usd", 0.0) or 0.0)
+        read_savings = float(prompt_cache.get("cache_read_savings_usd", 0.0) or 0.0)
+        row["cache_creation_tokens"] = creation_tokens
+        row["cache_read_tokens"] = read_tokens
+        row["cache_write_read_token_ratio"] = round(creation_tokens / read_tokens, 3) if read_tokens else None
+        row["cache_creation_cost_usd"] = round(creation_cost, 6)
+        row["cache_read_savings_usd"] = round(read_savings, 6)
+        row["cache_warmup_payback_ratio"] = round(creation_cost / read_savings, 3) if read_savings else None
     return {"sessions": sessions}
 
 
@@ -1699,7 +1764,7 @@ async def dashboard() -> str:
   <h2>Sessions today</h2>
   <table>
     <thead><tr>
-      <th>Session</th><th>Calls</th><th>Cost</th><th>Thinking</th><th>Thinking cost</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
+      <th>Session</th><th>Calls</th><th>Cost</th><th>Thinking</th><th>Thinking cost</th><th>Cache write</th><th>Cache read</th><th>Write/read</th><th>Write cost</th><th>Read saved</th><th>Payback</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
     </tr></thead>
     <tbody id="sess-tbody"></tbody>
   </table>
@@ -1710,6 +1775,7 @@ async def dashboard() -> str:
 function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
 function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
 function fmtTok(n){if(n==null)return'?';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
+function fmtRatio(n){if(n==null)return'—';return n.toFixed(2)+'x'}
 function ago(ts){
   if(!ts)return'—';
   const d=Math.floor((Date.now()-new Date(ts).getTime())/1000);
@@ -1882,13 +1948,19 @@ async function refreshSessions(){
       <td class="cost">${fmt(row.cost_usd,5)}</td>
       <td class="tokens">${fmtTok(row.thinking_tokens||0)}</td>
       <td class="cost">${fmt(row.thinking_cost_usd||0,5)}</td>
+      <td class="tokens">${fmtTok(row.cache_creation_tokens||0)}</td>
+      <td class="tokens">${fmtTok(row.cache_read_tokens||0)}</td>
+      <td class="tokens">${fmtRatio(row.cache_write_read_token_ratio)}</td>
+      <td class="cost">${fmt(row.cache_creation_cost_usd||0,5)}</td>
+      <td class="savings">${fmt(row.cache_read_savings_usd||0,5)}</td>
+      <td class="tokens">${fmtRatio(row.cache_warmup_payback_ratio)}</td>
       <td class="tokens">${row.tool_result||0}</td>
       <td class="tokens">${row.tool_heavy||0}</td>
       <td class="tokens">${row.short_completion||0}</td>
       <td class="tokens">${row.code_gen||0}</td>
       <td class="tokens">${row.chat||0}</td>
       <td class="tokens">${row.other||0}</td>
-    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No sessions today</td></tr>';
+    </tr>`).join('')||'<tr><td colspan="17" style="color:#8b949e">No sessions today</td></tr>';
   }catch(e){}
 }
 
