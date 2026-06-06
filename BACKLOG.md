@@ -529,7 +529,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: WARNING log emitted when a session crosses the threshold; visible in server logs
   during unattended runs; does not fire on typical <$1 sessions.
 
-- [READY] Raise small-Sonnet-→-Haiku text threshold from 6000 to 8000 chars for code-gen (2026-06-05)
+- [DONE] Raise small-Sonnet-→-Haiku text threshold from 6000 to 8000 chars for code-gen (2026-06-06)
   Details: Analysis 2026-06-05: the small-non-tool rule fires at <6000 chars. Post-restart,
   2 code-gen calls at 6614 and 9048 chars stay on Sonnet. Raising the threshold to 8000
   (not 10000 as previously IDEAd) would catch the 6614-char call without reaching into the
