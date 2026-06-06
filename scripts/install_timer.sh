@@ -7,6 +7,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"
+CODEX_BIN="$(command -v codex || echo /home/$USER/.local/bin/codex)"
 
 mkdir -p "$UNIT_DIR"
 
@@ -45,6 +46,46 @@ EnvironmentFile=-$REPO/.env
 ExecStartPre=-/usr/bin/fuser -k 4003/tcp
 ExecStart=$REPO/.venv/bin/python -m agentflow_proxy.server --provider openai --host 127.0.0.1 --port 4003
 Environment=AGENTFLOW_PROVIDER=openai
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+EOF
+
+# ── Codex OAuth app-server pass-through telemetry ────────────────────────────
+cat > "$UNIT_DIR/agentflow-codex-app-upstream.service" << EOF
+[Unit]
+Description=Codex App Server Upstream
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO
+EnvironmentFile=-$REPO/.env
+ExecStartPre=-/usr/bin/fuser -k 4014/tcp
+ExecStart=$CODEX_BIN app-server --listen ws://127.0.0.1:4014
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=default.target
+EOF
+
+cat > "$UNIT_DIR/agentflow-codex-app-proxy.service" << EOF
+[Unit]
+Description=AgentFlow Codex App-Server Proxy
+After=network-online.target agentflow-codex-app-upstream.service
+Wants=agentflow-codex-app-upstream.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$REPO
+EnvironmentFile=-$REPO/.env
+ExecStartPre=-/usr/bin/fuser -k 4013/tcp
+ExecStart=$REPO/.venv/bin/python -m agentflow_proxy.codex_app_proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
 Restart=always
 RestartSec=1
 
@@ -107,6 +148,8 @@ EOF
 systemctl --user daemon-reload
 systemctl --user enable --now agentflow-claude-proxy.service
 systemctl --user enable --now agentflow-openai-proxy.service
+systemctl --user enable --now agentflow-codex-app-upstream.service
+systemctl --user enable --now agentflow-codex-app-proxy.service
 systemctl --user enable --now agentflow-dashboard.service
 systemctl --user enable --now agentflow-orchestrator.timer
 
@@ -121,6 +164,9 @@ systemctl --user status agentflow-dashboard.service --no-pager
 echo ""
 echo "OpenAI proxy status:"
 systemctl --user status agentflow-openai-proxy.service --no-pager
+echo ""
+echo "Codex app-server proxy status:"
+systemctl --user status agentflow-codex-app-proxy.service --no-pager
 echo ""
 echo "Status:"
 systemctl --user status agentflow-orchestrator.timer --no-pager
@@ -138,5 +184,7 @@ echo "To uninstall:"
 echo "  systemctl --user disable --now agentflow-orchestrator.timer"
 echo "  systemctl --user disable --now agentflow-claude-proxy.service"
 echo "  systemctl --user disable --now agentflow-openai-proxy.service"
+echo "  systemctl --user disable --now agentflow-codex-app-proxy.service"
+echo "  systemctl --user disable --now agentflow-codex-app-upstream.service"
 echo "  systemctl --user disable --now agentflow-dashboard.service"
-echo "  rm $UNIT_DIR/agentflow-orchestrator.{service,timer} $UNIT_DIR/agentflow-claude-proxy.service $UNIT_DIR/agentflow-openai-proxy.service $UNIT_DIR/agentflow-dashboard.service"
+echo "  rm $UNIT_DIR/agentflow-orchestrator.{service,timer} $UNIT_DIR/agentflow-claude-proxy.service $UNIT_DIR/agentflow-openai-proxy.service $UNIT_DIR/agentflow-codex-app-proxy.service $UNIT_DIR/agentflow-codex-app-upstream.service $UNIT_DIR/agentflow-dashboard.service"

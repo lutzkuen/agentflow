@@ -110,6 +110,17 @@ Use `--openai-auth-mode client` to preserve Codex's own OAuth/subscription auth 
 Use `--openai-auth-mode proxy` only when you intentionally want the proxy to replace client
 auth with `OPENAI_API_KEY` or `AGENTFLOW_OPENAI_API_KEY` for API-key billing.
 
+For Codex OAuth/subscription quota, the safer experimental path is the Codex app-server protocol,
+not `openai_base_url`:
+
+```bash
+codex app-server --listen ws://127.0.0.1:4014
+agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
+```
+
+This relay is pass-through telemetry first. It records redacted JSON-RPC method names and sizes
+to SQLite without storing raw prompts.
+
 If your client refuses `ANTHROPIC_AUTH_TOKEN`, try keeping `ANTHROPIC_API_KEY` set. The proxy accepts both header styles.
 
 ## Direct test

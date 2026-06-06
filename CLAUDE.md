@@ -31,6 +31,8 @@ premium managed service.
 | dev  | 4001 | `~/.agentflow/dev.sqlite3` | Agent development and testing |
 | dashboard | 4002 | `~/.agentflow/agentflow.sqlite3` | Read-only LAN dashboard |
 | OpenAI proxy | 4003 | `~/.agentflow/agentflow.sqlite3` | Localhost-only Codex/Codex extension proxy |
+| Codex app proxy | 4013 | `~/.agentflow/agentflow.sqlite3` | Experimental Codex OAuth app-server telemetry relay |
+| Codex app upstream | 4014 | `~/.agentflow/agentflow.sqlite3` | Local Codex app-server behind the relay |
 
 **Never restart prod mid-development.** The developer agent works against port 4001.
 Only the orchestrator promotes to prod after tests pass.
@@ -147,6 +149,19 @@ agentflow-proxy --provider openai --host 127.0.0.1 --port 4003
 OpenAI-mode proxying supports the OpenAI-compatible `/v1/responses` and
 `/v1/chat/completions` endpoints plus Responses/file/upload passthrough routes. Routing stays
 within OpenAI models only; cross-provider routing is deliberately out of scope.
+
+For Codex OAuth/subscription quota, do not use `openai_base_url`: that forces the public
+OpenAI API `/v1/responses` path. Use the experimental app-server relay instead:
+
+```bash
+codex app-server --listen ws://127.0.0.1:4014
+agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
+```
+
+The app-server relay is currently pass-through telemetry only. It records JSON-RPC method names,
+message sizes, input item counts, thread IDs, and latency in `codex_app_events`, but it does not
+store raw prompts or auth-bearing payloads. Prompt crunching should only be enabled later for a
+small allowlist such as `turn/start` after we validate the observed protocol shape.
 
 ## Commit message format
 

@@ -81,6 +81,25 @@ class Store:
         self._ensure_column("calls", "cache_json", "text")
         self._ensure_column("calls", "thinking_output_tokens", "integer")
         self._ensure_column("calls", "provider", "text")
+        cur.execute("""
+        create table if not exists codex_app_events (
+          id text primary key,
+          created_at text not null,
+          direction text not null,
+          method text,
+          request_id text,
+          thread_id text,
+          message_chars integer,
+          params_chars integer,
+          input_items integer,
+          input_text_chars integer,
+          result_chars integer,
+          error_code integer,
+          error_message text,
+          latency_ms integer,
+          session_id text
+        )
+        """)
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -139,6 +158,19 @@ class Store:
         values = [kwargs.get(c, "anthropic") if c == "provider" else kwargs.get(c) for c in cols]
         self.conn.execute(
             f"insert into calls({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+            values,
+        )
+        self.conn.commit()
+
+    def log_codex_app_event(self, **kwargs: Any) -> None:
+        cols = [
+            "id", "created_at", "direction", "method", "request_id", "thread_id",
+            "message_chars", "params_chars", "input_items", "input_text_chars",
+            "result_chars", "error_code", "error_message", "latency_ms", "session_id",
+        ]
+        values = [kwargs.get(c) for c in cols]
+        self.conn.execute(
+            f"insert into codex_app_events({','.join(cols)}) values ({','.join(['?']*len(cols))})",
             values,
         )
         self.conn.commit()
