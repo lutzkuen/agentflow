@@ -123,6 +123,8 @@ Controls:
 export AGENTFLOW_WORKER=codex                         # default; set to claude to switch back
 export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit Codex worker model
 export AGENTFLOW_CODEX_OPENAI_BASE_URL=http://127.0.0.1:4003/v1 # route normal Codex through AgentFlow OpenAI proxy
+export AGENTFLOW_OPENAI_AUTH_MODE=proxy               # proxy sends its own OpenAI API key upstream
+export AGENTFLOW_OPENAI_API_KEY=sk-...                # needs Responses API write scope
 export AGENTFLOW_CODEX_SANDBOX=workspace-write        # default Codex worker sandbox
 export AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=1 # default recovery bypasses proxies
 export AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL=https://api.openai.com/v1

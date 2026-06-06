@@ -55,6 +55,7 @@ OPENAI_MODEL_LIST = list(dict.fromkeys([
     "gpt-5.2-codex",
     "gpt-5-codex",
 ]))
+OPENAI_AUTH_MODE = os.getenv("AGENTFLOW_OPENAI_AUTH_MODE", "client").lower()
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
@@ -186,14 +187,23 @@ store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
 
 
-def configure_provider(provider: str, anthropic_upstream: str = ANTHROPIC_UPSTREAM, openai_upstream: str = OPENAI_UPSTREAM) -> None:
-    global PROVIDER, ANTHROPIC_UPSTREAM, OPENAI_UPSTREAM, DEFAULT_UPSTREAM
+def configure_provider(
+    provider: str,
+    anthropic_upstream: str = ANTHROPIC_UPSTREAM,
+    openai_upstream: str = OPENAI_UPSTREAM,
+    openai_auth_mode: str = OPENAI_AUTH_MODE,
+) -> None:
+    global PROVIDER, ANTHROPIC_UPSTREAM, OPENAI_UPSTREAM, DEFAULT_UPSTREAM, OPENAI_AUTH_MODE
     provider = provider.lower()
     if provider not in {"anthropic", "openai"}:
         raise ValueError("provider must be 'anthropic' or 'openai'")
+    openai_auth_mode = openai_auth_mode.lower()
+    if openai_auth_mode not in {"client", "proxy"}:
+        raise ValueError("openai auth mode must be 'client' or 'proxy'")
     PROVIDER = provider
     ANTHROPIC_UPSTREAM = anthropic_upstream
     OPENAI_UPSTREAM = openai_upstream
+    OPENAI_AUTH_MODE = openai_auth_mode
     DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
     app.title = f"AgentFlow {PROVIDER.title()} Proxy"
 
@@ -241,10 +251,11 @@ def build_openai_forward_headers(request: Request, *, force_json: bool = True) -
     }
     headers: dict[str, str] = {}
     for k, v in request.headers.items():
-        if k.lower() in allowed:
+        lk = k.lower()
+        if lk in allowed and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy"):
             headers[k] = v
-    if "authorization" not in {k.lower() for k in headers}:
-        api_key = os.getenv("OPENAI_API_KEY")
+    if OPENAI_AUTH_MODE == "proxy" or "authorization" not in {k.lower() for k in headers}:
+        api_key = os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if api_key:
             headers["authorization"] = f"Bearer {api_key}"
     if force_json:
@@ -278,10 +289,11 @@ def build_openai_websocket_headers(websocket: WebSocket) -> dict[str, str]:
     allowed = {"authorization", "openai-organization", "openai-project", "accept", "user-agent"}
     headers: dict[str, str] = {}
     for k, v in websocket.headers.items():
-        if k.lower() in allowed:
+        lk = k.lower()
+        if lk in allowed and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy"):
             headers[k] = v
-    if "authorization" not in {k.lower() for k in headers}:
-        api_key = os.getenv("OPENAI_API_KEY")
+    if OPENAI_AUTH_MODE == "proxy" or "authorization" not in {k.lower() for k in headers}:
+        api_key = os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if api_key:
             headers["authorization"] = f"Bearer {api_key}"
     return headers
@@ -355,7 +367,14 @@ def _openai_session_id(request: Request) -> str:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "provider": PROVIDER, "db": DEFAULT_DB, "upstream": DEFAULT_UPSTREAM, "time": utc_now()}
+    return {
+        "ok": True,
+        "provider": PROVIDER,
+        "db": DEFAULT_DB,
+        "upstream": DEFAULT_UPSTREAM,
+        "openai_auth_mode": OPENAI_AUTH_MODE if PROVIDER == "openai" else None,
+        "time": utc_now(),
+    }
 
 
 @app.get("/v1/models")
@@ -1643,6 +1662,7 @@ def main() -> None:
     parser.add_argument("--provider", choices=("anthropic", "openai"), default=PROVIDER)
     parser.add_argument("--anthropic-upstream", default=ANTHROPIC_UPSTREAM)
     parser.add_argument("--openai-upstream", default=OPENAI_UPSTREAM)
+    parser.add_argument("--openai-auth-mode", choices=("client", "proxy"), default=OPENAI_AUTH_MODE)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--reload", action="store_true")
@@ -1650,7 +1670,8 @@ def main() -> None:
     os.environ["AGENTFLOW_PROVIDER"] = args.provider
     os.environ["AGENTFLOW_ANTHROPIC_UPSTREAM"] = args.anthropic_upstream
     os.environ["AGENTFLOW_OPENAI_UPSTREAM"] = args.openai_upstream
-    configure_provider(args.provider, args.anthropic_upstream, args.openai_upstream)
+    os.environ["AGENTFLOW_OPENAI_AUTH_MODE"] = args.openai_auth_mode
+    configure_provider(args.provider, args.anthropic_upstream, args.openai_upstream, args.openai_auth_mode)
     import uvicorn
     if args.reload:
         uvicorn.run("agentflow_proxy.server:app", host=args.host, port=args.port, reload=True)
