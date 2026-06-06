@@ -4,7 +4,8 @@
 #   1. Ensure the supervised middleware is healthy.
 #   2. Smoke test Claude OAuth through the middleware.
 #   3. Run the Claude orchestrator.
-#   4. Re-check and repair the middleware if Claude disturbed it.
+#   4. Merge commits and restart prod to deploy new code.
+#   5. Re-check and repair the middleware if Claude disturbed it.
 
 set -Eeuo pipefail
 
@@ -572,7 +573,19 @@ main() {
     fi
     log "Claude orchestrator exited non-zero; continuing to postflight middleware check" | tee -a "$RUN_LOG"
   fi
+  main_head_before=$(git -C "$MAIN_REPO" rev-parse HEAD)
   finalize_run_worktree
+  main_head_after=$(git -C "$MAIN_REPO" rev-parse HEAD)
+
+  if [[ "$main_head_after" != "$main_head_before" ]]; then
+    log "Deploying merged commits: restarting prod service" | tee -a "$RUN_LOG"
+    systemctl --user restart "$PROXY_SERVICE"
+    if ! wait_for_health; then
+      log "Prod did not come healthy after restart; attempting repair" | tee -a "$RUN_LOG"
+      repair_proxy_service || true
+    fi
+    log "Prod deployed: $(git -C "$MAIN_REPO" rev-parse --short HEAD)" | tee -a "$RUN_LOG"
+  fi
 
   log "Postflight: checking whether Claude disturbed the middleware" | tee -a "$RUN_LOG"
   if ! ensure_proxy_ready; then
