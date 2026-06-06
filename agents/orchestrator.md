@@ -24,13 +24,15 @@ as this run when practical. For Codex, non-interactive sub-agents use `codex exe
 use `claude --print`.
 
 ```bash
+CODEX_RUN_SANDBOX="${AGENTFLOW_CODEX_SANDBOX:-danger-full-access}"
+
 # Developer — implements one backlog item
 (cat "$PWD/agents/develop.md"
  echo ""
  echo "# Your Task"
  echo "Item: <item title>"
  echo "Hint: <specific implementation approach>"
-) | codex exec --cd "$PWD" --sandbox workspace-write --ask-for-approval never -
+) | codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never -
 
 # Tester — validates proxy and the specific item, ends with VERDICT: PASS or VERDICT: FAIL — <reason>
 (cat "$PWD/agents/test.md"
@@ -42,14 +44,14 @@ use `claude --print`.
  echo "# Current Diff"
  git diff --stat
  git diff -- <relevant files>
-) | codex exec --cd "$PWD" --sandbox read-only --ask-for-approval never -
+) | codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never -
 
 # Analyzer — queries DB, appends findings to BACKLOG.md
-codex exec --cd "$PWD" --sandbox workspace-write --ask-for-approval never \
+codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never \
   < "$PWD/agents/analyze.md"
 
 # Researcher — finds new techniques, appends IDEAs to BACKLOG.md
-codex exec --cd "$PWD" --sandbox workspace-write --ask-for-approval never \
+codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never \
   < "$PWD/agents/research.md"
 ```
 

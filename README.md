@@ -94,11 +94,12 @@ The proxy does not require local auth. It simply forwards incoming `authorizatio
 
 ## Point Codex at it
 
-Run the OpenAI proxy on a separate port and point Codex at the OpenAI-compatible `/v1` base URL:
+Run the OpenAI proxy on a separate port when you want to test OpenAI API-compatible clients
+or API-key billing:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-agentflow-proxy --provider openai --openai-auth-mode client --host 127.0.0.1 --port 4003
+agentflow-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
 codex exec --config 'openai_base_url="http://127.0.0.1:4003/v1"' "Reply with ok"
 ```
 
@@ -106,12 +107,13 @@ Provider modes are intentionally separate. An Anthropic-mode process serves `/v1
 an OpenAI-mode process serves `/v1/responses` and `/v1/chat/completions`. Cross-provider
 routing is not supported.
 
-Use `--openai-auth-mode client` to preserve Codex's own OAuth/subscription auth and quota.
-Use `--openai-auth-mode proxy` only when you intentionally want the proxy to replace client
-auth with `OPENAI_API_KEY` or `AGENTFLOW_OPENAI_API_KEY` for API-key billing.
+Use `--openai-auth-mode client` to preserve whatever auth an API-compatible client sends.
+Use `--openai-auth-mode proxy` when you intentionally want the proxy to replace client auth
+with `OPENAI_API_KEY` or `AGENTFLOW_OPENAI_API_KEY`.
 
-For Codex OAuth/subscription quota, the safer experimental path is the Codex app-server protocol,
-not `openai_base_url`:
+For Codex OAuth/subscription quota, do not set `openai_base_url`: that forces the public
+OpenAI API `/v1/responses` path and requires API scopes. Use Codex's default profile/auth,
+or the safer experimental Codex app-server protocol:
 
 ```bash
 codex app-server --listen ws://127.0.0.1:4014

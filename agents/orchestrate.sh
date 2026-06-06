@@ -63,7 +63,7 @@ CLAUDE_BIN=${CLAUDE_BIN:-$(resolve_claude_bin)}
 CLAUDE_PROJECT_DIR=${CLAUDE_PROJECT_DIR:-$HOME/.claude/projects/-home-lutz-agentflow}
 CODEX_BIN=${CODEX_BIN:-$(resolve_codex_bin)}
 CODEX_MODEL=${AGENTFLOW_CODEX_MODEL:-}
-CODEX_SANDBOX=${AGENTFLOW_CODEX_SANDBOX:-workspace-write}
+CODEX_SANDBOX=${AGENTFLOW_CODEX_SANDBOX:-danger-full-access}
 CODEX_APPROVAL=${AGENTFLOW_CODEX_APPROVAL:-never}
 CODEX_OPENAI_BASE_URL=${AGENTFLOW_CODEX_OPENAI_BASE_URL:-}
 CODEX_PROXY_SERVICE=${AGENTFLOW_CODEX_PROXY_SERVICE:-agentflow-openai-proxy.service}
@@ -305,7 +305,7 @@ codex_smoke() {
     --ask-for-approval never
     exec
     --cd "$MAIN_REPO"
-    --sandbox read-only
+    --sandbox "$CODEX_SANDBOX"
     --ephemeral
   )
   if [[ -n "$CODEX_MODEL" ]]; then
@@ -646,6 +646,9 @@ run_claude_operator() {
 
 run_codex_operator() {
   local -a codex_args
+  local codex_output="$LOG_DIR/$RUN_ID.codex-output.log"
+  local codex_summary="$LOG_DIR/$RUN_ID.codex-summary"
+  local status
   codex_args=(
     --ask-for-approval "$CODEX_APPROVAL"
     exec
@@ -654,14 +657,39 @@ run_codex_operator() {
     --add-dir "$WORKTREE_ROOT"
     --add-dir "$MAIN_REPO/.git"
     --sandbox "$CODEX_SANDBOX"
-    --output-last-message "$LOG_DIR/$RUN_ID.codex-summary"
+    --output-last-message "$codex_summary"
   )
   if [[ -n "$CODEX_MODEL" ]]; then
     codex_args+=(--model "$CODEX_MODEL")
   fi
   append_codex_config_args codex_args
 
-  write_orchestrator_prompt | "$CODEX_BIN" "${codex_args[@]}" 2>&1 | tee -a "$RUN_LOG"
+  echo "Codex raw output: $codex_output" | tee -a "$RUN_LOG"
+  echo "Codex summary: $codex_summary" | tee -a "$RUN_LOG"
+
+  set +e
+  write_orchestrator_prompt | "$CODEX_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
+  status=${PIPESTATUS[1]}
+  set -e
+
+  if [[ -s "$codex_summary" ]]; then
+    {
+      echo ""
+      echo "## Codex Summary"
+      sed -n '1,120p' "$codex_summary"
+    } | tee -a "$RUN_LOG"
+  fi
+
+  if (( status != 0 )); then
+    {
+      echo ""
+      echo "## Codex Output Tail"
+      echo "Codex exited with status $status. Last output lines:"
+      tail -120 "$codex_output"
+    } | tee -a "$RUN_LOG"
+  fi
+
+  return "$status"
 }
 
 run_orchestrator() {

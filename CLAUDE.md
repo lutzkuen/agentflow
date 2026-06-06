@@ -124,11 +124,11 @@ Controls:
 ```bash
 export AGENTFLOW_WORKER=codex                         # default; set to claude to switch back
 export AGENTFLOW_CODEX_MODEL="gpt-5-codex"            # optional explicit Codex worker model
-export AGENTFLOW_CODEX_OPENAI_BASE_URL=http://127.0.0.1:4003/v1 # route normal Codex through AgentFlow OpenAI proxy
-export AGENTFLOW_OPENAI_AUTH_MODE=client              # preserve Codex OAuth/subscription auth; use proxy for API-key billing
+export AGENTFLOW_CODEX_OPENAI_BASE_URL=              # leave empty for Codex OAuth/subscription quota
+export AGENTFLOW_OPENAI_AUTH_MODE=client              # preserve client auth when testing API-compatible OpenAI proxying
 export AGENTFLOW_OPENAI_API_KEY=sk-...                # optional, only used when AGENTFLOW_OPENAI_AUTH_MODE=proxy
-export AGENTFLOW_CODEX_SANDBOX=workspace-write        # default Codex worker sandbox
-export AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=1 # default recovery bypasses proxies
+export AGENTFLOW_CODEX_SANDBOX=danger-full-access     # default; avoids bwrap user-namespace failures in unattended Codex
+export AGENTFLOW_CODEX_RECOVERY_USE_ORIGINAL_OPENAI=0 # default recovery uses Codex's own profile/auth
 export AGENTFLOW_CODEX_ORIGINAL_OPENAI_BASE_URL=https://api.openai.com/v1
 export AGENTFLOW_CODEX_AUTO=0                         # disable automatic Codex recovery
 export AGENTFLOW_CODEX_RECOVERY_COOLDOWN_MINUTES=180  # default retry cooldown
