@@ -56,6 +56,26 @@ OPENAI_MODEL_LIST = list(dict.fromkeys([
     "gpt-5-codex",
 ]))
 OPENAI_AUTH_MODE = os.getenv("AGENTFLOW_OPENAI_AUTH_MODE", "client").lower()
+OPENAI_FORWARD_HEADER_PREFIXES = ("openai-", "oai-", "codex-", "x-")
+HTTP_HOP_BY_HOP_HEADERS = {
+    "connection",
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "upgrade",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "keep-alive",
+    "te",
+    "trailer",
+}
+WEBSOCKET_HANDSHAKE_HEADERS = {
+    "sec-websocket-accept",
+    "sec-websocket-extensions",
+    "sec-websocket-key",
+    "sec-websocket-protocol",
+    "sec-websocket-version",
+}
 
 _forward_lock = asyncio.Lock()
 _last_forward_time: float = 0.0
@@ -245,14 +265,18 @@ def build_forward_headers(request: Request) -> dict[str, str]:
 
 
 def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
-    allowed = {
-        "authorization", "openai-organization", "openai-project",
-        "content-type", "content-encoding", "accept", "user-agent",
-    }
     headers: dict[str, str] = {}
     for k, v in request.headers.items():
         lk = k.lower()
-        if lk in allowed and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy"):
+        allowed = (
+            lk in {"authorization", "content-type", "content-encoding", "accept", "user-agent"}
+            or lk.startswith(OPENAI_FORWARD_HEADER_PREFIXES)
+        )
+        if (
+            allowed
+            and lk not in HTTP_HOP_BY_HOP_HEADERS
+            and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy")
+        ):
             headers[k] = v
     if OPENAI_AUTH_MODE == "proxy" or "authorization" not in {k.lower() for k in headers}:
         api_key = os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -286,11 +310,19 @@ async def read_openai_json_body(request: Request) -> Optional[dict[str, Any]]:
 
 
 def build_openai_websocket_headers(websocket: WebSocket) -> dict[str, str]:
-    allowed = {"authorization", "openai-organization", "openai-project", "accept", "user-agent"}
     headers: dict[str, str] = {}
     for k, v in websocket.headers.items():
         lk = k.lower()
-        if lk in allowed and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy"):
+        allowed = (
+            lk in {"authorization", "accept", "user-agent"}
+            or lk.startswith(OPENAI_FORWARD_HEADER_PREFIXES)
+        )
+        if (
+            allowed
+            and lk not in HTTP_HOP_BY_HOP_HEADERS
+            and lk not in WEBSOCKET_HANDSHAKE_HEADERS
+            and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy")
+        ):
             headers[k] = v
     if OPENAI_AUTH_MODE == "proxy" or "authorization" not in {k.lower() for k in headers}:
         api_key = os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
