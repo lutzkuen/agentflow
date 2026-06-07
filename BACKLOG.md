@@ -267,6 +267,24 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
+- [READY] Add file-backed crunch and cache rule loaders — architecture priority #2
+  Details: Analysis 2026-06-07: no `[READY]` backlog items remained, so the analyzer
+  checked current DB traffic and the local policy code. Routing has a YAML loader
+  (`agentflow_proxy/routing_rules.yaml` plus `AGENTFLOW_ROUTING_RULES`), but crunch
+  and cache policy are still environment-variable constants in `crunch.py` and `cache.py`
+  with `policy_source: local-default`. This misses the architecture contract for local,
+  versionable manual controls in `config/routing_rules.yaml`, `config/crunch_rules.yaml`,
+  and `config/cache_rules.yaml`. Last 24h traffic makes this worth doing now: 656 calls,
+  639 crunch-changed calls, ~22.1M saved chars, and 94% streaming traffic where cache
+  decisions need explicit local policy reasons.
+  Implementation hint: add small YAML loaders for crunch and cache rules with bundled
+  safe defaults, local manual override files under `config/` or `~/.agentflow/`, and
+  metadata that reports `policy_source` and rule path. Preserve current defaults when no
+  files exist; keep the LAN dashboard read-only.
+  Metric: tests can change crunch/cache behavior via YAML files without env vars; default
+  behavior is unchanged when files are absent; new crunch/cache decision metadata reports
+  `local-default` vs `local-manual` and the effective rule source.
+
 - [DONE] Fix effort parameter stripping: deep-scan request body for nested "effort" key (2026-06-06)
   Details: Analysis 2026-06-06: 10+ Haiku-routed calls per day fail with HTTP 400
   "This model does not support the effort parameter." The stripping code (server.py ~line 238)
