@@ -46,6 +46,10 @@ def create_dashboard_router(
     async def stats_limiter() -> dict[str, Any]:
         return await stats_views.stats_limiter(_store(store_obj), limiter_status, limiter_config)
 
+    @router.get("/agentflow/stats/policies")
+    async def stats_policies() -> dict[str, Any]:
+        return await stats_views.stats_policies()
+
     @router.get("/agentflow/stats/weekly")
     async def stats_weekly() -> dict[str, Any]:
         return await stats_views.stats_weekly(_store(store_obj))

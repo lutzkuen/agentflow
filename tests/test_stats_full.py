@@ -713,7 +713,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','limiter','sessions']", html)
+        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','limiter','policies','sessions']", html)
 
     def test_dashboard_exposes_usage_by_app_engineer_table(self):
         html = stats_views.dashboard_html()

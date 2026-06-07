@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sqlite3
+from pathlib import Path
 from typing import Any, Optional
 
 from agentflow_proxy.limiter import model_tier
@@ -22,6 +23,78 @@ def _json_obj(raw: Any) -> dict[str, Any]:
     except Exception:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _routing_rules_path(router_module: Any) -> str:
+    if router_module.ROUTING_RULES_SOURCE == "local-manual":
+        return str(router_module.ROUTING_RULES_PATH)
+    return str(Path(router_module.__file__).parent / "routing_rules.yaml")
+
+
+def _copy_policy(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+async def stats_policies() -> dict[str, Any]:
+    from agentflow_proxy import cache, crunch, router, routing_experiments
+
+    return {
+        "schema": "agentflow.policy_state.v1",
+        "routing": {
+            "enabled": bool(router.ROUTING_ENABLED),
+            "policy_source": router.ROUTING_RULES_SOURCE,
+            "rule_path": _routing_rules_path(router),
+            "rules": _copy_policy(router.ROUTING_RULES),
+            "defaults": {
+                "haiku": router.HAIKU_DEFAULT,
+                "sonnet": router.SONNET_DEFAULT,
+                "opus": router.OPUS_DEFAULT,
+            },
+            "openai": {
+                "enabled": bool(router.OPENAI_ROUTING_ENABLED),
+                "large": router.OPENAI_LARGE_DEFAULT,
+                "small": router.OPENAI_SMALL_DEFAULT,
+                "tiny": router.OPENAI_TINY_DEFAULT,
+            },
+            "strip_thinking_history": bool(router.STRIP_THINKING_HISTORY),
+        },
+        "crunch": {
+            "enabled": bool(crunch.CRUNCH_ENABLED),
+            "policy_source": crunch.CRUNCH_POLICY_SOURCE,
+            "rule_path": crunch.CRUNCH_RULES_PATH,
+            "threshold_chars": crunch.CRUNCH_THRESHOLD_CHARS,
+            "prompt_cache": {
+                "enabled": bool(crunch.PROMPT_CACHE_ENABLED),
+                "min_chars": crunch.PROMPT_CACHE_MIN_CHARS,
+            },
+            "old_context_summarization": _copy_policy(crunch.OLD_CONTEXT_SUMMARY_POLICY),
+            "thinking_deduplication": _copy_policy(crunch.THINKING_DEDUP_POLICY),
+        },
+        "cache": {
+            "enabled": bool(cache.CACHE_ENABLED or cache.SEMANTIC_CACHE_ENABLED),
+            "policy_source": cache.CACHE_POLICY_SOURCE,
+            "rule_path": cache.CACHE_RULES_PATH,
+            "exact_cache": {
+                "enabled": bool(cache.CACHE_ENABLED),
+                "cache_tool_calls": bool(cache.CACHE_TOOL_CALLS),
+            },
+            "semantic_cache": {
+                "enabled": bool(cache.SEMANTIC_CACHE_ENABLED),
+                "threshold": cache.SEMANTIC_CACHE_THRESHOLD,
+            },
+            "file_watch": {
+                "enabled": bool(cache.CACHE_FILE_WATCH_ENABLED),
+                "root": cache.CACHE_FILE_WATCH_ROOT,
+                "max_paths": cache.CACHE_FILE_WATCH_MAX_PATHS,
+            },
+        },
+        "routing_experiments": {
+            "enabled": bool(routing_experiments.ROUTING_EXPERIMENT_ENABLED),
+            "policy_source": routing_experiments.ROUTING_EXPERIMENT_POLICY_SOURCE,
+            "rule_path": routing_experiments.ROUTING_EXPERIMENT_RULES_PATH,
+            "policy": _copy_policy(routing_experiments.ROUTING_EXPERIMENT_POLICY),
+        },
+    }
 
 
 def _source_surface(provider: str, path: str) -> str:
@@ -1555,6 +1628,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
+  <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
@@ -1639,6 +1713,27 @@ def dashboard_html() -> str:
       <th>Time</th><th>Tier</th><th>Provider</th><th>Status</th><th>Retries</th><th>Latency</th><th>Source</th><th>Error</th>
     </tr></thead>
     <tbody id="limiter-recent-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-policies">
+<div class="section">
+  <h2>Effective policy files</h2>
+  <table>
+    <thead><tr>
+      <th>Policy</th><th>Status</th><th>Source</th><th>Rule path</th><th>Effective settings</th>
+    </tr></thead>
+    <tbody id="policies-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Routing rules</h2>
+  <table>
+    <thead><tr>
+      <th>#</th><th>Conditions</th><th>Action</th>
+    </tr></thead>
+    <tbody id="routing-rules-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -1751,7 +1846,7 @@ function usageHints(row){
 }
 
 function showTab(name){
-  const tabs=['activity','usage','weekly','categories','cache','limiter','sessions'];
+  const tabs=['activity','usage','weekly','categories','cache','limiter','policies','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -1951,6 +2046,84 @@ async function refreshLimiter(){
   }catch(e){}
 }
 
+function policyStatus(enabled){
+  return enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">disabled</span>';
+}
+function policySource(source){
+  const cls=source==='local-manual'?'routed':'provider';
+  return `<span class="badge ${cls}">${esc(source||'unknown')}</span>`;
+}
+function compactSettings(items){
+  return items.filter(Boolean).map(item=>`<span class="badge stream">${esc(item)}</span>`).join(' ');
+}
+async function refreshPolicies(){
+  try{
+    const r=await fetch('/agentflow/stats/policies');
+    const d=await r.json();
+    const rows=[
+      {
+        name:'Routing',
+        enabled:d.routing&&d.routing.enabled,
+        source:d.routing&&d.routing.policy_source,
+        path:d.routing&&d.routing.rule_path,
+        settings:compactSettings([
+          'rules '+((d.routing&&d.routing.rules)||[]).length,
+          d.routing&&d.routing.strip_thinking_history?'strip thinking history':'keep thinking history',
+          d.routing&&d.routing.openai&&d.routing.openai.enabled?'OpenAI routing on':'OpenAI routing off'
+        ])
+      },
+      {
+        name:'Crunch',
+        enabled:d.crunch&&d.crunch.enabled,
+        source:d.crunch&&d.crunch.policy_source,
+        path:d.crunch&&d.crunch.rule_path,
+        settings:compactSettings([
+          'threshold '+fmtTok(d.crunch&&d.crunch.threshold_chars),
+          d.crunch&&d.crunch.prompt_cache&&d.crunch.prompt_cache.enabled?'prompt cache on':'prompt cache off',
+          d.crunch&&d.crunch.old_context_summarization&&d.crunch.old_context_summarization.enabled?'old-context summary on':'old-context summary off',
+          d.crunch&&d.crunch.thinking_deduplication&&d.crunch.thinking_deduplication.enabled?'thinking dedupe on':'thinking dedupe off'
+        ])
+      },
+      {
+        name:'Cache',
+        enabled:d.cache&&d.cache.enabled,
+        source:d.cache&&d.cache.policy_source,
+        path:d.cache&&d.cache.rule_path,
+        settings:compactSettings([
+          d.cache&&d.cache.exact_cache&&d.cache.exact_cache.enabled?'exact on':'exact off',
+          d.cache&&d.cache.exact_cache&&d.cache.exact_cache.cache_tool_calls?'tool cache on':'tool cache off',
+          d.cache&&d.cache.semantic_cache&&d.cache.semantic_cache.enabled?'semantic on':'semantic off',
+          d.cache&&d.cache.file_watch&&d.cache.file_watch.enabled?'file watch on':'file watch off'
+        ])
+      },
+      {
+        name:'Routing experiments',
+        enabled:d.routing_experiments&&d.routing_experiments.enabled,
+        source:d.routing_experiments&&d.routing_experiments.policy_source,
+        path:d.routing_experiments&&d.routing_experiments.rule_path,
+        settings:compactSettings([
+          'sample '+(((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.sample_rate)||0)*100).toFixed(1)+'%',
+          'similarity '+((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.similarity_threshold)||0)
+        ])
+      }
+    ];
+    document.getElementById('policies-tbody').innerHTML=rows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.name)}</span></td>
+      <td>${policyStatus(row.enabled)}</td>
+      <td>${policySource(row.source)}</td>
+      <td class="model" title="${esc(row.path)}">${esc(row.path)}</td>
+      <td class="flags">${row.settings}</td>
+    </tr>`).join('');
+
+    const ruleRows=(d.routing&&d.routing.rules)||[];
+    document.getElementById('routing-rules-tbody').innerHTML=ruleRows.map((rule,i)=>`<tr>
+      <td class="tokens">${i+1}</td>
+      <td class="flags">${esc(JSON.stringify(rule.conditions||{}))}</td>
+      <td class="flags">${esc(JSON.stringify(rule.action||{}))}</td>
+    </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No routing rules loaded</td></tr>';
+  }catch(e){}
+}
+
 async function refreshSessions(){
   try{
     const r=await fetch('/agentflow/stats/sessions');
@@ -1999,6 +2172,7 @@ refreshWeekly();
 refreshCategories();
 refreshCache();
 refreshLimiter();
+refreshPolicies();
 refreshSessions();
 setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
@@ -2007,6 +2181,7 @@ setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
 setInterval(refreshLimiter,5000);
+setInterval(refreshPolicies,30000);
 setInterval(refreshSessions,30000);
 </script>
 </body>
