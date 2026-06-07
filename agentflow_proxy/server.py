@@ -143,6 +143,164 @@ def _tier_backoff_status(now: Optional[float] = None) -> list[dict[str, Any]]:
     return tiers
 
 
+def _json_obj(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _source_surface(provider: str, path: str) -> str:
+    provider_l = (provider or "").lower()
+    path_l = (path or "").lower()
+    if provider_l == "anthropic":
+        return "anthropic_messages"
+    if provider_l == "openai":
+        if "chat/completions" in path_l:
+            return "openai_chat"
+        return "openai_responses"
+    return "unknown"
+
+
+def _app_family_for_call(provider: str, requested_model: Any, path: str) -> str:
+    provider_l = (provider or "").lower()
+    model_l = str(requested_model or "").lower()
+    if provider_l == "anthropic" and "messages" in (path or "").lower():
+        return "claude_code"
+    if provider_l == "openai" and "codex" in model_l:
+        return "codex"
+    if provider_l == "openai":
+        return "generic_openai"
+    return "unknown"
+
+
+def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    routing = _json_obj(r.get("routing_json"))
+    crunch = _json_obj(r.get("crunch_json"))
+    cache = _json_obj(r.get("cache_json"))
+    provider = str(r.get("provider") or "anthropic")
+    requested_model = r.get("requested_model")
+    routed_model = r.get("routed_model")
+    target_model = routed_model or requested_model
+    input_tokens = r.get("actual_input_tokens")
+    if input_tokens is None:
+        input_tokens = r.get("input_tokens_est")
+    output_tokens = r.get("actual_output_tokens")
+    if output_tokens is None:
+        output_tokens = r.get("output_tokens_est")
+    return {
+        "unit_id": f"provider_call:{r.get('id')}",
+        "created_at": r.get("created_at"),
+        "source_surface": _source_surface(provider, str(r.get("path") or "")),
+        "granularity": "provider_request",
+        "app_family": _app_family_for_call(provider, requested_model, str(r.get("path") or "")),
+        "requested_model": requested_model,
+        "target_model": target_model,
+        "routed_model": routed_model,
+        "input_features": {
+            "path": r.get("path"),
+            "stream": bool(r.get("stream")),
+            "category": r.get("category") or routing.get("category"),
+            "text_chars": routing.get("text_chars"),
+            "input_tokens": input_tokens,
+            "input_tokens_est": r.get("input_tokens_est"),
+            "actual_input_tokens": r.get("actual_input_tokens"),
+            "cache_creation_input_tokens": r.get("cache_creation_input_tokens") or 0,
+            "cache_read_input_tokens": r.get("cache_read_input_tokens") or 0,
+        },
+        "tool_features": {
+            "has_tools": routing.get("has_tools"),
+            "category": r.get("category") or routing.get("category"),
+            "thinking_history_stripped": routing.get("thinking_history_stripped"),
+            "stripped_params": routing.get("stripped_params") or [],
+        },
+        "optimization_features": {
+            "routing": routing,
+            "crunch": crunch,
+            "cache": cache,
+            "policy_sources": sorted({
+                str(source)
+                for source in (
+                    routing.get("policy_source"),
+                    crunch.get("policy_source"),
+                    cache.get("policy_source"),
+                )
+                if source
+            }),
+        },
+        "outcome_features": {
+            "status_code": r.get("status_code"),
+            "latency_ms": r.get("latency_ms"),
+            "cache_hit": bool(r.get("cache_hit")),
+            "retry_count": r.get("retry_count") or 0,
+            "output_tokens": output_tokens,
+            "thinking_output_tokens": r.get("thinking_output_tokens") or 0,
+            "cost_est_usd": r.get("cost_est_usd"),
+            "cost_baseline_usd": r.get("cost_baseline_usd"),
+            "error": r.get("error"),
+        },
+        "replayability_level": "raw_body_opt_in" if r.get("request_json") else "features_only",
+        "local_ids": {
+            "calls_id": r.get("id"),
+            "session_id": r.get("session_id"),
+        },
+    }
+
+
+def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    error_code = r.get("response_error_code")
+    response_event_id = r.get("response_event_id")
+    status = "error" if error_code is not None else ("success" if response_event_id else "pending")
+    return {
+        "unit_id": f"codex_turn:{r.get('start_event_id')}",
+        "created_at": r.get("created_at"),
+        "source_surface": "codex_turn",
+        "granularity": "agent_turn",
+        "app_family": "codex",
+        "requested_model": None,
+        "target_model": None,
+        "routed_model": None,
+        "input_features": {
+            "input_text_chars": r.get("input_text_chars") or 0,
+            "input_items": r.get("input_items") or 0,
+            "params_chars": r.get("params_chars"),
+            "message_chars": r.get("message_chars"),
+        },
+        "tool_features": {
+            "method": "turn/start",
+            "thread_id": r.get("thread_id"),
+        },
+        "optimization_features": {
+            "routing": None,
+            "crunch": None,
+            "cache": None,
+            "policy_sources": [],
+        },
+        "outcome_features": {
+            "status": status,
+            "latency_ms": r.get("response_latency_ms"),
+            "result_chars": r.get("response_result_chars"),
+            "error_code": error_code,
+            "error_message": r.get("response_error_message"),
+        },
+        "replayability_level": "features_only",
+        "local_ids": {
+            "codex_app_start_event_id": r.get("start_event_id"),
+            "codex_app_response_event_id": response_event_id,
+            "request_id": r.get("request_id"),
+            "thread_id": r.get("thread_id"),
+            "session_id": r.get("session_id"),
+        },
+    }
+
+
 async def _await_tier_backoff(model: str) -> None:
     tier = _model_tier(model)
     remaining = _tier_backoff_until.get(tier, 0.0) - time.time()
@@ -1500,6 +1658,112 @@ async def stats_limiter() -> dict[str, Any]:
             "local_throttled_recent": local_throttled_recent,
             "upstream_limited_recent": upstream_limited_recent,
         },
+    }
+
+
+@app.get("/agentflow/stats/activity")
+async def stats_activity(limit: int = 100) -> dict[str, Any]:
+    conn = store.conn
+    capped_limit = max(1, min(int(limit or 100), 500))
+
+    provider_rows = conn.execute("""
+        select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+               requested_model, routed_model, stream, cache_hit, status_code,
+               latency_ms, input_tokens_est, output_tokens_est,
+               actual_input_tokens, actual_output_tokens, cost_est_usd,
+               cost_baseline_usd, crunch_json, routing_json, cache_json, error,
+               request_json, response_json, session_id, category,
+               cache_creation_input_tokens, cache_read_input_tokens, retry_count,
+               thinking_output_tokens
+        from calls
+        order by created_at desc
+        limit ?
+    """, (capped_limit,)).fetchall()
+    provider_units = [_provider_activity_unit(row) for row in provider_rows]
+
+    codex_rows = conn.execute("""
+        select s.id as start_event_id,
+               s.created_at,
+               s.request_id,
+               s.thread_id,
+               s.session_id,
+               s.message_chars,
+               s.params_chars,
+               s.input_items,
+               s.input_text_chars,
+               (
+                   select r.id from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_event_id,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code,
+               (
+                   select r.error_message from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_message,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms
+        from codex_app_events s
+        where s.direction = 'client_to_server' and s.method = 'turn/start'
+        order by s.created_at desc
+        limit ?
+    """, (capped_limit,)).fetchall()
+    codex_units = [_codex_turn_activity_unit(row) for row in codex_rows]
+
+    units = sorted(
+        provider_units + codex_units,
+        key=lambda unit: str(unit.get("created_at") or ""),
+        reverse=True,
+    )[:capped_limit]
+
+    def counts_by(key: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for unit in units:
+            value = str(unit.get(key) or "unknown")
+            counts[value] = counts.get(value, 0) + 1
+        return counts
+
+    return {
+        "generated_at": utc_now(),
+        "schema": "agentflow.optimization_activity.v1",
+        "summary": {
+            "units": len(units),
+            "provider_request_units": sum(1 for unit in units if unit["granularity"] == "provider_request"),
+            "codex_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_turn"),
+            "by_source_surface": counts_by("source_surface"),
+            "by_granularity": counts_by("granularity"),
+            "by_app_family": counts_by("app_family"),
+            "by_replayability_level": counts_by("replayability_level"),
+        },
+        "units": units,
     }
 
 

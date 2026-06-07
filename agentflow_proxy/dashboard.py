@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from agentflow_proxy.server import DEFAULT_DB, DEFAULT_UPSTREAM, dashboard, stats, stats_full, stats_limiter, stats_sessions, stats_weekly, utc_now
+from agentflow_proxy.server import DEFAULT_DB, DEFAULT_UPSTREAM, dashboard, stats, stats_activity, stats_full, stats_limiter, stats_sessions, stats_weekly, utc_now
 
 DEFAULT_DASHBOARD_HOST = os.getenv("AGENTFLOW_DASHBOARD_HOST", "0.0.0.0")
 DEFAULT_DASHBOARD_PORT = int(os.getenv("AGENTFLOW_DASHBOARD_PORT", "4002"))
@@ -32,6 +32,7 @@ async def root() -> RedirectResponse:
 
 
 app.get("/agentflow/stats")(stats)
+app.get("/agentflow/stats/activity")(stats_activity)
 app.get("/agentflow/stats/full")(stats_full)
 app.get("/agentflow/stats/limiter")(stats_limiter)
 app.get("/agentflow/stats/weekly")(stats_weekly)

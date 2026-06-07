@@ -247,6 +247,111 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(summary["thinking_cost_usd"], 0.0015, places=6)
         json.dumps(summary)
 
+    def test_activity_stats_normalize_provider_calls_and_codex_turns(self):
+        provider_id = str(uuid.uuid4())
+        server.store.log_call(
+            id=provider_id,
+            created_at="2026-06-07T01:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=12,
+            input_tokens_est=100,
+            output_tokens_est=20,
+            actual_input_tokens=90,
+            actual_output_tokens=18,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.004,
+            crunch_json=stable_json({"changed": True, "tokens_saved_est": 10, "policy_source": "local-default"}),
+            routing_json=stable_json({
+                "reason": "tool result routed to Haiku",
+                "text_chars": 360,
+                "has_tools": True,
+                "category": "tool-result",
+                "policy_source": "local-manual",
+            }),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="provider-session",
+            category="tool-result",
+            cache_creation_input_tokens=5,
+            cache_read_input_tokens=50,
+            retry_count=1,
+            thinking_output_tokens=0,
+            provider="anthropic",
+        )
+        start_id = str(uuid.uuid4())
+        response_id = str(uuid.uuid4())
+        server.store.log_codex_app_event(
+            id=start_id,
+            created_at="2026-06-07T01:01:00+00:00",
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-1",
+            thread_id="thread-1",
+            message_chars=500,
+            params_chars=450,
+            input_items=2,
+            input_text_chars=120,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-session",
+        )
+        server.store.log_codex_app_event(
+            id=response_id,
+            created_at="2026-06-07T01:01:03+00:00",
+            direction="server_to_client",
+            method="turn/completed",
+            request_id="req-1",
+            thread_id="thread-1",
+            message_chars=300,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=200,
+            error_code=None,
+            error_message=None,
+            latency_ms=3000,
+            session_id="codex-session",
+        )
+
+        result = asyncio.run(server.stats_activity())
+        units = {unit["unit_id"]: unit for unit in result["units"]}
+        provider = units[f"provider_call:{provider_id}"]
+        codex = units[f"codex_turn:{start_id}"]
+
+        self.assertEqual(result["schema"], "agentflow.optimization_activity.v1")
+        self.assertEqual(provider["source_surface"], "anthropic_messages")
+        self.assertEqual(provider["granularity"], "provider_request")
+        self.assertEqual(provider["app_family"], "claude_code")
+        self.assertEqual(provider["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(provider["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(provider["tool_features"]["has_tools"], True)
+        self.assertEqual(provider["input_features"]["text_chars"], 360)
+        self.assertEqual(provider["outcome_features"]["status_code"], 200)
+        self.assertEqual(provider["replayability_level"], "features_only")
+        self.assertEqual(provider["local_ids"]["calls_id"], provider_id)
+
+        self.assertEqual(codex["source_surface"], "codex_turn")
+        self.assertEqual(codex["granularity"], "agent_turn")
+        self.assertEqual(codex["app_family"], "codex")
+        self.assertIsNone(codex["requested_model"])
+        self.assertEqual(codex["input_features"]["input_text_chars"], 120)
+        self.assertEqual(codex["outcome_features"]["status"], "success")
+        self.assertEqual(codex["outcome_features"]["latency_ms"], 3000)
+        self.assertEqual(codex["replayability_level"], "features_only")
+        self.assertEqual(codex["local_ids"]["codex_app_response_event_id"], response_id)
+        self.assertEqual(result["summary"]["by_source_surface"]["anthropic_messages"], 1)
+        self.assertEqual(result["summary"]["by_source_surface"]["codex_turn"], 1)
+        json.dumps(result)
+
     def test_sessions_identify_context_plateaus(self):
         text_sizes = [10_000, 10_200, 10_150, 15_000]
         for idx, text_chars in enumerate(text_sizes):
