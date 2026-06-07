@@ -3,19 +3,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
-import gzip
 import hashlib
 import json
 import logging
 import math
 import os
 import random
-import sqlite3
 import sys
 import time
 import uuid
-import zlib
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Iterable, Optional, Tuple
@@ -25,11 +21,6 @@ import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-
-try:
-    import zstandard as zstd
-except Exception:  # pragma: no cover - optional runtime dependency
-    zstd = None
 
 load_dotenv()
 
@@ -59,373 +50,35 @@ OPENAI_MODEL_LIST = list(dict.fromkeys([
     "gpt-5-codex",
 ]))
 OPENAI_AUTH_MODE = os.getenv("AGENTFLOW_OPENAI_AUTH_MODE", "client").lower()
-OPENAI_FORWARD_HEADERS = {
-    "authorization",
-    "x-api-key",
-    "content-type",
-    "content-encoding",
-    "accept",
-    "user-agent",
-    "openai-organization",
-    "openai-project",
-    "openai-beta",
-}
-OPENAI_WEBSOCKET_FORWARD_HEADERS = {
-    "authorization",
-    "x-api-key",
-    "accept",
-    "user-agent",
-    "openai-organization",
-    "openai-project",
-    "openai-beta",
-}
-HTTP_HOP_BY_HOP_HEADERS = {
-    "connection",
-    "host",
-    "content-length",
-    "transfer-encoding",
-    "upgrade",
-    "proxy-authorization",
-    "proxy-authenticate",
-    "keep-alive",
-    "te",
-    "trailer",
-}
-WEBSOCKET_HANDSHAKE_HEADERS = {
-    "sec-websocket-accept",
-    "sec-websocket-extensions",
-    "sec-websocket-key",
-    "sec-websocket-protocol",
-    "sec-websocket-version",
-}
-
-_forward_lock = asyncio.Lock()
-_last_forward_time: float = 0.0
-_tier_backoff_until: dict[str, float] = {}
-_tier_backoff_update_lock = asyncio.Lock()
-# Per-tier semaphores cap concurrent in-flight forwarded requests. Requests queue rather than racing.
-_sem_value = MAX_CONCURRENT_PER_TIER if MAX_CONCURRENT_PER_TIER > 0 else 9999
-_tier_semaphores: dict[str, asyncio.Semaphore] = {
-    "haiku": asyncio.Semaphore(_sem_value),
-    "sonnet": asyncio.Semaphore(_sem_value),
-    "opus": asyncio.Semaphore(_sem_value),
-}
-
-
-@dataclass(frozen=True)
-class TierBackoffActive(Exception):
-    tier: str
-    remaining: float
-
-    @property
-    def retry_after(self) -> int:
-        return max(1, int(self.remaining + 0.999))
-
-    @property
-    def message(self) -> str:
-        return f"temporarily limiting requests for {self.tier} tier; retry after {self.retry_after}s"
-
-
-@dataclass(frozen=True)
-class ClientJsonRequestError(Exception):
-    message: str
-
-
-def client_json_error_body(provider: str, message: str) -> dict[str, Any]:
-    error = {
-        "type": "invalid_request_error",
-        "message": message,
-    }
-    if provider == "anthropic":
-        return {"type": "error", "error": error}
-    return {"error": error}
-
-
-async def read_json_object_body(
-    request: Request,
-    *,
-    allow_compressed: bool = False,
-    passthrough_unsupported_encoding: bool = False,
-) -> Optional[dict[str, Any]]:
-    body = await request.body()
-    encoding = (request.headers.get("content-encoding") or "").lower().strip()
-    try:
-        if allow_compressed and encoding:
-            if encoding in {"zstd", "zstandard"}:
-                if zstd is None:
-                    if passthrough_unsupported_encoding:
-                        return None
-                    raise ClientJsonRequestError("Unsupported content encoding.")
-                body = zstd.ZstdDecompressor().decompress(body)
-            elif encoding == "gzip":
-                body = gzip.decompress(body)
-            elif encoding in {"deflate", "zlib"}:
-                body = zlib.decompress(body)
-            elif passthrough_unsupported_encoding:
-                return None
-            else:
-                raise ClientJsonRequestError("Unsupported content encoding.")
-        parsed = json.loads(body)
-    except ClientJsonRequestError:
-        raise
-    except Exception as exc:
-        raise ClientJsonRequestError("Malformed JSON request body.") from exc
-    if not isinstance(parsed, dict):
-        raise ClientJsonRequestError("JSON request body must be an object.")
-    return parsed
 
 
 def _model_tier(model: str) -> str:
-    m = model.lower()
-    if "haiku" in m:
-        return "haiku"
-    if "opus" in m:
-        return "opus"
-    return "sonnet"
+    return model_tier(model)
 
 
 def _tier_backoff_status(now: Optional[float] = None) -> list[dict[str, Any]]:
-    now_ts = time.time() if now is None else now
-    tiers = []
-    for tier in ("haiku", "sonnet", "opus"):
-        sem = _tier_semaphores[tier]
-        until_ts = float(_tier_backoff_until.get(tier, 0.0) or 0.0)
-        remaining = max(0.0, until_ts - now_ts)
-        waiters = getattr(sem, "_waiters", None)
-        queued = len(waiters) if waiters is not None else 0
-        available = int(getattr(sem, "_value", 0))
-        cooldown_until = (
-            datetime.fromtimestamp(until_ts, timezone.utc).isoformat()
-            if remaining > 0
-            else None
-        )
-        tiers.append({
-            "tier": tier,
-            "active": remaining > 0,
-            "cooldown_until": cooldown_until,
-            "seconds_remaining": round(remaining, 1),
-            "exceeds_max_wait": remaining > MAX_TIER_BACKOFF_WAIT,
-            "max_concurrent": MAX_CONCURRENT_PER_TIER,
-            "available_slots": available if MAX_CONCURRENT_PER_TIER > 0 else None,
-            "queued_count": queued,
-        })
-    return tiers
+    return _limiter.status(now)
 
-
-def _json_obj(raw: Any) -> dict[str, Any]:
-    if not raw:
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    try:
-        value = json.loads(raw)
-    except Exception:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _source_surface(provider: str, path: str) -> str:
-    provider_l = (provider or "").lower()
-    path_l = (path or "").lower()
-    if provider_l == "anthropic":
-        return "anthropic_messages"
-    if provider_l == "openai":
-        if "chat/completions" in path_l:
-            return "openai_chat"
-        return "openai_responses"
-    return "unknown"
-
-
-def _app_family_for_call(provider: str, requested_model: Any, path: str) -> str:
-    provider_l = (provider or "").lower()
-    model_l = str(requested_model or "").lower()
-    if provider_l == "anthropic" and "messages" in (path or "").lower():
-        return "claude_code"
-    if provider_l == "openai" and "codex" in model_l:
-        return "codex"
-    if provider_l == "openai":
-        return "generic_openai"
-    return "unknown"
-
-
-def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    r = dict(row)
-    routing = _json_obj(r.get("routing_json"))
-    crunch = _json_obj(r.get("crunch_json"))
-    cache = _json_obj(r.get("cache_json"))
-    provider = str(r.get("provider") or "anthropic")
-    requested_model = r.get("requested_model")
-    routed_model = r.get("routed_model")
-    target_model = routed_model or requested_model
-    input_tokens = r.get("actual_input_tokens")
-    if input_tokens is None:
-        input_tokens = r.get("input_tokens_est")
-    output_tokens = r.get("actual_output_tokens")
-    if output_tokens is None:
-        output_tokens = r.get("output_tokens_est")
-    return {
-        "unit_id": f"provider_call:{r.get('id')}",
-        "created_at": r.get("created_at"),
-        "source_surface": _source_surface(provider, str(r.get("path") or "")),
-        "granularity": "provider_request",
-        "app_family": _app_family_for_call(provider, requested_model, str(r.get("path") or "")),
-        "requested_model": requested_model,
-        "target_model": target_model,
-        "routed_model": routed_model,
-        "input_features": {
-            "path": r.get("path"),
-            "stream": bool(r.get("stream")),
-            "category": r.get("category") or routing.get("category"),
-            "text_chars": routing.get("text_chars"),
-            "input_tokens": input_tokens,
-            "input_tokens_est": r.get("input_tokens_est"),
-            "actual_input_tokens": r.get("actual_input_tokens"),
-            "cache_creation_input_tokens": r.get("cache_creation_input_tokens") or 0,
-            "cache_read_input_tokens": r.get("cache_read_input_tokens") or 0,
-        },
-        "tool_features": {
-            "has_tools": routing.get("has_tools"),
-            "category": r.get("category") or routing.get("category"),
-            "thinking_history_stripped": routing.get("thinking_history_stripped"),
-            "stripped_params": routing.get("stripped_params") or [],
-        },
-        "optimization_features": {
-            "routing": routing,
-            "crunch": crunch,
-            "cache": cache,
-            "policy_sources": sorted({
-                str(source)
-                for source in (
-                    routing.get("policy_source"),
-                    routing.get("final_policy_source"),
-                    crunch.get("policy_source"),
-                    cache.get("policy_source"),
-                )
-                if source
-            }),
-        },
-        "outcome_features": {
-            "status_code": r.get("status_code"),
-            "latency_ms": r.get("latency_ms"),
-            "cache_hit": bool(r.get("cache_hit")),
-            "retry_count": r.get("retry_count") or 0,
-            "output_tokens": output_tokens,
-            "thinking_output_tokens": r.get("thinking_output_tokens") or 0,
-            "cost_est_usd": r.get("cost_est_usd"),
-            "cost_baseline_usd": r.get("cost_baseline_usd"),
-            "error": r.get("error"),
-        },
-        "replayability_level": "raw_body_opt_in" if r.get("request_json") else "features_only",
-        "local_ids": {
-            "calls_id": r.get("id"),
-            "session_id": r.get("session_id"),
-        },
-    }
-
-
-def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    r = dict(row)
-    error_code = r.get("response_error_code")
-    response_event_id = r.get("response_event_id")
-    status = "error" if error_code is not None else ("success" if response_event_id else "pending")
-    return {
-        "unit_id": f"codex_turn:{r.get('start_event_id')}",
-        "created_at": r.get("created_at"),
-        "source_surface": "codex_turn",
-        "granularity": "agent_turn",
-        "app_family": "codex",
-        "requested_model": None,
-        "target_model": None,
-        "routed_model": None,
-        "input_features": {
-            "input_text_chars": r.get("input_text_chars") or 0,
-            "input_items": r.get("input_items") or 0,
-            "params_chars": r.get("params_chars"),
-            "message_chars": r.get("message_chars"),
-        },
-        "tool_features": {
-            "method": "turn/start",
-            "thread_id": r.get("thread_id"),
-        },
-        "optimization_features": {
-            "routing": None,
-            "crunch": None,
-            "cache": None,
-            "policy_sources": [],
-        },
-        "outcome_features": {
-            "status": status,
-            "latency_ms": r.get("response_latency_ms"),
-            "result_chars": r.get("response_result_chars"),
-            "error_code": error_code,
-            "error_message": r.get("response_error_message"),
-        },
-        "replayability_level": "features_only",
-        "local_ids": {
-            "codex_app_start_event_id": r.get("start_event_id"),
-            "codex_app_response_event_id": response_event_id,
-            "request_id": r.get("request_id"),
-            "thread_id": r.get("thread_id"),
-            "session_id": r.get("session_id"),
-        },
-    }
 
 
 async def _await_tier_backoff(model: str) -> None:
-    tier = _model_tier(model)
-    remaining = _tier_backoff_until.get(tier, 0.0) - time.time()
-    if remaining <= 0:
-        return
-    if remaining > MAX_TIER_BACKOFF_WAIT:
-        print(
-            f"tier_backoff: tier={tier} remaining={remaining:.1f}s "
-            f"exceeds_max_wait={MAX_TIER_BACKOFF_WAIT:.1f}s"
-        )
-        raise TierBackoffActive(tier=tier, remaining=remaining)
-    print(f"tier_backoff: tier={tier} waiting={remaining:.1f}s")
-    await asyncio.sleep(remaining)
+    await _limiter.await_backoff(model)
 
 
 def _tier_backoff_payload(exc: TierBackoffActive) -> dict[str, Any]:
-    return {
-        "type": "error",
-        "error": {
-            "type": "rate_limit_error",
-            "message": exc.message,
-        },
-    }
+    return tier_backoff_payload(exc)
 
 
 def _tier_backoff_headers(exc: TierBackoffActive, model: str) -> dict[str, str]:
-    return {
-        "retry-after": str(exc.retry_after),
-        "x-agentflow-routed-model": model,
-    }
+    return tier_backoff_headers(exc, model)
 
 
 async def _record_tier_backoff(model: str, response_headers: Any, default_seconds: float = 60.0) -> None:
-    tier = _model_tier(model)
-    raw = response_headers.get("retry-after")
-    try:
-        delay = float(raw) if raw else default_seconds
-    except (ValueError, TypeError):
-        delay = default_seconds
-    new_until = time.time() + delay
-    async with _tier_backoff_update_lock:
-        if new_until > _tier_backoff_until.get(tier, 0.0):
-            _tier_backoff_until[tier] = new_until
+    await _limiter.record_backoff(model, response_headers, default_seconds)
 
 
 async def _throttle_forward() -> None:
-    global _last_forward_time
-    if MIN_REQUEST_INTERVAL_MS <= 0:
-        return
-    async with _forward_lock:
-        now = time.time()
-        elapsed_ms = (now - _last_forward_time) * 1000
-        if elapsed_ms < MIN_REQUEST_INTERVAL_MS:
-            await asyncio.sleep((MIN_REQUEST_INTERVAL_MS - elapsed_ms) / 1000)
-        _last_forward_time = time.time()
+    await _limiter.throttle_forward()
 
 
 async def _check_session_cost_alert(sid: str) -> None:
@@ -548,7 +201,24 @@ def _log_recent_session_spending_summary(event: str, hours: int = 24, limit: int
 
 
 from agentflow_proxy.store import Store, utc_now, stable_json
+from agentflow_proxy import provider_handlers
+from agentflow_proxy import stats as stats_views
 from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_blended_input_savings, estimate_cost
+from agentflow_proxy.headers import (
+    ClientJsonRequestError,
+    build_anthropic_forward_headers,
+    build_openai_forward_headers as build_openai_forward_headers_from_mapping,
+    build_openai_websocket_headers as build_openai_websocket_headers_from_mapping,
+    client_json_error_body,
+    read_json_object_body,
+)
+from agentflow_proxy.limiter import (
+    TierBackoffActive,
+    TierLimiter,
+    model_tier,
+    tier_backoff_headers,
+    tier_backoff_payload,
+)
 from agentflow_proxy.router import (
     extract_text, has_tools, categorize_request, route_model,
     HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT,
@@ -585,8 +255,17 @@ from agentflow_proxy.recommendations import (
 )
 
 
+_limiter = TierLimiter(
+    min_request_interval_ms=MIN_REQUEST_INTERVAL_MS,
+    max_tier_backoff_wait=MAX_TIER_BACKOFF_WAIT,
+    max_concurrent_per_tier=MAX_CONCURRENT_PER_TIER,
+)
+_tier_backoff_until = _limiter.backoff_until
+_tier_semaphores = _limiter.semaphores
+
 store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
+_SERVER_CONTEXT = sys.modules[__name__]
 
 
 @app.on_event("startup")
@@ -659,19 +338,7 @@ def provider_disabled_response(expected: str) -> JSONResponse:
 
 
 def build_forward_headers(request: Request) -> dict[str, str]:
-    # Pass auth through. This server does not require/store credentials.
-    allowed = {
-        "authorization", "x-api-key", "anthropic-version", "anthropic-beta",
-        "content-type", "accept", "user-agent",
-    }
-    headers: dict[str, str] = {}
-    for k, v in request.headers.items():
-        lk = k.lower()
-        if lk in allowed:
-            headers[k] = v
-    headers.setdefault("anthropic-version", os.getenv("ANTHROPIC_VERSION", "2023-06-01"))
-    headers["content-type"] = "application/json"
-    return headers
+    return build_anthropic_forward_headers(request.headers)
 
 
 async def _fetch_old_context_summary(summary_request: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
@@ -817,24 +484,12 @@ async def _run_anthropic_routing_experiment(
 
 
 def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for k, v in request.headers.items():
-        lk = k.lower()
-        if (
-            lk in OPENAI_FORWARD_HEADERS
-            and lk not in HTTP_HOP_BY_HOP_HEADERS
-            and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy")
-        ):
-            headers[k] = v
-    if OPENAI_AUTH_MODE == "proxy" or "authorization" not in {k.lower() for k in headers}:
-        api_key = os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if api_key:
-            headers["authorization"] = f"Bearer {api_key}"
-    if force_json:
-        headers.pop("content-encoding", None)
-        headers.pop("Content-Encoding", None)
-        headers["content-type"] = "application/json"
-    return headers
+    return build_openai_forward_headers_from_mapping(
+        request.headers,
+        auth_mode=OPENAI_AUTH_MODE,
+        api_key=os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+        force_json=force_json,
+    )
 
 
 async def read_openai_json_body(request: Request) -> Optional[dict[str, Any]]:
@@ -846,21 +501,11 @@ async def read_openai_json_body(request: Request) -> Optional[dict[str, Any]]:
 
 
 def build_openai_websocket_headers(websocket: WebSocket) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for k, v in websocket.headers.items():
-        lk = k.lower()
-        if (
-            lk in OPENAI_WEBSOCKET_FORWARD_HEADERS
-            and lk not in HTTP_HOP_BY_HOP_HEADERS
-            and lk not in WEBSOCKET_HANDSHAKE_HEADERS
-            and not (lk == "authorization" and OPENAI_AUTH_MODE == "proxy")
-        ):
-            headers[k] = v
-    if OPENAI_AUTH_MODE == "proxy" or "authorization" not in {k.lower() for k in headers}:
-        api_key = os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if api_key:
-            headers["authorization"] = f"Bearer {api_key}"
-    return headers
+    return build_openai_websocket_headers_from_mapping(
+        websocket.headers,
+        auth_mode=OPENAI_AUTH_MODE,
+        api_key=os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
+    )
 
 
 def openai_websocket_url(path: str) -> str:
@@ -956,6 +601,10 @@ async def models() -> dict[str, Any]:
 
 @app.post("/v1/messages")
 async def messages(request: Request) -> Response:
+    return await provider_handlers.anthropic_messages(_SERVER_CONTEXT, request)
+
+
+async def _anthropic_messages_impl(request: Request) -> Response:
     if PROVIDER != "anthropic":
         return provider_disabled_response("anthropic")
     started = time.time()
@@ -1513,6 +1162,10 @@ async def messages(request: Request) -> Response:
 
 
 async def openai_optimized(request: Request, path: str) -> Response:
+    return await provider_handlers.openai_optimized(_SERVER_CONTEXT, request, path)
+
+
+async def _openai_optimized_impl(request: Request, path: str) -> Response:
     if PROVIDER != "openai":
         return provider_disabled_response("openai")
 
@@ -1867,6 +1520,10 @@ async def openai_optimized(request: Request, path: str) -> Response:
 
 
 async def openai_passthrough(request: Request, path: str) -> Response:
+    return await provider_handlers.openai_passthrough(_SERVER_CONTEXT, request, path)
+
+
+async def _openai_passthrough_impl(request: Request, path: str) -> Response:
     if PROVIDER != "openai":
         return provider_disabled_response("openai")
     headers = build_openai_forward_headers(request, force_json=False)
@@ -1899,6 +1556,10 @@ async def openai_chat_completions(request: Request) -> Response:
 
 @app.websocket("/v1/responses")
 async def openai_responses_websocket(websocket: WebSocket) -> None:
+    await provider_handlers.openai_responses_websocket(_SERVER_CONTEXT, websocket)
+
+
+async def _openai_responses_websocket_impl(websocket: WebSocket) -> None:
     await websocket.accept()
     if PROVIDER != "openai":
         await websocket.close(code=1008, reason="provider mismatch")
@@ -1975,1339 +1636,45 @@ async def openai_uploads_passthrough(request: Request, rest: str) -> Response:
 
 @app.get("/agentflow/stats")
 async def stats() -> dict[str, Any]:
-    conn = store.conn
-    calls = conn.execute("select count(*) c from calls").fetchone()["c"]
-    cache_hits = conn.execute("select count(*) c from calls where cache_hit = 1").fetchone()["c"]
-    routed = conn.execute("select coalesce(provider, 'anthropic') as provider, requested_model, routed_model, count(*) c from calls group by coalesce(provider, 'anthropic'), requested_model, routed_model order by c desc limit 20").fetchall()
-    recent = conn.execute("select coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, cache_hit, status_code, latency_ms, cost_est_usd from calls order by created_at desc limit 20").fetchall()
-    return {
-        "calls": calls,
-        "cache_hits": cache_hits,
-        "cache_hit_rate": (cache_hits / calls) if calls else 0,
-        "db": DEFAULT_DB,
-        "routing": [dict(r) for r in routed],
-        "recent": [dict(r) for r in recent],
-    }
+    return await stats_views.stats(store, DEFAULT_DB)
 
 
 @app.get("/agentflow/stats/limiter")
 async def stats_limiter() -> dict[str, Any]:
-    conn = store.conn
-    recent_rows = conn.execute("""
-        select created_at,
-               status_code,
-               coalesce(routed_model, requested_model) as model,
-               coalesce(provider, 'anthropic') as provider,
-               retry_count,
-               latency_ms,
-               error
-        from calls
-        where status_code in (429, 529)
-           or error like 'temporarily limiting requests%'
-        order by created_at desc
-        limit 50
-    """).fetchall()
-    recent = []
-    last_upstream_by_tier: dict[str, Optional[str]] = {
-        "haiku": None,
-        "sonnet": None,
-        "opus": None,
-    }
-    local_throttled_recent = 0
-    upstream_limited_recent = 0
-    for row in recent_rows:
-        error = row["error"] or ""
-        tier = _model_tier(str(row["model"] or ""))
-        local_throttled = error.startswith("temporarily limiting requests")
-        if local_throttled:
-            local_throttled_recent += 1
-        else:
-            upstream_limited_recent += 1
-            if last_upstream_by_tier.get(tier) is None:
-                last_upstream_by_tier[tier] = row["created_at"]
-        recent.append({
-            "created_at": row["created_at"],
-            "tier": tier,
-            "provider": row["provider"],
-            "model": row["model"],
-            "status_code": row["status_code"],
-            "retry_count": row["retry_count"] or 0,
-            "latency_ms": row["latency_ms"],
-            "local_throttled": local_throttled,
-            "error": error[:240] if error else None,
-        })
-
-    tiers = _tier_backoff_status()
-    for tier in tiers:
-        tier["last_upstream_429_at"] = last_upstream_by_tier.get(tier["tier"])
-
-    return {
-        "generated_at": utc_now(),
-        "config": {
+    return await stats_views.stats_limiter(
+        store,
+        _tier_backoff_status,
+        {
             "min_request_interval_ms": MIN_REQUEST_INTERVAL_MS,
             "max_tier_backoff_wait_s": MAX_TIER_BACKOFF_WAIT,
             "max_concurrent_per_tier": MAX_CONCURRENT_PER_TIER,
         },
-        "tiers": tiers,
-        "recent_rate_limits": recent,
-        "summary": {
-            "active_cooldowns": sum(1 for tier in tiers if tier["active"]),
-            "local_throttled_recent": local_throttled_recent,
-            "upstream_limited_recent": upstream_limited_recent,
-        },
-    }
+    )
 
 
 @app.get("/agentflow/stats/activity")
 async def stats_activity(limit: int = 100) -> dict[str, Any]:
-    conn = store.conn
-    capped_limit = max(1, min(int(limit or 100), 500))
-
-    provider_rows = conn.execute("""
-        select id, created_at, path, coalesce(provider, 'anthropic') as provider,
-               requested_model, routed_model, stream, cache_hit, status_code,
-               latency_ms, input_tokens_est, output_tokens_est,
-               actual_input_tokens, actual_output_tokens, cost_est_usd,
-               cost_baseline_usd, crunch_json, routing_json, cache_json, error,
-               request_json, response_json, session_id, category,
-               cache_creation_input_tokens, cache_read_input_tokens, retry_count,
-               thinking_output_tokens
-        from calls
-        order by created_at desc
-        limit ?
-    """, (capped_limit,)).fetchall()
-    provider_units = [_provider_activity_unit(row) for row in provider_rows]
-
-    codex_rows = conn.execute("""
-        select s.id as start_event_id,
-               s.created_at,
-               s.request_id,
-               s.thread_id,
-               s.session_id,
-               s.message_chars,
-               s.params_chars,
-               s.input_items,
-               s.input_text_chars,
-               (
-                   select r.id from codex_app_events r
-                   where r.direction = 'server_to_client'
-                     and r.request_id = s.request_id
-                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
-                   order by r.created_at desc
-                   limit 1
-               ) as response_event_id,
-               (
-                   select r.result_chars from codex_app_events r
-                   where r.direction = 'server_to_client'
-                     and r.request_id = s.request_id
-                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
-                   order by r.created_at desc
-                   limit 1
-               ) as response_result_chars,
-               (
-                   select r.error_code from codex_app_events r
-                   where r.direction = 'server_to_client'
-                     and r.request_id = s.request_id
-                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
-                   order by r.created_at desc
-                   limit 1
-               ) as response_error_code,
-               (
-                   select r.error_message from codex_app_events r
-                   where r.direction = 'server_to_client'
-                     and r.request_id = s.request_id
-                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
-                   order by r.created_at desc
-                   limit 1
-               ) as response_error_message,
-               (
-                   select r.latency_ms from codex_app_events r
-                   where r.direction = 'server_to_client'
-                     and r.request_id = s.request_id
-                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
-                   order by r.created_at desc
-                   limit 1
-               ) as response_latency_ms
-        from codex_app_events s
-        where s.direction = 'client_to_server' and s.method = 'turn/start'
-        order by s.created_at desc
-        limit ?
-    """, (capped_limit,)).fetchall()
-    codex_units = [_codex_turn_activity_unit(row) for row in codex_rows]
-
-    units = sorted(
-        provider_units + codex_units,
-        key=lambda unit: str(unit.get("created_at") or ""),
-        reverse=True,
-    )[:capped_limit]
-
-    def counts_by(key: str) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for unit in units:
-            value = str(unit.get(key) or "unknown")
-            counts[value] = counts.get(value, 0) + 1
-        return counts
-
-    return {
-        "generated_at": utc_now(),
-        "schema": "agentflow.optimization_activity.v1",
-        "summary": {
-            "units": len(units),
-            "provider_request_units": sum(1 for unit in units if unit["granularity"] == "provider_request"),
-            "codex_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_turn"),
-            "by_source_surface": counts_by("source_surface"),
-            "by_granularity": counts_by("granularity"),
-            "by_app_family": counts_by("app_family"),
-            "by_replayability_level": counts_by("replayability_level"),
-        },
-        "units": units,
-    }
+    return await stats_views.stats_activity(store, limit=limit)
 
 
 @app.get("/agentflow/stats/full")
 async def stats_full() -> dict[str, Any]:
-    conn = store.conn
-
-    def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
-
-    def s(sql: str, params: tuple = ()) -> Any:
-        row = conn.execute(sql, params).fetchone()
-        return row[0] if row else None
-
-    total_calls = s("select count(*) from calls") or 0
-    today_calls = s("select count(*) from calls where date(created_at) = date('now')") or 0
-    total_cost = s("select sum(cost_est_usd) from calls") or 0.0
-    today_cost = s("select sum(cost_est_usd) from calls where date(created_at) = date('now')") or 0.0
-    cache_hits = s("select count(*) from calls where cache_hit = 1") or 0
-    cache_cost_saved = s("select count(*) * 0.003 from calls where cache_hit = 1") or 0.0  # rough avg
-    avg_latency = s("select avg(latency_ms) from calls where latency_ms is not null") or 0
-    routed_count = s("select count(*) from calls where requested_model != routed_model and routed_model is not null") or 0
-    crunched_count = s("select count(*) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
-    errors = s("select count(*) from calls where status_code >= 400") or 0
-
-    # Estimate routing savings: calls where model was downgraded, cost diff
-    routing_savings = 0.0
-    today_routing_savings = 0.0
-    downgraded = q("""
-        select coalesce(provider, 'anthropic') as provider, requested_model, routed_model,
-               coalesce(actual_input_tokens, input_tokens_est, 0) as in_tok,
-               coalesce(actual_output_tokens, output_tokens_est, 0) as out_tok,
-               (date(created_at) = date('now')) as is_today
-        from calls where requested_model != routed_model and routed_model is not null
-    """)
-    for row in downgraded:
-        req_cost = estimate_cost(row["requested_model"], row["in_tok"], row["out_tok"], provider=row["provider"]) or 0
-        act_cost = estimate_cost(row["routed_model"], row["in_tok"], row["out_tok"], provider=row["provider"]) or 0
-        delta = max(0.0, req_cost - act_cost)
-        routing_savings += delta
-        if row["is_today"]:
-            today_routing_savings += delta
-
-    today_cache_savings = s("select count(*) * 0.003 from calls where cache_hit = 1 and date(created_at) = date('now')") or 0.0
-
-    crunch_chars_saved = s("select sum(json_extract(crunch_json, '$.saved_chars')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
-    crunch_tokens_saved = s("select sum(json_extract(crunch_json, '$.tokens_saved_est')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
-    avg_crunch_ratio = s("select avg(json_extract(crunch_json, '$.crunch_ratio')) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
-    crunch_savings = 0.0
-    today_crunch_savings = 0.0
-    crunch_by_model = q("""
-        select coalesce(provider, 'anthropic') as provider,
-               coalesce(routed_model, requested_model) as model,
-               sum(coalesce(json_extract(crunch_json, '$.tokens_saved_est'), 0)) as saved_tok,
-               sum(coalesce(actual_input_tokens, input_tokens_est, 0)) as input_tok,
-               sum(coalesce(cache_read_input_tokens, 0)) as cache_read_tok,
-               sum(case when date(created_at) = date('now') then coalesce(json_extract(crunch_json, '$.tokens_saved_est'), 0) else 0 end) as today_saved_tok,
-               sum(case when date(created_at) = date('now') then coalesce(actual_input_tokens, input_tokens_est, 0) else 0 end) as today_input_tok,
-               sum(case when date(created_at) = date('now') then coalesce(cache_read_input_tokens, 0) else 0 end) as today_cache_read_tok
-        from calls
-        where json_extract(crunch_json, '$.changed') = 1
-        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
-    """)
-    for row in crunch_by_model:
-        crunch_savings += estimate_blended_input_savings(
-            row["model"],
-            tokens_saved=int(row["saved_tok"] or 0),
-            input_tokens=int(row["input_tok"] or 0),
-            cache_read_tokens=int(row["cache_read_tok"] or 0),
-            provider=row["provider"],
-        ) or 0
-        today_crunch_savings += estimate_blended_input_savings(
-            row["model"],
-            tokens_saved=int(row["today_saved_tok"] or 0),
-            input_tokens=int(row["today_input_tok"] or 0),
-            cache_read_tokens=int(row["today_cache_read_tok"] or 0),
-            provider=row["provider"],
-        ) or 0
-    prompt_cache_creation_tokens = s("select sum(cache_creation_input_tokens) from calls") or 0
-    prompt_cache_read_tokens = s("select sum(cache_read_input_tokens) from calls") or 0
-    prompt_cache_hits = s("select count(*) from calls where cache_read_input_tokens > 0") or 0
-    prompt_cache_hit_rate = round(prompt_cache_hits / total_calls, 4) if total_calls else 0
-
-    prompt_cache_savings = 0.0
-    today_prompt_cache_savings = 0.0
-    cache_read_by_model = q("""
-        select coalesce(routed_model, requested_model) as model,
-               sum(cache_read_input_tokens) as read_tok,
-               sum(case when date(created_at) = date('now') then cache_read_input_tokens else 0 end) as today_read_tok,
-               coalesce(provider, 'anthropic') as provider
-        from calls where cache_read_input_tokens > 0
-        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
-    """)
-    for row in cache_read_by_model:
-        full_cost = estimate_cost(row["model"], row["read_tok"], 0, provider=row["provider"]) or 0
-        prompt_cache_savings += 0.90 * full_cost
-        today_full_cost = estimate_cost(row["model"], row["today_read_tok"] or 0, 0, provider=row["provider"]) or 0
-        today_prompt_cache_savings += 0.90 * today_full_cost
-
-    thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls") or 0)
-    today_thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls where date(created_at) = date('now')") or 0)
-    thinking_cost = 0.0
-    today_thinking_cost = 0.0
-    thinking_by_model = q("""
-        select coalesce(routed_model, requested_model) as model,
-               sum(thinking_output_tokens) as think_tok,
-               sum(case when date(created_at) = date('now') then coalesce(thinking_output_tokens, 0) else 0 end) as today_think_tok,
-               coalesce(provider, 'anthropic') as provider
-        from calls where thinking_output_tokens > 0
-        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
-    """)
-    for row in thinking_by_model:
-        thinking_cost += estimate_cost(row["model"], 0, row["think_tok"] or 0, provider=row["provider"]) or 0
-        today_thinking_cost += estimate_cost(row["model"], 0, row["today_think_tok"] or 0, provider=row["provider"]) or 0
-
-    codex_app_total_events = int(s("select count(*) from codex_app_events") or 0)
-    codex_app_today_events = int(s("select count(*) from codex_app_events where date(created_at) = date('now')") or 0)
-    codex_app_sessions = int(s("select count(distinct session_id) from codex_app_events where session_id is not null") or 0)
-    codex_app_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed'") or 0)
-    codex_app_today_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed' and date(created_at) = date('now')") or 0)
-    codex_app_last_event_at = s("select max(created_at) from codex_app_events")
-    codex_app_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start'") or 0)
-    codex_app_avg_latency = s("select avg(latency_ms) from codex_app_events where latency_ms is not null") or 0
-
-    recent = q("""
-        select id, coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, stream, cache_hit,
-               status_code, latency_ms,
-               coalesce(actual_input_tokens, input_tokens_est) as input_tokens,
-               coalesce(actual_output_tokens, output_tokens_est) as output_tokens,
-               cost_est_usd,
-               json_extract(crunch_json, '$.changed') as crunched,
-               json_extract(crunch_json, '$.saved_chars') as crunch_saved_chars,
-               json_extract(routing_json, '$.reason') as routing_reason,
-               error
-        from calls order by created_at desc limit 50
-    """)
-
-    routing_breakdown = q("""
-        select coalesce(provider, 'anthropic') as provider, requested_model, routed_model, count(*) as count
-        from calls group by coalesce(provider, 'anthropic'), requested_model, routed_model order by count desc limit 15
-    """)
-
-    category_breakdown = q("""
-        select coalesce(provider, 'anthropic') as provider, coalesce(category, 'unknown') as category, count(*) as count,
-               round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
-               sum(case when requested_model != routed_model and routed_model is not null then 1 else 0 end) as routed_count
-        from calls group by coalesce(provider, 'anthropic'), coalesce(category, 'unknown') order by count desc
-    """)
-
-    cache_decision_breakdown = q("""
-        select coalesce(json_extract(cache_json, '$.status'), 'missing') as status,
-               coalesce(json_extract(cache_json, '$.reason'), 'unknown') as reason,
-               coalesce(json_extract(cache_json, '$.hit_type'), '') as hit_type,
-               coalesce(json_extract(cache_json, '$.policy_source'), 'unknown') as policy_source,
-               count(*) as count
-        from calls
-        group by coalesce(json_extract(cache_json, '$.status'), 'missing'),
-                 coalesce(json_extract(cache_json, '$.reason'), 'unknown'),
-                 coalesce(json_extract(cache_json, '$.hit_type'), ''),
-                 coalesce(json_extract(cache_json, '$.policy_source'), 'unknown')
-        order by count desc
-    """)
-
-    routing_experiment_rows = q("""
-        select requested_model,
-               routed_model,
-               coalesce(category, 'unknown') as category,
-               coalesce(routing_reason, 'unknown') as routing_reason,
-               count(*) as samples,
-               sum(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then 1 else 0 end) as compared_samples,
-               avg(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then output_similarity else null end) as avg_similarity,
-               avg(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then passed_threshold else null end) as pass_rate,
-               round(sum(coalesce(primary_cost_est_usd, 0)), 6) as primary_cost_usd,
-               round(sum(coalesce(shadow_cost_est_usd, 0)), 6) as shadow_cost_usd,
-               max(created_at) as last_sample_at
-        from routing_experiments
-        group by requested_model, routed_model, coalesce(category, 'unknown'), coalesce(routing_reason, 'unknown')
-        order by samples desc, last_sample_at desc
-        limit 20
-    """)
-    routing_experiment_summary = []
-    for row in routing_experiment_rows:
-        compared_samples = int(row["compared_samples"] or 0)
-        avg_similarity = row["avg_similarity"]
-        pass_rate = row["pass_rate"]
-        confidence_score = 0.0
-        if avg_similarity is not None and compared_samples > 0:
-            confidence_score = float(avg_similarity) * min(1.0, compared_samples / ROUTING_EXPERIMENT_MIN_SAMPLES)
-        row["compared_samples"] = compared_samples
-        row["avg_similarity"] = round(float(avg_similarity), 6) if avg_similarity is not None else None
-        row["pass_rate"] = round(float(pass_rate), 4) if pass_rate is not None else None
-        row["confidence_score"] = round(confidence_score, 6)
-        row["min_samples_for_confidence"] = ROUTING_EXPERIMENT_MIN_SAMPLES
-        routing_experiment_summary.append(row)
-    routing_experiment_samples = int(s("select count(*) from routing_experiments") or 0)
-    routing_experiment_compared = int(s("""
-        select count(*) from routing_experiments
-        where primary_status_code < 400
-          and shadow_status_code < 400
-          and output_similarity is not null
-    """) or 0)
-    routing_experiment_avg_similarity = s("""
-        select avg(output_similarity) from routing_experiments
-        where primary_status_code < 400
-          and shadow_status_code < 400
-          and output_similarity is not null
-    """)
-
-    provider_breakdown = q("""
-        select coalesce(provider, 'anthropic') as provider, count(*) as count,
-               round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
-               sum(case when requested_model != routed_model and routed_model is not null then 1 else 0 end) as routed_count
-        from calls group by coalesce(provider, 'anthropic') order by count desc
-    """)
-    if codex_app_total_events:
-        provider_breakdown.append({
-            "provider": "codex-app",
-            "count": codex_app_turns,
-            "cost_usd": None,
-            "routed_count": 0,
-            "events": codex_app_total_events,
-        })
-
-    codex_app_methods = q("""
-        select direction, coalesce(method, '(response)') as method, count(*) as count,
-               round(avg(latency_ms)) as avg_latency_ms,
-               sum(coalesce(input_text_chars, 0)) as input_text_chars
-        from codex_app_events
-        group by direction, coalesce(method, '(response)')
-        order by count desc
-        limit 20
-    """)
-    codex_app_recent = q("""
-        select created_at, direction, coalesce(method, '(response)') as method,
-               request_id, thread_id, message_chars, input_items, input_text_chars,
-               result_chars, error_code, error_message, latency_ms, session_id
-        from codex_app_events
-        order by created_at desc
-        limit 50
-    """)
-
-    return {
-        "summary": {
-            "total_calls": total_calls,
-            "today_calls": today_calls,
-            "total_cost_usd": round(total_cost, 6),
-            "today_cost_usd": round(today_cost, 6),
-            "cache_hits": cache_hits,
-            "cache_hit_rate": round(cache_hits / total_calls, 4) if total_calls else 0,
-            "routing_savings_usd": round(routing_savings, 6),
-            "today_routing_savings_usd": round(today_routing_savings, 6),
-            "cache_savings_usd": round(cache_cost_saved, 6),
-            "today_cache_savings_usd": round(today_cache_savings, 6),
-            "total_savings_usd": round(routing_savings + cache_cost_saved, 6),
-            "avg_latency_ms": round(avg_latency),
-            "routed_count": routed_count,
-            "crunched_count": crunched_count,
-            "crunch_chars_saved": crunch_chars_saved,
-            "crunch_tokens_saved": int(crunch_tokens_saved),
-            "crunch_savings_usd": round(crunch_savings, 6),
-            "today_crunch_savings_usd": round(today_crunch_savings, 6),
-            "avg_crunch_ratio": round(avg_crunch_ratio, 4),
-            "errors": errors,
-            "prompt_cache_creation_tokens": int(prompt_cache_creation_tokens),
-            "prompt_cache_read_tokens": int(prompt_cache_read_tokens),
-            "prompt_cache_hit_rate": prompt_cache_hit_rate,
-            "prompt_cache_savings_usd": round(prompt_cache_savings, 6),
-            "today_prompt_cache_savings_usd": round(today_prompt_cache_savings, 6),
-            "thinking_output_tokens": thinking_output_tokens,
-            "today_thinking_output_tokens": today_thinking_output_tokens,
-            "thinking_cost_usd": round(thinking_cost, 6),
-            "today_thinking_cost_usd": round(today_thinking_cost, 6),
-            "codex_app_total_events": codex_app_total_events,
-            "codex_app_today_events": codex_app_today_events,
-            "codex_app_sessions": codex_app_sessions,
-            "codex_app_turns": codex_app_turns,
-            "codex_app_today_turns": codex_app_today_turns,
-            "codex_app_last_event_at": codex_app_last_event_at,
-            "codex_app_input_text_chars": codex_app_input_text_chars,
-            "codex_app_avg_latency_ms": round(codex_app_avg_latency),
-            "routing_experiment_samples": routing_experiment_samples,
-            "routing_experiment_compared_samples": routing_experiment_compared,
-            "routing_experiment_avg_similarity": (
-                round(float(routing_experiment_avg_similarity), 6)
-                if routing_experiment_avg_similarity is not None else None
-            ),
-        },
-        "recent": recent,
-        "routing_breakdown": routing_breakdown,
-        "category_breakdown": category_breakdown,
-        "cache_decision_breakdown": cache_decision_breakdown,
-        "routing_experiment_summary": routing_experiment_summary,
-        "provider_breakdown": provider_breakdown,
-        "codex_app_methods": codex_app_methods,
-        "codex_app_recent": codex_app_recent,
-    }
+    return await stats_views.stats_full(store)
 
 
 @app.get("/agentflow/stats/weekly")
 async def stats_weekly() -> dict[str, Any]:
-    conn = store.conn
-    rows = conn.execute("""
-        select
-            date(created_at) as day,
-            count(*) as total_calls,
-            sum(case when status_code = 200 then 1 else 0 end) as successful_calls,
-            sum(case when status_code >= 400 then 1 else 0 end) as errors,
-            sum(cache_hit) as cache_hits,
-            round(avg(latency_ms)) as avg_latency_ms,
-            round(sum(coalesce(cost_est_usd, 0)), 6) as cost_est_usd,
-            round(sum(coalesce(cost_baseline_usd, 0)), 6) as cost_baseline_usd
-        from calls
-        where date(created_at) >= date('now', '-6 days')
-        group by date(created_at)
-        order by day asc
-    """).fetchall()
-    days = []
-    for r in rows:
-        row = dict(r)
-        row["savings_usd"] = round((row["cost_baseline_usd"] or 0) - (row["cost_est_usd"] or 0), 6)
-        days.append(row)
-    totals = {
-        "day": "Total",
-        "total_calls": sum(r["total_calls"] for r in days),
-        "successful_calls": sum(r["successful_calls"] or 0 for r in days),
-        "errors": sum(r["errors"] or 0 for r in days),
-        "cache_hits": sum(r["cache_hits"] or 0 for r in days),
-        "avg_latency_ms": round(sum(r["avg_latency_ms"] or 0 for r in days) / len(days)) if days else None,
-        "cost_est_usd": round(sum(r["cost_est_usd"] or 0 for r in days), 6),
-        "cost_baseline_usd": round(sum(r["cost_baseline_usd"] or 0 for r in days), 6),
-        "savings_usd": round(sum(r["savings_usd"] for r in days), 6),
-    }
-    return {"days": days, "totals": totals}
+    return await stats_views.stats_weekly(store)
 
 
 @app.get("/agentflow/stats/sessions")
 async def stats_sessions() -> dict[str, Any]:
-    conn = store.conn
-    rows = conn.execute("""
-        SELECT SUBSTR(session_id,1,8) as sid, session_id, COUNT(*) as calls,
-            ROUND(SUM(cost_est_usd),6) as cost_usd,
-            SUM(CASE WHEN category='tool-result' THEN 1 ELSE 0 END) as tool_result,
-            SUM(CASE WHEN category='tool-heavy' THEN 1 ELSE 0 END) as tool_heavy,
-            SUM(CASE WHEN category='short-completion' THEN 1 ELSE 0 END) as short_completion,
-            SUM(CASE WHEN category='code-gen' THEN 1 ELSE 0 END) as code_gen,
-            SUM(CASE WHEN category='chat' THEN 1 ELSE 0 END) as chat,
-            SUM(CASE WHEN category IS NULL OR category NOT IN ('tool-result','tool-heavy','short-completion','code-gen','chat') THEN 1 ELSE 0 END) as other
-        FROM calls
-        WHERE DATE(created_at) = DATE('now') AND session_id IS NOT NULL
-        GROUP BY session_id ORDER BY cost_usd DESC LIMIT 20
-    """).fetchall()
-    sessions = [dict(r) for r in rows]
-    session_ids = [row["session_id"] for row in sessions]
-    plateau_rows = conn.execute("""
-        SELECT session_id,
-               created_at,
-               CAST(coalesce(
-                   json_extract(routing_json, '$.text_chars'),
-                   coalesce(actual_input_tokens, input_tokens_est, 0) * 4,
-                   0
-               ) AS INTEGER) as text_chars,
-               coalesce(provider, 'anthropic') as provider,
-               coalesce(routed_model, requested_model) as model,
-               coalesce(cost_est_usd, 0) as cost_usd,
-               coalesce(cache_read_input_tokens, 0) as cache_read_tokens,
-               coalesce(json_extract(crunch_json, '$.saved_chars'), 0) as crunch_saved_chars
-        FROM calls
-        WHERE DATE(created_at) = DATE('now') AND session_id IS NOT NULL
-        ORDER BY session_id, created_at
-    """).fetchall()
-    plateau_by_session: dict[str, dict[str, Any]] = {}
-    prev_by_session: dict[str, int] = {}
-    min_plateau_chars = 8_000
-    max_plateau_delta_ratio = 0.03
-    flagged_plateau_pairs = 50
-
-    def median_int(values: list[int]) -> int:
-        if not values:
-            return 0
-        sorted_values = sorted(values)
-        mid = len(sorted_values) // 2
-        if len(sorted_values) % 2:
-            return sorted_values[mid]
-        return int(round((sorted_values[mid - 1] + sorted_values[mid]) / 2))
-
-    def percentile_int(values: list[int], percentile: float) -> int:
-        if not values:
-            return 0
-        sorted_values = sorted(values)
-        idx = min(len(sorted_values) - 1, math.ceil((len(sorted_values) - 1) * percentile))
-        return sorted_values[idx]
-
-    for row in plateau_rows:
-        sid = row["session_id"]
-        text_chars = int(row["text_chars"] or 0)
-        bucket = plateau_by_session.setdefault(
-            sid,
-            {
-                "session_id": sid,
-                "sid": sid[:8],
-                "calls": 0,
-                "cost_usd": 0.0,
-                "plateau_pairs": 0,
-                "large_text_values": [],
-                "cache_read_savings_usd": 0.0,
-                "crunch_saved_chars": 0,
-            },
-        )
-        bucket["calls"] += 1
-        bucket["cost_usd"] += float(row["cost_usd"] or 0.0)
-        if text_chars >= min_plateau_chars:
-            bucket["large_text_values"].append(text_chars)
-        prev_text = prev_by_session.get(sid)
-        if (
-            prev_text is not None
-            and prev_text >= min_plateau_chars
-            and text_chars >= min_plateau_chars
-            and abs(text_chars - prev_text) / max(prev_text, 1) <= max_plateau_delta_ratio
-        ):
-            bucket["plateau_pairs"] += 1
-        prev_by_session[sid] = text_chars
-
-        read_tokens = int(row["cache_read_tokens"] or 0)
-        if read_tokens:
-            provider = str(row["provider"] or "anthropic").lower()
-            full_read_cost = estimate_cost(row["model"], read_tokens, 0, provider=provider) or 0.0
-            cached_read_input_tokens = read_tokens if provider == "openai" else 0
-            cached_read_cost = estimate_cost(
-                row["model"],
-                cached_read_input_tokens,
-                0,
-                cache_read=read_tokens,
-                provider=provider,
-            ) or 0.0
-            bucket["cache_read_savings_usd"] += max(full_read_cost - cached_read_cost, 0.0)
-        bucket["crunch_saved_chars"] += int(row["crunch_saved_chars"] or 0)
-
-    all_plateau_metrics = []
-    for bucket in plateau_by_session.values():
-        large_text_values = bucket.pop("large_text_values")
-        bucket["median_text_chars"] = median_int(large_text_values)
-        bucket["p90_text_chars"] = percentile_int(large_text_values, 0.9)
-        bucket["cost_usd"] = round(float(bucket["cost_usd"]), 6)
-        bucket["cache_read_savings_usd"] = round(float(bucket["cache_read_savings_usd"]), 6)
-        bucket["flagged"] = int(bucket["plateau_pairs"]) > flagged_plateau_pairs
-        all_plateau_metrics.append(bucket)
-    context_plateaus = [
-        bucket for bucket in all_plateau_metrics
-        if bucket["plateau_pairs"] > 0
-    ]
-    context_plateaus.sort(key=lambda r: (r["flagged"], r["plateau_pairs"], r["cost_usd"]), reverse=True)
-    context_plateaus = context_plateaus[:20]
-    plateau_metrics_by_session = {
-        row["session_id"]: row
-        for row in all_plateau_metrics
-    }
-    thinking_by_session: dict[str, dict[str, float | int]] = {
-        sid: {"thinking_tokens": 0, "thinking_cost_usd": 0.0}
-        for sid in session_ids
-    }
-    prompt_cache_by_session: dict[str, dict[str, float | int]] = {
-        sid: {
-            "cache_creation_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_creation_cost_usd": 0.0,
-            "cache_read_savings_usd": 0.0,
-        }
-        for sid in session_ids
-    }
-    if session_ids:
-        placeholders = ",".join("?" for _ in session_ids)
-        thinking_rows = conn.execute(f"""
-            SELECT session_id,
-                   coalesce(provider, 'anthropic') as provider,
-                   coalesce(routed_model, requested_model) as model,
-                   SUM(coalesce(thinking_output_tokens, 0)) as thinking_tokens
-            FROM calls
-            WHERE DATE(created_at) = DATE('now')
-              AND session_id IN ({placeholders})
-              AND coalesce(thinking_output_tokens, 0) > 0
-            GROUP BY session_id, coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
-        """, tuple(session_ids)).fetchall()
-        for row in thinking_rows:
-            sid = row["session_id"]
-            tokens = int(row["thinking_tokens"] or 0)
-            thinking_by_session[sid]["thinking_tokens"] = int(thinking_by_session[sid]["thinking_tokens"]) + tokens
-            thinking_by_session[sid]["thinking_cost_usd"] = float(thinking_by_session[sid]["thinking_cost_usd"]) + (
-                estimate_cost(row["model"], 0, tokens, provider=row["provider"]) or 0.0
-            )
-        prompt_cache_rows = conn.execute(f"""
-            SELECT session_id,
-                   coalesce(provider, 'anthropic') as provider,
-                   coalesce(routed_model, requested_model) as model,
-                   SUM(coalesce(cache_creation_input_tokens, 0)) as cache_creation_tokens,
-                   SUM(coalesce(cache_read_input_tokens, 0)) as cache_read_tokens
-            FROM calls
-            WHERE DATE(created_at) = DATE('now')
-              AND session_id IN ({placeholders})
-              AND (
-                  coalesce(cache_creation_input_tokens, 0) > 0
-                  OR coalesce(cache_read_input_tokens, 0) > 0
-              )
-            GROUP BY session_id, coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
-        """, tuple(session_ids)).fetchall()
-        for row in prompt_cache_rows:
-            sid = row["session_id"]
-            creation_tokens = int(row["cache_creation_tokens"] or 0)
-            read_tokens = int(row["cache_read_tokens"] or 0)
-            bucket = prompt_cache_by_session[sid]
-            bucket["cache_creation_tokens"] = int(bucket["cache_creation_tokens"]) + creation_tokens
-            bucket["cache_read_tokens"] = int(bucket["cache_read_tokens"]) + read_tokens
-
-            creation_cost = estimate_cost(
-                row["model"],
-                0,
-                0,
-                cache_creation=creation_tokens,
-                provider=row["provider"],
-            ) or 0.0
-            provider = str(row["provider"]).lower()
-            full_read_cost = estimate_cost(row["model"], read_tokens, 0, provider=provider) or 0.0
-            cached_read_input_tokens = read_tokens if provider == "openai" else 0
-            cached_read_cost = estimate_cost(
-                row["model"],
-                cached_read_input_tokens,
-                0,
-                cache_read=read_tokens,
-                provider=provider,
-            ) or 0.0
-            bucket["cache_creation_cost_usd"] = float(bucket["cache_creation_cost_usd"]) + creation_cost
-            bucket["cache_read_savings_usd"] = float(bucket["cache_read_savings_usd"]) + max(
-                full_read_cost - cached_read_cost,
-                0.0,
-            )
-    for row in sessions:
-        thinking = thinking_by_session.get(row["session_id"], {})
-        row["thinking_tokens"] = int(thinking.get("thinking_tokens", 0) or 0)
-        row["thinking_cost_usd"] = round(float(thinking.get("thinking_cost_usd", 0.0) or 0.0), 6)
-        prompt_cache = prompt_cache_by_session.get(row["session_id"], {})
-        creation_tokens = int(prompt_cache.get("cache_creation_tokens", 0) or 0)
-        read_tokens = int(prompt_cache.get("cache_read_tokens", 0) or 0)
-        creation_cost = float(prompt_cache.get("cache_creation_cost_usd", 0.0) or 0.0)
-        read_savings = float(prompt_cache.get("cache_read_savings_usd", 0.0) or 0.0)
-        row["cache_creation_tokens"] = creation_tokens
-        row["cache_read_tokens"] = read_tokens
-        row["cache_write_read_token_ratio"] = round(creation_tokens / read_tokens, 3) if read_tokens else None
-        row["cache_creation_cost_usd"] = round(creation_cost, 6)
-        row["cache_read_savings_usd"] = round(read_savings, 6)
-        row["cache_warmup_payback_ratio"] = round(creation_cost / read_savings, 3) if read_savings else None
-        plateau = plateau_metrics_by_session.get(row["session_id"], {})
-        row["plateau_pairs"] = int(plateau.get("plateau_pairs", 0) or 0)
-        row["median_text_chars"] = int(plateau.get("median_text_chars", 0) or 0)
-        row["p90_text_chars"] = int(plateau.get("p90_text_chars", 0) or 0)
-    return {
-        "sessions": sessions,
-        "context_plateaus": context_plateaus,
-        "context_plateau_policy": {
-            "min_text_chars": min_plateau_chars,
-            "max_delta_ratio": max_plateau_delta_ratio,
-            "flagged_plateau_pairs": flagged_plateau_pairs,
-        },
-    }
+    return await stats_views.stats_sessions(store)
 
 
 @app.get("/agentflow/dashboard", response_class=HTMLResponse)
 async def dashboard() -> str:
-    return """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>AgentFlow</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:ui-monospace,monospace;background:#0d1117;color:#c9d1d9;font-size:13px}
-  a{color:#58a6ff;text-decoration:none}
-  header{background:#161b22;border-bottom:1px solid #30363d;padding:14px 24px;display:flex;align-items:center;gap:16px}
-  header h1{font-size:16px;font-weight:600;color:#f0f6fc}
-  header .sub{color:#8b949e;font-size:12px}
-  .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;display:inline-block;margin-right:6px;animation:pulse 2s infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .cards{display:flex;gap:12px;padding:16px 24px;flex-wrap:wrap}
-  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px;min-width:150px;flex:1}
-  .card .label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-  .card .value{font-size:22px;font-weight:600;color:#f0f6fc}
-  .card .sub{color:#8b949e;font-size:11px;margin-top:3px}
-  .card.green .value{color:#3fb950}
-  .card.yellow .value{color:#d29922}
-  .card.blue .value{color:#58a6ff}
-  .tabs{display:flex;padding:0 24px;border-bottom:1px solid #30363d}
-  .tab-btn{background:none;border:none;border-bottom:2px solid transparent;color:#8b949e;cursor:pointer;font-family:inherit;font-size:13px;margin-bottom:-1px;padding:10px 16px}
-  .tab-btn.active{border-bottom-color:#58a6ff;color:#f0f6fc}
-  .tab-panel{display:none}
-  .tab-panel.active{display:block}
-  .section{padding:0 24px 24px}
-  .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;margin-bottom:10px;padding-top:4px}
-  .table-wrap{overflow-x:auto}
-  table{width:100%;border-collapse:collapse}
-  .activity-table{min-width:980px}
-  th{text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:6px 10px;border-bottom:1px solid #21262d;font-weight:400}
-  td{padding:6px 10px;border-bottom:1px solid #161b22;vertical-align:middle;white-space:nowrap}
-  tr:hover td{background:#161b22}
-  .badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:500}
-  .badge.hit{background:#1a3a1f;color:#3fb950}
-  .badge.miss{background:#1c1c1c;color:#8b949e}
-  .badge.stream{background:#1a2a3a;color:#58a6ff}
-  .badge.err{background:#3a1a1a;color:#f85149}
-  .badge.routed{background:#2d2208;color:#d29922}
-  .badge.crunched{background:#1a1a3a;color:#79c0ff}
-  .badge.provider{background:#20242b;color:#c9d1d9}
-  .model{max-width:160px;overflow:hidden;text-overflow:ellipsis;color:#c9d1d9}
-  .model.downgraded{color:#d29922}
-  .cost{color:#3fb950;font-variant-numeric:tabular-nums}
-  .latency{color:#8b949e;font-variant-numeric:tabular-nums}
-  .tokens{color:#8b949e;font-variant-numeric:tabular-nums}
-  .ts{color:#8b949e;font-size:11px}
-  .flags{white-space:normal;min-width:170px}
-  .err-row td{background:#1a0a0a}
-  .totals-row td{border-top:1px solid #30363d;font-weight:600}
-  .savings{color:#3fb950;font-variant-numeric:tabular-nums}
-  .baseline{color:#8b949e;font-variant-numeric:tabular-nums}
-  #status{margin-left:auto;font-size:11px;color:#8b949e}
-  .arrow{color:#8b949e;margin:0 3px}
-  @media (max-width:700px){
-    header{padding:12px;gap:8px;flex-wrap:wrap}
-    .cards{padding:12px;gap:8px}
-    .card{min-width:130px;padding:12px}
-    .tabs{padding:0 12px;overflow-x:auto}
-    .tab-btn{padding:10px 12px;white-space:nowrap}
-    .section{padding:0 12px 18px}
-  }
-</style>
-</head>
-<body>
-<header>
-  <span class="dot"></span>
-  <h1>AgentFlow</h1>
-  <span class="sub">provider-aware proxy · cost reduction dashboard</span>
-  <span id="status">loading...</span>
-</header>
-
-<div class="cards" id="cards">
-  <div class="card"><div class="label">Calls today</div><div class="value" id="c-today">—</div><div class="sub" id="c-total">— total</div></div>
-  <div class="card"><div class="label">Cost today</div><div class="value" id="c-cost">—</div><div class="sub" id="c-cost-total">— total</div></div>
-  <div class="card green"><div class="label">Saved by routing</div><div class="value" id="c-routing">—</div><div class="sub" id="c-routed-n">— calls routed</div></div>
-  <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
-  <div class="card green"><div class="label">Provider cache discount</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— provider cache hit rate</div></div>
-  <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
-  <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
-  <div class="card yellow"><div class="label">Tier cooldowns</div><div class="value" id="c-limiter">—</div><div class="sub" id="c-limiter-sub">— queued</div></div>
-  <div class="card blue"><div class="label">Codex app-server</div><div class="value" id="c-codex-app-turns">—</div><div class="sub" id="c-codex-app-events">— events</div></div>
-</div>
-
-<div class="tabs">
-  <button class="tab-btn active" onclick="showTab('activity')">Activity</button>
-  <button class="tab-btn" onclick="showTab('provider')">Provider calls</button>
-  <button class="tab-btn" onclick="showTab('codex')">Codex debug</button>
-  <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
-  <button class="tab-btn" onclick="showTab('categories')">By category</button>
-  <button class="tab-btn" onclick="showTab('cache')">Cache</button>
-  <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
-  <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
-</div>
-
-<div class="tab-panel active" id="tab-activity">
-<div class="section">
-  <h2>Unified recent activity</h2>
-  <div class="table-wrap">
-  <table class="activity-table">
-    <thead><tr>
-      <th>Time</th><th>Surface</th><th>Granularity</th><th>Requested</th><th>Target</th><th>Input</th><th>Output / status</th><th>Latency</th><th>Flags</th>
-    </tr></thead>
-    <tbody id="activity-tbody"></tbody>
-  </table>
-  </div>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-provider">
-<div class="section">
-  <h2>Recent calls</h2>
-  <div class="table-wrap">
-  <table>
-    <thead><tr>
-      <th>Time</th><th>Provider</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
-    </tr></thead>
-    <tbody id="provider-tbody"></tbody>
-  </table>
-  </div>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-codex">
-<div class="section">
-  <h2>Codex app-server telemetry</h2>
-  <div class="table-wrap">
-  <table>
-    <thead><tr>
-      <th>Time</th><th>Direction</th><th>Method</th><th>Chars</th><th>Input</th><th>Latency</th><th>Session</th>
-    </tr></thead>
-    <tbody id="codex-tbody"></tbody>
-  </table>
-  </div>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-weekly">
-<div class="section">
-  <h2>7-day daily statistics</h2>
-  <table>
-    <thead><tr>
-      <th>Date</th><th>Calls</th><th>Success</th><th>Errors</th><th>Cache hits</th><th>Avg latency</th><th>Cost (actual)</th><th>Cost (baseline)</th><th>Savings</th>
-    </tr></thead>
-    <tbody id="weekly-tbody"></tbody>
-  </table>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-categories">
-<div class="section">
-  <h2>Calls by request category</h2>
-  <table>
-    <thead><tr>
-      <th>Category</th><th>Calls</th><th>Cost</th><th>Routed</th>
-    </tr></thead>
-    <tbody id="cat-tbody"></tbody>
-  </table>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-cache">
-<div class="section">
-  <h2>Cache decisions</h2>
-  <table>
-    <thead><tr>
-      <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
-    </tr></thead>
-    <tbody id="cache-tbody"></tbody>
-  </table>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-limiter">
-<div class="section">
-  <h2>Tier limiter state</h2>
-  <table>
-    <thead><tr>
-      <th>Tier</th><th>Status</th><th>Remaining</th><th>Cooldown until</th><th>Slots</th><th>Queued</th><th>Last upstream 429</th>
-    </tr></thead>
-    <tbody id="limiter-tbody"></tbody>
-  </table>
-</div>
-<div class="section">
-  <h2>Recent rate limits</h2>
-  <table>
-    <thead><tr>
-      <th>Time</th><th>Tier</th><th>Provider</th><th>Status</th><th>Retries</th><th>Latency</th><th>Source</th><th>Error</th>
-    </tr></thead>
-    <tbody id="limiter-recent-tbody"></tbody>
-  </table>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-sessions">
-<div class="section">
-  <h2>Sessions today</h2>
-  <table>
-    <thead><tr>
-      <th>Session</th><th>Calls</th><th>Cost</th><th>Thinking</th><th>Thinking cost</th><th>Cache write</th><th>Cache read</th><th>Write/read</th><th>Write cost</th><th>Read saved</th><th>Payback</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
-    </tr></thead>
-    <tbody id="sess-tbody"></tbody>
-  </table>
-</div>
-<div class="section">
-  <h2>Context plateaus today</h2>
-  <table>
-    <thead><tr>
-      <th>Session</th><th>Calls</th><th>Cost</th><th>Plateau pairs</th><th>Median chars</th><th>P90 chars</th><th>Cache read saved</th><th>Crunch saved chars</th><th>Flag</th>
-    </tr></thead>
-    <tbody id="plateau-tbody"></tbody>
-  </table>
-</div>
-</div>
-
-<script>
-function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
-function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
-function fmtSec(n){if(n==null)return'—';return n<60?n.toFixed(1)+'s':(n/60).toFixed(1)+'m'}
-function fmtTok(n){if(n==null)return'?';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
-function fmtRatio(n){if(n==null)return'—';return n.toFixed(2)+'x'}
-function until(ts){
-  if(!ts)return'—';
-  const d=Math.ceil((new Date(ts).getTime()-Date.now())/1000);
-  if(isNaN(d))return'—';
-  if(d<=0)return'now';
-  return fmtSec(d);
-}
-function ago(ts){
-  if(!ts)return'—';
-  const d=Math.floor((Date.now()-new Date(ts).getTime())/1000);
-  if(isNaN(d))return'—';
-  if(d<60)return d+'s';if(d<3600)return Math.floor(d/60)+'m';
-  if(d<86400)return Math.floor(d/3600)+'h';return Math.floor(d/86400)+'d';
-}
-function shortModel(m){
-  if(!m)return'—';
-  return m.replace('claude-','').replace(/-20\\d{6}$/,'');
-}
-function shortProvider(p){
-  if(!p)return'—';
-  return p==='anthropic'?'Claude':p.charAt(0).toUpperCase()+p.slice(1);
-}
-function esc(v){
-  return String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function shortSurface(s){
-  const labels={anthropic_messages:'Claude',openai_chat:'OpenAI chat',openai_responses:'OpenAI',codex_turn:'Codex turn'};
-  return labels[s]||s||'unknown';
-}
-function activityInput(unit){
-  const f=unit.input_features||{};
-  if(unit.granularity==='provider_request'){
-    const tok=f.input_tokens??f.input_tokens_est;
-    const cache=f.cache_read_input_tokens||0;
-    const text=f.text_chars;
-    const parts=[];
-    if(tok!=null)parts.push(fmtTok(tok)+' tok');
-    if(text!=null)parts.push(fmtTok(text)+' chars');
-    if(cache)parts.push(fmtTok(cache)+' cached');
-    return parts.join(' · ')||'—';
-  }
-  const parts=[];
-  parts.push(fmtTok(f.input_text_chars||0)+' text chars');
-  if(f.input_items!=null)parts.push((f.input_items||0)+' items');
-  return parts.join(' · ');
-}
-function activityOutcome(unit){
-  const o=unit.outcome_features||{};
-  if(unit.granularity==='provider_request'){
-    const status=o.status_code??'—';
-    const cls=Number(status)>=400?'err':'hit';
-    const out=o.output_tokens!=null?fmtTok(o.output_tokens)+' out':'— out';
-    const cost=o.cost_est_usd==null?'cost unknown':fmt(o.cost_est_usd,5);
-    return `<span class="badge ${cls}">${status}</span> <span class="tokens">${out}</span> <span class="cost">${cost}</span>`;
-  }
-  const cls=o.status==='error'?'err':o.status==='pending'?'miss':'hit';
-  const chars=o.result_chars!=null?fmtTok(o.result_chars)+' result chars':'turn-level';
-  return `<span class="badge ${cls}">${esc(o.status||'pending')}</span> <span class="tokens">${chars}</span> <span class="badge miss">cost unknown</span>`;
-}
-function activityFlags(unit){
-  const flags=[];
-  const opt=unit.optimization_features||{};
-  const routing=opt.routing||{};
-  const crunch=opt.crunch||{};
-  const cache=opt.cache||{};
-  if(unit.granularity==='agent_turn')flags.push('<span class="badge miss">not provider-replayable</span>');
-  if(unit.replayability_level)flags.push(`<span class="badge provider">${esc(unit.replayability_level)}</span>`);
-  if(routing.routed_model&&routing.routed_model!==routing.requested_model)flags.push('<span class="badge routed">routed</span>');
-  if(cache.status)flags.push(`<span class="badge ${cache.status==='hit'?'hit':cache.status==='miss'?'miss':'stream'}">cache ${esc(cache.status)}</span>`);
-  if(crunch.changed)flags.push('<span class="badge crunched">crunched</span>');
-  const category=(unit.input_features&&unit.input_features.category)||(unit.tool_features&&unit.tool_features.category);
-  if(category)flags.push(`<span class="badge provider">${esc(category)}</span>`);
-  return flags.join(' ')||'<span class="badge miss">observed</span>';
-}
-
-function showTab(name){
-  const tabs=['activity','provider','codex','weekly','categories','cache','limiter','sessions'];
-  tabs.forEach(t=>{
-    document.getElementById('tab-'+t).classList.toggle('active',t===name);
-  });
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>{
-    b.classList.toggle('active',tabs[i]===name);
-  });
-}
-
-async function refreshActivity(){
-  try{
-    const r=await fetch('/agentflow/stats/activity?limit=100');
-    const d=await r.json();
-    const tb=document.getElementById('activity-tbody');
-    const rows=d.units||[];
-    tb.innerHTML=rows.map(unit=>{
-      const o=unit.outcome_features||{};
-      const err=(o.status_code&&o.status_code>=400)||o.status==='error';
-      const requested=unit.requested_model?shortModel(unit.requested_model):(unit.granularity==='agent_turn'?'turn-level':'—');
-      const target=unit.target_model?shortModel(unit.target_model):(unit.granularity==='agent_turn'?'not provider-replayable':'—');
-      return `<tr class="${err?'err-row':''}">
-        <td class="ts">${ago(unit.created_at)}</td>
-        <td><span class="badge provider">${esc(shortSurface(unit.source_surface))}</span></td>
-        <td><span class="badge stream">${esc(unit.granularity||'unknown')}</span></td>
-        <td class="model">${esc(requested)}</td>
-        <td class="model">${esc(target)}</td>
-        <td class="tokens">${esc(activityInput(unit))}</td>
-        <td>${activityOutcome(unit)}</td>
-        <td class="latency">${fmtMs(o.latency_ms)}</td>
-        <td class="flags">${activityFlags(unit)}</td>
-      </tr>`;
-    }).join('')||'<tr><td colspan="9" style="color:#8b949e">No recent activity yet</td></tr>';
-  }catch(e){}
-}
-
-async function refreshWeekly(){
-  try{
-    const r=await fetch('/agentflow/stats/weekly');
-    const d=await r.json();
-    const tb=document.getElementById('weekly-tbody');
-    const rows=[...d.days,{...d.totals,_total:true}];
-    tb.innerHTML=rows.map(row=>{
-      const cls=row._total?' class="totals-row"':'';
-      const errColor=row.errors?'color:#f85149':'color:#8b949e';
-      return `<tr${cls}>
-        <td class="ts">${row.day}</td>
-        <td>${(row.total_calls??0).toLocaleString()}</td>
-        <td style="color:#3fb950">${(row.successful_calls??0).toLocaleString()}</td>
-        <td style="${errColor}">${(row.errors??0).toLocaleString()}</td>
-        <td>${(row.cache_hits??0).toLocaleString()}</td>
-        <td class="latency">${fmtMs(row.avg_latency_ms)}</td>
-        <td class="cost">${fmt(row.cost_est_usd,5)}</td>
-        <td class="baseline">${fmt(row.cost_baseline_usd,5)}</td>
-        <td class="savings">${fmt(row.savings_usd,5)}</td>
-      </tr>`;
-    }).join('');
-  }catch(e){}
-}
-
-async function refresh(){
-  try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
-    const s=d.summary;
-
-    document.getElementById('c-today').textContent=s.today_calls.toLocaleString();
-    document.getElementById('c-total').textContent=s.total_calls.toLocaleString()+' total';
-    document.getElementById('c-cost').textContent=fmt(s.today_cost_usd,4);
-    document.getElementById('c-cost-total').textContent=fmt(s.total_cost_usd,4)+' total';
-    document.getElementById('c-routing').textContent=fmt(s.today_routing_savings_usd,4);
-    document.getElementById('c-routed-n').textContent=s.routed_count+' calls routed';
-    document.getElementById('c-cache-saved').textContent=fmt(s.today_cache_savings_usd,4);
-    document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
-    document.getElementById('c-prompt-cache-saved').textContent=fmt(s.today_prompt_cache_savings_usd,4);
-    document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% provider cache hit rate';
-    document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
-    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · '+fmt(s.today_crunch_savings_usd||0,4)+' today · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
-    document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
-    document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
-    document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';
-    document.getElementById('c-codex-app-events').textContent=(s.codex_app_today_events||0).toLocaleString()+' events · last '+ago(s.codex_app_last_event_at);
-
-    const tb=document.getElementById('provider-tbody');
-    tb.innerHTML=d.recent.map(row=>{
-      const routed=row.routed_model&&row.routed_model!==row.requested_model;
-      const errClass=row.status_code>=400?'err-row':'';
-      const flags=[
-        row.cache_hit?'<span class="badge hit">cache</span>':'<span class="badge miss">miss</span>',
-        row.stream?'<span class="badge stream">stream</span>':'',
-        routed?'<span class="badge routed">routed</span>':'',
-        row.crunched?'<span class="badge crunched">crunched</span>':'',
-        row.status_code>=400?`<span class="badge err">${row.status_code}</span>`:'',
-      ].filter(Boolean).join(' ');
-      const usedModel=`<span class="model${routed?' downgraded':''}">${shortModel(row.routed_model||row.requested_model)}</span>`;
-      return `<tr class="${errClass}">
-        <td class="ts">${ago(row.created_at)}</td>
-        <td><span class="badge provider">${shortProvider(row.provider)}</span></td>
-        <td class="model">${shortModel(row.requested_model)}</td>
-        <td>${usedModel}</td>
-        <td class="tokens">${fmtTok(row.input_tokens)}<span class="arrow">/</span>${fmtTok(row.output_tokens)}</td>
-        <td class="cost">${fmt(row.cost_est_usd,5)}</td>
-        <td class="latency">${fmtMs(row.latency_ms)}</td>
-        <td>${flags}</td>
-      </tr>`;
-    }).join('');
-
-    document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
-  }catch(e){
-    document.getElementById('status').textContent='error: '+e.message;
-  }
-}
-
-async function refreshCategories(){
-  try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
-    const tb=document.getElementById('cat-tbody');
-    const rows=d.category_breakdown||[];
-    const total=rows.reduce((s,r)=>s+(r.count||0),0)||1;
-    tb.innerHTML=rows.map(row=>{
-      const pct=Math.round((row.count/total)*100);
-      return `<tr>
-        <td><span class="badge provider">${shortProvider(row.provider)}</span> <span class="badge miss">${row.category}</span></td>
-        <td>${(row.count||0).toLocaleString()} <span style="color:#8b949e;font-size:11px">(${pct}%)</span></td>
-        <td class="cost">${fmt(row.cost_usd,5)}</td>
-        <td class="tokens">${(row.routed_count||0).toLocaleString()}</td>
-      </tr>`;
-    }).join('')||'<tr><td colspan="4" style="color:#8b949e">No data yet</td></tr>';
-  }catch(e){}
-}
-
-async function refreshCache(){
-  try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
-    const tb=document.getElementById('cache-tbody');
-    const rows=d.cache_decision_breakdown||[];
-    tb.innerHTML=rows.map(row=>`<tr>
-      <td><span class="badge ${row.status==='hit'?'hit':row.status==='miss'?'miss':'stream'}">${row.status}</span></td>
-      <td class="model">${row.reason||'unknown'}</td>
-      <td class="tokens">${row.hit_type||'—'}</td>
-      <td><span class="badge provider">${row.policy_source||'unknown'}</span></td>
-      <td>${(row.count||0).toLocaleString()}</td>
-    </tr>`).join('')||'<tr><td colspan="5" style="color:#8b949e">No cache decision data yet</td></tr>';
-  }catch(e){}
-}
-
-async function refreshLimiter(){
-  try{
-    const r=await fetch('/agentflow/stats/limiter');
-    const d=await r.json();
-    const tiers=d.tiers||[];
-    const active=tiers.filter(t=>t.active);
-    const queued=tiers.reduce((sum,t)=>sum+(t.queued_count||0),0);
-    const longest=active.reduce((max,t)=>Math.max(max,t.seconds_remaining||0),0);
-    document.getElementById('c-limiter').textContent=active.length?active.length+' active':'clear';
-    document.getElementById('c-limiter-sub').textContent=queued+' queued · longest '+fmtSec(longest);
-
-    const tb=document.getElementById('limiter-tbody');
-    tb.innerHTML=tiers.map(row=>{
-      const badge=row.active
-        ? `<span class="badge err">cooldown</span>`
-        : `<span class="badge hit">clear</span>`;
-      const slots=row.available_slots==null?'—':`${row.available_slots}/${row.max_concurrent}`;
-      return `<tr>
-        <td><span class="badge provider">${row.tier}</span></td>
-        <td>${badge}</td>
-        <td class="latency">${fmtSec(row.seconds_remaining||0)}</td>
-        <td class="ts">${until(row.cooldown_until)}</td>
-        <td class="tokens">${slots}</td>
-        <td class="tokens">${row.queued_count||0}</td>
-        <td class="ts">${row.last_upstream_429_at?ago(row.last_upstream_429_at):'—'}</td>
-      </tr>`;
-    }).join('');
-
-    const rb=document.getElementById('limiter-recent-tbody');
-    const recent=d.recent_rate_limits||[];
-    rb.innerHTML=recent.map(row=>`<tr>
-      <td class="ts">${ago(row.created_at)}</td>
-      <td><span class="badge provider">${row.tier}</span></td>
-      <td><span class="badge provider">${shortProvider(row.provider)}</span></td>
-      <td>${row.status_code>=500?`<span class="badge err">${row.status_code}</span>`:`<span class="badge routed">${row.status_code}</span>`}</td>
-      <td class="tokens">${row.retry_count||0}</td>
-      <td class="latency">${fmtMs(row.latency_ms)}</td>
-      <td>${row.local_throttled?'<span class="badge err">local cooldown</span>':'<span class="badge routed">upstream</span>'}</td>
-      <td class="model">${row.error||'—'}</td>
-    </tr>`).join('')||'<tr><td colspan="8" style="color:#8b949e">No recent rate-limit responses</td></tr>';
-  }catch(e){}
-}
-
-async function refreshCodexApp(){
-  try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
-    const tb=document.getElementById('codex-tbody');
-    const rows=d.codex_app_recent||[];
-    tb.innerHTML=rows.map(row=>{
-      const err=row.error_code?` <span class="badge err">${row.error_code}</span>`:'';
-      const sid=(row.session_id||'').slice(0,8);
-      return `<tr>
-        <td class="ts">${ago(row.created_at)}</td>
-        <td><span class="badge provider">${row.direction}</span></td>
-        <td class="model">${row.method}${err}</td>
-        <td class="tokens">${fmtTok(row.message_chars)}</td>
-        <td class="tokens">${fmtTok(row.input_text_chars)}</td>
-        <td class="latency">${fmtMs(row.latency_ms)}</td>
-        <td class="ts">${sid}</td>
-      </tr>`;
-    }).join('')||'<tr><td colspan="7" style="color:#8b949e">No Codex app-server telemetry yet</td></tr>';
-  }catch(e){}
-}
-
-async function refreshSessions(){
-  try{
-    const r=await fetch('/agentflow/stats/sessions');
-    const d=await r.json();
-    const tb=document.getElementById('sess-tbody');
-    const pb=document.getElementById('plateau-tbody');
-    const rows=d.sessions||[];
-    tb.innerHTML=rows.map(row=>`<tr>
-      <td class="ts">${row.sid}</td>
-      <td>${(row.calls||0).toLocaleString()}</td>
-      <td class="cost">${fmt(row.cost_usd,5)}</td>
-      <td class="tokens">${fmtTok(row.thinking_tokens||0)}</td>
-      <td class="cost">${fmt(row.thinking_cost_usd||0,5)}</td>
-      <td class="tokens">${fmtTok(row.cache_creation_tokens||0)}</td>
-      <td class="tokens">${fmtTok(row.cache_read_tokens||0)}</td>
-      <td class="tokens">${fmtRatio(row.cache_write_read_token_ratio)}</td>
-      <td class="cost">${fmt(row.cache_creation_cost_usd||0,5)}</td>
-      <td class="savings">${fmt(row.cache_read_savings_usd||0,5)}</td>
-      <td class="tokens">${fmtRatio(row.cache_warmup_payback_ratio)}</td>
-      <td class="tokens">${row.tool_result||0}</td>
-      <td class="tokens">${row.tool_heavy||0}</td>
-      <td class="tokens">${row.short_completion||0}</td>
-      <td class="tokens">${row.code_gen||0}</td>
-      <td class="tokens">${row.chat||0}</td>
-      <td class="tokens">${row.other||0}</td>
-    </tr>`).join('')||'<tr><td colspan="17" style="color:#8b949e">No sessions today</td></tr>';
-    const plateaus=d.context_plateaus||[];
-    pb.innerHTML=plateaus.map(row=>`<tr>
-      <td class="ts">${row.sid}</td>
-      <td>${(row.calls||0).toLocaleString()}</td>
-      <td class="cost">${fmt(row.cost_usd,5)}</td>
-      <td class="tokens">${(row.plateau_pairs||0).toLocaleString()}</td>
-      <td class="tokens">${fmtTok(row.median_text_chars||0)}</td>
-      <td class="tokens">${fmtTok(row.p90_text_chars||0)}</td>
-      <td class="savings">${fmt(row.cache_read_savings_usd||0,5)}</td>
-      <td class="tokens">${fmtTok(row.crunch_saved_chars||0)}</td>
-      <td>${row.flagged?'<span class="badge err">flagged</span>':'<span class="badge miss">watch</span>'}</td>
-    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
-  }catch(e){}
-}
-
-refreshActivity();
-refresh();
-refreshCodexApp();
-refreshWeekly();
-refreshCategories();
-refreshCache();
-refreshLimiter();
-refreshSessions();
-setInterval(refreshActivity,5000);
-setInterval(refresh,5000);
-setInterval(refreshCodexApp,5000);
-setInterval(refreshWeekly,30000);
-setInterval(refreshCategories,30000);
-setInterval(refreshCache,30000);
-setInterval(refreshLimiter,5000);
-setInterval(refreshSessions,30000);
-</script>
-</body>
-</html>"""
+    return stats_views.dashboard_html()
 
 
 def main() -> None:
