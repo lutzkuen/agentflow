@@ -202,6 +202,7 @@ def _log_recent_session_spending_summary(event: str, hours: int = 24, limit: int
 
 from agentflow_proxy.store import Store, utc_now, stable_json
 from agentflow_proxy import provider_handlers
+from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.dashboard_app import create_dashboard_router
 from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_blended_input_savings, estimate_cost
 from agentflow_proxy.headers import (
@@ -266,7 +267,25 @@ _tier_semaphores = _limiter.semaphores
 
 store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
-_SERVER_CONTEXT = sys.modules[__name__]
+
+
+def _provider_context() -> ProviderContext:
+    return ProviderContext(
+        provider=PROVIDER,
+        anthropic_upstream=ANTHROPIC_UPSTREAM,
+        openai_upstream=OPENAI_UPSTREAM,
+        default_upstream=DEFAULT_UPSTREAM,
+        openai_auth_mode=OPENAI_AUTH_MODE,
+        openai_model_list=tuple(OPENAI_MODEL_LIST),
+        store=store,
+        limiter=_limiter,
+        log_bodies=LOG_BODIES,
+        http_timeout=HTTP_TIMEOUT,
+        anthropic_messages_handler=_anthropic_messages_impl,
+        openai_optimized_handler=_openai_optimized_impl,
+        openai_passthrough_handler=_openai_passthrough_impl,
+        openai_responses_websocket_handler=_openai_responses_websocket_impl,
+    )
 
 
 def _dashboard_limiter_config() -> dict[str, Any]:
@@ -624,7 +643,7 @@ async def models() -> dict[str, Any]:
 
 @app.post("/v1/messages")
 async def messages(request: Request) -> Response:
-    return await provider_handlers.anthropic_messages(_SERVER_CONTEXT, request)
+    return await provider_handlers.anthropic_messages(_provider_context(), request)
 
 
 async def _anthropic_messages_impl(request: Request) -> Response:
@@ -1196,7 +1215,7 @@ async def _anthropic_messages_impl(request: Request) -> Response:
 
 
 async def openai_optimized(request: Request, path: str) -> Response:
-    return await provider_handlers.openai_optimized(_SERVER_CONTEXT, request, path)
+    return await provider_handlers.openai_optimized(_provider_context(), request, path)
 
 
 async def _openai_optimized_impl(request: Request, path: str) -> Response:
@@ -1554,7 +1573,7 @@ async def _openai_optimized_impl(request: Request, path: str) -> Response:
 
 
 async def openai_passthrough(request: Request, path: str) -> Response:
-    return await provider_handlers.openai_passthrough(_SERVER_CONTEXT, request, path)
+    return await provider_handlers.openai_passthrough(_provider_context(), request, path)
 
 
 async def _openai_passthrough_impl(request: Request, path: str) -> Response:
@@ -1590,7 +1609,7 @@ async def openai_chat_completions(request: Request) -> Response:
 
 @app.websocket("/v1/responses")
 async def openai_responses_websocket(websocket: WebSocket) -> None:
-    await provider_handlers.openai_responses_websocket(_SERVER_CONTEXT, websocket)
+    await provider_handlers.openai_responses_websocket(_provider_context(), websocket)
 
 
 async def _openai_responses_websocket_impl(websocket: WebSocket) -> None:
