@@ -463,17 +463,22 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(result["summary"]["by_source_surface"]["codex_turn"], 1)
         json.dumps(result)
 
-    def test_dashboard_exposes_unified_activity_and_debug_tables(self):
+    def test_dashboard_exposes_unified_recent_calls_table(self):
         html = stats_views.dashboard_html()
 
-        self.assertIn("Unified recent activity", html)
+        self.assertIn(">Recent calls</button>", html)
+        self.assertIn("<h2>Recent calls</h2>", html)
         self.assertIn("id=\"activity-tbody\"", html)
         self.assertIn("fetch('/agentflow/stats/activity?limit=100')", html)
+        self.assertIn("<th>Surface</th><th>Granularity</th><th>App family</th>", html)
         self.assertIn("not provider-replayable", html)
-        self.assertIn("cost unknown", html)
-        self.assertIn("id=\"provider-tbody\"", html)
-        self.assertIn("Codex app-server telemetry", html)
-        self.assertIn("const tabs=['activity','provider','codex'", html)
+        self.assertIn("cost unknown / turn-level telemetry", html)
+        self.assertNotIn(">Activity</button>", html)
+        self.assertNotIn(">Provider calls</button>", html)
+        self.assertNotIn(">Codex debug</button>", html)
+        self.assertNotIn("id=\"provider-tbody\"", html)
+        self.assertNotIn("id=\"codex-tbody\"", html)
+        self.assertIn("const tabs=['activity','weekly','categories','cache','limiter','sessions']", html)
 
     def test_dashboard_exposes_old_context_summary_card(self):
         html = stats_views.dashboard_html()

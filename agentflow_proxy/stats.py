@@ -1038,7 +1038,7 @@ def dashboard_html() -> str:
   .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;margin-bottom:10px;padding-top:4px}
   .table-wrap{overflow-x:auto}
   table{width:100%;border-collapse:collapse}
-  .activity-table{min-width:980px}
+  .activity-table{min-width:1080px}
   th{text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:6px 10px;border-bottom:1px solid #21262d;font-weight:400}
   td{padding:6px 10px;border-bottom:1px solid #161b22;vertical-align:middle;white-space:nowrap}
   tr:hover td{background:#161b22}
@@ -1095,9 +1095,7 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tabs">
-  <button class="tab-btn active" onclick="showTab('activity')">Activity</button>
-  <button class="tab-btn" onclick="showTab('provider')">Provider calls</button>
-  <button class="tab-btn" onclick="showTab('codex')">Codex debug</button>
+  <button class="tab-btn active" onclick="showTab('activity')">Recent calls</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
@@ -1107,41 +1105,13 @@ def dashboard_html() -> str:
 
 <div class="tab-panel active" id="tab-activity">
 <div class="section">
-  <h2>Unified recent activity</h2>
+  <h2>Recent calls</h2>
   <div class="table-wrap">
   <table class="activity-table">
     <thead><tr>
-      <th>Time</th><th>Surface</th><th>Granularity</th><th>Requested</th><th>Target</th><th>Input</th><th>Output / status</th><th>Latency</th><th>Flags</th>
+      <th>Time</th><th>Surface</th><th>Granularity</th><th>App family</th><th>Requested</th><th>Target</th><th>Input</th><th>Output / status</th><th>Latency</th><th>Flags</th>
     </tr></thead>
     <tbody id="activity-tbody"></tbody>
-  </table>
-  </div>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-provider">
-<div class="section">
-  <h2>Recent calls</h2>
-  <div class="table-wrap">
-  <table>
-    <thead><tr>
-      <th>Time</th><th>Provider</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
-    </tr></thead>
-    <tbody id="provider-tbody"></tbody>
-  </table>
-  </div>
-</div>
-</div>
-
-<div class="tab-panel" id="tab-codex">
-<div class="section">
-  <h2>Codex app-server telemetry</h2>
-  <div class="table-wrap">
-  <table>
-    <thead><tr>
-      <th>Time</th><th>Direction</th><th>Method</th><th>Chars</th><th>Input</th><th>Latency</th><th>Session</th>
-    </tr></thead>
-    <tbody id="codex-tbody"></tbody>
   </table>
   </div>
 </div>
@@ -1288,7 +1258,7 @@ function activityOutcome(unit){
   }
   const cls=o.status==='error'?'err':o.status==='pending'?'miss':'hit';
   const chars=o.result_chars!=null?fmtTok(o.result_chars)+' result chars':'turn-level';
-  return `<span class="badge ${cls}">${esc(o.status||'pending')}</span> <span class="tokens">${chars}</span> <span class="badge miss">cost unknown</span>`;
+  return `<span class="badge ${cls}">${esc(o.status||'pending')}</span> <span class="tokens">${chars}</span> <span class="badge miss">cost unknown / turn-level telemetry</span>`;
 }
 function activityFlags(unit){
   const flags=[];
@@ -1307,7 +1277,7 @@ function activityFlags(unit){
 }
 
 function showTab(name){
-  const tabs=['activity','provider','codex','weekly','categories','cache','limiter','sessions'];
+  const tabs=['activity','weekly','categories','cache','limiter','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -1331,6 +1301,7 @@ async function refreshActivity(){
         <td class="ts">${ago(unit.created_at)}</td>
         <td><span class="badge provider">${esc(shortSurface(unit.source_surface))}</span></td>
         <td><span class="badge stream">${esc(unit.granularity||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(unit.app_family||'unknown')}</span></td>
         <td class="model">${esc(requested)}</td>
         <td class="model">${esc(target)}</td>
         <td class="tokens">${esc(activityInput(unit))}</td>
@@ -1338,7 +1309,7 @@ async function refreshActivity(){
         <td class="latency">${fmtMs(o.latency_ms)}</td>
         <td class="flags">${activityFlags(unit)}</td>
       </tr>`;
-    }).join('')||'<tr><td colspan="9" style="color:#8b949e">No recent activity yet</td></tr>';
+    }).join('')||'<tr><td colspan="10" style="color:#8b949e">No recent activity yet</td></tr>';
   }catch(e){}
 }
 
@@ -1390,30 +1361,6 @@ async function refresh(){
     document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
     document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';
     document.getElementById('c-codex-app-events').textContent=(s.codex_app_today_events||0).toLocaleString()+' events · last '+ago(s.codex_app_last_event_at);
-
-    const tb=document.getElementById('provider-tbody');
-    tb.innerHTML=d.recent.map(row=>{
-      const routed=row.routed_model&&row.routed_model!==row.requested_model;
-      const errClass=row.status_code>=400?'err-row':'';
-      const flags=[
-        row.cache_hit?'<span class="badge hit">cache</span>':'<span class="badge miss">miss</span>',
-        row.stream?'<span class="badge stream">stream</span>':'',
-        routed?'<span class="badge routed">routed</span>':'',
-        row.crunched?'<span class="badge crunched">crunched</span>':'',
-        row.status_code>=400?`<span class="badge err">${row.status_code}</span>`:'',
-      ].filter(Boolean).join(' ');
-      const usedModel=`<span class="model${routed?' downgraded':''}">${shortModel(row.routed_model||row.requested_model)}</span>`;
-      return `<tr class="${errClass}">
-        <td class="ts">${ago(row.created_at)}</td>
-        <td><span class="badge provider">${shortProvider(row.provider)}</span></td>
-        <td class="model">${shortModel(row.requested_model)}</td>
-        <td>${usedModel}</td>
-        <td class="tokens">${fmtTok(row.input_tokens)}<span class="arrow">/</span>${fmtTok(row.output_tokens)}</td>
-        <td class="cost">${fmt(row.cost_est_usd,5)}</td>
-        <td class="latency">${fmtMs(row.latency_ms)}</td>
-        <td>${flags}</td>
-      </tr>`;
-    }).join('');
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
   }catch(e){
@@ -1499,28 +1446,6 @@ async function refreshLimiter(){
   }catch(e){}
 }
 
-async function refreshCodexApp(){
-  try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
-    const tb=document.getElementById('codex-tbody');
-    const rows=d.codex_app_recent||[];
-    tb.innerHTML=rows.map(row=>{
-      const err=row.error_code?` <span class="badge err">${row.error_code}</span>`:'';
-      const sid=(row.session_id||'').slice(0,8);
-      return `<tr>
-        <td class="ts">${ago(row.created_at)}</td>
-        <td><span class="badge provider">${row.direction}</span></td>
-        <td class="model">${row.method}${err}</td>
-        <td class="tokens">${fmtTok(row.message_chars)}</td>
-        <td class="tokens">${fmtTok(row.input_text_chars)}</td>
-        <td class="latency">${fmtMs(row.latency_ms)}</td>
-        <td class="ts">${sid}</td>
-      </tr>`;
-    }).join('')||'<tr><td colspan="7" style="color:#8b949e">No Codex app-server telemetry yet</td></tr>';
-  }catch(e){}
-}
-
 async function refreshSessions(){
   try{
     const r=await fetch('/agentflow/stats/sessions');
@@ -1564,7 +1489,6 @@ async function refreshSessions(){
 
 refreshActivity();
 refresh();
-refreshCodexApp();
 refreshWeekly();
 refreshCategories();
 refreshCache();
@@ -1572,7 +1496,6 @@ refreshLimiter();
 refreshSessions();
 setInterval(refreshActivity,5000);
 setInterval(refresh,5000);
-setInterval(refreshCodexApp,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
