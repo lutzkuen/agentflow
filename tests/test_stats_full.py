@@ -381,7 +381,12 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(provider["target_model"], "claude-haiku-4-5-20251001")
         self.assertEqual(provider["tool_features"]["has_tools"], True)
         self.assertEqual(provider["input_features"]["text_chars"], 360)
+        self.assertEqual(provider["input_features"]["input_tokens"], 90)
+        self.assertEqual(provider["optimization_features"]["cache"]["status"], "skipped")
+        self.assertEqual(provider["optimization_features"]["crunch"]["changed"], True)
+        self.assertEqual(provider["optimization_features"]["policy_sources"], ["local-default", "local-manual"])
         self.assertEqual(provider["outcome_features"]["status_code"], 200)
+        self.assertEqual(provider["outcome_features"]["cost_est_usd"], 0.001)
         self.assertEqual(provider["replayability_level"], "features_only")
         self.assertEqual(provider["local_ids"]["calls_id"], provider_id)
 
@@ -389,14 +394,30 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(codex["granularity"], "agent_turn")
         self.assertEqual(codex["app_family"], "codex")
         self.assertIsNone(codex["requested_model"])
+        self.assertIsNone(codex["target_model"])
         self.assertEqual(codex["input_features"]["input_text_chars"], 120)
         self.assertEqual(codex["outcome_features"]["status"], "success")
         self.assertEqual(codex["outcome_features"]["latency_ms"], 3000)
+        self.assertNotIn("cost_est_usd", codex["outcome_features"])
         self.assertEqual(codex["replayability_level"], "features_only")
         self.assertEqual(codex["local_ids"]["codex_app_response_event_id"], response_id)
+        self.assertEqual(result["summary"]["provider_request_units"], 1)
+        self.assertEqual(result["summary"]["codex_turn_units"], 1)
         self.assertEqual(result["summary"]["by_source_surface"]["anthropic_messages"], 1)
         self.assertEqual(result["summary"]["by_source_surface"]["codex_turn"], 1)
         json.dumps(result)
+
+    def test_dashboard_exposes_unified_activity_and_debug_tables(self):
+        html = asyncio.run(server.dashboard())
+
+        self.assertIn("Unified recent activity", html)
+        self.assertIn("id=\"activity-tbody\"", html)
+        self.assertIn("fetch('/agentflow/stats/activity?limit=100')", html)
+        self.assertIn("not provider-replayable", html)
+        self.assertIn("cost unknown", html)
+        self.assertIn("id=\"provider-tbody\"", html)
+        self.assertIn("Codex app-server telemetry", html)
+        self.assertIn("const tabs=['activity','provider','codex'", html)
 
     def test_sessions_identify_context_plateaus(self):
         text_sizes = [10_000, 10_200, 10_150, 15_000]

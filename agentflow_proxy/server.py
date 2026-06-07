@@ -2483,7 +2483,9 @@ async def dashboard() -> str:
   .tab-panel.active{display:block}
   .section{padding:0 24px 24px}
   .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;margin-bottom:10px;padding-top:4px}
+  .table-wrap{overflow-x:auto}
   table{width:100%;border-collapse:collapse}
+  .activity-table{min-width:980px}
   th{text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:6px 10px;border-bottom:1px solid #21262d;font-weight:400}
   td{padding:6px 10px;border-bottom:1px solid #161b22;vertical-align:middle;white-space:nowrap}
   tr:hover td{background:#161b22}
@@ -2501,12 +2503,21 @@ async def dashboard() -> str:
   .latency{color:#8b949e;font-variant-numeric:tabular-nums}
   .tokens{color:#8b949e;font-variant-numeric:tabular-nums}
   .ts{color:#8b949e;font-size:11px}
+  .flags{white-space:normal;min-width:170px}
   .err-row td{background:#1a0a0a}
   .totals-row td{border-top:1px solid #30363d;font-weight:600}
   .savings{color:#3fb950;font-variant-numeric:tabular-nums}
   .baseline{color:#8b949e;font-variant-numeric:tabular-nums}
   #status{margin-left:auto;font-size:11px;color:#8b949e}
   .arrow{color:#8b949e;margin:0 3px}
+  @media (max-width:700px){
+    header{padding:12px;gap:8px;flex-wrap:wrap}
+    .cards{padding:12px;gap:8px}
+    .card{min-width:130px;padding:12px}
+    .tabs{padding:0 12px;overflow-x:auto}
+    .tab-btn{padding:10px 12px;white-space:nowrap}
+    .section{padding:0 12px 18px}
+  }
 </style>
 </head>
 <body>
@@ -2530,8 +2541,9 @@ async def dashboard() -> str:
 </div>
 
 <div class="tabs">
-  <button class="tab-btn active" onclick="showTab('recent')">Recent calls</button>
-  <button class="tab-btn" onclick="showTab('codex')">Codex app</button>
+  <button class="tab-btn active" onclick="showTab('activity')">Activity</button>
+  <button class="tab-btn" onclick="showTab('provider')">Provider calls</button>
+  <button class="tab-btn" onclick="showTab('codex')">Codex debug</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
@@ -2539,27 +2551,45 @@ async def dashboard() -> str:
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
-<div class="tab-panel active" id="tab-recent">
+<div class="tab-panel active" id="tab-activity">
+<div class="section">
+  <h2>Unified recent activity</h2>
+  <div class="table-wrap">
+  <table class="activity-table">
+    <thead><tr>
+      <th>Time</th><th>Surface</th><th>Granularity</th><th>Requested</th><th>Target</th><th>Input</th><th>Output / status</th><th>Latency</th><th>Flags</th>
+    </tr></thead>
+    <tbody id="activity-tbody"></tbody>
+  </table>
+  </div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-provider">
 <div class="section">
   <h2>Recent calls</h2>
+  <div class="table-wrap">
   <table>
     <thead><tr>
       <th>Time</th><th>Provider</th><th>Requested</th><th>Used</th><th>Tokens in/out</th><th>Cost</th><th>Latency</th><th>Flags</th>
     </tr></thead>
-    <tbody id="tbody"></tbody>
+    <tbody id="provider-tbody"></tbody>
   </table>
+  </div>
 </div>
 </div>
 
 <div class="tab-panel" id="tab-codex">
 <div class="section">
   <h2>Codex app-server telemetry</h2>
+  <div class="table-wrap">
   <table>
     <thead><tr>
       <th>Time</th><th>Direction</th><th>Method</th><th>Chars</th><th>Input</th><th>Latency</th><th>Session</th>
     </tr></thead>
     <tbody id="codex-tbody"></tbody>
   </table>
+  </div>
 </div>
 </div>
 
@@ -2669,15 +2699,93 @@ function shortProvider(p){
   if(!p)return'—';
   return p==='anthropic'?'Claude':p.charAt(0).toUpperCase()+p.slice(1);
 }
+function esc(v){
+  return String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function shortSurface(s){
+  const labels={anthropic_messages:'Claude',openai_chat:'OpenAI chat',openai_responses:'OpenAI',codex_turn:'Codex turn'};
+  return labels[s]||s||'unknown';
+}
+function activityInput(unit){
+  const f=unit.input_features||{};
+  if(unit.granularity==='provider_request'){
+    const tok=f.input_tokens??f.input_tokens_est;
+    const cache=f.cache_read_input_tokens||0;
+    const text=f.text_chars;
+    const parts=[];
+    if(tok!=null)parts.push(fmtTok(tok)+' tok');
+    if(text!=null)parts.push(fmtTok(text)+' chars');
+    if(cache)parts.push(fmtTok(cache)+' cached');
+    return parts.join(' · ')||'—';
+  }
+  const parts=[];
+  parts.push(fmtTok(f.input_text_chars||0)+' text chars');
+  if(f.input_items!=null)parts.push((f.input_items||0)+' items');
+  return parts.join(' · ');
+}
+function activityOutcome(unit){
+  const o=unit.outcome_features||{};
+  if(unit.granularity==='provider_request'){
+    const status=o.status_code??'—';
+    const cls=Number(status)>=400?'err':'hit';
+    const out=o.output_tokens!=null?fmtTok(o.output_tokens)+' out':'— out';
+    const cost=o.cost_est_usd==null?'cost unknown':fmt(o.cost_est_usd,5);
+    return `<span class="badge ${cls}">${status}</span> <span class="tokens">${out}</span> <span class="cost">${cost}</span>`;
+  }
+  const cls=o.status==='error'?'err':o.status==='pending'?'miss':'hit';
+  const chars=o.result_chars!=null?fmtTok(o.result_chars)+' result chars':'turn-level';
+  return `<span class="badge ${cls}">${esc(o.status||'pending')}</span> <span class="tokens">${chars}</span> <span class="badge miss">cost unknown</span>`;
+}
+function activityFlags(unit){
+  const flags=[];
+  const opt=unit.optimization_features||{};
+  const routing=opt.routing||{};
+  const crunch=opt.crunch||{};
+  const cache=opt.cache||{};
+  if(unit.granularity==='agent_turn')flags.push('<span class="badge miss">not provider-replayable</span>');
+  if(unit.replayability_level)flags.push(`<span class="badge provider">${esc(unit.replayability_level)}</span>`);
+  if(routing.routed_model&&routing.routed_model!==routing.requested_model)flags.push('<span class="badge routed">routed</span>');
+  if(cache.status)flags.push(`<span class="badge ${cache.status==='hit'?'hit':cache.status==='miss'?'miss':'stream'}">cache ${esc(cache.status)}</span>`);
+  if(crunch.changed)flags.push('<span class="badge crunched">crunched</span>');
+  const category=(unit.input_features&&unit.input_features.category)||(unit.tool_features&&unit.tool_features.category);
+  if(category)flags.push(`<span class="badge provider">${esc(category)}</span>`);
+  return flags.join(' ')||'<span class="badge miss">observed</span>';
+}
 
 function showTab(name){
-  const tabs=['recent','codex','weekly','categories','cache','limiter','sessions'];
+  const tabs=['activity','provider','codex','weekly','categories','cache','limiter','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
     b.classList.toggle('active',tabs[i]===name);
   });
+}
+
+async function refreshActivity(){
+  try{
+    const r=await fetch('/agentflow/stats/activity?limit=100');
+    const d=await r.json();
+    const tb=document.getElementById('activity-tbody');
+    const rows=d.units||[];
+    tb.innerHTML=rows.map(unit=>{
+      const o=unit.outcome_features||{};
+      const err=(o.status_code&&o.status_code>=400)||o.status==='error';
+      const requested=unit.requested_model?shortModel(unit.requested_model):(unit.granularity==='agent_turn'?'turn-level':'—');
+      const target=unit.target_model?shortModel(unit.target_model):(unit.granularity==='agent_turn'?'not provider-replayable':'—');
+      return `<tr class="${err?'err-row':''}">
+        <td class="ts">${ago(unit.created_at)}</td>
+        <td><span class="badge provider">${esc(shortSurface(unit.source_surface))}</span></td>
+        <td><span class="badge stream">${esc(unit.granularity||'unknown')}</span></td>
+        <td class="model">${esc(requested)}</td>
+        <td class="model">${esc(target)}</td>
+        <td class="tokens">${esc(activityInput(unit))}</td>
+        <td>${activityOutcome(unit)}</td>
+        <td class="latency">${fmtMs(o.latency_ms)}</td>
+        <td class="flags">${activityFlags(unit)}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="9" style="color:#8b949e">No recent activity yet</td></tr>';
+  }catch(e){}
 }
 
 async function refreshWeekly(){
@@ -2727,7 +2835,7 @@ async function refresh(){
     document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';
     document.getElementById('c-codex-app-events').textContent=(s.codex_app_today_events||0).toLocaleString()+' events · last '+ago(s.codex_app_last_event_at);
 
-    const tb=document.getElementById('tbody');
+    const tb=document.getElementById('provider-tbody');
     tb.innerHTML=d.recent.map(row=>{
       const routed=row.routed_model&&row.routed_model!==row.requested_model;
       const errClass=row.status_code>=400?'err-row':'';
@@ -2898,6 +3006,7 @@ async function refreshSessions(){
   }catch(e){}
 }
 
+refreshActivity();
 refresh();
 refreshCodexApp();
 refreshWeekly();
@@ -2905,6 +3014,7 @@ refreshCategories();
 refreshCache();
 refreshLimiter();
 refreshSessions();
+setInterval(refreshActivity,5000);
 setInterval(refresh,5000);
 setInterval(refreshCodexApp,5000);
 setInterval(refreshWeekly,30000);
