@@ -10,7 +10,7 @@ async def anthropic_messages(context: ProviderContext, request: Any) -> Any:
 
 
 async def openai_optimized(context: ProviderContext, request: Any, path: str) -> Any:
-    return await context.openai_optimized_handler(request, path)
+    return await context.openai_optimized_handler(context, request, path)
 
 
 async def openai_passthrough(context: ProviderContext, request: Any, path: str) -> Any:

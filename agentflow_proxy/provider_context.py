@@ -5,7 +5,7 @@ from typing import Any, Awaitable, Callable
 
 
 AnthropicMessagesHandler = Callable[[Any, Any], Awaitable[Any]]
-OpenAIOptimizedHandler = Callable[[Any, str], Awaitable[Any]]
+OpenAIOptimizedHandler = Callable[[Any, Any, str], Awaitable[Any]]
 OpenAIPassthroughHandler = Callable[[Any, str], Awaitable[Any]]
 OpenAIWebSocketHandler = Callable[[Any], Awaitable[None]]
 

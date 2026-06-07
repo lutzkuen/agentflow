@@ -16,8 +16,8 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(("anthropic", context_arg.provider, request))
                 return {"provider": "anthropic"}
 
-            async def openai_optimized_handler(request, path):
-                calls.append(("openai_optimized", request, path))
+            async def openai_optimized_handler(context_arg, request, path):
+                calls.append(("openai_optimized", context_arg.provider, request, path))
                 return {"path": path}
 
             async def openai_passthrough_handler(request, path):
@@ -62,7 +62,7 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
                 calls,
                 [
                     ("anthropic", "anthropic", "request"),
-                    ("openai_optimized", "request", "/v1/responses"),
+                    ("openai_optimized", "anthropic", "request", "/v1/responses"),
                     ("openai_passthrough", "request", "/v1/files"),
                     ("websocket", "websocket"),
                 ],

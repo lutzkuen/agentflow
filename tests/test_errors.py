@@ -14,7 +14,7 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import anthropic_proxy, server
+    from agentflow_proxy import anthropic_proxy, openai_proxy, server
     from agentflow_proxy.store import Store
 
 
@@ -148,7 +148,7 @@ class PublicProxyErrorTest(unittest.TestCase):
         request_body = {"model": "gpt-5-codex", "input": "Trigger internal error."}
 
         with patch.object(
-            server,
+            openai_proxy,
             "crunch_body",
             side_effect=RuntimeError("secret openai failure from /tmp/agentflow-token"),
         ), self.assertLogs(level="ERROR"):
