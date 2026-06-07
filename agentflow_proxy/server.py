@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import sqlite3
@@ -1517,6 +1518,109 @@ async def stats_sessions() -> dict[str, Any]:
     """).fetchall()
     sessions = [dict(r) for r in rows]
     session_ids = [row["session_id"] for row in sessions]
+    plateau_rows = conn.execute("""
+        SELECT session_id,
+               created_at,
+               CAST(coalesce(
+                   json_extract(routing_json, '$.text_chars'),
+                   coalesce(actual_input_tokens, input_tokens_est, 0) * 4,
+                   0
+               ) AS INTEGER) as text_chars,
+               coalesce(provider, 'anthropic') as provider,
+               coalesce(routed_model, requested_model) as model,
+               coalesce(cost_est_usd, 0) as cost_usd,
+               coalesce(cache_read_input_tokens, 0) as cache_read_tokens,
+               coalesce(json_extract(crunch_json, '$.saved_chars'), 0) as crunch_saved_chars
+        FROM calls
+        WHERE DATE(created_at) = DATE('now') AND session_id IS NOT NULL
+        ORDER BY session_id, created_at
+    """).fetchall()
+    plateau_by_session: dict[str, dict[str, Any]] = {}
+    prev_by_session: dict[str, int] = {}
+    min_plateau_chars = 8_000
+    max_plateau_delta_ratio = 0.03
+    flagged_plateau_pairs = 50
+
+    def median_int(values: list[int]) -> int:
+        if not values:
+            return 0
+        sorted_values = sorted(values)
+        mid = len(sorted_values) // 2
+        if len(sorted_values) % 2:
+            return sorted_values[mid]
+        return int(round((sorted_values[mid - 1] + sorted_values[mid]) / 2))
+
+    def percentile_int(values: list[int], percentile: float) -> int:
+        if not values:
+            return 0
+        sorted_values = sorted(values)
+        idx = min(len(sorted_values) - 1, math.ceil((len(sorted_values) - 1) * percentile))
+        return sorted_values[idx]
+
+    for row in plateau_rows:
+        sid = row["session_id"]
+        text_chars = int(row["text_chars"] or 0)
+        bucket = plateau_by_session.setdefault(
+            sid,
+            {
+                "session_id": sid,
+                "sid": sid[:8],
+                "calls": 0,
+                "cost_usd": 0.0,
+                "plateau_pairs": 0,
+                "large_text_values": [],
+                "cache_read_savings_usd": 0.0,
+                "crunch_saved_chars": 0,
+            },
+        )
+        bucket["calls"] += 1
+        bucket["cost_usd"] += float(row["cost_usd"] or 0.0)
+        if text_chars >= min_plateau_chars:
+            bucket["large_text_values"].append(text_chars)
+        prev_text = prev_by_session.get(sid)
+        if (
+            prev_text is not None
+            and prev_text >= min_plateau_chars
+            and text_chars >= min_plateau_chars
+            and abs(text_chars - prev_text) / max(prev_text, 1) <= max_plateau_delta_ratio
+        ):
+            bucket["plateau_pairs"] += 1
+        prev_by_session[sid] = text_chars
+
+        read_tokens = int(row["cache_read_tokens"] or 0)
+        if read_tokens:
+            provider = str(row["provider"] or "anthropic").lower()
+            full_read_cost = estimate_cost(row["model"], read_tokens, 0, provider=provider) or 0.0
+            cached_read_input_tokens = read_tokens if provider == "openai" else 0
+            cached_read_cost = estimate_cost(
+                row["model"],
+                cached_read_input_tokens,
+                0,
+                cache_read=read_tokens,
+                provider=provider,
+            ) or 0.0
+            bucket["cache_read_savings_usd"] += max(full_read_cost - cached_read_cost, 0.0)
+        bucket["crunch_saved_chars"] += int(row["crunch_saved_chars"] or 0)
+
+    all_plateau_metrics = []
+    for bucket in plateau_by_session.values():
+        large_text_values = bucket.pop("large_text_values")
+        bucket["median_text_chars"] = median_int(large_text_values)
+        bucket["p90_text_chars"] = percentile_int(large_text_values, 0.9)
+        bucket["cost_usd"] = round(float(bucket["cost_usd"]), 6)
+        bucket["cache_read_savings_usd"] = round(float(bucket["cache_read_savings_usd"]), 6)
+        bucket["flagged"] = int(bucket["plateau_pairs"]) > flagged_plateau_pairs
+        all_plateau_metrics.append(bucket)
+    context_plateaus = [
+        bucket for bucket in all_plateau_metrics
+        if bucket["plateau_pairs"] > 0
+    ]
+    context_plateaus.sort(key=lambda r: (r["flagged"], r["plateau_pairs"], r["cost_usd"]), reverse=True)
+    context_plateaus = context_plateaus[:20]
+    plateau_metrics_by_session = {
+        row["session_id"]: row
+        for row in all_plateau_metrics
+    }
     thinking_by_session: dict[str, dict[str, float | int]] = {
         sid: {"thinking_tokens": 0, "thinking_cost_usd": 0.0}
         for sid in session_ids
@@ -1610,7 +1714,19 @@ async def stats_sessions() -> dict[str, Any]:
         row["cache_creation_cost_usd"] = round(creation_cost, 6)
         row["cache_read_savings_usd"] = round(read_savings, 6)
         row["cache_warmup_payback_ratio"] = round(creation_cost / read_savings, 3) if read_savings else None
-    return {"sessions": sessions}
+        plateau = plateau_metrics_by_session.get(row["session_id"], {})
+        row["plateau_pairs"] = int(plateau.get("plateau_pairs", 0) or 0)
+        row["median_text_chars"] = int(plateau.get("median_text_chars", 0) or 0)
+        row["p90_text_chars"] = int(plateau.get("p90_text_chars", 0) or 0)
+    return {
+        "sessions": sessions,
+        "context_plateaus": context_plateaus,
+        "context_plateau_policy": {
+            "min_text_chars": min_plateau_chars,
+            "max_delta_ratio": max_plateau_delta_ratio,
+            "flagged_plateau_pairs": flagged_plateau_pairs,
+        },
+    }
 
 
 @app.get("/agentflow/dashboard", response_class=HTMLResponse)
@@ -1767,6 +1883,15 @@ async def dashboard() -> str:
       <th>Session</th><th>Calls</th><th>Cost</th><th>Thinking</th><th>Thinking cost</th><th>Cache write</th><th>Cache read</th><th>Write/read</th><th>Write cost</th><th>Read saved</th><th>Payback</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
     </tr></thead>
     <tbody id="sess-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Context plateaus today</h2>
+  <table>
+    <thead><tr>
+      <th>Session</th><th>Calls</th><th>Cost</th><th>Plateau pairs</th><th>Median chars</th><th>P90 chars</th><th>Cache read saved</th><th>Crunch saved chars</th><th>Flag</th>
+    </tr></thead>
+    <tbody id="plateau-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -1941,6 +2066,7 @@ async function refreshSessions(){
     const r=await fetch('/agentflow/stats/sessions');
     const d=await r.json();
     const tb=document.getElementById('sess-tbody');
+    const pb=document.getElementById('plateau-tbody');
     const rows=d.sessions||[];
     tb.innerHTML=rows.map(row=>`<tr>
       <td class="ts">${row.sid}</td>
@@ -1961,6 +2087,18 @@ async function refreshSessions(){
       <td class="tokens">${row.chat||0}</td>
       <td class="tokens">${row.other||0}</td>
     </tr>`).join('')||'<tr><td colspan="17" style="color:#8b949e">No sessions today</td></tr>';
+    const plateaus=d.context_plateaus||[];
+    pb.innerHTML=plateaus.map(row=>`<tr>
+      <td class="ts">${row.sid}</td>
+      <td>${(row.calls||0).toLocaleString()}</td>
+      <td class="cost">${fmt(row.cost_usd,5)}</td>
+      <td class="tokens">${(row.plateau_pairs||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.median_text_chars||0)}</td>
+      <td class="tokens">${fmtTok(row.p90_text_chars||0)}</td>
+      <td class="savings">${fmt(row.cache_read_savings_usd||0,5)}</td>
+      <td class="tokens">${fmtTok(row.crunch_saved_chars||0)}</td>
+      <td>${row.flagged?'<span class="badge err">flagged</span>':'<span class="badge miss">watch</span>'}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
   }catch(e){}
 }
 

@@ -670,7 +670,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: additional code-gen calls routed at 6k-8k chars; no increase in error rate or
   quality complaints on short code-gen tasks.
 
-- [IDEA] Dashboard: context plateau detector for repeated agent sessions (2026-06-06)
+- [DONE] Dashboard: context plateau detector for repeated agent sessions (2026-06-07)
   Details: Analysis 2026-06-06: 2,233 consecutive call pairs have text_chars within 3% of
   the previous call while still carrying >=8k chars. The highest-cost sessions show hundreds
   of these plateaus: session 360d58e2 has 617 adjacent near-same-size calls, median 108k chars,
@@ -681,6 +681,11 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   manual summarization, stricter crunch rules, or future managed optimizer policies.
   Metric: dashboard identifies sessions with >50 adjacent near-same-size large calls; operator
   can see estimated dollars attached to repeated-context plateaus.
+  Verified 2026-06-07: `/agentflow/stats/sessions` now returns context_plateaus with
+  adjacent large-context plateau counts, median/p90 text chars, session cost, prompt-cache read
+  savings, crunch saved chars, and the detector policy. The read-only Sessions tab renders a
+  Context plateaus table. Unit coverage and a served temporary dashboard/API check on port
+  4011 confirmed the JSON endpoint and dashboard HTML.
 
 - [DONE] Populate cache_json with explicit cache decision metadata on every call (2026-06-06)
   Details: Analysis 2026-06-06: cache_hit is 0/3,801 and cache_json is missing on 100% of calls,

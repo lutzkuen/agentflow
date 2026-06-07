@@ -197,6 +197,57 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(session["cache_warmup_payback_ratio"], 0.139)
         json.dumps(result)
 
+    def test_sessions_identify_context_plateaus(self):
+        text_sizes = [10_000, 10_200, 10_150, 15_000]
+        for idx, text_chars in enumerate(text_sizes):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=text_chars // 4,
+                output_tokens_est=1,
+                actual_input_tokens=text_chars // 4,
+                actual_output_tokens=1,
+                cost_est_usd=0.01,
+                cost_baseline_usd=0.01,
+                crunch_json=stable_json({"changed": True, "saved_chars": 100 + idx}),
+                routing_json=stable_json({"text_chars": text_chars}),
+                cache_json=None,
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="session-plateau",
+                category="tool-heavy",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=1_000 if idx == 0 else 0,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(server.stats_sessions())
+        [session] = result["sessions"]
+        [plateau] = result["context_plateaus"]
+
+        self.assertEqual(session["session_id"], "session-plateau")
+        self.assertEqual(session["plateau_pairs"], 2)
+        self.assertEqual(session["median_text_chars"], 10_175)
+        self.assertEqual(session["p90_text_chars"], 15_000)
+        self.assertEqual(plateau["session_id"], "session-plateau")
+        self.assertEqual(plateau["calls"], 4)
+        self.assertEqual(plateau["plateau_pairs"], 2)
+        self.assertEqual(plateau["crunch_saved_chars"], 406)
+        self.assertAlmostEqual(plateau["cache_read_savings_usd"], 0.0027, places=6)
+        self.assertFalse(plateau["flagged"])
+        self.assertEqual(result["context_plateau_policy"]["min_text_chars"], 8_000)
+        json.dumps(result)
+
 
 if __name__ == "__main__":
     unittest.main()
