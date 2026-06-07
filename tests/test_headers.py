@@ -6,6 +6,7 @@ import unittest
 from agentflow_proxy.headers import (
     ClientJsonRequestError,
     build_anthropic_forward_headers,
+    build_anthropic_summary_headers,
     build_openai_forward_headers,
     build_openai_websocket_headers,
     read_json_object_body,
@@ -35,6 +36,22 @@ class HeaderForwardingModuleTests(unittest.TestCase):
         self.assertEqual(headers["content-type"], "application/json")
         self.assertNotIn("X-Internal-User", headers)
         self.assertEqual(headers["anthropic-version"], "2023-06-01")
+
+    def test_anthropic_summary_headers_do_not_inherit_client_beta_headers(self):
+        headers = build_anthropic_summary_headers({
+            "Authorization": "Bearer client-key",
+            "Anthropic-Beta": "prompt-caching-2024-07-31",
+            "User-Agent": "claude-code",
+            "X-Internal-User": "alice@example.test",
+            "Content-Type": "text/plain",
+        })
+
+        self.assertEqual(headers["Authorization"], "Bearer client-key")
+        self.assertEqual(headers["content-type"], "application/json")
+        self.assertEqual(headers["anthropic-version"], "2023-06-01")
+        self.assertNotIn("Anthropic-Beta", headers)
+        self.assertNotIn("User-Agent", headers)
+        self.assertNotIn("X-Internal-User", headers)
 
     def test_openai_proxy_auth_replaces_client_authorization(self):
         headers = build_openai_forward_headers(

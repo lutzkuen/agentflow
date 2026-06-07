@@ -68,6 +68,60 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(summary["crunch_savings_usd"], 0.00057, places=6)
         self.assertAlmostEqual(summary["today_crunch_savings_usd"], 0.00057, places=6)
 
+    def test_old_context_summary_stats_are_attributed_separately(self):
+        for cache_hit, cost in ((False, 0.0002), (True, 0.0)):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=1_000,
+                output_tokens_est=0,
+                actual_input_tokens=1_000,
+                actual_output_tokens=0,
+                cost_est_usd=cost,
+                cost_baseline_usd=0.0,
+                crunch_json=stable_json({
+                    "changed": False,
+                    "old_context_summarization": {
+                        "status": "applied",
+                        "reason": "summary-cache-hit" if cache_hit else "summary-created",
+                        "summary_cache_hit": cache_hit,
+                        "summary_cost_est_usd": cost,
+                        "saved_chars": 2_000,
+                        "tokens_saved_est": 500,
+                    },
+                }),
+                routing_json=None,
+                cache_json=None,
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="session-summary",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(server.stats_full())
+        summary = result["summary"]
+
+        self.assertEqual(summary["old_context_summary_applied_count"], 2)
+        self.assertEqual(summary["old_context_summary_created_count"], 1)
+        self.assertEqual(summary["old_context_summary_cache_hits"], 1)
+        self.assertAlmostEqual(summary["old_context_summary_cache_hit_rate"], 0.5, places=6)
+        self.assertEqual(summary["old_context_summary_tokens_saved"], 1_000)
+        self.assertAlmostEqual(summary["old_context_summary_cost_usd"], 0.0002, places=6)
+        self.assertAlmostEqual(summary["old_context_summary_savings_usd"], 0.003, places=6)
+        self.assertAlmostEqual(summary["today_old_context_summary_net_usd"], 0.0028, places=6)
+
     def test_cache_decision_breakdown_groups_status_reason_and_hit_type(self):
         rows = [
             {"status": "skipped", "reason": "streaming", "policy_source": "local-default"},
@@ -418,6 +472,14 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("id=\"provider-tbody\"", html)
         self.assertIn("Codex app-server telemetry", html)
         self.assertIn("const tabs=['activity','provider','codex'", html)
+
+    def test_dashboard_exposes_old_context_summary_card(self):
+        html = asyncio.run(server.dashboard())
+
+        self.assertIn("Old-context summaries", html)
+        self.assertIn("id=\"c-summary-net\"", html)
+        self.assertIn("today_old_context_summary_net_usd", html)
+        self.assertIn("today_old_context_summary_cost_usd", html)
 
     def test_sessions_identify_context_plateaus(self):
         text_sizes = [10_000, 10_200, 10_150, 15_000]

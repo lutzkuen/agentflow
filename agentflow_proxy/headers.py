@@ -22,6 +22,11 @@ ANTHROPIC_FORWARD_HEADERS = {
     "accept",
     "user-agent",
 }
+ANTHROPIC_SUMMARY_HEADERS = {
+    "authorization",
+    "x-api-key",
+    "anthropic-version",
+}
 OPENAI_FORWARD_HEADERS = {
     "authorization",
     "x-api-key",
@@ -140,6 +145,24 @@ def build_anthropic_forward_headers(
         request_headers.items(),
         allowed=ANTHROPIC_FORWARD_HEADERS,
         blocked=set(),
+    )
+    headers.setdefault(
+        "anthropic-version",
+        anthropic_version or os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+    )
+    headers["content-type"] = "application/json"
+    return headers
+
+
+def build_anthropic_summary_headers(
+    request_headers: Mapping[str, str],
+    *,
+    anthropic_version: str | None = None,
+) -> dict[str, str]:
+    headers = _copy_allowed_headers(
+        request_headers.items(),
+        allowed=ANTHROPIC_SUMMARY_HEADERS,
+        blocked=HTTP_HOP_BY_HOP_HEADERS,
     )
     headers.setdefault(
         "anthropic-version",

@@ -36,6 +36,7 @@ def _default_crunch_policy() -> dict[str, Any]:
         "old_context_summarization": {
             "enabled": False,
             "model": "claude-haiku-4-5-20251001",
+            "placement": "system",
             "min_request_chars": 32000,
             "min_summarized_chars": 12000,
             "max_turns": 6,
@@ -135,6 +136,11 @@ def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) 
     target["enabled"] = _as_bool(summary.get("enabled"), target["enabled"])
     if summary.get("model") is not None:
         target["model"] = str(summary["model"])
+    if summary.get("placement") is not None:
+        placement = str(summary["placement"]).strip().lower()
+        if placement != "system":
+            raise ValueError("old_context_summarization.placement currently supports only 'system'")
+        target["placement"] = placement
     for key in (
         "min_request_chars",
         "min_summarized_chars",
@@ -168,6 +174,7 @@ PROMPT_CACHE_MIN_CHARS = int(CRUNCH_POLICY["prompt_cache"]["min_chars"])
 OLD_CONTEXT_SUMMARY_POLICY = CRUNCH_POLICY["old_context_summarization"]
 OLD_CONTEXT_SUMMARY_ENABLED = bool(OLD_CONTEXT_SUMMARY_POLICY["enabled"])
 OLD_CONTEXT_SUMMARY_MODEL = str(OLD_CONTEXT_SUMMARY_POLICY["model"])
+OLD_CONTEXT_SUMMARY_PLACEMENT = str(OLD_CONTEXT_SUMMARY_POLICY["placement"])
 OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["min_request_chars"])
 OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["min_summarized_chars"])
 OLD_CONTEXT_SUMMARY_MAX_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["max_turns"])
@@ -285,6 +292,7 @@ def _summary_base_meta(status: str, reason: str) -> dict[str, Any]:
         "policy_source": CRUNCH_POLICY_SOURCE,
         "rule_path": CRUNCH_RULES_PATH,
         "model": OLD_CONTEXT_SUMMARY_MODEL,
+        "placement": OLD_CONTEXT_SUMMARY_PLACEMENT,
         "min_request_chars": OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS,
         "min_summarized_chars": OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS,
         "max_turns": OLD_CONTEXT_SUMMARY_MAX_TURNS,
@@ -317,11 +325,13 @@ def _non_tool_message_text(msg: dict[str, Any]) -> str | None:
     return text if text else None
 
 
-def old_context_summary_plan(body: dict[str, Any], *, exact_cache_enabled: bool) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def old_context_summary_plan(
+    body: dict[str, Any],
+    *,
+    exact_cache_enabled: bool | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     if not OLD_CONTEXT_SUMMARY_ENABLED:
         return None, _summary_base_meta("skipped", "disabled")
-    if not exact_cache_enabled:
-        return None, _summary_base_meta("skipped", "exact-cache-required")
 
     before_chars = len(stable_json(body))
     if before_chars < OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS:
@@ -395,6 +405,7 @@ def old_context_summary_plan(body: dict[str, Any], *, exact_cache_enabled: bool)
         "source_hash": source_hash,
         "cache_key": "agentflow-old-context-summary\n" + source_hash,
         "summary_request": summary_request,
+        "placement": OLD_CONTEXT_SUMMARY_PLACEMENT,
         "candidate_indexes": [c["index"] for c in candidates],
         "candidate_roles": [c["role"] for c in candidates],
         "eligible_turns": len(candidates),
@@ -409,6 +420,8 @@ def old_context_summary_plan(body: dict[str, Any], *, exact_cache_enabled: bool)
         "eligible_chars": total_chars,
         "source_hash": source_hash[:12],
         "source_truncated": source_truncated,
+        "summary_cache_enabled": True,
+        "exact_cache_enabled": exact_cache_enabled,
     })
     return plan, meta
 
@@ -434,22 +447,26 @@ def apply_old_context_summary(body: dict[str, Any], plan: dict[str, Any], summar
     new_body = copy.deepcopy(body)
     messages = new_body.get("messages") or []
     indexes = set(plan["candidate_indexes"])
-    first_idx = min(indexes)
     notice = (
         f"[AgentFlow: old non-tool context summarized by {OLD_CONTEXT_SUMMARY_MODEL}; "
         f"source_turns={plan['eligible_turns']}; source_chars={plan['eligible_chars']}; "
         f"source_hash={plan['source_hash'][:12]}]\n\n"
         f"{summary.strip()[:OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS]}"
     )
-    replacement = {"role": "user", "content": [{"type": "text", "text": notice}]}
-    new_messages = []
-    for idx, msg in enumerate(messages):
-        if idx == first_idx:
-            new_messages.append(replacement)
-        if idx in indexes:
-            continue
-        new_messages.append(msg)
-    new_body["messages"] = new_messages
+    system = new_body.get("system")
+    summary_block = {"type": "text", "text": notice}
+    if system is None:
+        new_body["system"] = [summary_block]
+    elif isinstance(system, str):
+        new_body["system"] = [
+            {"type": "text", "text": system},
+            summary_block,
+        ]
+    elif isinstance(system, list):
+        new_body["system"] = copy.deepcopy(system) + [summary_block]
+    else:
+        new_body["system"] = [summary_block]
+    new_body["messages"] = [msg for idx, msg in enumerate(messages) if idx not in indexes]
     return new_body
 
 

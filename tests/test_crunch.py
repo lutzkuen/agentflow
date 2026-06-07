@@ -244,7 +244,7 @@ thinking_deduplication:
         self.assertEqual(meta["status"], "skipped")
         self.assertEqual(meta["reason"], "disabled")
 
-    def test_old_context_summarization_requires_exact_cache(self):
+    def test_old_context_summarization_does_not_require_exact_cache(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config = tmp_path / "config"
@@ -277,9 +277,11 @@ old_context_summarization:
                 exact_cache_enabled=False,
             )
 
-            self.assertIsNone(plan)
+            self.assertIsNotNone(plan)
             self.assertTrue(meta["enabled"])
-            self.assertEqual(meta["reason"], "exact-cache-required")
+            self.assertEqual(meta["reason"], "eligible")
+            self.assertTrue(meta["summary_cache_enabled"])
+            self.assertFalse(meta["exact_cache_enabled"])
 
     def test_old_context_summarization_plans_only_old_non_tool_turns(self):
         with TemporaryDirectory() as tmp:
@@ -369,8 +371,9 @@ old_context_summarization:
             self.assertEqual(meta["status"], "applied")
             self.assertEqual(meta["reason"], "summary-cache-hit")
             self.assertTrue(meta["summary_cache_hit"])
-            self.assertIn("durable facts only", summarized["messages"][0]["content"][0]["text"])
-            self.assertEqual(summarized["messages"][-1]["content"], "recent")
+            self.assertIn("durable facts only", summarized["system"][0]["text"])
+            self.assertIn("AgentFlow: old non-tool context summarized", summarized["system"][0]["text"])
+            self.assertEqual(summarized["messages"], [{"role": "user", "content": "recent"}])
 
     def test_maybe_summarize_old_context_fetches_and_caches_summary(self):
         with TemporaryDirectory() as tmp:
@@ -427,7 +430,44 @@ old_context_summarization:
             self.assertEqual(meta["reason"], "summary-created")
             self.assertEqual(meta["summary_input_tokens"], 100)
             self.assertAlmostEqual(meta["summary_cost_est_usd"], 0.0008)
-            self.assertIn("fetched compact summary", summarized["messages"][0]["content"][0]["text"])
+            self.assertIn("fetched compact summary", summarized["system"][0]["text"])
+
+    def test_old_context_summary_preserves_existing_system_as_system_context(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 2
+  keep_recent_turns: 1
+  max_summary_chars: 1000
+  max_source_chars: 20000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "system": "Original system instruction.",
+                "messages": [
+                    {"role": "user", "content": "alpha " * 40},
+                    {"role": "assistant", "content": "beta " * 40},
+                    {"role": "user", "content": "recent"},
+                ],
+            }
+            plan, _ = manual.old_context_summary_plan(body, exact_cache_enabled=False)
+
+            summarized = manual.apply_old_context_summary(body, plan, "compact summary")
+
+            self.assertEqual(summarized["system"][0], {"type": "text", "text": "Original system instruction."})
+            self.assertIn("compact summary", summarized["system"][1]["text"])
+            self.assertEqual(summarized["messages"], [{"role": "user", "content": "recent"}])
 
 
 if __name__ == "__main__":

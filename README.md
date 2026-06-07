@@ -152,7 +152,15 @@ This prototype is deliberately conservative for agent usage:
 4. If the request is very large, shortens older non-tool text blocks by keeping the head and tail.
 5. Never changes `tool_use` or `tool_result` blocks.
 
-It does not yet use model-assisted summarization. That should be added later behind a careful fallback/eval path.
+Model-assisted old-context summarization exists but is disabled by default. To enable it,
+set `old_context_summarization.enabled: true` in `config/crunch_rules.yaml` or set
+`AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT=1`. When enabled, AgentFlow may make one additional
+Anthropic request to summarize old non-tool turns. The resulting summary is inserted as a
+tagged top-level `system` context block rather than an ordinary user message; recent turns and
+all `tool_use` / `tool_result` protocol messages stay unchanged. Summary creation cost,
+summary cache reuse, estimated saved tokens, and net savings are exposed under
+`/agentflow/stats/full` and on the dashboard. The summary cache is used when available, but
+exact request caching is not required for summarization eligibility.
 
 ## What routing does
 
@@ -301,6 +309,6 @@ Good next steps:
 2. Add configurable YAML routing rules.
 3. Add exact cache for selected tool-safe endpoints.
 4. Add Anthropic-style streaming event parsing for better logging.
-5. Add model-assisted summarization behind opt-in fallback.
+5. Add evaluation coverage for opt-in model-assisted summarization.
 6. Add per-session savings estimates against a baseline model.
 7. Add `agentflow doctor` to validate Claude Code config.

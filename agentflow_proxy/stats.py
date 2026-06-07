@@ -433,6 +433,73 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             cache_read_tokens=int(row["today_cache_read_tok"] or 0),
             provider=row["provider"],
         ) or 0
+
+    summary_applied_count = int(s("""
+        select count(*) from calls
+        where json_extract(crunch_json, '$.old_context_summarization.status') = 'applied'
+    """) or 0)
+    today_summary_applied_count = int(s("""
+        select count(*) from calls
+        where json_extract(crunch_json, '$.old_context_summarization.status') = 'applied'
+          and date(created_at) = date('now')
+    """) or 0)
+    summary_created_count = int(s("""
+        select count(*) from calls
+        where json_extract(crunch_json, '$.old_context_summarization.reason') = 'summary-created'
+    """) or 0)
+    summary_cache_hits = int(s("""
+        select count(*) from calls
+        where json_extract(crunch_json, '$.old_context_summarization.summary_cache_hit') = 1
+    """) or 0)
+    summary_extra_cost = float(s("""
+        select sum(coalesce(json_extract(crunch_json, '$.old_context_summarization.summary_cost_est_usd'), 0))
+        from calls
+    """) or 0.0)
+    today_summary_extra_cost = float(s("""
+        select sum(coalesce(json_extract(crunch_json, '$.old_context_summarization.summary_cost_est_usd'), 0))
+        from calls
+        where date(created_at) = date('now')
+    """) or 0.0)
+    summary_chars_saved = int(s("""
+        select sum(coalesce(json_extract(crunch_json, '$.old_context_summarization.saved_chars'), 0))
+        from calls
+        where json_extract(crunch_json, '$.old_context_summarization.status') = 'applied'
+    """) or 0)
+    summary_tokens_saved = int(s("""
+        select sum(coalesce(json_extract(crunch_json, '$.old_context_summarization.tokens_saved_est'), 0))
+        from calls
+        where json_extract(crunch_json, '$.old_context_summarization.status') = 'applied'
+    """) or 0)
+    summary_savings = 0.0
+    today_summary_savings = 0.0
+    summary_by_model = q("""
+        select coalesce(provider, 'anthropic') as provider,
+               coalesce(routed_model, requested_model) as model,
+               sum(coalesce(json_extract(crunch_json, '$.old_context_summarization.tokens_saved_est'), 0)) as saved_tok,
+               sum(coalesce(actual_input_tokens, input_tokens_est, 0)) as input_tok,
+               sum(coalesce(cache_read_input_tokens, 0)) as cache_read_tok,
+               sum(case when date(created_at) = date('now') then coalesce(json_extract(crunch_json, '$.old_context_summarization.tokens_saved_est'), 0) else 0 end) as today_saved_tok,
+               sum(case when date(created_at) = date('now') then coalesce(actual_input_tokens, input_tokens_est, 0) else 0 end) as today_input_tok,
+               sum(case when date(created_at) = date('now') then coalesce(cache_read_input_tokens, 0) else 0 end) as today_cache_read_tok
+        from calls
+        where json_extract(crunch_json, '$.old_context_summarization.status') = 'applied'
+        group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
+    """)
+    for row in summary_by_model:
+        summary_savings += estimate_blended_input_savings(
+            row["model"],
+            tokens_saved=max(0, int(row["saved_tok"] or 0)),
+            input_tokens=int(row["input_tok"] or 0),
+            cache_read_tokens=int(row["cache_read_tok"] or 0),
+            provider=row["provider"],
+        ) or 0
+        today_summary_savings += estimate_blended_input_savings(
+            row["model"],
+            tokens_saved=max(0, int(row["today_saved_tok"] or 0)),
+            input_tokens=int(row["today_input_tok"] or 0),
+            cache_read_tokens=int(row["today_cache_read_tok"] or 0),
+            provider=row["provider"],
+        ) or 0
     prompt_cache_creation_tokens = s("select sum(cache_creation_input_tokens) from calls") or 0
     prompt_cache_read_tokens = s("select sum(cache_read_input_tokens) from calls") or 0
     prompt_cache_hits = s("select count(*) from calls where cache_read_input_tokens > 0") or 0
@@ -626,6 +693,18 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "crunch_savings_usd": round(crunch_savings, 6),
             "today_crunch_savings_usd": round(today_crunch_savings, 6),
             "avg_crunch_ratio": round(avg_crunch_ratio, 4),
+            "old_context_summary_applied_count": summary_applied_count,
+            "today_old_context_summary_applied_count": today_summary_applied_count,
+            "old_context_summary_created_count": summary_created_count,
+            "old_context_summary_cache_hits": summary_cache_hits,
+            "old_context_summary_cache_hit_rate": round(summary_cache_hits / summary_applied_count, 4) if summary_applied_count else 0,
+            "old_context_summary_chars_saved": summary_chars_saved,
+            "old_context_summary_tokens_saved": summary_tokens_saved,
+            "old_context_summary_cost_usd": round(summary_extra_cost, 6),
+            "today_old_context_summary_cost_usd": round(today_summary_extra_cost, 6),
+            "old_context_summary_savings_usd": round(summary_savings, 6),
+            "today_old_context_summary_savings_usd": round(today_summary_savings, 6),
+            "today_old_context_summary_net_usd": round(today_summary_savings - today_summary_extra_cost, 6),
             "errors": errors,
             "prompt_cache_creation_tokens": int(prompt_cache_creation_tokens),
             "prompt_cache_read_tokens": int(prompt_cache_read_tokens),
@@ -1009,6 +1088,7 @@ def dashboard_html() -> str:
   <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
   <div class="card green"><div class="label">Provider cache discount</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— provider cache hit rate</div></div>
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
+  <div class="card yellow"><div class="label">Old-context summaries</div><div class="value" id="c-summary-net">—</div><div class="sub" id="c-summary-sub">— cost</div></div>
   <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
   <div class="card yellow"><div class="label">Tier cooldowns</div><div class="value" id="c-limiter">—</div><div class="sub" id="c-limiter-sub">— queued</div></div>
   <div class="card blue"><div class="label">Codex app-server</div><div class="value" id="c-codex-app-turns">—</div><div class="sub" id="c-codex-app-events">— events</div></div>
@@ -1304,6 +1384,8 @@ async function refresh(){
     document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% provider cache hit rate';
     document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
     document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · '+fmt(s.today_crunch_savings_usd||0,4)+' today · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
+    document.getElementById('c-summary-net').textContent=fmt(s.today_old_context_summary_net_usd||0,4);
+    document.getElementById('c-summary-sub').textContent=(s.today_old_context_summary_applied_count||0)+' today · '+fmt(s.today_old_context_summary_savings_usd||0,4)+' saved · '+fmt(s.today_old_context_summary_cost_usd||0,4)+' cost · '+Math.round((s.old_context_summary_cache_hit_rate||0)*100)+'% reused';
     document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
     document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
     document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';
@@ -1499,4 +1581,3 @@ setInterval(refreshSessions,30000);
 </script>
 </body>
 </html>"""
-

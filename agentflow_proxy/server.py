@@ -207,6 +207,7 @@ from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_blende
 from agentflow_proxy.headers import (
     ClientJsonRequestError,
     build_anthropic_forward_headers,
+    build_anthropic_summary_headers,
     build_openai_forward_headers as build_openai_forward_headers_from_mapping,
     build_openai_websocket_headers as build_openai_websocket_headers_from_mapping,
     client_json_error_body,
@@ -339,6 +340,10 @@ def provider_disabled_response(expected: str) -> JSONResponse:
 
 def build_forward_headers(request: Request) -> dict[str, str]:
     return build_anthropic_forward_headers(request.headers)
+
+
+def build_summary_headers(request: Request) -> dict[str, str]:
+    return build_anthropic_summary_headers(request.headers)
 
 
 async def _fetch_old_context_summary(summary_request: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
@@ -650,6 +655,7 @@ async def _anthropic_messages_impl(request: Request) -> Response:
 
     try:
         headers = build_forward_headers(request)
+        summary_headers = build_summary_headers(request)
         raw_body, summary_meta = await maybe_summarize_old_context(
             raw_body,
             exact_cache_enabled=CACHE_ENABLED,
@@ -660,9 +666,19 @@ async def _anthropic_messages_impl(request: Request) -> Response:
                 len(stable_json(value)),
                 value,
             ),
-            fetch_summary=lambda summary_request: _fetch_old_context_summary(summary_request, headers),
+            fetch_summary=lambda summary_request: _fetch_old_context_summary(summary_request, summary_headers),
         )
         summary_extra_cost = float(summary_meta.get("summary_cost_est_usd") or 0.0)
+        if summary_meta.get("status") == "applied":
+            print(
+                "agentflow_old_context_summary "
+                f"reason={summary_meta.get('reason')} "
+                f"cache_hit={int(bool(summary_meta.get('summary_cache_hit')))} "
+                f"cost_est_usd={summary_extra_cost:.6f} "
+                f"tokens_saved_est={int(summary_meta.get('tokens_saved_est') or 0)} "
+                f"placement={summary_meta.get('placement')}",
+                file=sys.stderr,
+            )
         crunched, crunch_meta = crunch_body(raw_body)
         crunch_meta["old_context_summarization"] = summary_meta
         crunched, prompt_cached = inject_prompt_cache(crunched)

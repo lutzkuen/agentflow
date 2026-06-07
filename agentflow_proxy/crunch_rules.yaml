@@ -4,8 +4,17 @@ prompt_cache:
   enabled: true
   min_chars: 4096
 old_context_summarization:
+  # Opt-in only. When enabled, AgentFlow may make one additional Anthropic
+  # request to the model below to summarize old non-tool conversation turns.
+  # The summary is inserted as tagged top-level system context, not as a
+  # synthetic user turn, and the original recent turns plus all tool protocol
+  # messages are preserved. Summary creation cost, cache reuse, and estimated
+  # savings are recorded in crunch_json.old_context_summarization and dashboard
+  # stats. The summary cache is used when available but exact request caching is
+  # not required for eligibility.
   enabled: false
   model: claude-haiku-4-5-20251001
+  placement: system
   min_request_chars: 32000
   min_summarized_chars: 12000
   max_turns: 6
