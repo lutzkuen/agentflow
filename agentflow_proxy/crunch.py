@@ -8,6 +8,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
+from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import stable_json
 
 TOKEN_CHARS = 4  # rough estimator only
@@ -167,6 +168,8 @@ def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: di
 
 
 CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()
+CRUNCH_RULES_LOADED_AT = utc_now()
+CRUNCH_RULES_LOADED_FILE = policy_file_snapshot(CRUNCH_RULES_PATH)
 CRUNCH_ENABLED = bool(CRUNCH_POLICY["enabled"])
 CRUNCH_THRESHOLD_CHARS = int(CRUNCH_POLICY["threshold_chars"])
 PROMPT_CACHE_ENABLED = bool(CRUNCH_POLICY["prompt_cache"]["enabled"])

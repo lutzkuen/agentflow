@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.crunch import sha256_text
+from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import stable_json
 
 
@@ -118,6 +119,8 @@ def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
 
 
 CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH = _load_cache_policy()
+CACHE_RULES_LOADED_AT = utc_now()
+CACHE_RULES_LOADED_FILE = policy_file_snapshot(CACHE_RULES_PATH)
 CACHE_ENABLED = bool(CACHE_POLICY["exact_cache"]["enabled"])
 CACHE_TOOL_CALLS = bool(CACHE_POLICY["exact_cache"]["cache_tool_calls"])
 SEMANTIC_CACHE_ENABLED = bool(CACHE_POLICY["semantic_cache"]["enabled"])

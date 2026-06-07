@@ -6,6 +6,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
+from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import stable_json
 
 HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
@@ -123,24 +124,26 @@ def strip_thinking_history_blocks(body: dict[str, Any]) -> tuple[dict[str, Any],
     return body, n_stripped
 
 
-def _load_routing_rules() -> tuple[list[dict], str]:
+def _load_routing_rules() -> tuple[list[dict], str, str]:
     p = Path(ROUTING_RULES_PATH)
     if p.exists():
         with open(p) as f:
             data = yaml.safe_load(f)
         if isinstance(data, list):
-            return data, "local-manual"
+            return data, "local-manual", str(p)
         if isinstance(data, dict) and "rules" in data:
-            return list(data["rules"]), "local-manual"
+            return list(data["rules"]), "local-manual", str(p)
     defaults = Path(__file__).parent / "routing_rules.yaml"
     with open(defaults) as f:
         data = yaml.safe_load(f)
     if isinstance(data, list):
-        return data, "local-default"
-    return list(data.get("rules", [])), "local-default"
+        return data, "local-default", str(defaults)
+    return list(data.get("rules", [])), "local-default", str(defaults)
 
 
-ROUTING_RULES, ROUTING_RULES_SOURCE = _load_routing_rules()
+ROUTING_RULES, ROUTING_RULES_SOURCE, ROUTING_RULES_PATH = _load_routing_rules()
+ROUTING_RULES_LOADED_AT = utc_now()
+ROUTING_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_RULES_PATH)
 
 _TIER_MAP = {"haiku": HAIKU_DEFAULT, "sonnet": SONNET_DEFAULT, "opus": OPUS_DEFAULT}
 

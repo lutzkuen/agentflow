@@ -4,10 +4,10 @@ import json
 import math
 import os
 import sqlite3
-from pathlib import Path
 from typing import Any, Optional
 
 from agentflow_proxy.limiter import model_tier
+from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import estimate_blended_input_savings, estimate_cost
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
@@ -25,12 +25,6 @@ def _json_obj(raw: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _routing_rules_path(router_module: Any) -> str:
-    if router_module.ROUTING_RULES_SOURCE == "local-manual":
-        return str(router_module.ROUTING_RULES_PATH)
-    return str(Path(router_module.__file__).parent / "routing_rules.yaml")
-
-
 def _copy_policy(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
@@ -43,7 +37,12 @@ async def stats_policies() -> dict[str, Any]:
         "routing": {
             "enabled": bool(router.ROUTING_ENABLED),
             "policy_source": router.ROUTING_RULES_SOURCE,
-            "rule_path": _routing_rules_path(router),
+            "rule_path": router.ROUTING_RULES_PATH,
+            "file": policy_file_status(
+                router.ROUTING_RULES_PATH,
+                loaded_at=router.ROUTING_RULES_LOADED_AT,
+                loaded_snapshot=router.ROUTING_RULES_LOADED_FILE,
+            ),
             "rules": _copy_policy(router.ROUTING_RULES),
             "defaults": {
                 "haiku": router.HAIKU_DEFAULT,
@@ -62,6 +61,11 @@ async def stats_policies() -> dict[str, Any]:
             "enabled": bool(crunch.CRUNCH_ENABLED),
             "policy_source": crunch.CRUNCH_POLICY_SOURCE,
             "rule_path": crunch.CRUNCH_RULES_PATH,
+            "file": policy_file_status(
+                crunch.CRUNCH_RULES_PATH,
+                loaded_at=crunch.CRUNCH_RULES_LOADED_AT,
+                loaded_snapshot=crunch.CRUNCH_RULES_LOADED_FILE,
+            ),
             "threshold_chars": crunch.CRUNCH_THRESHOLD_CHARS,
             "prompt_cache": {
                 "enabled": bool(crunch.PROMPT_CACHE_ENABLED),
@@ -74,6 +78,11 @@ async def stats_policies() -> dict[str, Any]:
             "enabled": bool(cache.CACHE_ENABLED or cache.SEMANTIC_CACHE_ENABLED),
             "policy_source": cache.CACHE_POLICY_SOURCE,
             "rule_path": cache.CACHE_RULES_PATH,
+            "file": policy_file_status(
+                cache.CACHE_RULES_PATH,
+                loaded_at=cache.CACHE_RULES_LOADED_AT,
+                loaded_snapshot=cache.CACHE_RULES_LOADED_FILE,
+            ),
             "exact_cache": {
                 "enabled": bool(cache.CACHE_ENABLED),
                 "cache_tool_calls": bool(cache.CACHE_TOOL_CALLS),
@@ -92,6 +101,11 @@ async def stats_policies() -> dict[str, Any]:
             "enabled": bool(routing_experiments.ROUTING_EXPERIMENT_ENABLED),
             "policy_source": routing_experiments.ROUTING_EXPERIMENT_POLICY_SOURCE,
             "rule_path": routing_experiments.ROUTING_EXPERIMENT_RULES_PATH,
+            "file": policy_file_status(
+                routing_experiments.ROUTING_EXPERIMENT_RULES_PATH,
+                loaded_at=routing_experiments.ROUTING_EXPERIMENT_RULES_LOADED_AT,
+                loaded_snapshot=routing_experiments.ROUTING_EXPERIMENT_RULES_LOADED_FILE,
+            ),
             "policy": _copy_policy(routing_experiments.ROUTING_EXPERIMENT_POLICY),
         },
     }
@@ -2056,6 +2070,10 @@ function policySource(source){
 function compactSettings(items){
   return items.filter(Boolean).map(item=>`<span class="badge stream">${esc(item)}</span>`).join(' ');
 }
+function policyReloadSetting(file){
+  if(!file) return '';
+  return file.reload_required?'reload required':'loaded';
+}
 async function refreshPolicies(){
   try{
     const r=await fetch('/agentflow/stats/policies');
@@ -2067,6 +2085,7 @@ async function refreshPolicies(){
         source:d.routing&&d.routing.policy_source,
         path:d.routing&&d.routing.rule_path,
         settings:compactSettings([
+          policyReloadSetting(d.routing&&d.routing.file),
           'rules '+((d.routing&&d.routing.rules)||[]).length,
           d.routing&&d.routing.strip_thinking_history?'strip thinking history':'keep thinking history',
           d.routing&&d.routing.openai&&d.routing.openai.enabled?'OpenAI routing on':'OpenAI routing off'
@@ -2078,6 +2097,7 @@ async function refreshPolicies(){
         source:d.crunch&&d.crunch.policy_source,
         path:d.crunch&&d.crunch.rule_path,
         settings:compactSettings([
+          policyReloadSetting(d.crunch&&d.crunch.file),
           'threshold '+fmtTok(d.crunch&&d.crunch.threshold_chars),
           d.crunch&&d.crunch.prompt_cache&&d.crunch.prompt_cache.enabled?'prompt cache on':'prompt cache off',
           d.crunch&&d.crunch.old_context_summarization&&d.crunch.old_context_summarization.enabled?'old-context summary on':'old-context summary off',
@@ -2090,6 +2110,7 @@ async function refreshPolicies(){
         source:d.cache&&d.cache.policy_source,
         path:d.cache&&d.cache.rule_path,
         settings:compactSettings([
+          policyReloadSetting(d.cache&&d.cache.file),
           d.cache&&d.cache.exact_cache&&d.cache.exact_cache.enabled?'exact on':'exact off',
           d.cache&&d.cache.exact_cache&&d.cache.exact_cache.cache_tool_calls?'tool cache on':'tool cache off',
           d.cache&&d.cache.semantic_cache&&d.cache.semantic_cache.enabled?'semantic on':'semantic off',
@@ -2102,6 +2123,7 @@ async function refreshPolicies(){
         source:d.routing_experiments&&d.routing_experiments.policy_source,
         path:d.routing_experiments&&d.routing_experiments.rule_path,
         settings:compactSettings([
+          policyReloadSetting(d.routing_experiments&&d.routing_experiments.file),
           'sample '+(((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.sample_rate)||0)*100).toFixed(1)+'%',
           'similarity '+((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.similarity_threshold)||0)
         ])

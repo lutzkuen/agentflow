@@ -9,6 +9,7 @@ import yaml
 
 from agentflow_proxy.crunch import build_embedding, sha256_text
 from agentflow_proxy.cache import response_output_text
+from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import cosine_similarity, stable_json
 
 
@@ -99,6 +100,8 @@ def _load_experiment_policy() -> tuple[dict[str, Any], str, str]:
 
 
 ROUTING_EXPERIMENT_POLICY, ROUTING_EXPERIMENT_POLICY_SOURCE, ROUTING_EXPERIMENT_RULES_PATH = _load_experiment_policy()
+ROUTING_EXPERIMENT_RULES_LOADED_AT = utc_now()
+ROUTING_EXPERIMENT_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_EXPERIMENT_RULES_PATH)
 ROUTING_EXPERIMENT_ENABLED = bool(ROUTING_EXPERIMENT_POLICY["enabled"])
 ROUTING_EXPERIMENT_SAMPLE_RATE = float(ROUTING_EXPERIMENT_POLICY["sample_rate"])
 ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD = float(ROUTING_EXPERIMENT_POLICY["similarity_threshold"])
@@ -185,4 +188,3 @@ def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_res
         "output_similarity": round(float(similarity), 6),
         "passed_threshold": float(similarity) >= ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD,
     }
-
