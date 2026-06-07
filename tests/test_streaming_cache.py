@@ -58,12 +58,65 @@ class FakeAsyncClient:
         return FakeStreamResponse()
 
 
+class FakeStreamErrorResponse:
+    status_code = 400
+    headers = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aiter_bytes(self):
+        yield b'{"type":"error","error":{"type":"invalid_request_error","message":"stream body failed"}}'
+
+
+class FakeStreamErrorClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def stream(self, *args, **kwargs):
+        return FakeStreamErrorResponse()
+
+
+class FakeEmptyErrorResponse:
+    status_code = 400
+    headers = {"content-type": "text/plain"}
+    content = b""
+    text = ""
+
+    def json(self):
+        raise ValueError("not json")
+
+
+class FakeEmptyErrorClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, *args, **kwargs):
+        return FakeEmptyErrorResponse()
+
+
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class StreamingCacheTest(unittest.TestCase):
     def setUp(self):
         self.old_store = server.store
         self.old_provider = server.PROVIDER
         self.old_upstream = server.ANTHROPIC_UPSTREAM
+        self.old_openai_upstream = server.OPENAI_UPSTREAM
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
@@ -73,7 +126,11 @@ class StreamingCacheTest(unittest.TestCase):
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
-        server.configure_provider(self.old_provider, anthropic_upstream=self.old_upstream)
+        server.configure_provider(
+            self.old_provider,
+            anthropic_upstream=self.old_upstream,
+            openai_upstream=self.old_openai_upstream,
+        )
 
     def test_streamed_non_tool_response_is_buffered_and_replayed_from_cache(self):
         request_body = {
@@ -155,6 +212,65 @@ class StreamingCacheTest(unittest.TestCase):
         finally:
             os.chdir(old_cwd)
             cache_module.CACHE_TOOL_CALLS = old_cache_tool_calls
+
+    def test_non_streaming_empty_error_body_logs_status_fallback(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "Trigger an error."}],
+        }
+
+        with patch.object(server.httpx, "AsyncClient", FakeEmptyErrorClient):
+            client = TestClient(server.app)
+            response = client.post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 400)
+        [row] = server.store.conn.execute(
+            "select status_code, error from calls"
+        ).fetchall()
+        self.assertEqual(row["status_code"], 400)
+        self.assertEqual(row["error"], "upstream_error: status=400")
+
+    def test_anthropic_streaming_error_logs_upstream_body(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "Trigger a stream error."}],
+        }
+
+        with patch.object(server.httpx, "AsyncClient", FakeStreamErrorClient):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertIn(b"stream body failed", body)
+        [row] = server.store.conn.execute(
+            "select status_code, error from calls"
+        ).fetchall()
+        self.assertEqual(row["status_code"], 400)
+        self.assertIn("stream body failed", row["error"])
+
+    def test_openai_streaming_error_logs_upstream_body(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test")
+        request_body = {
+            "model": "gpt-5-codex",
+            "stream": True,
+            "input": "Trigger a stream error.",
+        }
+
+        with patch.object(server.httpx, "AsyncClient", FakeStreamErrorClient):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/responses", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertIn(b"stream body failed", body)
+        [row] = server.store.conn.execute(
+            "select provider, status_code, error from calls"
+        ).fetchall()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["status_code"], 400)
+        self.assertIn("stream body failed", row["error"])
 
 
 if __name__ == "__main__":

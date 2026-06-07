@@ -499,6 +499,7 @@ from agentflow_proxy.cache import (
     streaming_cache_lookup_meta,
     cache_file_dependency_snapshots,
 )
+from agentflow_proxy.errors import upstream_error_text
 from agentflow_proxy.routing_experiments import (
     ROUTING_EXPERIMENT_MIN_SAMPLES,
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
@@ -1070,6 +1071,7 @@ async def messages(request: Request) -> Response:
                 cache_read_in: int = 0
                 thinking_chars: int = 0
                 stream_frames: list[bytes] = []
+                upstream_error_chunks: list[bytes] = []
                 output_text_parts: list[str] = []
                 sse_frame_buf = b""
                 stream_retry_count = 0
@@ -1131,10 +1133,14 @@ async def messages(request: Request) -> Response:
                                                 frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
                                                 event_bytes = frame + b"\n\n"
                                                 stream_frames.append(event_bytes)
+                                                if status_code >= 400:
+                                                    upstream_error_chunks.append(event_bytes)
                                                 yield event_bytes
                                                 parse_sse_usage(frame)
                                         if sse_frame_buf:
                                             stream_frames.append(sse_frame_buf)
+                                            if status_code >= 400:
+                                                upstream_error_chunks.append(sse_frame_buf)
                                             yield sse_frame_buf
                                             parse_sse_usage(sse_frame_buf)
                                             sse_frame_buf = b""
@@ -1165,7 +1171,7 @@ async def messages(request: Request) -> Response:
                     if cache_creation_in or cache_read_in:
                         print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
                     if status_code >= 400 and error is None:
-                        error = f"upstream_error: status={status_code}"
+                        error = upstream_error_text(b"".join(upstream_error_chunks), status_code)
                     if status_code < 400 and error is None and can_stream_cache and stream_frames:
                         stream_usage = {
                             "input_tokens": actual_in,
@@ -1318,7 +1324,7 @@ async def messages(request: Request) -> Response:
                 cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                 cache_json=stable_json(cache_meta),
-                error=r.text[:1000],
+                error=upstream_error_text(r.text, status_code),
                 request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                 session_id=session_id, category=category,
                 cache_creation_input_tokens=0, cache_read_input_tokens=0,
@@ -1378,7 +1384,7 @@ async def messages(request: Request) -> Response:
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             cache_json=stable_json(cache_meta),
-            error=None if status_code < 400 else stable_json(response_body)[:1000],
+            error=None if status_code < 400 else upstream_error_text(response_body, status_code),
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
             session_id=session_id, category=category,
@@ -1488,6 +1494,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
                 actual_out: Optional[int] = None
                 cache_read_in = 0
                 reasoning_tokens = 0
+                upstream_error_chunks: list[bytes] = []
                 sse_frame_buf = b""
                 stream_retry_count = 0
                 stream_net_retries = 0
@@ -1537,9 +1544,13 @@ async def openai_optimized(request: Request, path: str) -> Response:
                                         while b"\n\n" in sse_frame_buf:
                                             frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
                                             event_bytes = frame + b"\n\n"
+                                            if status_code >= 400:
+                                                upstream_error_chunks.append(event_bytes)
                                             yield event_bytes
                                             parse_sse_usage(frame)
                                     if sse_frame_buf:
+                                        if status_code >= 400:
+                                            upstream_error_chunks.append(sse_frame_buf)
                                         yield sse_frame_buf
                                         parse_sse_usage(sse_frame_buf)
                                         sse_frame_buf = b""
@@ -1561,7 +1572,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
                     cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai")
                     cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
                     if status_code >= 400 and error is None:
-                        error = f"upstream_error: status={status_code}"
+                        error = upstream_error_text(b"".join(upstream_error_chunks), status_code)
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path, provider="openai",
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -1688,7 +1699,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
                 cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                 cache_json=stable_json(cache_meta),
-                error=r.text[:1000],
+                error=upstream_error_text(r.text, status_code),
                 request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                 session_id=session_id, category=category,
                 cache_creation_input_tokens=0, cache_read_input_tokens=0,
@@ -1728,7 +1739,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             cache_json=stable_json(cache_meta),
-            error=None if status_code < 400 else stable_json(response_body)[:1000],
+            error=None if status_code < 400 else upstream_error_text(response_body, status_code),
             request_json=stable_json(crunched) if LOG_BODIES else None,
             response_json=stable_json(response_body) if LOG_BODIES else None,
             session_id=session_id, category=category,
