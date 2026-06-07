@@ -330,9 +330,10 @@ from agentflow_proxy.router import (
 from agentflow_proxy.crunch import (
     TOKEN_CHARS, sha256_text, estimate_tokens_from_text, build_embedding,
     crunch_body, inject_prompt_cache, has_cache_control_blocks,
+    maybe_summarize_old_context, OLD_CONTEXT_SUMMARY_MODEL,
 )
 from agentflow_proxy.cache import (
-    SEMANTIC_CACHE_THRESHOLD,
+    CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
     cache_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
 )
 
@@ -406,6 +407,56 @@ def build_forward_headers(request: Request) -> dict[str, str]:
     headers.setdefault("anthropic-version", os.getenv("ANTHROPIC_VERSION", "2023-06-01"))
     headers["content-type"] = "application/json"
     return headers
+
+
+async def _fetch_old_context_summary(summary_request: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+    model = str(summary_request.get("model") or OLD_CONTEXT_SUMMARY_MODEL)
+    try:
+        async with _tier_semaphores[_model_tier(model)]:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                await _await_tier_backoff(model)
+                await _throttle_forward()
+                r = await client.post(
+                    ANTHROPIC_UPSTREAM.rstrip("/") + "/v1/messages",
+                    headers=headers,
+                    json=summary_request,
+                )
+    except Exception as exc:
+        return {
+            "summary": None,
+            "summary_status_code": None,
+            "summary_error": repr(exc),
+        }
+
+    try:
+        body = r.json()
+    except Exception:
+        return {
+            "summary": None,
+            "summary_status_code": r.status_code,
+            "summary_error": r.text[:500],
+        }
+
+    parts = [
+        str(block.get("text") or "")
+        for block in body.get("content") or []
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    usage = body.get("usage") or {}
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    meta = {
+        "summary": "\n".join(parts).strip() if r.status_code < 400 else None,
+        "usage": usage,
+        "summary_status_code": r.status_code,
+        "summary_input_tokens": input_tokens,
+        "summary_output_tokens": output_tokens,
+    }
+    if input_tokens is not None or output_tokens is not None:
+        meta["summary_cost_est_usd"] = estimate_cost(model, input_tokens or 0, output_tokens or 0) or 0.0
+    if r.status_code >= 400:
+        meta["summary_error"] = stable_json(body)[:500]
+    return meta
 
 
 def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
@@ -591,11 +642,27 @@ async def messages(request: Request) -> Response:
     response_body: Optional[dict[str, Any]] = None
     retry_count = 0
     net_retries = 0
+    summary_extra_cost = 0.0
 
     category = categorize_request(raw_body)
 
     try:
+        headers = build_forward_headers(request)
+        raw_body, summary_meta = await maybe_summarize_old_context(
+            raw_body,
+            exact_cache_enabled=CACHE_ENABLED,
+            get_cached_summary=store.get_cache,
+            set_cached_summary=lambda key, value: store.set_cache(
+                key,
+                OLD_CONTEXT_SUMMARY_MODEL,
+                len(stable_json(value)),
+                value,
+            ),
+            fetch_summary=lambda summary_request: _fetch_old_context_summary(summary_request, headers),
+        )
+        summary_extra_cost = float(summary_meta.get("summary_cost_est_usd") or 0.0)
         crunched, crunch_meta = crunch_body(raw_body)
+        crunch_meta["old_context_summarization"] = summary_meta
         crunched, prompt_cached = inject_prompt_cache(crunched)
         if STRIP_THINKING_HISTORY and category == "tool-result" and not _has_top_level_thinking(crunched):
             tokens_before = estimate_tokens_from_text(extract_text(crunched))
@@ -634,7 +701,6 @@ async def messages(request: Request) -> Response:
             routing_meta["thinking_capped"] = True
             print(f"thinking_cap: original={_original_budget} cap={MAX_THINKING_BUDGET_TOKENS}", flush=True)
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
-        headers = build_forward_headers(request)
         if prompt_cached or has_cache_control_blocks(crunched):
             existing = headers.get("anthropic-beta", "")
             if "prompt-caching" not in existing:
@@ -732,6 +798,8 @@ async def messages(request: Request) -> Response:
                     cost_in = actual_in if actual_in is not None else input_tokens
                     cost_out = actual_out if actual_out is not None else 0
                     cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_creation_in, cache_read_in)
+                    if cost is not None:
+                        cost += summary_extra_cost
                     cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
                     if cache_creation_in or cache_read_in:
                         print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
@@ -773,7 +841,7 @@ async def messages(request: Request) -> Response:
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
                     cache_hit=1, status_code=200, latency_ms=latency_ms,
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
-                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    cost_est_usd=summary_extra_cost, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     cache_json=stable_json(cache_decision_meta(
                         "hit",
@@ -800,7 +868,7 @@ async def messages(request: Request) -> Response:
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
                     cache_hit=1, status_code=200, latency_ms=latency_ms,
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
-                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    cost_est_usd=summary_extra_cost, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     cache_json=stable_json(cache_decision_meta(
                         "hit",
@@ -847,6 +915,8 @@ async def messages(request: Request) -> Response:
         except Exception:
             latency_ms = int((time.time() - started) * 1000)
             cost = estimate_cost(str(crunched.get("model")), input_tokens, 0)
+            if cost is not None:
+                cost += summary_extra_cost
             cost_baseline = estimate_cost(requested_model, input_tokens, 0)
             store.log_call(
                 id=call_id, created_at=utc_now(), path=path,
@@ -882,6 +952,8 @@ async def messages(request: Request) -> Response:
         cost_in = actual_in if actual_in is not None else input_tokens
         cost_out = actual_out if actual_out is not None else out_tokens
         cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_creation_in, cache_read_in)
+        if cost is not None:
+            cost += summary_extra_cost
         cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
         store.log_call(

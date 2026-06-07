@@ -10,8 +10,11 @@ import uuid
 from pathlib import Path
 from typing import Any, NoReturn
 
-import websockets
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - exercised only in minimal test environments
+    def load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
+        return False
 
 load_dotenv()
 
@@ -192,6 +195,11 @@ class CodexAppClient:
         self.completed_agent_message = ""
 
     async def run(self, prompt: str) -> int:
+        try:
+            import websockets
+        except ImportError as exc:
+            raise CodexAppError("websockets dependency is required to run the Codex app client") from exc
+
         started = time.time()
         async with websockets.connect(self.url, max_size=64 * 1024 * 1024) as websocket:
             await self._send_initialize(websocket)

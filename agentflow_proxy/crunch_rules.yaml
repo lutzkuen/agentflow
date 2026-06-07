@@ -3,3 +3,12 @@ threshold_chars: 24000
 prompt_cache:
   enabled: true
   min_chars: 4096
+old_context_summarization:
+  enabled: false
+  model: claude-haiku-4-5-20251001
+  min_request_chars: 32000
+  min_summarized_chars: 12000
+  max_turns: 6
+  keep_recent_turns: 4
+  max_summary_chars: 4000
+  max_source_chars: 80000
