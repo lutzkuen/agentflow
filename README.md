@@ -35,6 +35,22 @@ The intended product split is:
 
 See `ARCHITECTURE.md` before making architectural changes.
 
+## Development workflow
+
+The active backlog lives in GitHub Issues. `BACKLOG.md` is retained as historical context.
+
+The unattended orchestrator is GitHub-centered:
+
+1. If an open PR exists, the next run reviews that PR first.
+2. If the PR aligns with the architecture and verification passes, the run merges it on GitHub,
+   pulls the merged commit locally, and deploys prod.
+3. If no PR is open, the run picks an open issue, implements it on an isolated branch, pushes
+   the branch, opens a PR, and requests Codex cloud review with `@codex review`.
+
+Codex cloud code review uses the repository guidance in `AGENTS.md`. Enable it for this repo
+in ChatGPT Codex code review settings, then PR comments containing `@codex review` should
+trigger a GitHub review.
+
 ## Install
 
 ```bash

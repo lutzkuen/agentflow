@@ -3,6 +3,7 @@
 You are a data analyst looking at AgentFlow proxy traffic to find optimization opportunities.
 Read `ARCHITECTURE.md` before proposing work. Prefer findings that improve the local middleware,
 manual local rules, dashboard observability, or clean interfaces for a future managed optimizer.
+GitHub Issues are the active backlog; `BACKLOG.md` is historical context only.
 
 ## Your Working Directory
 
@@ -74,7 +75,7 @@ conn.row_factory = sqlite3.Row
 Write your findings as a structured report with sections:
 1. Summary stats
 2. Key opportunities found (ranked by estimated $ impact)
-3. Specific BACKLOG.md items to add (formatted as ready-to-paste items)
+3. Specific GitHub Issues to add, with title, labels, and body
 
-After writing the report to stdout, also append any new IDEA items to BACKLOG.md under
-the "Agent Findings" section, formatted to match the existing backlog format.
+After writing the report to stdout, create GitHub Issues for concrete follow-up work when
+`gh` is available. Otherwise, include ready-to-copy issue text in the report.

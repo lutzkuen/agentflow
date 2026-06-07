@@ -109,7 +109,7 @@ Expected: SSE events starting with `event:` lines.
 ## Output
 
 For each test: PASS or FAIL with the actual output.
-At the end: overall PASS/FAIL, and any regressions to add to BACKLOG.md.
+At the end: overall PASS/FAIL, and any regressions to file as GitHub Issues.
 
 Do not return `VERDICT: PASS` unless the task-specific acceptance test passed. Generic proxy
 smoke tests can support the verdict, but they cannot replace the item-specific check.

@@ -11,13 +11,13 @@ isolated git worktree branch, so do not assume `/home/lutz/agentflow` is the edi
 Key files:
 - `agentflow_proxy/server.py` — the proxy (single file, ~500 lines)
 - `ARCHITECTURE.md` — target product shape and local-vs-managed boundaries
-- `BACKLOG.md` — read this to understand the item you're implementing
+- GitHub Issues — active backlog and task source
+- `BACKLOG.md` — historical context only
 - `NORTH_STAR.md` — understand goals and constraints
 
 ## How to Work
 
-1. Read `ARCHITECTURE.md`, then read the task (either from the prompt that invoked you, or
-   the top READY item in BACKLOG.md).
+1. Read `ARCHITECTURE.md`, then read the GitHub Issue task from the prompt that invoked you.
 2. Read the relevant sections of `server.py` to understand what exists.
 3. Implement the change. Keep it tight — don't refactor things not related to the task.
 4. Test the specific change. Restart dev and run a curl smoke test for proxy behavior.

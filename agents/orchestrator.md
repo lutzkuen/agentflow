@@ -16,6 +16,23 @@ or bind the prod proxy on port 4000. If prod appears unhealthy, report it in the
 summary and stop; Codex handles prod repair. Development and smoke tests happen on dev
 port 4001.
 
+## GitHub-centered workflow
+
+GitHub Issues are the active backlog. `BACKLOG.md` is historical context only and should not
+be edited during normal runs.
+
+The shell guard checks for open pull requests before invoking you:
+
+- If an open PR exists, review that PR only. Do not start new work. If it aligns with
+  `ARCHITECTURE.md`, passes verification, and has no serious review findings, merge it with
+  GitHub. If it is unsafe, leave a concise PR comment and do not merge.
+- If no open PR exists, pick one open GitHub Issue, implement it on the isolated run branch,
+  and let the shell guard publish the branch as a PR. Do not merge it yourself in development
+  mode.
+
+When a PR is opened, the shell guard requests Codex cloud review with `@codex review`.
+Read any Codex cloud review comments before merging if they are already present.
+
 ## Invoking sub-agents
 
 Sub-agents are optional. Prefer doing the developer/tester loop directly when the configured
@@ -26,7 +43,7 @@ use `claude --print`.
 ```bash
 CODEX_RUN_SANDBOX="${AGENTFLOW_CODEX_SANDBOX:-danger-full-access}"
 
-# Developer — implements one backlog item
+# Developer — implements one GitHub Issue
 (cat "$PWD/agents/develop.md"
  echo ""
  echo "# Your Task"
@@ -34,23 +51,23 @@ CODEX_RUN_SANDBOX="${AGENTFLOW_CODEX_SANDBOX:-danger-full-access}"
  echo "Hint: <specific implementation approach>"
 ) | codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never -
 
-# Tester — validates proxy and the specific item, ends with VERDICT: PASS or VERDICT: FAIL — <reason>
+# Tester — validates proxy and the specific issue, ends with VERDICT: PASS or VERDICT: FAIL — <reason>
 (cat "$PWD/agents/test.md"
  echo ""
  echo "# Task Under Test"
  echo "Item: <item title>"
- echo "Acceptance metric: <metric from BACKLOG.md>"
+ echo "Acceptance metric: <metric from GitHub Issue>"
  echo ""
  echo "# Current Diff"
  git diff --stat
  git diff -- <relevant files>
 ) | codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never -
 
-# Analyzer — queries DB, appends findings to BACKLOG.md
+# Analyzer — queries DB, creates GitHub Issues
 codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never \
   < "$PWD/agents/analyze.md"
 
-# Researcher — finds new techniques, appends IDEAs to BACKLOG.md
+# Researcher — finds new techniques, creates GitHub Issues
 codex exec --cd "$PWD" --sandbox "$CODEX_RUN_SANDBOX" --ask-for-approval never \
   < "$PWD/agents/research.md"
 ```
@@ -62,12 +79,13 @@ If the live context says Codex app-server transport is active, do not use the di
 `codex exec ...` examples. Complete the developer/tester loop in the current session unless
 the live context explicitly provides an app-server helper for sub-agents.
 
-## What to do each run
+## What to do each development run
 
-1. **Pick work.** Read `ARCHITECTURE.md`, then read the backlog from the context below.
-   Choose the highest-priority READY item that moves the repo toward that architecture.
-   - If the last run left something BLOCKED, try to unblock it first.
-   - If no READY items exist, invoke the analyzer to find new work.
+1. **Pick work.** Read `ARCHITECTURE.md`, then read open GitHub Issues from the context below.
+   Choose the highest-priority issue that moves the repo toward that architecture.
+   - If an issue is labeled `status:blocked`, try to unblock it first only when the blocker is
+     now clearly resolved.
+   - If no suitable open issues exist, invoke the analyzer to propose new GitHub Issues.
 
 2. **Invoke the developer.** Pass the item title and a specific implementation hint.
    Read its full output — it will tell you what it changed and whether it smoke-tested.
@@ -81,11 +99,13 @@ the live context explicitly provides an app-server helper for sub-agents.
      service on port 4002 or report that deployment is still required. Never restart port 4000.
    - `VERDICT: PASS` → commit: `git add -A && git commit -m "agent: <item>"`
    - `VERDICT: FAIL` → examine the reason. If a quick fix is obvious, invoke the developer
-     again with a corrected hint. If it fails twice, stop and mark the item BLOCKED.
+     again with a corrected hint. If it fails twice, stop and comment on the GitHub Issue.
 
-4. **Update BACKLOG.md.** Edit it directly with your Edit tool:
-   - PASS: change `[READY]` to `[DONE]` and append `(YYYY-MM-DD)`
-   - FAIL twice: change to `[BLOCKED]` and append a short reason
+4. **Update GitHub.**
+   - PASS: comment on the issue with what changed and reference the commit. The PR will close
+     or link the issue once merged.
+   - FAIL twice: comment on the issue with a clear blocker and add/update a `status:blocked`
+     label when practical.
 
 5. **Finalize the worktree.** Run `git status --short` after backlog updates and before
    declaring the run complete.

@@ -86,12 +86,17 @@ WORKTREE_ROOT=${AGENTFLOW_WORKTREE_ROOT:-$HOME/agentflow-runs/worktrees}
 RUN_BRANCH=${AGENTFLOW_RUN_BRANCH:-agent/$RUN_ID}
 RUN_REPO="$WORKTREE_ROOT/$RUN_ID"
 BASE_SHA=""
+BASE_BRANCH=""
 SMOKE_EXPECT="AGENTFLOW_SMOKE_OK"
 LOCK_FILE=${AGENTFLOW_ORCHESTRATOR_LOCK:-/tmp/agentflow-orchestrator.lock}
 RUN_LOG="$LOG_DIR/$RUN_ID.md"
 WORKER_SMOKE_OUTPUT=""
 STATE_DIR=${AGENTFLOW_STATE_DIR:-$HOME/.agentflow}
 RATE_LIMIT_STATE_DIR="$STATE_DIR/orchestrator"
+GITHUB_REPO=${AGENTFLOW_GITHUB_REPO:-}
+REQUEST_CODEX_CLOUD_REVIEW=${AGENTFLOW_REQUEST_CODEX_CLOUD_REVIEW:-1}
+RUN_MODE="develop"
+TARGET_PR_NUMBER=""
 
 case "$WORKER" in
   claude)
@@ -445,6 +450,42 @@ git_has_changes() {
   git -C "$1" status --short --untracked-files=normal | grep -q .
 }
 
+resolve_github_repo() {
+  if [[ -n "$GITHUB_REPO" ]]; then
+    printf '%s\n' "$GITHUB_REPO"
+    return 0
+  fi
+  command -v gh >/dev/null 2>&1 || return 1
+  gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null
+}
+
+sync_main_from_remote() {
+  local branch
+  branch=$(git -C "$MAIN_REPO" branch --show-current)
+  [[ -n "$branch" ]] || return 0
+  git -C "$MAIN_REPO" remote get-url origin >/dev/null 2>&1 || return 0
+  if git_has_changes "$MAIN_REPO"; then
+    log "Main worktree is dirty; refusing to sync from origin" | tee -a "$RUN_LOG"
+    git -C "$MAIN_REPO" status --short --untracked-files=normal | tee -a "$RUN_LOG"
+    exit 30
+  fi
+  git -C "$MAIN_REPO" fetch --prune origin >> "$RUN_LOG" 2>&1
+  if git -C "$MAIN_REPO" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git -C "$MAIN_REPO" merge --ff-only "origin/$branch" >> "$RUN_LOG" 2>&1
+  fi
+}
+
+first_open_pr_number() {
+  local repo
+  repo=$(resolve_github_repo) || return 1
+  gh pr list \
+    --repo "$repo" \
+    --state open \
+    --limit 20 \
+    --json number,createdAt \
+    --jq 'sort_by(.createdAt) | .[0].number // empty'
+}
+
 save_worktree_state() {
   local reason=$1
   {
@@ -496,6 +537,7 @@ has_unresolved_worktrees() {
 prepare_run_worktree() {
   local unresolved
   BASE_SHA=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  BASE_BRANCH=$(git -C "$MAIN_REPO" branch --show-current)
 
   if git_has_changes "$MAIN_REPO"; then
     log "Main worktree is dirty; refusing to start unattended branch from ambiguous state" | tee -a "$RUN_LOG"
@@ -531,6 +573,81 @@ prepare_run_worktree() {
   REPO="$RUN_REPO"
 }
 
+prepare_pr_review_worktree() {
+  BASE_SHA=$(git -C "$MAIN_REPO" rev-parse HEAD)
+  BASE_BRANCH=$(git -C "$MAIN_REPO" branch --show-current)
+
+  if git_has_changes "$MAIN_REPO"; then
+    log "Main worktree is dirty; refusing to review PR from ambiguous state" | tee -a "$RUN_LOG"
+    git -C "$MAIN_REPO" status --short --untracked-files=normal | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: main worktree is dirty. Commit, stash, or quarantine current work before PR review." | tee -a "$RUN_LOG"
+    exit 30
+  fi
+
+  unresolved=$(has_unresolved_worktrees || true)
+  if [[ -n "$unresolved" ]]; then
+    log "Existing dirty AgentFlow run worktree found: $unresolved" | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: salvage or remove the dirty run worktree before reviewing PRs." | tee -a "$RUN_LOG"
+    exit 31
+  fi
+
+  mkdir -p "$WORKTREE_ROOT"
+  if [[ -e "$RUN_REPO" ]]; then
+    log "Run worktree path already exists: $RUN_REPO" | tee -a "$RUN_LOG"
+    echo "CODEX_REQUIRED: run worktree path already exists. Inspect it before retrying." | tee -a "$RUN_LOG"
+    exit 33
+  fi
+
+  log "Creating isolated PR review worktree $RUN_REPO from $BASE_SHA" | tee -a "$RUN_LOG"
+  git -C "$MAIN_REPO" worktree add --detach "$RUN_REPO" "$BASE_SHA" >> "$RUN_LOG" 2>&1
+  export AGENTFLOW_RUN_REPO="$RUN_REPO"
+  export AGENTFLOW_RUN_BRANCH="pr-review/$RUN_ID"
+  cd "$RUN_REPO"
+  REPO="$RUN_REPO"
+}
+
+publish_run_pull_request() {
+  local repo
+  local title
+  local pr_body
+  local pr_url
+  repo=$(resolve_github_repo) || {
+    echo "CODEX_REQUIRED: GitHub repo could not be resolved; cannot publish run branch as PR." | tee -a "$RUN_LOG"
+    exit 38
+  }
+  title=$(git -C "$RUN_REPO" log -1 --pretty=%s)
+  pr_body="$LOG_DIR/$RUN_ID.pr.md"
+  {
+    echo "Automated AgentFlow run: \`$RUN_ID\`."
+    echo ""
+    echo "Worker: \`$WORKER\`"
+    echo "Branch: \`$RUN_BRANCH\`"
+    echo "Base: \`$BASE_SHA\`"
+    echo ""
+    echo "## Run Summary"
+    if [[ -s "$RUN_LOG" ]]; then
+      sed -n '/## Codex Summary/,$p' "$RUN_LOG" | sed -n '1,160p'
+    else
+      echo "See local run log: \`$RUN_LOG\`"
+    fi
+  } > "$pr_body"
+
+  log "Pushing $RUN_BRANCH and opening GitHub PR" | tee -a "$RUN_LOG"
+  git -C "$RUN_REPO" push -u origin "$RUN_BRANCH" >> "$RUN_LOG" 2>&1
+  pr_url=$(gh pr create \
+    --repo "$repo" \
+    --base "$BASE_BRANCH" \
+    --head "$RUN_BRANCH" \
+    --title "$title" \
+    --body-file "$pr_body")
+  log "Opened PR: $pr_url" | tee -a "$RUN_LOG"
+
+  if [[ "$REQUEST_CODEX_CLOUD_REVIEW" != "0" ]]; then
+    gh pr comment "$pr_url" --repo "$repo" --body "@codex review" >> "$RUN_LOG" 2>&1 || true
+    log "Requested Codex cloud review on $pr_url" | tee -a "$RUN_LOG"
+  fi
+}
+
 finalize_run_worktree() {
   local commits
   commits=$(git -C "$RUN_REPO" rev-list --count "$BASE_SHA..HEAD")
@@ -558,16 +675,25 @@ finalize_run_worktree() {
     exit 35
   fi
 
-  log "Fast-forward merging $RUN_BRANCH into $(git -C "$MAIN_REPO" branch --show-current)" | tee -a "$RUN_LOG"
-  git -C "$MAIN_REPO" merge --ff-only "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || {
-    save_worktree_state "fast-forward merge failed"
-    echo "CODEX_REQUIRED: fast-forward merge failed for $RUN_BRANCH. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
-    exit 36
-  }
+  publish_run_pull_request
   cd "$MAIN_REPO"
   REPO="$MAIN_REPO"
   git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
   git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
+}
+
+finalize_pr_review_worktree() {
+  if [[ -d "$RUN_REPO/.git" || -f "$RUN_REPO/.git" ]]; then
+    if git_has_changes "$RUN_REPO"; then
+      log "PR review worktree is dirty after $(worker_label); preserving it for inspection" | tee -a "$RUN_LOG"
+      save_worktree_state "dirty worktree after PR review"
+      echo "CODEX_REQUIRED: $(worker_label) left partial PR review work in $RUN_REPO. Patch saved to $LOG_DIR/$RUN_ID.patch." | tee -a "$RUN_LOG"
+      exit 34
+    fi
+  fi
+  cd "$MAIN_REPO"
+  REPO="$MAIN_REPO"
+  git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
 }
 
 find_broken_token_session() {
@@ -718,12 +844,79 @@ write_orchestrator_prompt() {
     echo "**NORTH_STAR.md:**"
     cat "$REPO/NORTH_STAR.md"
     echo ""
-    echo "**BACKLOG.md:**"
+    echo "**GitHub Issues Backlog:**"
+    if command -v gh >/dev/null 2>&1 && resolve_github_repo >/dev/null 2>&1; then
+      gh issue list \
+        --repo "$(resolve_github_repo)" \
+        --state open \
+        --limit 40 \
+        --json number,title,labels,url \
+        --jq '.[] | "- #\(.number) \(.title) [\(.labels | map(.name) | join(", "))] \(.url)"' \
+        2>/dev/null || echo "unavailable"
+    else
+      echo "GitHub Issues unavailable; use BACKLOG.md as read-only historical context."
+    fi
+    echo ""
+    echo "**BACKLOG.md historical context:**"
     cat "$REPO/BACKLOG.md"
     echo ""
     echo "**Last run:**"
     ls -1t "$LOG_DIR"/*.md 2>/dev/null | grep -v "/$RUN_ID.md$" | head -1 | xargs tail -60 2>/dev/null || echo "(no previous runs)"
   }
+}
+
+write_pr_review_prompt() {
+  local repo
+  repo=$(resolve_github_repo)
+  {
+    cat "$REPO/agents/orchestrator.md"
+    echo ""
+    echo "---"
+    echo ""
+    echo "# Live Context - $RUN_ID"
+    echo ""
+    echo "The recurring shell guard found an open GitHub PR before starting new work."
+    echo "Your only task this run is to review PR #$TARGET_PR_NUMBER in $repo."
+    echo "Do not pick a new issue and do not implement unrelated changes."
+    echo "This review is isolated at $RUN_REPO. Main repo is $MAIN_REPO. Run log is $RUN_LOG."
+    echo ""
+    echo "Review flow:"
+    echo "1. Inspect the PR with gh pr view, gh pr diff, gh pr checks, and local git commands."
+    echo "2. Check whether a Codex cloud review is already present; if not, you may request one with: gh pr comment $TARGET_PR_NUMBER --body '@codex review'"
+    echo "3. If the PR aligns with ARCHITECTURE.md/NORTH_STAR.md and verification passes, merge it with GitHub, preferably: gh pr merge $TARGET_PR_NUMBER --squash --delete-branch"
+    echo "4. If it is not safe to merge, leave a concise PR comment explaining the blocker and do not merge."
+    echo "5. End with a clean worktree and append a run summary to \$AGENTFLOW_RUN_LOG."
+    echo ""
+    echo "**PR metadata:**"
+    gh pr view "$TARGET_PR_NUMBER" \
+      --repo "$repo" \
+      --json number,title,state,isDraft,author,baseRefName,headRefName,mergeable,reviewDecision,url,labels \
+      --jq .
+    echo ""
+    echo "**PR checks:**"
+    gh pr checks "$TARGET_PR_NUMBER" --repo "$repo" 2>/dev/null || echo "No checks available."
+    echo ""
+    echo "**ARCHITECTURE.md:**"
+    cat "$REPO/ARCHITECTURE.md"
+    echo ""
+    echo "**NORTH_STAR.md:**"
+    cat "$REPO/NORTH_STAR.md"
+    echo ""
+    echo "**Review guidance:**"
+    if [[ -f "$REPO/AGENTS.md" ]]; then
+      cat "$REPO/AGENTS.md"
+    else
+      echo "No AGENTS.md found."
+    fi
+  }
+}
+
+write_worker_prompt() {
+  if [[ "$RUN_MODE" == "pr-review" ]]; then
+    write_pr_review_prompt
+  else
+    write_orchestrator_prompt
+  fi
 }
 
 run_claude_operator() {
@@ -741,7 +934,7 @@ run_claude_operator() {
     claude_args+=(--resume "$resume_session")
   fi
 
-  write_orchestrator_prompt | env \
+  write_worker_prompt | env \
       -u ANTHROPIC_API_KEY \
       -u ANTHROPIC_AUTH_TOKEN \
       ANTHROPIC_BASE_URL="$PROXY_URL" \
@@ -799,10 +992,10 @@ run_codex_operator() {
 
   set +e
   if [[ "$CODEX_TRANSPORT" == "app-server" ]]; then
-    write_orchestrator_prompt | "$PYTHON_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
+    write_worker_prompt | "$PYTHON_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
     status=${PIPESTATUS[1]}
   else
-    write_orchestrator_prompt | "$CODEX_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
+    write_worker_prompt | "$CODEX_BIN" "${codex_args[@]}" > "$codex_output" 2>&1
     status=${PIPESTATUS[1]}
   fi
   set -e
@@ -833,6 +1026,18 @@ run_orchestrator() {
     claude) run_claude_operator ;;
     codex) run_codex_operator ;;
   esac
+}
+
+deploy_current_head() {
+  log "Deploying merged commits: restarting prod service" | tee -a "$RUN_LOG"
+  if ! systemctl --user restart "$PROXY_SERVICE"; then
+    log "Prod restart command failed; attempting repair" | tee -a "$RUN_LOG"
+    repair_proxy_service || true
+  elif ! wait_for_health; then
+    log "Prod did not come healthy after restart; attempting repair" | tee -a "$RUN_LOG"
+    repair_proxy_service || true
+  fi
+  log "Prod deployed: $(git -C "$MAIN_REPO" rev-parse --short HEAD)" | tee -a "$RUN_LOG"
 }
 
 main() {
@@ -907,8 +1112,18 @@ main() {
     return 0
   fi
 
-  log "Running $(worker_label) orchestrator" | tee -a "$RUN_LOG"
-  prepare_run_worktree
+  sync_main_from_remote
+  TARGET_PR_NUMBER=$(first_open_pr_number || true)
+  if [[ -n "$TARGET_PR_NUMBER" ]]; then
+    RUN_MODE="pr-review"
+    log "Open GitHub PR detected (#$TARGET_PR_NUMBER); reviewing it before starting new work" | tee -a "$RUN_LOG"
+    prepare_pr_review_worktree
+  else
+    RUN_MODE="develop"
+    log "No open GitHub PR found; running $(worker_label) orchestrator for new issue work" | tee -a "$RUN_LOG"
+    prepare_run_worktree
+  fi
+
   if ! run_orchestrator; then
     if run_log_has_transient_rate_limit; then
       log "$(worker_label) orchestrator hit transient upstream rate limiting; checking proxy health only" | tee -a "$RUN_LOG"
@@ -923,7 +1138,9 @@ main() {
           cd "$MAIN_REPO"
           REPO="$MAIN_REPO"
           git -C "$MAIN_REPO" worktree remove "$RUN_REPO" >> "$RUN_LOG" 2>&1 || true
-          git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
+          if [[ "$RUN_MODE" == "develop" ]]; then
+            git -C "$MAIN_REPO" branch -D "$RUN_BRANCH" >> "$RUN_LOG" 2>&1 || true
+          fi
         fi
         record_worker_rate_limit | tee -a "$RUN_LOG"
         echo "WORKER_RATE_LIMITED: middleware is healthy; try this run again later." | tee -a "$RUN_LOG"
@@ -933,19 +1150,18 @@ main() {
     log "$(worker_label) orchestrator exited non-zero; continuing to postflight middleware check" | tee -a "$RUN_LOG"
   fi
   main_head_before=$(git -C "$MAIN_REPO" rev-parse HEAD)
-  finalize_run_worktree
-  main_head_after=$(git -C "$MAIN_REPO" rev-parse HEAD)
-
-  if [[ "$main_head_after" != "$main_head_before" ]]; then
-    log "Deploying merged commits: restarting prod service" | tee -a "$RUN_LOG"
-    if ! systemctl --user restart "$PROXY_SERVICE"; then
-      log "Prod restart command failed; attempting repair" | tee -a "$RUN_LOG"
-      repair_proxy_service || true
-    elif ! wait_for_health; then
-      log "Prod did not come healthy after restart; attempting repair" | tee -a "$RUN_LOG"
-      repair_proxy_service || true
+  if [[ "$RUN_MODE" == "pr-review" ]]; then
+    finalize_pr_review_worktree
+    sync_main_from_remote
+    main_head_after=$(git -C "$MAIN_REPO" rev-parse HEAD)
+    if [[ "$main_head_after" != "$main_head_before" ]]; then
+      deploy_current_head
+    else
+      log "PR review did not change local master; no prod deploy needed" | tee -a "$RUN_LOG"
     fi
-    log "Prod deployed: $(git -C "$MAIN_REPO" rev-parse --short HEAD)" | tee -a "$RUN_LOG"
+  else
+    finalize_run_worktree
+    log "Development run published a GitHub PR; prod deploy waits for PR review/merge" | tee -a "$RUN_LOG"
   fi
 
   log "Postflight: checking whether $(worker_label) disturbed the middleware" | tee -a "$RUN_LOG"

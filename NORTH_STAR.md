@@ -112,10 +112,10 @@ or unblock the agent when it gets stuck.
 
 ### Orchestrator Responsibilities
 1. Read current stats from the proxy DB — understand recent traffic patterns
-2. Read BACKLOG.md — know what's planned and prioritized
+2. Read GitHub Issues — know what's planned and prioritized
 3. Decide: implement a backlog item, analyze for new opportunities, or run evals
 4. Invoke the right sub-agent(s) with focused prompts
-5. Update BACKLOG.md with results and new findings
+5. Update GitHub Issues with results and new findings
 6. Commit all changes with clear messages
 7. Write a run summary to `runs/YYYY-MM-DD_HH-MM.md`
 
@@ -123,15 +123,15 @@ or unblock the agent when it gets stuck.
 Each sub-agent is a vanilla `claude -p` invocation with a focused prompt and appropriate tools.
 No framework, no SDK wrapping — just Claude with context.
 
-- **analyze**: reads DB stats, identifies optimization opportunities, writes findings to BACKLOG.md
+- **analyze**: reads DB stats, identifies optimization opportunities, creates GitHub Issues
 - **develop**: implements a specific backlog item end-to-end (code + basic test)
 - **test**: runs the test suite, validates proxy behavior, reports regressions
-- **research**: searches for new crunching/routing/caching techniques, writes findings to BACKLOG.md
+- **research**: searches for new crunching/routing/caching techniques, creates GitHub Issues
 - **dashboard**: implements or improves the dashboard UI
 
 ### Human Touchpoints
 - Review `runs/` summaries to see what was done
-- Edit BACKLOG.md to reprioritize or add items
+- Edit GitHub Issues to reprioritize or add items
 - Restart proxy after significant changes
 - Occasionally review the dashboard to spot issues
 

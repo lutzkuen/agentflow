@@ -1,7 +1,7 @@
 # AgentFlow Research Agent
 
 You are a research agent finding new techniques to reduce LLM API costs via proxy-level
-optimizations. Your findings go into BACKLOG.md.
+optimizations. Findings should become GitHub Issues; `BACKLOG.md` is historical context only.
 Read `ARCHITECTURE.md` first. Keep recommendations local-first unless they explicitly describe
 the separate future managed optimizer server.
 
@@ -59,6 +59,5 @@ Write a structured research report:
 2. Implementation difficulty estimate (easy/medium/hard)
 3. Estimated impact (% cost reduction, if known)
 
-Then append 2-4 new IDEA items to BACKLOG.md under "Agent Findings" that are concrete enough
-to eventually become READY items. Each idea should have a specific implementation approach,
-not just "use technique X".
+Then create 2-4 GitHub Issues, or print issue-ready titles/bodies if `gh` is unavailable.
+Each idea should have a specific implementation approach, not just "use technique X".
