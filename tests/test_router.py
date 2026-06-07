@@ -107,6 +107,69 @@ rules:
             finally:
                 importlib.reload(router_module)
 
+    def test_max_tokens_lte_rule_requires_explicit_max_tokens(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      has_tools: false
+      max_tokens_lte: 64
+    action:
+      route_to: haiku
+      reason: bounded small response
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [{"role": "user", "content": "Say ok."}],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["reason"], "keep requested model")
+            finally:
+                importlib.reload(router_module)
+
+    def test_max_tokens_lte_rule_matches_when_explicitly_bounded(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      has_tools: false
+      max_tokens_lte: 64
+    action:
+      route_to: haiku
+      reason: bounded small response
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "max_tokens": 64,
+                        "messages": [{"role": "user", "content": "Say ok."}],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["reason"], "bounded small response")
+            finally:
+                importlib.reload(router_module)
+
     def test_disabled_thinking_with_assistant_thinking_history_keeps_requested_model(self):
         body = {
             "model": SONNET_DEFAULT,
