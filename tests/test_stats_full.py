@@ -70,6 +70,96 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(summary["crunch_savings_usd"], 0.00057, places=6)
         self.assertAlmostEqual(summary["today_crunch_savings_usd"], 0.00057, places=6)
 
+    def test_full_stats_include_executive_summary_for_top_dashboard_tiles(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at="2026-06-07T01:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=1,
+            status_code=200,
+            latency_ms=10,
+            input_tokens_est=1_200,
+            output_tokens_est=120,
+            actual_input_tokens=1_000,
+            actual_output_tokens=100,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.01,
+            crunch_json=stable_json({"changed": True, "tokens_saved_est": 500}),
+            routing_json=stable_json({"reason": "test route"}),
+            cache_json=stable_json({"status": "hit", "reason": "exact-match", "hit_type": "exact"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-exec",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=2_000,
+            retry_count=0,
+            thinking_output_tokens=25,
+            provider="anthropic",
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at="2026-06-07T01:01:00+00:00",
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-exec",
+            thread_id="thread-exec",
+            message_chars=200,
+            params_chars=50,
+            input_items=1,
+            input_text_chars=123,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-exec",
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at="2026-06-07T01:01:02+00:00",
+            direction="server_to_client",
+            method="turn/completed",
+            request_id="req-exec",
+            thread_id="thread-exec",
+            message_chars=120,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=80,
+            error_code=None,
+            error_message=None,
+            latency_ms=2000,
+            session_id="codex-exec",
+        )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        executive = result["executive_summary"]
+
+        self.assertEqual(executive["schema"], "agentflow.executive_summary.v1")
+        self.assertEqual(executive["tokens_today"]["provider_input_tokens"], 3_000)
+        self.assertEqual(executive["tokens_today"]["provider_output_tokens"], 100)
+        self.assertEqual(executive["tokens_today"]["provider_total_tokens"], 3_100)
+        self.assertEqual(executive["tokens_today"]["codex_app_turns"], 1)
+        self.assertEqual(executive["tokens_today"]["codex_app_input_text_chars"], 123)
+        self.assertFalse(executive["tokens_today"]["codex_app_cost_known"])
+        self.assertAlmostEqual(executive["spend"]["today_provider_spend_usd"], 0.001, places=6)
+        self.assertGreater(executive["spend"]["thinking_cost_today_usd"], 0)
+        buckets = executive["savings"]["today_buckets"]
+        self.assertIn("routing_usd", buckets)
+        self.assertIn("crunching_usd", buckets)
+        self.assertAlmostEqual(buckets["exact_local_cache_usd"], 0.003, places=6)
+        self.assertIn("provider_prompt_cache_discount_usd", buckets)
+        self.assertTrue(executive["hard_floor"]["excludes_unknown_codex_app_cost"])
+        self.assertLessEqual(
+            executive["hard_floor"]["today_unavoidable_provider_spend_usd"],
+            executive["spend"]["today_baseline_provider_cost_usd"],
+        )
+        json.dumps(executive)
+
     def test_old_context_summary_stats_are_attributed_separately(self):
         for cache_hit, cost in ((False, 0.0002), (True, 0.0)):
             server.store.log_call(
@@ -480,13 +570,26 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("id=\"codex-tbody\"", html)
         self.assertIn("const tabs=['activity','weekly','categories','cache','limiter','sessions']", html)
 
-    def test_dashboard_exposes_old_context_summary_card(self):
+    def test_dashboard_exposes_executive_summary_cards(self):
         html = stats_views.dashboard_html()
 
-        self.assertIn("Old-context summaries", html)
-        self.assertIn("id=\"c-summary-net\"", html)
-        self.assertIn("today_old_context_summary_net_usd", html)
-        self.assertIn("today_old_context_summary_cost_usd", html)
+        self.assertEqual(html.count("class=\"card\""), 2)
+        self.assertEqual(html.count("class=\"card green\""), 1)
+        self.assertEqual(html.count("class=\"card yellow\""), 1)
+        self.assertEqual(html.count("class=\"card blue\""), 1)
+        self.assertIn("Tokens today", html)
+        self.assertIn("Calculated spend", html)
+        self.assertIn("Hard floor", html)
+        self.assertIn("Ops health", html)
+        self.assertIn("executive_summary", html)
+        self.assertIn("today_buckets", html)
+        self.assertIn("cost unknown", html)
+        self.assertNotIn("Calls today", html)
+        self.assertNotIn("Saved by routing", html)
+        self.assertNotIn("Provider cache discount", html)
+        self.assertNotIn("Old-context summaries", html)
+        self.assertNotIn("Thinking cost today", html)
+        self.assertNotIn("Codex app-server", html)
 
     def test_proxy_dashboard_router_uses_current_store(self):
         response = TestClient(server.app).get("/agentflow/stats")

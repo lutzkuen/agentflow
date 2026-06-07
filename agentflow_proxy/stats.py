@@ -544,7 +544,96 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     codex_app_today_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed' and date(created_at) = date('now')") or 0)
     codex_app_last_event_at = s("select max(created_at) from codex_app_events")
     codex_app_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start'") or 0)
+    codex_app_today_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start' and date(created_at) = date('now')") or 0)
     codex_app_avg_latency = s("select avg(latency_ms) from codex_app_events where latency_ms is not null") or 0
+
+    provider_input_tokens = int(s("""
+        select sum(
+            coalesce(actual_input_tokens, input_tokens_est, 0)
+            + coalesce(cache_creation_input_tokens, 0)
+            + coalesce(cache_read_input_tokens, 0)
+        ) from calls
+    """) or 0)
+    provider_output_tokens = int(s("""
+        select sum(coalesce(actual_output_tokens, output_tokens_est, 0))
+        from calls
+    """) or 0)
+    today_provider_input_tokens = int(s("""
+        select sum(
+            coalesce(actual_input_tokens, input_tokens_est, 0)
+            + coalesce(cache_creation_input_tokens, 0)
+            + coalesce(cache_read_input_tokens, 0)
+        ) from calls
+        where date(created_at) = date('now')
+    """) or 0)
+    today_provider_output_tokens = int(s("""
+        select sum(coalesce(actual_output_tokens, output_tokens_est, 0))
+        from calls
+        where date(created_at) = date('now')
+    """) or 0)
+    today_crunching_net_savings = today_crunch_savings + (today_summary_savings - today_summary_extra_cost)
+    crunching_net_savings = crunch_savings + (summary_savings - summary_extra_cost)
+    today_savings_buckets = {
+        "routing_usd": round(today_routing_savings, 6),
+        "crunching_usd": round(max(0.0, today_crunching_net_savings), 6),
+        "exact_local_cache_usd": round(today_cache_savings, 6),
+        "provider_prompt_cache_discount_usd": round(today_prompt_cache_savings, 6),
+    }
+    savings_buckets = {
+        "routing_usd": round(routing_savings, 6),
+        "crunching_usd": round(max(0.0, crunching_net_savings), 6),
+        "exact_local_cache_usd": round(cache_cost_saved, 6),
+        "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
+    }
+    today_total_savings = sum(float(value or 0.0) for value in today_savings_buckets.values())
+    total_savings = sum(float(value or 0.0) for value in savings_buckets.values())
+    today_observed_baseline = today_cost + today_total_savings
+    observed_baseline = total_cost + total_savings
+    today_hard_floor = today_cost
+    hard_floor = total_cost
+    executive_summary = {
+        "schema": "agentflow.executive_summary.v1",
+        "tokens_today": {
+            "provider_total_tokens": today_provider_input_tokens + today_provider_output_tokens,
+            "provider_input_tokens": today_provider_input_tokens,
+            "provider_output_tokens": today_provider_output_tokens,
+            "codex_app_turns": codex_app_today_turns,
+            "codex_app_input_text_chars": codex_app_today_input_text_chars,
+            "codex_app_cost_known": False,
+        },
+        "tokens_total": {
+            "provider_total_tokens": provider_input_tokens + provider_output_tokens,
+            "provider_input_tokens": provider_input_tokens,
+            "provider_output_tokens": provider_output_tokens,
+            "codex_app_turns": codex_app_turns,
+            "codex_app_input_text_chars": codex_app_input_text_chars,
+            "codex_app_cost_known": False,
+        },
+        "spend": {
+            "today_provider_spend_usd": round(today_cost, 6),
+            "total_provider_spend_usd": round(total_cost, 6),
+            "today_baseline_provider_cost_usd": round(today_observed_baseline, 6),
+            "baseline_provider_cost_usd": round(observed_baseline, 6),
+            "thinking_cost_today_usd": round(today_thinking_cost, 6),
+        },
+        "savings": {
+            "today_total_savings_usd": round(today_total_savings, 6),
+            "total_savings_usd": round(total_savings, 6),
+            "today_buckets": today_savings_buckets,
+            "buckets": savings_buckets,
+        },
+        "hard_floor": {
+            "today_unavoidable_provider_spend_usd": round(today_hard_floor, 6),
+            "unavoidable_provider_spend_usd": round(hard_floor, 6),
+            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline - today_total_savings, 6),
+            "excludes_unknown_codex_app_cost": True,
+        },
+        "health": {
+            "errors": errors,
+            "avg_latency_ms": round(avg_latency),
+            "rate_limit_cooldowns": None,
+        },
+    }
 
     recent = q("""
         select id, coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, stream, cache_hit,
@@ -673,6 +762,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     """)
 
     return {
+        "executive_summary": executive_summary,
         "summary": {
             "total_calls": total_calls,
             "today_calls": today_calls,
@@ -1025,7 +1115,7 @@ def dashboard_html() -> str:
   .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px 18px;min-width:150px;flex:1}
   .card .label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
   .card .value{font-size:22px;font-weight:600;color:#f0f6fc}
-  .card .sub{color:#8b949e;font-size:11px;margin-top:3px}
+  .card .sub{color:#8b949e;font-size:11px;line-height:1.35;margin-top:3px}
   .card.green .value{color:#3fb950}
   .card.yellow .value{color:#d29922}
   .card.blue .value{color:#58a6ff}
@@ -1082,16 +1172,11 @@ def dashboard_html() -> str:
 </header>
 
 <div class="cards" id="cards">
-  <div class="card"><div class="label">Calls today</div><div class="value" id="c-today">—</div><div class="sub" id="c-total">— total</div></div>
-  <div class="card"><div class="label">Cost today</div><div class="value" id="c-cost">—</div><div class="sub" id="c-cost-total">— total</div></div>
-  <div class="card green"><div class="label">Saved by routing</div><div class="value" id="c-routing">—</div><div class="sub" id="c-routed-n">— calls routed</div></div>
-  <div class="card green"><div class="label">Saved by cache</div><div class="value" id="c-cache-saved">—</div><div class="sub" id="c-cache-rate">— hit rate</div></div>
-  <div class="card green"><div class="label">Provider cache discount</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— provider cache hit rate</div></div>
-  <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
-  <div class="card yellow"><div class="label">Old-context summaries</div><div class="value" id="c-summary-net">—</div><div class="sub" id="c-summary-sub">— cost</div></div>
-  <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
-  <div class="card yellow"><div class="label">Tier cooldowns</div><div class="value" id="c-limiter">—</div><div class="sub" id="c-limiter-sub">— queued</div></div>
-  <div class="card blue"><div class="label">Codex app-server</div><div class="value" id="c-codex-app-turns">—</div><div class="sub" id="c-codex-app-events">— events</div></div>
+  <div class="card"><div class="label">Tokens today</div><div class="value" id="c-tokens-today">—</div><div class="sub" id="c-tokens-sub">— provider split</div><div class="sub" id="c-tokens-codex">— Codex telemetry</div></div>
+  <div class="card"><div class="label">Calculated spend</div><div class="value" id="c-spend">—</div><div class="sub" id="c-spend-sub">— total</div></div>
+  <div class="card green"><div class="label">Savings</div><div class="value" id="c-savings">—</div><div class="sub" id="c-savings-sub">— buckets</div></div>
+  <div class="card yellow"><div class="label">Hard floor</div><div class="value" id="c-floor">—</div><div class="sub" id="c-floor-sub">— baseline minus feasible savings</div></div>
+  <div class="card blue"><div class="label">Ops health</div><div class="value" id="c-health">—</div><div class="sub" id="c-health-sub">— latency</div><div class="sub" id="c-health-cooldown">— cooldowns</div></div>
 </div>
 
 <div class="tabs">
@@ -1199,7 +1284,7 @@ def dashboard_html() -> str:
 function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
 function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
 function fmtSec(n){if(n==null)return'—';return n<60?n.toFixed(1)+'s':(n/60).toFixed(1)+'m'}
-function fmtTok(n){if(n==null)return'?';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
+function fmtTok(n){if(n==null)return'?';if(n>=1000000)return(n/1000000).toFixed(1)+'M';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
 function fmtRatio(n){if(n==null)return'—';return n.toFixed(2)+'x'}
 function until(ts){
   if(!ts)return'—';
@@ -1342,25 +1427,25 @@ async function refresh(){
     const r=await fetch('/agentflow/stats/full');
     const d=await r.json();
     const s=d.summary;
+    const e=d.executive_summary||{};
+    const toks=e.tokens_today||{};
+    const spend=e.spend||{};
+    const savings=e.savings||{};
+    const buckets=savings.today_buckets||{};
+    const floor=e.hard_floor||{};
+    const health=e.health||{};
 
-    document.getElementById('c-today').textContent=s.today_calls.toLocaleString();
-    document.getElementById('c-total').textContent=s.total_calls.toLocaleString()+' total';
-    document.getElementById('c-cost').textContent=fmt(s.today_cost_usd,4);
-    document.getElementById('c-cost-total').textContent=fmt(s.total_cost_usd,4)+' total';
-    document.getElementById('c-routing').textContent=fmt(s.today_routing_savings_usd,4);
-    document.getElementById('c-routed-n').textContent=s.routed_count+' calls routed';
-    document.getElementById('c-cache-saved').textContent=fmt(s.today_cache_savings_usd,4);
-    document.getElementById('c-cache-rate').textContent=Math.round(s.cache_hit_rate*100)+'% hit rate';
-    document.getElementById('c-prompt-cache-saved').textContent=fmt(s.today_prompt_cache_savings_usd,4);
-    document.getElementById('c-prompt-cache-rate').textContent=Math.round((s.prompt_cache_hit_rate||0)*100)+'% provider cache hit rate';
-    document.getElementById('c-latency').textContent=fmtMs(s.avg_latency_ms);
-    document.getElementById('c-crunched').textContent=s.crunched_count+' crunched · '+fmt(s.today_crunch_savings_usd||0,4)+' today · ~'+s.crunch_tokens_saved+' tokens saved · '+Math.round((s.avg_crunch_ratio||0)*100)+'% avg ratio';
-    document.getElementById('c-summary-net').textContent=fmt(s.today_old_context_summary_net_usd||0,4);
-    document.getElementById('c-summary-sub').textContent=(s.today_old_context_summary_applied_count||0)+' today · '+fmt(s.today_old_context_summary_savings_usd||0,4)+' saved · '+fmt(s.today_old_context_summary_cost_usd||0,4)+' cost · '+Math.round((s.old_context_summary_cache_hit_rate||0)*100)+'% reused';
-    document.getElementById('c-thinking-cost').textContent=fmt(s.today_thinking_cost_usd,4);
-    document.getElementById('c-thinking-tok').textContent=fmtTok(s.today_thinking_output_tokens||0)+' thinking tokens';
-    document.getElementById('c-codex-app-turns').textContent=(s.codex_app_today_turns||0).toLocaleString()+' turns';
-    document.getElementById('c-codex-app-events').textContent=(s.codex_app_today_events||0).toLocaleString()+' events · last '+ago(s.codex_app_last_event_at);
+    document.getElementById('c-tokens-today').textContent=fmtTok(toks.provider_total_tokens||0);
+    document.getElementById('c-tokens-sub').textContent=fmtTok(toks.provider_input_tokens||0)+' input · '+fmtTok(toks.provider_output_tokens||0)+' output provider tokens';
+    document.getElementById('c-tokens-codex').textContent=(toks.codex_app_turns||0).toLocaleString()+' Codex turns · '+fmtTok(toks.codex_app_input_text_chars||0)+' chars, cost unknown';
+    document.getElementById('c-spend').textContent=fmt(spend.today_provider_spend_usd||0,4);
+    document.getElementById('c-spend-sub').textContent=fmt(spend.total_provider_spend_usd||0,4)+' total · '+fmt(spend.thinking_cost_today_usd||0,4)+' thinking today';
+    document.getElementById('c-savings').textContent=fmt(savings.today_total_savings_usd||0,4);
+    document.getElementById('c-savings-sub').textContent='routing '+fmt(buckets.routing_usd||0,4)+' · crunch '+fmt(buckets.crunching_usd||0,4)+' · local cache '+fmt(buckets.exact_local_cache_usd||0,4)+' · provider cache '+fmt(buckets.provider_prompt_cache_discount_usd||0,4);
+    document.getElementById('c-floor').textContent=fmt(floor.today_unavoidable_provider_spend_usd||0,4);
+    document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_provider_cost_usd||0,4)+' - feasible savings '+fmt(savings.today_total_savings_usd||0,4)+'; Codex cost unknown';
+    document.getElementById('c-health').textContent=(health.errors||0).toLocaleString()+' errors';
+    document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
   }catch(e){
@@ -1411,8 +1496,9 @@ async function refreshLimiter(){
     const active=tiers.filter(t=>t.active);
     const queued=tiers.reduce((sum,t)=>sum+(t.queued_count||0),0);
     const longest=active.reduce((max,t)=>Math.max(max,t.seconds_remaining||0),0);
-    document.getElementById('c-limiter').textContent=active.length?active.length+' active':'clear';
-    document.getElementById('c-limiter-sub').textContent=queued+' queued · longest '+fmtSec(longest);
+    document.getElementById('c-health-cooldown').textContent=active.length
+      ? active.length+' cooldowns · '+queued+' queued · longest '+fmtSec(longest)
+      : 'cooldowns clear · '+queued+' queued';
 
     const tb=document.getElementById('limiter-tbody');
     tb.innerHTML=tiers.map(row=>{
