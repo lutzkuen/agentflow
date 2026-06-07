@@ -14,8 +14,8 @@ async def openai_optimized(context: ProviderContext, request: Any, path: str) ->
 
 
 async def openai_passthrough(context: ProviderContext, request: Any, path: str) -> Any:
-    return await context.openai_passthrough_handler(request, path)
+    return await context.openai_passthrough_handler(context, request, path)
 
 
 async def openai_responses_websocket(context: ProviderContext, websocket: Any) -> None:
-    await context.openai_responses_websocket_handler(websocket)
+    await context.openai_responses_websocket_handler(context, websocket)

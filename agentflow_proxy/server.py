@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import os
 import sys
@@ -9,10 +8,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-import websockets
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Response, WebSocket
 
 load_dotenv()
 
@@ -154,18 +151,11 @@ from agentflow_proxy import anthropic_proxy, openai_proxy, provider_handlers
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.dashboard_app import create_dashboard_router
 from agentflow_proxy.pricing import estimate_cost
-from agentflow_proxy.headers import (
-    build_openai_forward_headers as build_openai_forward_headers_from_mapping,
-    build_openai_websocket_headers as build_openai_websocket_headers_from_mapping,
-)
 from agentflow_proxy.limiter import (
     TierLimiter,
 )
 from agentflow_proxy.router import (
     HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT,
-)
-from agentflow_proxy.errors import (
-    INTERNAL_PROXY_ERROR_MESSAGE,
 )
 
 
@@ -194,8 +184,8 @@ def _provider_context() -> ProviderContext:
         http_timeout=HTTP_TIMEOUT,
         anthropic_messages_handler=anthropic_proxy.anthropic_messages,
         openai_optimized_handler=openai_proxy.openai_optimized,
-        openai_passthrough_handler=_openai_passthrough_impl,
-        openai_responses_websocket_handler=_openai_responses_websocket_impl,
+        openai_passthrough_handler=openai_proxy.openai_passthrough,
+        openai_responses_websocket_handler=openai_proxy.openai_responses_websocket,
     )
 
 
@@ -247,57 +237,16 @@ def configure_provider(
     DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
     app.title = f"AgentFlow {PROVIDER.title()} Proxy"
 
-
-
-def provider_disabled_response(expected: str) -> JSONResponse:
-    return JSONResponse(
-        {
-            "error": {
-                "message": f"AgentFlow is running in {PROVIDER!r} provider mode, not {expected!r}.",
-                "type": "provider_mismatch",
-            }
-        },
-        status_code=404,
-    )
-
-
-
 def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
-    return build_openai_forward_headers_from_mapping(
-        request.headers,
-        auth_mode=OPENAI_AUTH_MODE,
-        api_key=os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
-        force_json=force_json,
-    )
+    return openai_proxy.build_forward_headers(_provider_context(), request, force_json=force_json)
 
 
 def build_openai_websocket_headers(websocket: WebSocket) -> dict[str, str]:
-    return build_openai_websocket_headers_from_mapping(
-        websocket.headers,
-        auth_mode=OPENAI_AUTH_MODE,
-        api_key=os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
-    )
+    return openai_proxy.build_websocket_headers(_provider_context(), websocket)
 
 
 def openai_websocket_url(path: str) -> str:
-    base = OPENAI_UPSTREAM.rstrip("/")
-    if base.startswith("https://"):
-        base = "wss://" + base[len("https://"):]
-    elif base.startswith("http://"):
-        base = "ws://" + base[len("http://"):]
-    return base + path
-
-
-def _openai_passthrough_media_type(headers: httpx.Headers) -> Optional[str]:
-    content_type = headers.get("content-type")
-    if content_type:
-        return content_type.split(";", 1)[0]
-    return None
-
-
-def _openai_headers_for_client(headers: httpx.Headers) -> dict[str, str]:
-    excluded = {"content-encoding", "content-length", "transfer-encoding", "connection"}
-    return {k: v for k, v in headers.items() if k.lower() not in excluded}
+    return openai_proxy.websocket_url(_provider_context(), path)
 
 
 @app.get("/health")
@@ -339,27 +288,6 @@ async def openai_passthrough(request: Request, path: str) -> Response:
     return await provider_handlers.openai_passthrough(_provider_context(), request, path)
 
 
-async def _openai_passthrough_impl(request: Request, path: str) -> Response:
-    if PROVIDER != "openai":
-        return provider_disabled_response("openai")
-    headers = build_openai_forward_headers(request, force_json=False)
-    content = await request.body()
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        r = await client.request(
-            request.method,
-            OPENAI_UPSTREAM.rstrip("/") + path,
-            headers=headers,
-            content=content if content else None,
-            params=dict(request.query_params),
-        )
-    return Response(
-        r.content,
-        status_code=r.status_code,
-        media_type=_openai_passthrough_media_type(r.headers),
-        headers=_openai_headers_for_client(r.headers),
-    )
-
-
 @app.post("/v1/responses")
 async def openai_responses(request: Request) -> Response:
     return await openai_optimized(request, "/v1/responses")
@@ -373,56 +301,6 @@ async def openai_chat_completions(request: Request) -> Response:
 @app.websocket("/v1/responses")
 async def openai_responses_websocket(websocket: WebSocket) -> None:
     await provider_handlers.openai_responses_websocket(_provider_context(), websocket)
-
-
-async def _openai_responses_websocket_impl(websocket: WebSocket) -> None:
-    await websocket.accept()
-    if PROVIDER != "openai":
-        await websocket.close(code=1008, reason="provider mismatch")
-        return
-
-    headers = build_openai_websocket_headers(websocket)
-    upstream_url = openai_websocket_url("/v1/responses")
-    try:
-        async with websockets.connect(upstream_url, additional_headers=headers) as upstream:
-            async def client_to_upstream() -> None:
-                while True:
-                    msg = await websocket.receive()
-                    msg_type = msg.get("type")
-                    if msg_type == "websocket.disconnect":
-                        await upstream.close()
-                        return
-                    if "text" in msg and msg["text"] is not None:
-                        await upstream.send(msg["text"])
-                    elif "bytes" in msg and msg["bytes"] is not None:
-                        await upstream.send(msg["bytes"])
-
-            async def upstream_to_client() -> None:
-                async for msg in upstream:
-                    if isinstance(msg, bytes):
-                        await websocket.send_bytes(msg)
-                    else:
-                        await websocket.send_text(msg)
-
-            tasks = {
-                asyncio.create_task(client_to_upstream()),
-                asyncio.create_task(upstream_to_client()),
-            }
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in pending:
-                task.cancel()
-            for task in done:
-                exc = task.exception()
-                if exc is not None and not isinstance(exc, WebSocketDisconnect):
-                    raise exc
-    except WebSocketDisconnect:
-        return
-    except Exception as exc:
-        logging.exception("agentflow openai websocket proxy error")
-        try:
-            await websocket.close(code=1011, reason=INTERNAL_PROXY_ERROR_MESSAGE)
-        except Exception:
-            pass
 
 
 @app.api_route("/v1/responses/{rest:path}", methods=["GET", "POST", "DELETE"])

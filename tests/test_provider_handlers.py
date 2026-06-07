@@ -20,12 +20,12 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(("openai_optimized", context_arg.provider, request, path))
                 return {"path": path}
 
-            async def openai_passthrough_handler(request, path):
-                calls.append(("openai_passthrough", request, path))
+            async def openai_passthrough_handler(context_arg, request, path):
+                calls.append(("openai_passthrough", context_arg.provider, request, path))
                 return {"path": path}
 
-            async def websocket_handler(websocket):
-                calls.append(("websocket", websocket))
+            async def websocket_handler(context_arg, websocket):
+                calls.append(("websocket", context_arg.provider, websocket))
 
             context = ProviderContext(
                 provider="anthropic",
@@ -63,8 +63,8 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
                 [
                     ("anthropic", "anthropic", "request"),
                     ("openai_optimized", "anthropic", "request", "/v1/responses"),
-                    ("openai_passthrough", "request", "/v1/files"),
-                    ("websocket", "websocket"),
+                    ("openai_passthrough", "anthropic", "request", "/v1/files"),
+                    ("websocket", "anthropic", "websocket"),
                 ],
             )
             self.assertNotIn("agentflow_proxy.server", sys.modules)
