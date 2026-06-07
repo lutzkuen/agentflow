@@ -197,6 +197,26 @@ stores status, latency, output hashes, output similarity, and estimated costs in
 pass rate, and a conservative confidence score by route/category. Response bodies are only
 stored when `store_response_bodies: true` or `AGENTFLOW_LOG_BODIES=1` is enabled.
 
+## Managed recommendations
+
+The local proxy can optionally ask a separate `agentflow_server` instance for a feature-only
+recommendation before it forwards a provider request. This is disabled by default, provider
+calls still happen locally with the user's credentials, and server failures fall back to the
+local routing/crunch/cache policy.
+
+```bash
+export AGENTFLOW_RECOMMENDATION_ENABLED=1
+export AGENTFLOW_RECOMMENDATION_SERVER_URL="http://127.0.0.1:4100"
+export AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS=1.5
+```
+
+The proxy posts normalized optimization-unit metadata to `/v1/recommendation`; it does not
+send raw prompt bodies by default. Returned `target_model` values may update the final local
+model when they stay inside the active provider family. Returned `replacement_prompt` values
+are recorded only as presence/hash metadata and are not applied by this local bridge yet.
+Recommendation status, policy ID, confidence, failure reason, and fallback metadata are stored
+inside `routing_json.managed_recommendation`.
+
 ## Caching behavior
 
 By default, exact cache is enabled only for non-streaming requests without tool blocks.

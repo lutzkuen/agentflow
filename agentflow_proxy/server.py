@@ -229,6 +229,7 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
                 str(source)
                 for source in (
                     routing.get("policy_source"),
+                    routing.get("final_policy_source"),
                     crunch.get("policy_source"),
                     cache.get("policy_source"),
                 )
@@ -501,6 +502,11 @@ from agentflow_proxy.routing_experiments import (
     compare_response_outputs,
     routing_experiment_decision,
 )
+from agentflow_proxy.recommendations import (
+    apply_recommendation_to_body,
+    build_optimization_unit,
+    fetch_recommendation,
+)
 
 
 store = Store(DEFAULT_DB)
@@ -544,6 +550,24 @@ def _count_thinking_chars(response_body: dict) -> int:
         if isinstance(block, dict) and block.get("type") == "thinking":
             total += len(block.get("thinking") or "")
     return total
+
+
+def _strip_model_incompatible_params(body: dict[str, Any], routing_meta: dict[str, Any], requested_model: str) -> None:
+    if body.get("model") == requested_model:
+        return
+    stripped = list(routing_meta.get("stripped_params") or [])
+    thinking_block = body.get("thinking")
+    if isinstance(thinking_block, dict) and "effort" in thinking_block:
+        del thinking_block["effort"]
+        if "thinking.effort" not in stripped:
+            stripped.append("thinking.effort")
+    for key in ("effort", "thinking", "budget_tokens", "interleaved_thinking"):
+        if key in body:
+            del body[key]
+            if key not in stripped:
+                stripped.append(key)
+    if stripped:
+        routing_meta["stripped_params"] = stripped
 
 
 def provider_disabled_response(expected: str) -> JSONResponse:
@@ -933,18 +957,7 @@ async def messages(request: Request) -> Response:
             routing_meta["thinking_history_stripped"] = _n_stripped
         resolved_requested_model = crunched.get("model", requested_model)
         crunched["model"] = routed_model
-        if routed_model != resolved_requested_model:
-            _incompatible = [k for k in ("effort", "thinking", "budget_tokens", "interleaved_thinking") if k in crunched]
-            for k in _incompatible:
-                del crunched[k]
-            # Also strip effort nested inside a thinking dict (e.g. {"type": "disabled", "effort": "high"})
-            _thinking_block = crunched.get("thinking")
-            if isinstance(_thinking_block, dict) and "effort" in _thinking_block:
-                del crunched["thinking"]["effort"]
-                if "thinking.effort" not in _incompatible:
-                    _incompatible.append("thinking.effort")
-            if _incompatible:
-                routing_meta["stripped_params"] = _incompatible
+        _strip_model_incompatible_params(crunched, routing_meta, str(resolved_requested_model))
         _thinking_param = crunched.get("thinking")
         if (
             MAX_THINKING_BUDGET_TOKENS > 0
@@ -957,6 +970,32 @@ async def messages(request: Request) -> Response:
             routing_meta["thinking_capped"] = True
             print(f"thinking_cap: original={_original_budget} cap={MAX_THINKING_BUDGET_TOKENS}", flush=True)
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
+        recommendation_unit = build_optimization_unit(
+            provider="anthropic",
+            path=path,
+            requested_model=str(resolved_requested_model),
+            routed_model=str(crunched.get("model") or routed_model),
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            category=category,
+            stream=stream,
+            input_tokens_est=input_tokens,
+        )
+        recommendation_meta = await fetch_recommendation(recommendation_unit)
+        recommendation_meta = apply_recommendation_to_body(
+            provider="anthropic",
+            body=crunched,
+            routing_meta=routing_meta,
+            recommendation_meta=recommendation_meta,
+        )
+        if crunched.get("model") in MODEL_ALIASES:
+            normalized_model = MODEL_ALIASES[str(crunched.get("model"))]
+            recommendation_meta["target_model_normalized"] = normalized_model
+            crunched["model"] = normalized_model
+            routing_meta["routed_model"] = normalized_model
+        routing_meta["managed_recommendation"] = recommendation_meta
+        _strip_model_incompatible_params(crunched, routing_meta, str(resolved_requested_model))
         if prompt_cached or has_cache_control_blocks(crunched):
             existing = headers.get("anthropic-beta", "")
             if "prompt-caching" not in existing:
@@ -1016,10 +1055,11 @@ async def messages(request: Request) -> Response:
                                             delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
                                             print(f"rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
                                             await _record_tier_backoff(crunched["model"], r.headers)
-                                            if stream_retry_count == 1 and routed_model != resolved_requested_model:
+                                            if stream_retry_count == 1 and crunched.get("model") != resolved_requested_model:
+                                                _rate_limited_model = crunched.get("model")
                                                 crunched["model"] = resolved_requested_model
                                                 routing_meta["fallback_reason"] = "rate_limited"
-                                                print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                                                print(f"rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                                             await asyncio.sleep(delay)
                                             continue
                                         async for chunk in r.aiter_bytes():
@@ -1158,10 +1198,11 @@ async def messages(request: Request) -> Response:
                         delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
                         print(f"rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
                         await _record_tier_backoff(crunched["model"], r.headers)
-                        if retry_count == 1 and routed_model != resolved_requested_model:
+                        if retry_count == 1 and crunched.get("model") != resolved_requested_model:
+                            _rate_limited_model = crunched.get("model")
                             crunched["model"] = resolved_requested_model
                             routing_meta["fallback_reason"] = "rate_limited"
-                            print(f"rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                            print(f"rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                         await asyncio.sleep(delay)
                         continue
                     break
@@ -1318,6 +1359,26 @@ async def openai_optimized(request: Request, path: str) -> Response:
         resolved_requested_model = str(crunched.get("model") or requested_model)
         crunched["model"] = routed_model
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
+        recommendation_unit = build_optimization_unit(
+            provider="openai",
+            path=path,
+            requested_model=resolved_requested_model,
+            routed_model=str(crunched.get("model") or routed_model),
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            category=category,
+            stream=stream,
+            input_tokens_est=input_tokens,
+        )
+        recommendation_meta = await fetch_recommendation(recommendation_unit)
+        recommendation_meta = apply_recommendation_to_body(
+            provider="openai",
+            body=crunched,
+            routing_meta=routing_meta,
+            recommendation_meta=recommendation_meta,
+        )
+        routing_meta["managed_recommendation"] = recommendation_meta
         headers = build_openai_forward_headers(request)
 
         if stream:
@@ -1364,10 +1425,11 @@ async def openai_optimized(request: Request, path: str) -> Response:
                                         stream_retry_count += 1
                                         delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
                                         print(f"openai_rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
-                                        if stream_retry_count == 1 and routed_model != resolved_requested_model:
+                                        if stream_retry_count == 1 and crunched.get("model") != resolved_requested_model:
+                                            _rate_limited_model = crunched.get("model")
                                             crunched["model"] = resolved_requested_model
                                             routing_meta["fallback_reason"] = "rate_limited"
-                                            print(f"openai_rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                                            print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                                         await asyncio.sleep(delay)
                                         continue
                                     async for chunk in r.aiter_bytes():
@@ -1496,10 +1558,11 @@ async def openai_optimized(request: Request, path: str) -> Response:
                     retry_count += 1
                     delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
                     print(f"openai_rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
-                    if retry_count == 1 and routed_model != resolved_requested_model:
+                    if retry_count == 1 and crunched.get("model") != resolved_requested_model:
+                        _rate_limited_model = crunched.get("model")
                         crunched["model"] = resolved_requested_model
                         routing_meta["fallback_reason"] = "rate_limited"
-                        print(f"openai_rate_limit_fallback: routing {routed_model!r} -> {resolved_requested_model!r}")
+                        print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                     await asyncio.sleep(delay)
                     continue
                 break
