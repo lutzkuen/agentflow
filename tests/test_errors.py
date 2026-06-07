@@ -98,6 +98,51 @@ class PublicProxyErrorTest(unittest.TestCase):
         self.assertEqual(row["status_code"], 500)
         self.assertIn("agentflow-token", row["error"])
 
+    def test_anthropic_malformed_json_returns_400_without_internal_log(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        payload = '{"model":"claude-sonnet-4-6","secret":"do-not-echo",'
+
+        with patch.object(server.logging, "exception") as log_exception:
+            response = TestClient(server.app).post(
+                "/v1/messages",
+                content=payload,
+                headers={"content-type": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["type"], "error")
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        self.assertEqual(body["error"]["message"], "Malformed JSON request body.")
+        self.assertLess(len(response.text), 200)
+        self.assertNotIn("do-not-echo", response.text)
+        log_exception.assert_not_called()
+        [row] = server.store.conn.execute("select status_code, error, request_json from calls").fetchall()
+        self.assertEqual(row["status_code"], 400)
+        self.assertEqual(row["error"], "Malformed JSON request body.")
+        self.assertIsNone(row["request_json"])
+
+    def test_anthropic_non_object_json_returns_400(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+
+        with patch.object(server.logging, "exception") as log_exception:
+            response = TestClient(server.app).post(
+                "/v1/messages",
+                content='["do-not-echo"]',
+                headers={"content-type": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        self.assertEqual(body["error"]["message"], "JSON request body must be an object.")
+        self.assertNotIn("do-not-echo", response.text)
+        log_exception.assert_not_called()
+        [row] = server.store.conn.execute("select status_code, error, request_json from calls").fetchall()
+        self.assertEqual(row["status_code"], 400)
+        self.assertEqual(row["error"], "JSON request body must be an object.")
+        self.assertIsNone(row["request_json"])
+
     def test_openai_internal_exception_returns_generic_public_error(self):
         server.configure_provider("openai", openai_upstream="https://openai.test")
         request_body = {"model": "gpt-5-codex", "input": "Trigger internal error."}
@@ -118,6 +163,54 @@ class PublicProxyErrorTest(unittest.TestCase):
         self.assertEqual(row["provider"], "openai")
         self.assertEqual(row["status_code"], 500)
         self.assertIn("agentflow-token", row["error"])
+
+    def test_openai_malformed_json_returns_400_without_passthrough(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test")
+        payload = '{"model":"gpt-5-codex","secret":"do-not-echo",'
+
+        with patch.object(server.logging, "exception") as log_exception, patch.object(server.httpx, "AsyncClient") as client:
+            response = TestClient(server.app).post(
+                "/v1/responses",
+                content=payload,
+                headers={"content-type": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        self.assertEqual(body["error"]["message"], "Malformed JSON request body.")
+        self.assertLess(len(response.text), 200)
+        self.assertNotIn("do-not-echo", response.text)
+        log_exception.assert_not_called()
+        client.assert_not_called()
+        [row] = server.store.conn.execute("select provider, status_code, error, request_json from calls").fetchall()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["status_code"], 400)
+        self.assertEqual(row["error"], "Malformed JSON request body.")
+        self.assertIsNone(row["request_json"])
+
+    def test_openai_non_object_json_returns_400(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test")
+
+        with patch.object(server.logging, "exception") as log_exception, patch.object(server.httpx, "AsyncClient") as client:
+            response = TestClient(server.app).post(
+                "/v1/chat/completions",
+                content='["do-not-echo"]',
+                headers={"content-type": "application/json"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        self.assertEqual(body["error"]["message"], "JSON request body must be an object.")
+        self.assertNotIn("do-not-echo", response.text)
+        log_exception.assert_not_called()
+        client.assert_not_called()
+        [row] = server.store.conn.execute("select provider, status_code, error, request_json from calls").fetchall()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["status_code"], 400)
+        self.assertEqual(row["error"], "JSON request body must be an object.")
+        self.assertIsNone(row["request_json"])
 
     def test_anthropic_streaming_internal_exception_returns_generic_event(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

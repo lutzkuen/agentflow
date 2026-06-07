@@ -126,6 +126,55 @@ class TierBackoffActive(Exception):
         return f"temporarily limiting requests for {self.tier} tier; retry after {self.retry_after}s"
 
 
+@dataclass(frozen=True)
+class ClientJsonRequestError(Exception):
+    message: str
+
+
+def client_json_error_body(provider: str, message: str) -> dict[str, Any]:
+    error = {
+        "type": "invalid_request_error",
+        "message": message,
+    }
+    if provider == "anthropic":
+        return {"type": "error", "error": error}
+    return {"error": error}
+
+
+async def read_json_object_body(
+    request: Request,
+    *,
+    allow_compressed: bool = False,
+    passthrough_unsupported_encoding: bool = False,
+) -> Optional[dict[str, Any]]:
+    body = await request.body()
+    encoding = (request.headers.get("content-encoding") or "").lower().strip()
+    try:
+        if allow_compressed and encoding:
+            if encoding in {"zstd", "zstandard"}:
+                if zstd is None:
+                    if passthrough_unsupported_encoding:
+                        return None
+                    raise ClientJsonRequestError("Unsupported content encoding.")
+                body = zstd.ZstdDecompressor().decompress(body)
+            elif encoding == "gzip":
+                body = gzip.decompress(body)
+            elif encoding in {"deflate", "zlib"}:
+                body = zlib.decompress(body)
+            elif passthrough_unsupported_encoding:
+                return None
+            else:
+                raise ClientJsonRequestError("Unsupported content encoding.")
+        parsed = json.loads(body)
+    except ClientJsonRequestError:
+        raise
+    except Exception as exc:
+        raise ClientJsonRequestError("Malformed JSON request body.") from exc
+    if not isinstance(parsed, dict):
+        raise ClientJsonRequestError("JSON request body must be an object.")
+    return parsed
+
+
 def _model_tier(model: str) -> str:
     m = model.lower()
     if "haiku" in m:
@@ -789,23 +838,11 @@ def build_openai_forward_headers(request: Request, *, force_json: bool = True) -
 
 
 async def read_openai_json_body(request: Request) -> Optional[dict[str, Any]]:
-    body = await request.body()
-    encoding = (request.headers.get("content-encoding") or "").lower().strip()
-    try:
-        if encoding in {"zstd", "zstandard"}:
-            if zstd is None:
-                return None
-            body = zstd.ZstdDecompressor().decompress(body)
-        elif encoding == "gzip":
-            body = gzip.decompress(body)
-        elif encoding in {"deflate", "zlib"}:
-            body = zlib.decompress(body)
-        elif encoding:
-            return None
-        parsed = json.loads(body)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    return await read_json_object_body(
+        request,
+        allow_compressed=True,
+        passthrough_unsupported_encoding=True,
+    )
 
 
 def build_openai_websocket_headers(websocket: WebSocket) -> dict[str, str]:
@@ -928,7 +965,23 @@ async def messages(request: Request) -> Response:
     session_id = request.headers.get("x-session-id") or hashlib.sha256(
         (client_ip + datetime.now(timezone.utc).strftime("%Y-%m-%d")).encode()
     ).hexdigest()[:16]
-    raw_body = await request.json()
+    try:
+        raw_body = await read_json_object_body(request)
+    except ClientJsonRequestError as exc:
+        latency_ms = int((time.time() - started) * 1000)
+        store.log_call(
+            id=call_id, created_at=utc_now(), path=path,
+            requested_model=None, routed_model=None, stream=0, cache_hit=0,
+            status_code=400, latency_ms=latency_ms,
+            input_tokens_est=None, output_tokens_est=None,
+            actual_input_tokens=None, actual_output_tokens=None,
+            cost_est_usd=None, cost_baseline_usd=None,
+            crunch_json=None, routing_json=None,
+            cache_json=stable_json(cache_decision_meta("skipped", "invalid-json")),
+            error=exc.message, request_json=None, response_json=None,
+            session_id=session_id, category=None, retry_count=0,
+        )
+        return JSONResponse(client_json_error_body("anthropic", exc.message), status_code=400)
     stream = bool(raw_body.get("stream"))
     requested_model = str(raw_body.get("model") or "")
     if requested_model in MODEL_ALIASES:
@@ -1466,7 +1519,23 @@ async def openai_optimized(request: Request, path: str) -> Response:
     started = time.time()
     call_id = str(uuid.uuid4())
     session_id = _openai_session_id(request)
-    raw_body = await read_openai_json_body(request)
+    try:
+        raw_body = await read_openai_json_body(request)
+    except ClientJsonRequestError as exc:
+        latency_ms = int((time.time() - started) * 1000)
+        store.log_call(
+            id=call_id, created_at=utc_now(), path=path, provider="openai",
+            requested_model=None, routed_model=None, stream=0, cache_hit=0,
+            status_code=400, latency_ms=latency_ms,
+            input_tokens_est=None, output_tokens_est=None,
+            actual_input_tokens=None, actual_output_tokens=None,
+            cost_est_usd=None, cost_baseline_usd=None,
+            crunch_json=None, routing_json=None,
+            cache_json=stable_json(cache_decision_meta("skipped", "invalid-json")),
+            error=exc.message, request_json=None, response_json=None,
+            session_id=session_id, category=None, retry_count=0,
+        )
+        return JSONResponse(client_json_error_body("openai", exc.message), status_code=400)
     if raw_body is None:
         return await openai_passthrough(request, path)
     stream = bool(raw_body.get("stream"))
