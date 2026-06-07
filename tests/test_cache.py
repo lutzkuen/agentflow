@@ -14,6 +14,10 @@ class CacheDecisionMetaTest(unittest.TestCase):
         "AGENTFLOW_SEMANTIC_CACHE",
         "AGENTFLOW_SEMANTIC_THRESHOLD",
         "AGENTFLOW_CACHE_RULES",
+        "AGENTFLOW_PROVIDER",
+        "AGENTFLOW_ANTHROPIC_UPSTREAM",
+        "AGENTFLOW_OPENAI_UPSTREAM",
+        "AGENTFLOW_CACHE_NAMESPACE",
         "HOME",
     )
 
@@ -68,6 +72,69 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertFalse(can_semantic)
         self.assertEqual(meta["status"], "miss")
         self.assertEqual(meta["reason"], "exact-miss")
+
+    def test_cache_key_is_namespaced_by_provider_upstream_and_namespace(self):
+        body = {"model": "same-model", "messages": [{"role": "user", "content": "same"}]}
+
+        anthropic = cache_module.cache_key_for(
+            body,
+            "/v1/messages",
+            provider="anthropic",
+            upstream="https://api.anthropic.com",
+            namespace="project-a",
+        )
+        openai = cache_module.cache_key_for(
+            body,
+            "/v1/messages",
+            provider="openai",
+            upstream="https://api.openai.com",
+            namespace="project-a",
+        )
+        other_namespace = cache_module.cache_key_for(
+            body,
+            "/v1/messages",
+            provider="anthropic",
+            upstream="https://api.anthropic.com",
+            namespace="project-b",
+        )
+        other_upstream = cache_module.cache_key_for(
+            body,
+            "/v1/messages",
+            provider="anthropic",
+            upstream="https://staging.anthropic.example",
+            namespace="project-a",
+        )
+
+        self.assertNotEqual(anthropic, openai)
+        self.assertNotEqual(anthropic, other_namespace)
+        self.assertNotEqual(anthropic, other_upstream)
+        self.assertEqual(
+            anthropic,
+            cache_module.cache_key_for(
+                body,
+                "/v1/messages",
+                provider="anthropic",
+                upstream="https://api.anthropic.com/",
+                namespace="project-a",
+            ),
+        )
+
+    def test_cache_key_uses_environment_namespace_by_default(self):
+        body = {"model": "same-model", "messages": [{"role": "user", "content": "same"}]}
+        os.environ["AGENTFLOW_CACHE_NAMESPACE"] = "env-project"
+        os.environ["AGENTFLOW_PROVIDER"] = "openai"
+        os.environ["AGENTFLOW_OPENAI_UPSTREAM"] = "https://openai.example"
+
+        key_from_env = cache_module.cache_key_for(body, "/v1/responses")
+        explicit_key = cache_module.cache_key_for(
+            body,
+            "/v1/responses",
+            provider="openai",
+            upstream="https://openai.example",
+            namespace="env-project",
+        )
+
+        self.assertEqual(key_from_env, explicit_key)
 
     def test_config_cache_rules_can_change_cache_behavior_without_env_flags(self):
         with TemporaryDirectory() as tmp:

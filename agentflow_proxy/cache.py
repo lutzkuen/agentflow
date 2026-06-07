@@ -152,9 +152,38 @@ def cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, bool, dict[str, Any]
     )
 
 
-def cache_key_for(body: dict[str, Any], path: str) -> str:
+def _default_cache_provider() -> str:
+    return os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
+
+
+def _default_cache_upstream(provider: str) -> str:
+    if provider == "openai":
+        return os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com").rstrip("/")
+    return os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com").rstrip("/")
+
+
+def cache_key_for(
+    body: dict[str, Any],
+    path: str,
+    *,
+    provider: str | None = None,
+    upstream: str | None = None,
+    namespace: str | None = None,
+) -> str:
     # Do not include auth. Include endpoint and body after crunch/routing.
-    return sha256_text(path + "\n" + stable_json(body))
+    # Namespacing prevents cache reuse across providers, upstreams, or user-selected projects.
+    provider = (provider or _default_cache_provider()).lower()
+    upstream = (upstream or _default_cache_upstream(provider)).rstrip("/")
+    namespace = namespace if namespace is not None else os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default")
+    key_material = stable_json({
+        "version": 2,
+        "namespace": namespace,
+        "provider": provider,
+        "upstream": upstream,
+        "path": path,
+        "body": body,
+    })
+    return sha256_text(key_material)
 
 
 def response_output_text(resp: dict[str, Any]) -> str:
