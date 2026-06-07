@@ -1122,7 +1122,12 @@ async def messages(request: Request) -> Response:
 
         has_tool_blocks = has_tools(crunched)
         can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)
-        key = cache_key_for(crunched, path)
+        key = cache_key_for(
+            crunched,
+            path,
+            provider="anthropic",
+            upstream=ANTHROPIC_UPSTREAM,
+        )
         emb: Optional[list[float]] = None
         if can_cache:
             cached = store.get_cache(key)
@@ -1487,7 +1492,12 @@ async def openai_optimized(request: Request, path: str) -> Response:
 
         has_tool_blocks = has_tools(crunched)
         can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)
-        key = cache_key_for(crunched, path)
+        key = cache_key_for(
+            crunched,
+            path,
+            provider="openai",
+            upstream=OPENAI_UPSTREAM,
+        )
         emb: Optional[list[float]] = None
         if can_cache:
             cached = store.get_cache(key)
