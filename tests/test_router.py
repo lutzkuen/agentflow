@@ -222,6 +222,85 @@ rules:
         finally:
             importlib.reload(router_module)
 
+    def test_midsize_non_tool_sonnet_routes_to_haiku_when_enabled(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "summarize this report\n" + ("a" * 11900)}],
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(meta["reason"], "midsize non-tool Sonnet request routed to Haiku")
+        self.assertEqual(meta["category"], "chat")
+        self.assertFalse(meta["has_tools"])
+
+    def test_midsize_non_tool_sonnet_stays_requested_by_default(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "summarize this report\n" + ("a" * 11900)}],
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["reason"], "keep requested model")
+
+    def test_midsize_code_gen_sonnet_does_not_route_to_haiku(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "```python\n" + ("print('x')\n" * 900) + "```"}],
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["category"], "code-gen")
+        self.assertEqual(meta["reason"], "keep requested model")
+
+    def test_large_non_tool_sonnet_above_midsize_window_stays_requested(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "summarize all of this\n" + ("a" * 31000)}],
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["category"], "chat")
+        self.assertEqual(meta["reason"], "keep requested model")
+
+    def test_midsize_tool_request_sonnet_does_not_route_as_non_tool(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "read the files\n" + ("a" * 11900)}],
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(meta["category"], "tool-light")
+        self.assertEqual(meta["reason"], "tool-light Sonnet request routed to Haiku")
+
+    def test_midsize_thinking_request_keeps_requested_model_when_enabled(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "messages": [{"role": "user", "content": "think about this\n" + ("a" * 11900)}],
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+
 
 if __name__ == "__main__":
     unittest.main()

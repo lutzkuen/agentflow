@@ -8,9 +8,13 @@
 #   model_pattern   — case-insensitive substring match against the requested model name
 #   text_chars_lt   — total request text characters less than this value
 #   text_chars_gt   — total request text characters greater than this value
+#   text_chars_lte  — total request text characters less than or equal to this value
+#   text_chars_gte  — total request text characters greater than or equal to this value
 #   has_tools       — true/false: whether the request includes tool definitions or tool blocks
 #   max_tokens_lte  — max_tokens field is <= this value
+#   env_flag        — environment variable that must be truthy for the rule to match
 #   category        — exact match: tool-result | tool-heavy | tool-light | long-context | short-completion | code-gen | chat
+#   category_not_in — category name or list of category names to exclude
 #
 # Action:
 #   route_to  — "haiku", "sonnet", "opus" (resolves to current default model), or a full model ID
@@ -45,6 +49,19 @@
   action:
     route_to: haiku
     reason: "small non-tool Sonnet request routed to Haiku"
+
+- conditions:
+    model_pattern: "sonnet"
+    text_chars_gte: 8000
+    text_chars_lte: 30000
+    has_tools: false
+    env_flag: "AGENTFLOW_ROUTE_MIDSIZE"
+    category_not_in:
+      - code-gen
+      - thinking
+  action:
+    route_to: haiku
+    reason: "midsize non-tool Sonnet request routed to Haiku"
 
 - conditions:
     model_pattern: "opus"

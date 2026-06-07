@@ -21,6 +21,10 @@ ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(Path.home() / ".ag
 STRIP_THINKING_HISTORY = os.getenv("AGENTFLOW_STRIP_THINKING_HISTORY", "0") == "1"
 
 
+def _env_flag_enabled(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def extract_text(obj: Any) -> str:
     parts: list[str] = []
     if isinstance(obj, str):
@@ -172,7 +176,13 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             continue
         if "text_chars_gt" in cond and not (text_chars > int(cond["text_chars_gt"])):
             continue
+        if "text_chars_lte" in cond and not (text_chars <= int(cond["text_chars_lte"])):
+            continue
+        if "text_chars_gte" in cond and not (text_chars >= int(cond["text_chars_gte"])):
+            continue
         if "has_tools" in cond and bool(cond["has_tools"]) != tools:
+            continue
+        if "env_flag" in cond and not _env_flag_enabled(str(cond["env_flag"])):
             continue
         # A missing max_tokens value is unknown, not safely bounded.
         if "max_tokens_lte" in cond:
@@ -180,6 +190,12 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 continue
         if "category" in cond and cond["category"] != category:
             continue
+        if "category_not_in" in cond:
+            excluded = cond["category_not_in"]
+            if isinstance(excluded, str):
+                excluded = [excluded]
+            if category in set(excluded):
+                continue
 
         action = rule.get("action") or {}
         route_key = str(action.get("route_to", ""))

@@ -162,6 +162,8 @@ Default routing is conservative:
 
 - non-tool Opus requests under threshold may route to Sonnet
 - small non-tool Sonnet requests may route to Haiku
+- midsize non-tool, non-code Sonnet requests from 8k to 30k text chars may route to Haiku
+  when `AGENTFLOW_ROUTE_MIDSIZE=1`
 - tiny tool requests from Opus may route to Sonnet
 - otherwise it keeps the requested model
 
