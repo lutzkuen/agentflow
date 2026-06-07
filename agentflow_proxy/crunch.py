@@ -33,6 +33,16 @@ def _default_crunch_policy() -> dict[str, Any]:
             "enabled": True,
             "min_chars": 4096,
         },
+        "old_context_summarization": {
+            "enabled": False,
+            "model": "claude-haiku-4-5-20251001",
+            "min_request_chars": 32000,
+            "min_summarized_chars": 12000,
+            "max_turns": 6,
+            "keep_recent_turns": 4,
+            "max_summary_chars": 4000,
+            "max_source_chars": 80000,
+        },
     }
 
 
@@ -65,6 +75,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
                 )
                 if prompt_cache.get("min_chars") is not None:
                     policy["prompt_cache"]["min_chars"] = int(prompt_cache["min_chars"])
+            summary = data.get("old_context_summarization") or {}
+            if isinstance(summary, dict):
+                _apply_summary_policy_yaml(policy, summary)
             return policy, "local-manual", str(path)
 
     defaults_path = Path(__file__).parent / "crunch_rules.yaml"
@@ -84,13 +97,42 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
                 )
                 if prompt_cache.get("min_chars") is not None:
                     policy["prompt_cache"]["min_chars"] = int(prompt_cache["min_chars"])
+            summary = data.get("old_context_summarization") or {}
+            if isinstance(summary, dict):
+                _apply_summary_policy_yaml(policy, summary)
     policy["enabled"] = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
     policy["threshold_chars"] = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", str(policy["threshold_chars"])))
     policy["prompt_cache"]["enabled"] = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
     policy["prompt_cache"]["min_chars"] = int(
         os.getenv("AGENTFLOW_PROMPT_CACHE_MIN_CHARS", str(policy["prompt_cache"]["min_chars"]))
     )
+    summary = policy["old_context_summarization"]
+    summary["enabled"] = os.getenv("AGENTFLOW_HAIKU_SUMMARIZE_OLD_CONTEXT", "0") == "1"
+    summary["model"] = os.getenv("AGENTFLOW_HAIKU_SUMMARY_MODEL", str(summary["model"]))
+    summary["min_request_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MIN_REQUEST_CHARS", str(summary["min_request_chars"])))
+    summary["min_summarized_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MIN_SUMMARIZED_CHARS", str(summary["min_summarized_chars"])))
+    summary["max_turns"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_TURNS", str(summary["max_turns"])))
+    summary["keep_recent_turns"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS", str(summary["keep_recent_turns"])))
+    summary["max_summary_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS", str(summary["max_summary_chars"])))
+    summary["max_source_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS", str(summary["max_source_chars"])))
     return policy, "local-default", str(defaults_path)
+
+
+def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) -> None:
+    target = policy["old_context_summarization"]
+    target["enabled"] = _as_bool(summary.get("enabled"), target["enabled"])
+    if summary.get("model") is not None:
+        target["model"] = str(summary["model"])
+    for key in (
+        "min_request_chars",
+        "min_summarized_chars",
+        "max_turns",
+        "keep_recent_turns",
+        "max_summary_chars",
+        "max_source_chars",
+    ):
+        if summary.get(key) is not None:
+            target[key] = int(summary[key])
 
 
 CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()
@@ -98,6 +140,15 @@ CRUNCH_ENABLED = bool(CRUNCH_POLICY["enabled"])
 CRUNCH_THRESHOLD_CHARS = int(CRUNCH_POLICY["threshold_chars"])
 PROMPT_CACHE_ENABLED = bool(CRUNCH_POLICY["prompt_cache"]["enabled"])
 PROMPT_CACHE_MIN_CHARS = int(CRUNCH_POLICY["prompt_cache"]["min_chars"])
+OLD_CONTEXT_SUMMARY_POLICY = CRUNCH_POLICY["old_context_summarization"]
+OLD_CONTEXT_SUMMARY_ENABLED = bool(OLD_CONTEXT_SUMMARY_POLICY["enabled"])
+OLD_CONTEXT_SUMMARY_MODEL = str(OLD_CONTEXT_SUMMARY_POLICY["model"])
+OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["min_request_chars"])
+OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["min_summarized_chars"])
+OLD_CONTEXT_SUMMARY_MAX_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["max_turns"])
+OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["keep_recent_turns"])
+OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["max_summary_chars"])
+OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["max_source_chars"])
 
 
 def sha256_text(text: str) -> str:
@@ -124,6 +175,239 @@ def build_embedding(text: str) -> list[float]:
     if norm > 0:
         buckets = [x / norm for x in buckets]
     return buckets
+
+
+def _summary_base_meta(status: str, reason: str) -> dict[str, Any]:
+    return {
+        "enabled": OLD_CONTEXT_SUMMARY_ENABLED,
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "model": OLD_CONTEXT_SUMMARY_MODEL,
+        "min_request_chars": OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS,
+        "min_summarized_chars": OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS,
+        "max_turns": OLD_CONTEXT_SUMMARY_MAX_TURNS,
+        "keep_recent_turns": OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS,
+        "max_summary_chars": OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS,
+        "max_source_chars": OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS,
+    }
+
+
+def _non_tool_message_text(msg: dict[str, Any]) -> str | None:
+    if msg.get("role") not in {"user", "assistant"}:
+        return None
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            return None
+        block_type = block.get("type")
+        if block_type in {"tool_use", "tool_result", "thinking"}:
+            return None
+        if block_type == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+        elif block_type is not None:
+            return None
+    text = "\n".join(parts)
+    return text if text else None
+
+
+def old_context_summary_plan(body: dict[str, Any], *, exact_cache_enabled: bool) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if not OLD_CONTEXT_SUMMARY_ENABLED:
+        return None, _summary_base_meta("skipped", "disabled")
+    if not exact_cache_enabled:
+        return None, _summary_base_meta("skipped", "exact-cache-required")
+
+    before_chars = len(stable_json(body))
+    if before_chars < OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS:
+        meta = _summary_base_meta("skipped", "request-too-small")
+        meta["before_chars"] = before_chars
+        return None, meta
+
+    messages = body.get("messages") or []
+    if not isinstance(messages, list) or len(messages) <= OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS:
+        meta = _summary_base_meta("skipped", "not-enough-old-turns")
+        meta["before_chars"] = before_chars
+        return None, meta
+
+    old_limit = max(0, len(messages) - OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS)
+    candidates: list[dict[str, Any]] = []
+    source_parts: list[str] = []
+    total_chars = 0
+    source_truncated = False
+    for idx, msg in enumerate(messages[:old_limit]):
+        if len(candidates) >= OLD_CONTEXT_SUMMARY_MAX_TURNS:
+            break
+        if not isinstance(msg, dict):
+            continue
+        text = _non_tool_message_text(msg)
+        if text is None:
+            continue
+        normalized = normalize_text(text)
+        if not normalized:
+            continue
+        remaining = OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS - total_chars
+        if remaining <= 0:
+            source_truncated = True
+            break
+        included = normalized[:remaining]
+        if len(included) < len(normalized):
+            source_truncated = True
+        candidates.append({"index": idx, "role": msg.get("role"), "chars": len(normalized)})
+        source_parts.append(f"<turn index=\"{idx}\" role=\"{msg.get('role')}\">\n{included}\n</turn>")
+        total_chars += len(included)
+
+    if total_chars < OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS or not candidates:
+        meta = _summary_base_meta("skipped", "eligible-context-too-small")
+        meta["before_chars"] = before_chars
+        meta["eligible_turns"] = len(candidates)
+        meta["eligible_chars"] = total_chars
+        return None, meta
+
+    source_text = "\n\n".join(source_parts)
+    source_hash = sha256_text(source_text)
+    summary_request = {
+        "model": OLD_CONTEXT_SUMMARY_MODEL,
+        "max_tokens": max(256, OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS // TOKEN_CHARS),
+        "temperature": 0,
+        "system": (
+            "Summarize old conversation context for a coding agent. Preserve durable facts, "
+            "decisions, constraints, file paths, command outcomes, and unresolved tasks. "
+            "Do not invent details. Keep the result compact and factual."
+        ),
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Summarize these old non-tool turns. The current request will keep recent "
+                    "turns and all tool-use/tool-result protocol messages unchanged.\n\n"
+                    f"{source_text}"
+                ),
+            }
+        ],
+    }
+    plan = {
+        "source_hash": source_hash,
+        "cache_key": "agentflow-old-context-summary\n" + source_hash,
+        "summary_request": summary_request,
+        "candidate_indexes": [c["index"] for c in candidates],
+        "candidate_roles": [c["role"] for c in candidates],
+        "eligible_turns": len(candidates),
+        "eligible_chars": total_chars,
+        "source_truncated": source_truncated,
+        "before_chars": before_chars,
+    }
+    meta = _summary_base_meta("planned", "eligible")
+    meta.update({
+        "before_chars": before_chars,
+        "eligible_turns": len(candidates),
+        "eligible_chars": total_chars,
+        "source_hash": source_hash[:12],
+        "source_truncated": source_truncated,
+    })
+    return plan, meta
+
+
+def _summary_text_from_result(result: Any) -> str | None:
+    if isinstance(result, str):
+        text = result.strip()
+        return text or None
+    if not isinstance(result, dict):
+        return None
+    if isinstance(result.get("summary"), str):
+        text = result["summary"].strip()
+        return text or None
+    parts: list[str] = []
+    for block in result.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text") or ""))
+    text = "\n".join(parts).strip()
+    return text or None
+
+
+def apply_old_context_summary(body: dict[str, Any], plan: dict[str, Any], summary: str) -> dict[str, Any]:
+    new_body = copy.deepcopy(body)
+    messages = new_body.get("messages") or []
+    indexes = set(plan["candidate_indexes"])
+    first_idx = min(indexes)
+    notice = (
+        f"[AgentFlow: old non-tool context summarized by {OLD_CONTEXT_SUMMARY_MODEL}; "
+        f"source_turns={plan['eligible_turns']}; source_chars={plan['eligible_chars']}; "
+        f"source_hash={plan['source_hash'][:12]}]\n\n"
+        f"{summary.strip()[:OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS]}"
+    )
+    replacement = {"role": "user", "content": [{"type": "text", "text": notice}]}
+    new_messages = []
+    for idx, msg in enumerate(messages):
+        if idx == first_idx:
+            new_messages.append(replacement)
+        if idx in indexes:
+            continue
+        new_messages.append(msg)
+    new_body["messages"] = new_messages
+    return new_body
+
+
+async def maybe_summarize_old_context(
+    body: dict[str, Any],
+    *,
+    exact_cache_enabled: bool,
+    get_cached_summary: Any,
+    set_cached_summary: Any,
+    fetch_summary: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    plan, meta = old_context_summary_plan(body, exact_cache_enabled=exact_cache_enabled)
+    if plan is None:
+        return body, meta
+
+    cached = get_cached_summary(plan["cache_key"])
+    summary = _summary_text_from_result(cached)
+    summary_cache_hit = summary is not None
+    fetch_result: Any = None
+    if summary is None:
+        fetch_result = await fetch_summary(plan["summary_request"])
+        summary = _summary_text_from_result(fetch_result)
+        if summary is None:
+            meta.update({"status": "skipped", "reason": "summary-empty"})
+            if isinstance(fetch_result, dict):
+                for key in (
+                    "summary_status_code",
+                    "summary_error",
+                    "summary_input_tokens",
+                    "summary_output_tokens",
+                    "summary_cost_est_usd",
+                ):
+                    if key in fetch_result:
+                        meta[key] = fetch_result[key]
+            return body, meta
+        set_cached_summary(plan["cache_key"], {
+            "summary": summary,
+            "usage": fetch_result.get("usage") if isinstance(fetch_result, dict) else None,
+        })
+
+    summarized = apply_old_context_summary(body, plan, summary)
+    after_chars = len(stable_json(summarized))
+    meta.update({
+        "status": "applied",
+        "reason": "summary-cache-hit" if summary_cache_hit else "summary-created",
+        "changed": after_chars != plan["before_chars"],
+        "after_chars": after_chars,
+        "saved_chars": plan["before_chars"] - after_chars,
+        "tokens_saved_est": (plan["before_chars"] - after_chars) // TOKEN_CHARS,
+        "summary_cache_hit": summary_cache_hit,
+        "summary_chars": len(summary),
+    })
+    if isinstance(fetch_result, dict):
+        for key in ("summary_input_tokens", "summary_output_tokens", "summary_cost_est_usd", "summary_status_code"):
+            if key in fetch_result:
+                meta[key] = fetch_result[key]
+    return summarized, meta
 
 
 def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
