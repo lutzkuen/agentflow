@@ -114,6 +114,34 @@ def _model_tier(model: str) -> str:
     return "sonnet"
 
 
+def _tier_backoff_status(now: Optional[float] = None) -> list[dict[str, Any]]:
+    now_ts = time.time() if now is None else now
+    tiers = []
+    for tier in ("haiku", "sonnet", "opus"):
+        sem = _tier_semaphores[tier]
+        until_ts = float(_tier_backoff_until.get(tier, 0.0) or 0.0)
+        remaining = max(0.0, until_ts - now_ts)
+        waiters = getattr(sem, "_waiters", None)
+        queued = len(waiters) if waiters is not None else 0
+        available = int(getattr(sem, "_value", 0))
+        cooldown_until = (
+            datetime.fromtimestamp(until_ts, timezone.utc).isoformat()
+            if remaining > 0
+            else None
+        )
+        tiers.append({
+            "tier": tier,
+            "active": remaining > 0,
+            "cooldown_until": cooldown_until,
+            "seconds_remaining": round(remaining, 1),
+            "exceeds_max_wait": remaining > MAX_TIER_BACKOFF_WAIT,
+            "max_concurrent": MAX_CONCURRENT_PER_TIER,
+            "available_slots": available if MAX_CONCURRENT_PER_TIER > 0 else None,
+            "queued_count": queued,
+        })
+    return tiers
+
+
 async def _await_tier_backoff(model: str) -> None:
     tier = _model_tier(model)
     remaining = _tier_backoff_until.get(tier, 0.0) - time.time()
@@ -1220,6 +1248,74 @@ async def stats() -> dict[str, Any]:
     }
 
 
+@app.get("/agentflow/stats/limiter")
+async def stats_limiter() -> dict[str, Any]:
+    conn = store.conn
+    recent_rows = conn.execute("""
+        select created_at,
+               status_code,
+               coalesce(routed_model, requested_model) as model,
+               coalesce(provider, 'anthropic') as provider,
+               retry_count,
+               latency_ms,
+               error
+        from calls
+        where status_code in (429, 529)
+           or error like 'temporarily limiting requests%'
+        order by created_at desc
+        limit 50
+    """).fetchall()
+    recent = []
+    last_upstream_by_tier: dict[str, Optional[str]] = {
+        "haiku": None,
+        "sonnet": None,
+        "opus": None,
+    }
+    local_throttled_recent = 0
+    upstream_limited_recent = 0
+    for row in recent_rows:
+        error = row["error"] or ""
+        tier = _model_tier(str(row["model"] or ""))
+        local_throttled = error.startswith("temporarily limiting requests")
+        if local_throttled:
+            local_throttled_recent += 1
+        else:
+            upstream_limited_recent += 1
+            if last_upstream_by_tier.get(tier) is None:
+                last_upstream_by_tier[tier] = row["created_at"]
+        recent.append({
+            "created_at": row["created_at"],
+            "tier": tier,
+            "provider": row["provider"],
+            "model": row["model"],
+            "status_code": row["status_code"],
+            "retry_count": row["retry_count"] or 0,
+            "latency_ms": row["latency_ms"],
+            "local_throttled": local_throttled,
+            "error": error[:240] if error else None,
+        })
+
+    tiers = _tier_backoff_status()
+    for tier in tiers:
+        tier["last_upstream_429_at"] = last_upstream_by_tier.get(tier["tier"])
+
+    return {
+        "generated_at": utc_now(),
+        "config": {
+            "min_request_interval_ms": MIN_REQUEST_INTERVAL_MS,
+            "max_tier_backoff_wait_s": MAX_TIER_BACKOFF_WAIT,
+            "max_concurrent_per_tier": MAX_CONCURRENT_PER_TIER,
+        },
+        "tiers": tiers,
+        "recent_rate_limits": recent,
+        "summary": {
+            "active_cooldowns": sum(1 for tier in tiers if tier["active"]),
+            "local_throttled_recent": local_throttled_recent,
+            "upstream_limited_recent": upstream_limited_recent,
+        },
+    }
+
+
 @app.get("/agentflow/stats/full")
 async def stats_full() -> dict[str, Any]:
     conn = store.conn
@@ -1803,6 +1899,7 @@ async def dashboard() -> str:
   <div class="card green"><div class="label">Provider cache discount</div><div class="value" id="c-prompt-cache-saved">—</div><div class="sub" id="c-prompt-cache-rate">— provider cache hit rate</div></div>
   <div class="card blue"><div class="label">Avg latency</div><div class="value" id="c-latency">—</div><div class="sub" id="c-crunched">— crunched</div></div>
   <div class="card yellow"><div class="label">Thinking cost today</div><div class="value" id="c-thinking-cost">—</div><div class="sub" id="c-thinking-tok">— thinking tokens</div></div>
+  <div class="card yellow"><div class="label">Tier cooldowns</div><div class="value" id="c-limiter">—</div><div class="sub" id="c-limiter-sub">— queued</div></div>
   <div class="card blue"><div class="label">Codex app-server</div><div class="value" id="c-codex-app-turns">—</div><div class="sub" id="c-codex-app-events">— events</div></div>
 </div>
 
@@ -1812,6 +1909,7 @@ async def dashboard() -> str:
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
+  <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
@@ -1875,6 +1973,27 @@ async def dashboard() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-limiter">
+<div class="section">
+  <h2>Tier limiter state</h2>
+  <table>
+    <thead><tr>
+      <th>Tier</th><th>Status</th><th>Remaining</th><th>Cooldown until</th><th>Slots</th><th>Queued</th><th>Last upstream 429</th>
+    </tr></thead>
+    <tbody id="limiter-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Recent rate limits</h2>
+  <table>
+    <thead><tr>
+      <th>Time</th><th>Tier</th><th>Provider</th><th>Status</th><th>Retries</th><th>Latency</th><th>Source</th><th>Error</th>
+    </tr></thead>
+    <tbody id="limiter-recent-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <div class="tab-panel" id="tab-sessions">
 <div class="section">
   <h2>Sessions today</h2>
@@ -1899,8 +2018,16 @@ async def dashboard() -> str:
 <script>
 function fmt(n,d=4){if(n==null)return'—';return'$'+n.toFixed(d)}
 function fmtMs(n){if(n==null)return'—';return n<1000?n+'ms':(n/1000).toFixed(1)+'s'}
+function fmtSec(n){if(n==null)return'—';return n<60?n.toFixed(1)+'s':(n/60).toFixed(1)+'m'}
 function fmtTok(n){if(n==null)return'?';return n>=1000?(n/1000).toFixed(1)+'k':String(n)}
 function fmtRatio(n){if(n==null)return'—';return n.toFixed(2)+'x'}
+function until(ts){
+  if(!ts)return'—';
+  const d=Math.ceil((new Date(ts).getTime()-Date.now())/1000);
+  if(isNaN(d))return'—';
+  if(d<=0)return'now';
+  return fmtSec(d);
+}
 function ago(ts){
   if(!ts)return'—';
   const d=Math.floor((Date.now()-new Date(ts).getTime())/1000);
@@ -1918,7 +2045,7 @@ function shortProvider(p){
 }
 
 function showTab(name){
-  const tabs=['recent','codex','weekly','categories','cache','sessions'];
+  const tabs=['recent','codex','weekly','categories','cache','limiter','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -2039,6 +2166,49 @@ async function refreshCache(){
   }catch(e){}
 }
 
+async function refreshLimiter(){
+  try{
+    const r=await fetch('/agentflow/stats/limiter');
+    const d=await r.json();
+    const tiers=d.tiers||[];
+    const active=tiers.filter(t=>t.active);
+    const queued=tiers.reduce((sum,t)=>sum+(t.queued_count||0),0);
+    const longest=active.reduce((max,t)=>Math.max(max,t.seconds_remaining||0),0);
+    document.getElementById('c-limiter').textContent=active.length?active.length+' active':'clear';
+    document.getElementById('c-limiter-sub').textContent=queued+' queued · longest '+fmtSec(longest);
+
+    const tb=document.getElementById('limiter-tbody');
+    tb.innerHTML=tiers.map(row=>{
+      const badge=row.active
+        ? `<span class="badge err">cooldown</span>`
+        : `<span class="badge hit">clear</span>`;
+      const slots=row.available_slots==null?'—':`${row.available_slots}/${row.max_concurrent}`;
+      return `<tr>
+        <td><span class="badge provider">${row.tier}</span></td>
+        <td>${badge}</td>
+        <td class="latency">${fmtSec(row.seconds_remaining||0)}</td>
+        <td class="ts">${until(row.cooldown_until)}</td>
+        <td class="tokens">${slots}</td>
+        <td class="tokens">${row.queued_count||0}</td>
+        <td class="ts">${row.last_upstream_429_at?ago(row.last_upstream_429_at):'—'}</td>
+      </tr>`;
+    }).join('');
+
+    const rb=document.getElementById('limiter-recent-tbody');
+    const recent=d.recent_rate_limits||[];
+    rb.innerHTML=recent.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge provider">${row.tier}</span></td>
+      <td><span class="badge provider">${shortProvider(row.provider)}</span></td>
+      <td>${row.status_code>=500?`<span class="badge err">${row.status_code}</span>`:`<span class="badge routed">${row.status_code}</span>`}</td>
+      <td class="tokens">${row.retry_count||0}</td>
+      <td class="latency">${fmtMs(row.latency_ms)}</td>
+      <td>${row.local_throttled?'<span class="badge err">local cooldown</span>':'<span class="badge routed">upstream</span>'}</td>
+      <td class="model">${row.error||'—'}</td>
+    </tr>`).join('')||'<tr><td colspan="8" style="color:#8b949e">No recent rate-limit responses</td></tr>';
+  }catch(e){}
+}
+
 async function refreshCodexApp(){
   try{
     const r=await fetch('/agentflow/stats/full');
@@ -2107,12 +2277,14 @@ refreshCodexApp();
 refreshWeekly();
 refreshCategories();
 refreshCache();
+refreshLimiter();
 refreshSessions();
 setInterval(refresh,5000);
 setInterval(refreshCodexApp,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
+setInterval(refreshLimiter,5000);
 setInterval(refreshSessions,30000);
 </script>
 </body>

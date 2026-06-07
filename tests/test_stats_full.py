@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import tempfile
+import time
 import unittest
 import uuid
 
@@ -19,6 +20,7 @@ if HAS_RUNTIME_DEPS:
 class StatsFullTest(unittest.TestCase):
     def setUp(self):
         self.old_store = server.store
+        self.old_tier_backoff_until = dict(server._tier_backoff_until)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
 
@@ -26,11 +28,13 @@ class StatsFullTest(unittest.TestCase):
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
+        server._tier_backoff_until.clear()
+        server._tier_backoff_until.update(self.old_tier_backoff_until)
 
     def test_crunch_savings_uses_cache_blended_input_rate(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
-            created_at=utc_now(),
+            created_at="2026-06-07T01:00:00+00:00",
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-sonnet-4-6",
@@ -116,7 +120,7 @@ class StatsFullTest(unittest.TestCase):
     def test_sessions_include_thinking_token_breakdown(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
-            created_at=utc_now(),
+            created_at="2026-06-07T01:00:01+00:00",
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-sonnet-4-6",
@@ -246,6 +250,83 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(plateau["cache_read_savings_usd"], 0.0027, places=6)
         self.assertFalse(plateau["flagged"])
         self.assertEqual(result["context_plateau_policy"]["min_text_chars"], 8_000)
+        json.dumps(result)
+
+    def test_limiter_stats_include_active_cooldown_and_recent_rate_limits(self):
+        server._tier_backoff_until.clear()
+        server._tier_backoff_until["haiku"] = time.time() + 90
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=0,
+            status_code=429,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error="temporarily limiting requests for haiku tier; retry after 90s",
+            request_json=None,
+            response_json=None,
+            session_id="session-limiter",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=429,
+            latency_ms=10,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error="upstream_error: status=429",
+            request_json=None,
+            response_json=None,
+            session_id="session-limiter",
+            category="tool-heavy",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=3,
+            provider="anthropic",
+        )
+
+        result = asyncio.run(server.stats_limiter())
+        tiers = {row["tier"]: row for row in result["tiers"]}
+
+        self.assertTrue(tiers["haiku"]["active"])
+        self.assertGreater(tiers["haiku"]["seconds_remaining"], 0)
+        self.assertIsNotNone(tiers["haiku"]["cooldown_until"])
+        self.assertEqual(tiers["haiku"]["max_concurrent"], server.MAX_CONCURRENT_PER_TIER)
+        self.assertIsNotNone(tiers["sonnet"]["last_upstream_429_at"])
+        self.assertEqual(result["summary"]["active_cooldowns"], 1)
+        self.assertEqual(result["summary"]["local_throttled_recent"], 1)
+        self.assertEqual(result["summary"]["upstream_limited_recent"], 1)
+        self.assertEqual(result["recent_rate_limits"][0]["tier"], "sonnet")
+        self.assertEqual(result["recent_rate_limits"][1]["tier"], "haiku")
         json.dumps(result)
 
 

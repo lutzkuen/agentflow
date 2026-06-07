@@ -703,7 +703,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   exposes cache_decision_breakdown and the read-only dashboard has a Cache tab for the
   breakdown. Served checks on a temp dev port confirmed the dashboard HTML and stats JSON.
 
-- [IDEA] Dashboard: show active tier cooldown/backoff state from local rate limiter (2026-06-06)
+- [DONE] Dashboard: show active tier cooldown/backoff state from local rate limiter (2026-06-07)
   Details: Analysis 2026-06-06: 247/3,801 calls are 4xx/5xx, dominated by 429s. Some local
   rate-limit responses now say "temporarily limiting requests" with retry-after windows as long
   as 12,744s for Sonnet and 3,176s for Haiku. The per-tier backoff/concurrency work may be
@@ -714,3 +714,8 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   local throttled responses.
   Metric: during a 429 burst, dashboard shows the active tier cooldown and remaining wait time;
   operators can distinguish upstream quota exhaustion from proxy or network failures.
+  Verified 2026-06-07: added `/agentflow/stats/limiter` with active per-tier cooldown state,
+  max wait/concurrency config, queued counts, last upstream 429 timestamps, and recent local vs
+  upstream rate-limit rows. The read-only dashboard now has a Tier cooldowns card and Limiter
+  tab. Unit coverage verifies active cooldown and recent rate-limit classification; served smoke
+  on temporary dev port 4011 confirmed the JSON endpoint and dashboard HTML.
