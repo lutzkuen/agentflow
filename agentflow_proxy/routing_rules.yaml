@@ -44,7 +44,7 @@
 
 - conditions:
     model_pattern: "sonnet"
-    text_chars_lt: 8000
+    text_chars_lt: 10000
     has_tools: false
   action:
     route_to: haiku
@@ -52,7 +52,7 @@
 
 - conditions:
     model_pattern: "sonnet"
-    text_chars_gte: 8000
+    text_chars_gte: 10000
     text_chars_lte: 30000
     has_tools: false
     env_flag: "AGENTFLOW_ROUTE_MIDSIZE"

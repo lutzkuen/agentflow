@@ -222,6 +222,33 @@ rules:
         finally:
             importlib.reload(router_module)
 
+    def test_small_non_tool_sonnet_routes_to_haiku_under_10000_chars(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "```python\n" + ("print('x')\n" * 860) + "```"}],
+        }
+
+        routed, meta = route_model(body)
+
+        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(meta["reason"], "small non-tool Sonnet request routed to Haiku")
+        self.assertEqual(meta["category"], "code-gen")
+        self.assertFalse(meta["has_tools"])
+        self.assertLess(meta["text_chars"], 10000)
+
+    def test_small_non_tool_sonnet_threshold_excludes_10000_chars(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "a" * 10000}],
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            routed, meta = route_model(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertEqual(meta["text_chars"], 10000)
+
     def test_midsize_non_tool_sonnet_routes_to_haiku_when_enabled(self):
         body = {
             "model": SONNET_DEFAULT,
@@ -251,7 +278,7 @@ rules:
     def test_midsize_code_gen_sonnet_does_not_route_to_haiku(self):
         body = {
             "model": SONNET_DEFAULT,
-            "messages": [{"role": "user", "content": "```python\n" + ("print('x')\n" * 900) + "```"}],
+            "messages": [{"role": "user", "content": "```python\n" + ("print('x')\n" * 1200) + "```"}],
         }
 
         with patch.dict(os.environ, {"AGENTFLOW_ROUTE_MIDSIZE": "1"}):
