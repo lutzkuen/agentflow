@@ -12,8 +12,8 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
 
             calls = []
 
-            async def anthropic_handler(request):
-                calls.append(("anthropic", request))
+            async def anthropic_handler(context_arg, request):
+                calls.append(("anthropic", context_arg.provider, request))
                 return {"provider": "anthropic"}
 
             async def openai_optimized_handler(request, path):
@@ -61,7 +61,7 @@ class ProviderHandlerContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 calls,
                 [
-                    ("anthropic", "request"),
+                    ("anthropic", "anthropic", "request"),
                     ("openai_optimized", "request", "/v1/responses"),
                     ("openai_passthrough", "request", "/v1/files"),
                     ("websocket", "websocket"),

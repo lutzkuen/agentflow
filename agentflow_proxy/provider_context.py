@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 
-AnthropicMessagesHandler = Callable[[Any], Awaitable[Any]]
+AnthropicMessagesHandler = Callable[[Any, Any], Awaitable[Any]]
 OpenAIOptimizedHandler = Callable[[Any, str], Awaitable[Any]]
 OpenAIPassthroughHandler = Callable[[Any, str], Awaitable[Any]]
 OpenAIWebSocketHandler = Callable[[Any], Awaitable[None]]

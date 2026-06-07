@@ -14,7 +14,7 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import server
+    from agentflow_proxy import anthropic_proxy, server
     from agentflow_proxy.store import Store
 
 
@@ -81,7 +81,7 @@ class PublicProxyErrorTest(unittest.TestCase):
         }
 
         with patch.object(
-            server,
+            anthropic_proxy,
             "crunch_body",
             side_effect=RuntimeError("secret anthropic failure from /tmp/agentflow-token"),
         ), self.assertLogs(level="ERROR") as logs:

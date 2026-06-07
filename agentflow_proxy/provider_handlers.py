@@ -6,7 +6,7 @@ from agentflow_proxy.provider_context import ProviderContext
 
 
 async def anthropic_messages(context: ProviderContext, request: Any) -> Any:
-    return await context.anthropic_messages_handler(request)
+    return await context.anthropic_messages_handler(context, request)
 
 
 async def openai_optimized(context: ProviderContext, request: Any, path: str) -> Any:
