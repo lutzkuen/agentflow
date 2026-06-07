@@ -4,16 +4,100 @@ import copy
 import hashlib
 import os
 import re
+import yaml
+from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.store import stable_json
 
-CRUNCH_ENABLED = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
-CRUNCH_THRESHOLD_CHARS = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", "24000"))
-PROMPT_CACHE_ENABLED = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
-PROMPT_CACHE_MIN_CHARS = int(os.getenv("AGENTFLOW_PROMPT_CACHE_MIN_CHARS", "4096"))
-
 TOKEN_CHARS = 4  # rough estimator only
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return default
+
+
+def _default_crunch_policy() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "threshold_chars": 24000,
+        "prompt_cache": {
+            "enabled": True,
+            "min_chars": 4096,
+        },
+    }
+
+
+def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
+    env_path = os.getenv(env_name)
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.cwd() / "config" / filename)
+    candidates.append(Path.home() / ".agentflow" / filename)
+    return candidates
+
+
+def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
+    for path in _manual_rule_candidates("crunch_rules.yaml", "AGENTFLOW_CRUNCH_RULES"):
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            policy = _default_crunch_policy()
+            policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
+            if data.get("threshold_chars") is not None:
+                policy["threshold_chars"] = int(data["threshold_chars"])
+            prompt_cache = data.get("prompt_cache") or {}
+            if isinstance(prompt_cache, dict):
+                policy["prompt_cache"]["enabled"] = _as_bool(
+                    prompt_cache.get("enabled"),
+                    policy["prompt_cache"]["enabled"],
+                )
+                if prompt_cache.get("min_chars") is not None:
+                    policy["prompt_cache"]["min_chars"] = int(prompt_cache["min_chars"])
+            return policy, "local-manual", str(path)
+
+    defaults_path = Path(__file__).parent / "crunch_rules.yaml"
+    policy = _default_crunch_policy()
+    if defaults_path.exists():
+        with open(defaults_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
+            if data.get("threshold_chars") is not None:
+                policy["threshold_chars"] = int(data["threshold_chars"])
+            prompt_cache = data.get("prompt_cache") or {}
+            if isinstance(prompt_cache, dict):
+                policy["prompt_cache"]["enabled"] = _as_bool(
+                    prompt_cache.get("enabled"),
+                    policy["prompt_cache"]["enabled"],
+                )
+                if prompt_cache.get("min_chars") is not None:
+                    policy["prompt_cache"]["min_chars"] = int(prompt_cache["min_chars"])
+    policy["enabled"] = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
+    policy["threshold_chars"] = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", str(policy["threshold_chars"])))
+    policy["prompt_cache"]["enabled"] = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
+    policy["prompt_cache"]["min_chars"] = int(
+        os.getenv("AGENTFLOW_PROMPT_CACHE_MIN_CHARS", str(policy["prompt_cache"]["min_chars"]))
+    )
+    return policy, "local-default", str(defaults_path)
+
+
+CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()
+CRUNCH_ENABLED = bool(CRUNCH_POLICY["enabled"])
+CRUNCH_THRESHOLD_CHARS = int(CRUNCH_POLICY["threshold_chars"])
+PROMPT_CACHE_ENABLED = bool(CRUNCH_POLICY["prompt_cache"]["enabled"])
+PROMPT_CACHE_MIN_CHARS = int(CRUNCH_POLICY["prompt_cache"]["min_chars"])
 
 
 def sha256_text(text: str) -> str:
@@ -52,7 +136,12 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     - if extremely large, compress older non-tool text blocks to bounded heads/tails
     """
     if not CRUNCH_ENABLED:
-        return body, {"enabled": False, "changed": False, "policy_source": "local-default"}
+        return body, {
+            "enabled": False,
+            "changed": False,
+            "policy_source": CRUNCH_POLICY_SOURCE,
+            "rule_path": CRUNCH_RULES_PATH,
+        }
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
@@ -145,7 +234,9 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         "duplicate_blocks_replaced": replacements,
         "near_duplicate_blocks_replaced": near_replacements,
         "long_blocks_shortened": shortened,
-        "policy_source": "local-default",
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "threshold_chars": CRUNCH_THRESHOLD_CHARS,
     }
 
 

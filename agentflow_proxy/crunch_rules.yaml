@@ -1,0 +1,5 @@
+enabled: true
+threshold_chars: 24000
+prompt_cache:
+  enabled: true
+  min_chars: 4096

@@ -1,0 +1,6 @@
+exact_cache:
+  enabled: true
+  cache_tool_calls: false
+semantic_cache:
+  enabled: false
+  threshold: 0.95

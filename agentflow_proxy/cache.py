@@ -1,16 +1,99 @@
 from __future__ import annotations
 
 import os
+import yaml
+from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.crunch import sha256_text
 from agentflow_proxy.store import stable_json
 
-CACHE_ENABLED = os.getenv("AGENTFLOW_CACHE", "1") != "0"
-# Avoid caching tool-using agent turns by default. Exact cache can be dangerous when tools reflect filesystem state.
-CACHE_TOOL_CALLS = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
-SEMANTIC_CACHE_ENABLED = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
-SEMANTIC_CACHE_THRESHOLD = float(os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", "0.95"))
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return default
+
+
+def _default_cache_policy() -> dict[str, Any]:
+    return {
+        "exact_cache": {
+            "enabled": True,
+            # Avoid caching tool-using agent turns by default. Exact cache can be dangerous when tools reflect filesystem state.
+            "cache_tool_calls": False,
+        },
+        "semantic_cache": {
+            "enabled": False,
+            "threshold": 0.95,
+        },
+    }
+
+
+def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
+    env_path = os.getenv(env_name)
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.cwd() / "config" / filename)
+    candidates.append(Path.home() / ".agentflow" / filename)
+    return candidates
+
+
+def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    exact = data.get("exact_cache") or {}
+    if isinstance(exact, dict):
+        policy["exact_cache"]["enabled"] = _as_bool(exact.get("enabled"), policy["exact_cache"]["enabled"])
+        policy["exact_cache"]["cache_tool_calls"] = _as_bool(
+            exact.get("cache_tool_calls"),
+            policy["exact_cache"]["cache_tool_calls"],
+        )
+    semantic = data.get("semantic_cache") or {}
+    if isinstance(semantic, dict):
+        policy["semantic_cache"]["enabled"] = _as_bool(
+            semantic.get("enabled"),
+            policy["semantic_cache"]["enabled"],
+        )
+        if semantic.get("threshold") is not None:
+            policy["semantic_cache"]["threshold"] = float(semantic["threshold"])
+    return policy
+
+
+def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
+    for path in _manual_rule_candidates("cache_rules.yaml", "AGENTFLOW_CACHE_RULES"):
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            return _apply_cache_policy_yaml(_default_cache_policy(), data), "local-manual", str(path)
+
+    defaults_path = Path(__file__).parent / "cache_rules.yaml"
+    policy = _default_cache_policy()
+    if defaults_path.exists():
+        with open(defaults_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            policy = _apply_cache_policy_yaml(policy, data)
+    policy["exact_cache"]["enabled"] = os.getenv("AGENTFLOW_CACHE", "1") != "0"
+    policy["exact_cache"]["cache_tool_calls"] = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
+    policy["semantic_cache"]["enabled"] = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
+    policy["semantic_cache"]["threshold"] = float(
+        os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
+    )
+    return policy, "local-default", str(defaults_path)
+
+
+CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH = _load_cache_policy()
+CACHE_ENABLED = bool(CACHE_POLICY["exact_cache"]["enabled"])
+CACHE_TOOL_CALLS = bool(CACHE_POLICY["exact_cache"]["cache_tool_calls"])
+SEMANTIC_CACHE_ENABLED = bool(CACHE_POLICY["semantic_cache"]["enabled"])
+SEMANTIC_CACHE_THRESHOLD = float(CACHE_POLICY["semantic_cache"]["threshold"])
 
 
 def cache_decision_meta(
@@ -31,10 +114,12 @@ def cache_decision_meta(
         "enabled": bool(overall_enabled),
         "status": status,
         "reason": reason,
-        "policy_source": "local-default",
+        "policy_source": CACHE_POLICY_SOURCE,
+        "rule_path": CACHE_RULES_PATH,
         "exact_enabled": bool(exact),
         "semantic_enabled": bool(semantic),
         "tool_cache_enabled": bool(tool_cache),
+        "semantic_threshold": SEMANTIC_CACHE_THRESHOLD,
     }
     if hit_type:
         meta["hit_type"] = hit_type

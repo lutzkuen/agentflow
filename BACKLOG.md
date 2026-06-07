@@ -267,7 +267,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
 
 (Orchestrator appends new opportunities discovered during analysis runs here)
 
-- [READY] Add file-backed crunch and cache rule loaders — architecture priority #2
+- [DONE] Add file-backed crunch and cache rule loaders — architecture priority #2 (2026-06-07)
   Details: Analysis 2026-06-07: no `[READY]` backlog items remained, so the analyzer
   checked current DB traffic and the local policy code. Routing has a YAML loader
   (`agentflow_proxy/routing_rules.yaml` plus `AGENTFLOW_ROUTING_RULES`), but crunch
