@@ -37,7 +37,7 @@ PROVIDER = os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
 ANTHROPIC_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
 OPENAI_UPSTREAM = os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com")
 DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
-DEFAULT_DB = os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
+DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
 DEFAULT_HOST = os.getenv("AGENTFLOW_HOST", "0.0.0.0")
 

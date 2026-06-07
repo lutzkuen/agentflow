@@ -245,6 +245,22 @@ Override:
 export AGENTFLOW_DB="/path/to/agentflow.sqlite3"
 ```
 
+SQLite remains the default because the local proxy must work offline. To use Postgres as the
+durable backend, install the package dependencies and set:
+
+```bash
+export AGENTFLOW_DATABASE_URL="postgresql://agentflow:agentflow@127.0.0.1:5432/agentflow"
+```
+
+When `AGENTFLOW_DATABASE_URL` is set, AgentFlow creates the `cache`, `semantic_cache`,
+`cache_file_deps`, `calls`, `routing_experiments`, and `codex_app_events` tables in Postgres
+and uses a small connection pool. `AGENTFLOW_POSTGRES_POOL_MIN` and
+`AGENTFLOW_POSTGRES_POOL_MAX` control the pool size.
+
+Migration from an existing SQLite DB is deferred: start Postgres with an empty database, or
+export/import rows manually for local experiments. The proxy interface is backend-neutral, so
+adding a first-class migration command can be done without changing request handling.
+
 ## Logging
 
 The proxy logs metadata for every call:
