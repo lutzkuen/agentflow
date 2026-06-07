@@ -43,6 +43,12 @@ def _default_crunch_policy() -> dict[str, Any]:
             "max_summary_chars": 4000,
             "max_source_chars": 80000,
         },
+        "thinking_deduplication": {
+            "enabled": True,
+            "min_chars": 2000,
+            "similarity_threshold": 0.95,
+            "skip_latest_assistant": True,
+        },
     }
 
 
@@ -78,6 +84,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             summary = data.get("old_context_summarization") or {}
             if isinstance(summary, dict):
                 _apply_summary_policy_yaml(policy, summary)
+            thinking_dedup = data.get("thinking_deduplication") or {}
+            if isinstance(thinking_dedup, dict):
+                _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
             return policy, "local-manual", str(path)
 
     defaults_path = Path(__file__).parent / "crunch_rules.yaml"
@@ -100,6 +109,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             summary = data.get("old_context_summarization") or {}
             if isinstance(summary, dict):
                 _apply_summary_policy_yaml(policy, summary)
+            thinking_dedup = data.get("thinking_deduplication") or {}
+            if isinstance(thinking_dedup, dict):
+                _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
     policy["enabled"] = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
     policy["threshold_chars"] = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", str(policy["threshold_chars"])))
     policy["prompt_cache"]["enabled"] = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
@@ -135,6 +147,19 @@ def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) 
             target[key] = int(summary[key])
 
 
+def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: dict[str, Any]) -> None:
+    target = policy["thinking_deduplication"]
+    target["enabled"] = _as_bool(thinking_dedup.get("enabled"), target["enabled"])
+    if thinking_dedup.get("min_chars") is not None:
+        target["min_chars"] = int(thinking_dedup["min_chars"])
+    if thinking_dedup.get("similarity_threshold") is not None:
+        target["similarity_threshold"] = float(thinking_dedup["similarity_threshold"])
+    target["skip_latest_assistant"] = _as_bool(
+        thinking_dedup.get("skip_latest_assistant"),
+        target["skip_latest_assistant"],
+    )
+
+
 CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()
 CRUNCH_ENABLED = bool(CRUNCH_POLICY["enabled"])
 CRUNCH_THRESHOLD_CHARS = int(CRUNCH_POLICY["threshold_chars"])
@@ -149,6 +174,11 @@ OLD_CONTEXT_SUMMARY_MAX_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["max_turns"])
 OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["keep_recent_turns"])
 OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["max_summary_chars"])
 OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["max_source_chars"])
+THINKING_DEDUP_POLICY = CRUNCH_POLICY["thinking_deduplication"]
+THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
+THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
+THINKING_DEDUP_SIMILARITY_THRESHOLD = float(THINKING_DEDUP_POLICY["similarity_threshold"])
+THINKING_DEDUP_SKIP_LATEST_ASSISTANT = bool(THINKING_DEDUP_POLICY["skip_latest_assistant"])
 
 
 def sha256_text(text: str) -> str:
@@ -175,6 +205,75 @@ def build_embedding(text: str) -> list[float]:
     if norm > 0:
         buckets = [x / norm for x in buckets]
     return buckets
+
+
+def _shingles(text: str) -> frozenset:
+    words = text.split()
+    return frozenset(tuple(words[i:i + 4]) for i in range(len(words) - 3))
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    union = len(a | b)
+    if union == 0:
+        return 0.0
+    return len(a & b) / union
+
+
+def _latest_assistant_message_index(messages: list[Any]) -> int | None:
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            return idx
+    return None
+
+
+def _dedupe_thinking_blocks(messages: list[Any]) -> int:
+    if not THINKING_DEDUP_ENABLED:
+        return 0
+
+    latest_assistant_idx = _latest_assistant_message_index(messages)
+    seen_newer: list[tuple[frozenset, int]] = []
+    removed = 0
+
+    for msg_idx in range(len(messages) - 1, -1, -1):
+        msg = messages[msg_idx]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        new_content: list[Any] = []
+        changed = False
+        for block_idx in range(len(content) - 1, -1, -1):
+            block = content[block_idx]
+            remove_block = False
+            if isinstance(block, dict) and block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                thinking = block["thinking"]
+                if len(thinking) >= THINKING_DEDUP_MIN_CHARS:
+                    shingles = _shingles(thinking)
+                    must_preserve = (
+                        THINKING_DEDUP_SKIP_LATEST_ASSISTANT
+                        and latest_assistant_idx is not None
+                        and msg_idx == latest_assistant_idx
+                    )
+                    if not must_preserve and len(content) > 1:
+                        for prev_shingles, _prev_idx in seen_newer:
+                            if _jaccard(shingles, prev_shingles) > THINKING_DEDUP_SIMILARITY_THRESHOLD:
+                                remove_block = True
+                                removed += 1
+                                changed = True
+                                break
+                    if not remove_block:
+                        seen_newer.append((shingles, block_idx))
+            if not remove_block:
+                new_content.append(block)
+
+        if changed:
+            new_content.reverse()
+            msg["content"] = new_content
+
+    return removed
 
 
 def _summary_base_meta(status: str, reason: str) -> dict[str, Any]:
@@ -433,11 +532,8 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     seen_shingles: list[tuple[frozenset, int]] = []
     replacements = 0
     near_replacements = 0
+    thinking_near_replacements = 0
     shortened = 0
-
-    def _shingles(text: str) -> frozenset:
-        words = text.split()
-        return frozenset(tuple(words[i:i + 4]) for i in range(len(words) - 3))
 
     def process_content(content: Any, allow_shorten: bool) -> Any:
         nonlocal replacements, near_replacements, shortened
@@ -452,9 +548,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
                 shingles = _shingles(txt)
                 matched_idx = None
                 for prev_shingles, prev_idx in seen_shingles:
-                    intersection = len(shingles & prev_shingles)
-                    union = len(shingles | prev_shingles)
-                    if union > 0 and intersection / union > 0.85:
+                    if _jaccard(shingles, prev_shingles) > 0.85:
                         matched_idx = prev_idx
                         break
                 if matched_idx is not None:
@@ -503,6 +597,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         allow_shorten = huge and idx < max(0, len(messages) - 4)
         if isinstance(msg, dict) and "content" in msg:
             msg["content"] = process_content(msg["content"], allow_shorten=allow_shorten)
+    thinking_near_replacements = _dedupe_thinking_blocks(messages)
 
     after = len(stable_json(new_body))
     return new_body, {
@@ -517,10 +612,17 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         "crunch_ratio": round((before - after) / before, 4) if before > 0 else 0,
         "duplicate_blocks_replaced": replacements,
         "near_duplicate_blocks_replaced": near_replacements,
+        "thinking_near_duplicate_blocks_removed": thinking_near_replacements,
         "long_blocks_shortened": shortened,
         "policy_source": CRUNCH_POLICY_SOURCE,
         "rule_path": CRUNCH_RULES_PATH,
         "threshold_chars": CRUNCH_THRESHOLD_CHARS,
+        "thinking_deduplication": {
+            "enabled": THINKING_DEDUP_ENABLED,
+            "min_chars": THINKING_DEDUP_MIN_CHARS,
+            "similarity_threshold": THINKING_DEDUP_SIMILARITY_THRESHOLD,
+            "skip_latest_assistant": THINKING_DEDUP_SKIP_LATEST_ASSISTANT,
+        },
     }
 
 

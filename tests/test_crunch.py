@@ -117,6 +117,121 @@ prompt_cache:
             self.assertEqual(meta["long_blocks_shortened"], 1)
             self.assertIn("middle of long older text block omitted", crunched["messages"][0]["content"])
 
+    def test_thinking_near_duplicate_dedup_removes_older_assistant_block(self):
+        manual = importlib.reload(crunch_module)
+        base_words = [f"token{i}" for i in range(520)]
+        newer_words = list(base_words)
+        newer_words[200] = "updated-token"
+        older_thinking = " ".join(base_words)
+        newer_thinking = " ".join(newer_words)
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": older_thinking, "signature": "older-signature"},
+                        {"type": "tool_use", "id": "tool-1", "name": "read", "input": {}},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "ok"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": newer_thinking, "signature": "newer-signature"},
+                        {"type": "tool_use", "id": "tool-2", "name": "read", "input": {}},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-2", "content": "ok"}]},
+            ]
+        }
+
+        crunched, meta = manual.crunch_body(body)
+
+        self.assertTrue(meta["changed"])
+        self.assertGreater(meta["saved_chars"], 2000)
+        self.assertEqual(meta["thinking_near_duplicate_blocks_removed"], 1)
+        self.assertEqual(crunched["messages"][0]["content"], [
+            {"type": "tool_use", "id": "tool-1", "name": "read", "input": {}},
+        ])
+        self.assertEqual(crunched["messages"][2]["content"][0]["thinking"], newer_thinking)
+        self.assertEqual(crunched["messages"][2]["content"][0]["signature"], "newer-signature")
+        self.assertEqual(crunched["messages"][2]["content"][1]["type"], "tool_use")
+
+    def test_thinking_near_duplicate_dedup_preserves_latest_assistant_block(self):
+        manual = importlib.reload(crunch_module)
+        thinking = " ".join(f"token{i}" for i in range(520))
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": thinking, "signature": "older-signature"},
+                        {"type": "text", "text": "older done"},
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": thinking, "signature": "latest-signature"},
+                        {"type": "tool_use", "id": "tool-1", "name": "read", "input": {}},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool-1", "content": "ok"}]},
+            ]
+        }
+
+        crunched, meta = manual.crunch_body(body)
+
+        latest = crunched["messages"][2]["content"][0]
+        self.assertEqual(meta["thinking_near_duplicate_blocks_removed"], 1)
+        self.assertEqual(latest["type"], "thinking")
+        self.assertEqual(latest["thinking"], thinking)
+        self.assertEqual(latest["signature"], "latest-signature")
+        self.assertTrue(meta["thinking_deduplication"]["skip_latest_assistant"])
+
+    def test_config_crunch_rules_can_disable_thinking_dedup_without_env_flags(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+thinking_deduplication:
+  enabled: false
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            thinking = " ".join(f"token{i}" for i in range(520))
+            body = {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": thinking},
+                            {"type": "text", "text": "older"},
+                        ],
+                    },
+                    {"role": "user", "content": "continue"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": thinking},
+                            {"type": "text", "text": "latest"},
+                        ],
+                    },
+                ]
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertFalse(meta["thinking_deduplication"]["enabled"])
+            self.assertEqual(meta["thinking_near_duplicate_blocks_removed"], 0)
+            self.assertEqual(crunched["messages"][0]["content"][0]["type"], "thinking")
+
     def test_old_context_summarization_is_disabled_by_default(self):
         manual = importlib.reload(crunch_module)
         plan, meta = manual.old_context_summary_plan(

@@ -148,8 +148,9 @@ This prototype is deliberately conservative for agent usage:
 
 1. Normalizes whitespace in large text blocks.
 2. Removes exact duplicate large text blocks within the same request.
-3. If the request is very large, shortens older non-tool text blocks by keeping the head and tail.
-4. Never changes `tool_use` or `tool_result` blocks.
+3. Removes older near-duplicate assistant `thinking` blocks while preserving the latest assistant thinking block.
+4. If the request is very large, shortens older non-tool text blocks by keeping the head and tail.
+5. Never changes `tool_use` or `tool_result` blocks.
 
 It does not yet use model-assisted summarization. That should be added later behind a careful fallback/eval path.
 

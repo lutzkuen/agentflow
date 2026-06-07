@@ -12,3 +12,8 @@ old_context_summarization:
   keep_recent_turns: 4
   max_summary_chars: 4000
   max_source_chars: 80000
+thinking_deduplication:
+  enabled: true
+  min_chars: 2000
+  similarity_threshold: 0.95
+  skip_latest_assistant: true
