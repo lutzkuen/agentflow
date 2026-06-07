@@ -386,7 +386,7 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   Metric: 30+ additional calls/day routed to Haiku; monitor error rate and quality signals before
   making permanent.
 
-- [IDEA] Per-session spending summary in daily log output (2026-06-06)
+- [DONE] Per-session spending summary in daily log output (2026-06-07)
   Details: Analysis 2026-06-06: session 360d cost $44 on June 5 (217k tokens saved by prompt cache
   but still expensive). The session cost alert LOG WARNING fires at $5 threshold, but there's no
   end-of-day summary that lists total per-session cost with breakdown (thinking cost, routing
@@ -397,6 +397,10 @@ Statuses: READY | IN-PROGRESS | DONE | BLOCKED | IDEA
   stderr so it's captured by the cron wrapper log.
   Metric: cron log shows per-session cost lines on shutdown; operator can audit cost without
   opening the dashboard.
+  Verified 2026-06-07: startup and shutdown hooks now emit `agentflow_session_summary`
+  stderr lines for the top sessions active in the previous 24h, including cost, baseline
+  savings, routing savings, prompt-cache savings, thinking tokens/cost, and prompt-cache
+  write/read token totals. Unit coverage verifies the per-session cost breakdown.
 
 - [DONE] Strip model-incompatible params when routing Sonnet→Haiku (2026-06-05)
   Details: Analysis 2026-06-05: a Sonnet→Haiku routed code-gen call returned 400

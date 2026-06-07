@@ -10,6 +10,7 @@ import math
 import os
 import random
 import sqlite3
+import sys
 import time
 import uuid
 import zlib
@@ -214,6 +215,110 @@ async def _check_session_cost_alert(sid: str) -> None:
         )
 
 
+def _recent_session_spending_summary(hours: int = 24, limit: int = 10) -> list[dict[str, Any]]:
+    rows = store.conn.execute("""
+        SELECT session_id,
+               coalesce(provider, 'anthropic') as provider,
+               requested_model,
+               routed_model,
+               coalesce(routed_model, requested_model) as model,
+               COUNT(*) as calls,
+               SUM(coalesce(cost_est_usd, 0)) as cost_usd,
+               SUM(coalesce(cost_baseline_usd, 0)) as baseline_usd,
+               SUM(coalesce(actual_input_tokens, input_tokens_est, 0)) as input_tokens,
+               SUM(coalesce(actual_output_tokens, output_tokens_est, 0)) as output_tokens,
+               SUM(coalesce(thinking_output_tokens, 0)) as thinking_tokens,
+               SUM(coalesce(cache_creation_input_tokens, 0)) as cache_creation_tokens,
+               SUM(coalesce(cache_read_input_tokens, 0)) as cache_read_tokens
+        FROM calls
+        WHERE datetime(created_at) >= datetime('now', ?)
+          AND session_id IS NOT NULL
+        GROUP BY session_id,
+                 coalesce(provider, 'anthropic'),
+                 requested_model,
+                 routed_model
+    """, (f"-{int(hours)} hours",)).fetchall()
+
+    by_session: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        session_id = row["session_id"]
+        bucket = by_session.setdefault(
+            session_id,
+            {
+                "session_id": session_id,
+                "sid": session_id[:8],
+                "calls": 0,
+                "cost_usd": 0.0,
+                "baseline_savings_usd": 0.0,
+                "routing_savings_usd": 0.0,
+                "prompt_cache_savings_usd": 0.0,
+                "thinking_tokens": 0,
+                "thinking_cost_usd": 0.0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+            },
+        )
+        calls = int(row["calls"] or 0)
+        cost = float(row["cost_usd"] or 0.0)
+        baseline = float(row["baseline_usd"] or 0.0)
+        provider = str(row["provider"] or "anthropic").lower()
+        requested_model = row["requested_model"]
+        routed_model = row["routed_model"]
+        model = row["model"]
+        input_tokens = int(row["input_tokens"] or 0)
+        output_tokens = int(row["output_tokens"] or 0)
+        thinking_tokens = int(row["thinking_tokens"] or 0)
+        cache_creation_tokens = int(row["cache_creation_tokens"] or 0)
+        cache_read_tokens = int(row["cache_read_tokens"] or 0)
+
+        bucket["calls"] += calls
+        bucket["cost_usd"] += cost
+        bucket["baseline_savings_usd"] += max(baseline - cost, 0.0)
+        bucket["thinking_tokens"] += thinking_tokens
+        bucket["cache_creation_tokens"] += cache_creation_tokens
+        bucket["cache_read_tokens"] += cache_read_tokens
+
+        if requested_model and routed_model and requested_model != routed_model:
+            requested_cost = estimate_cost(requested_model, input_tokens, output_tokens, provider=provider) or 0.0
+            routed_cost = estimate_cost(routed_model, input_tokens, output_tokens, provider=provider) or 0.0
+            bucket["routing_savings_usd"] += max(requested_cost - routed_cost, 0.0)
+        if cache_read_tokens:
+            full_read_cost = estimate_cost(model, cache_read_tokens, 0, provider=provider) or 0.0
+            bucket["prompt_cache_savings_usd"] += 0.90 * full_read_cost
+        if thinking_tokens:
+            bucket["thinking_cost_usd"] += estimate_cost(model, 0, thinking_tokens, provider=provider) or 0.0
+
+    summaries = sorted(by_session.values(), key=lambda r: r["cost_usd"], reverse=True)[:limit]
+    for row in summaries:
+        for key in (
+            "cost_usd",
+            "baseline_savings_usd",
+            "routing_savings_usd",
+            "prompt_cache_savings_usd",
+            "thinking_cost_usd",
+        ):
+            row[key] = round(float(row[key]), 6)
+    return summaries
+
+
+def _log_recent_session_spending_summary(event: str, hours: int = 24, limit: int = 10) -> None:
+    rows = _recent_session_spending_summary(hours=hours, limit=limit)
+    if not rows:
+        print(f"agentflow_session_summary event={event} window={hours}h sessions=0", file=sys.stderr)
+        return
+    for row in rows:
+        print(
+            "agentflow_session_summary "
+            f"event={event} window={hours}h session={row['sid']} calls={row['calls']} "
+            f"cost_usd={row['cost_usd']:.4f} baseline_savings_usd={row['baseline_savings_usd']:.4f} "
+            f"routing_savings_usd={row['routing_savings_usd']:.4f} "
+            f"prompt_cache_savings_usd={row['prompt_cache_savings_usd']:.4f} "
+            f"thinking_tokens={row['thinking_tokens']} thinking_cost_usd={row['thinking_cost_usd']:.4f} "
+            f"cache_creation_tokens={row['cache_creation_tokens']} cache_read_tokens={row['cache_read_tokens']}",
+            file=sys.stderr,
+        )
+
+
 from agentflow_proxy.store import Store, utc_now, stable_json
 from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_blended_input_savings, estimate_cost
 from agentflow_proxy.router import (
@@ -234,6 +339,16 @@ from agentflow_proxy.cache import (
 
 store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
+
+
+@app.on_event("startup")
+async def _log_startup_session_spending_summary() -> None:
+    _log_recent_session_spending_summary("startup")
+
+
+@app.on_event("shutdown")
+async def _log_shutdown_session_spending_summary() -> None:
+    _log_recent_session_spending_summary("shutdown")
 
 
 def configure_provider(

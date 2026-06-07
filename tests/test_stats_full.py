@@ -201,6 +201,52 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(session["cache_warmup_payback_ratio"], 0.139)
         json.dumps(result)
 
+    def test_recent_session_spending_summary_breaks_down_cost_drivers(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=1_000,
+            output_tokens_est=100,
+            actual_input_tokens=1_000,
+            actual_output_tokens=100,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.01,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({"reason": "test route"}),
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-spending",
+            category="tool-result",
+            cache_creation_input_tokens=500,
+            cache_read_input_tokens=2_000,
+            retry_count=0,
+            thinking_output_tokens=300,
+            provider="anthropic",
+        )
+
+        [summary] = server._recent_session_spending_summary()
+
+        self.assertEqual(summary["session_id"], "session-spending")
+        self.assertEqual(summary["calls"], 1)
+        self.assertEqual(summary["cache_creation_tokens"], 500)
+        self.assertEqual(summary["cache_read_tokens"], 2_000)
+        self.assertEqual(summary["thinking_tokens"], 300)
+        self.assertAlmostEqual(summary["cost_usd"], 0.001, places=6)
+        self.assertAlmostEqual(summary["baseline_savings_usd"], 0.009, places=6)
+        self.assertAlmostEqual(summary["routing_savings_usd"], 0.003, places=6)
+        self.assertAlmostEqual(summary["prompt_cache_savings_usd"], 0.0018, places=6)
+        self.assertAlmostEqual(summary["thinking_cost_usd"], 0.0015, places=6)
+        json.dumps(summary)
+
     def test_sessions_identify_context_plateaus(self):
         text_sizes = [10_000, 10_200, 10_150, 15_000]
         for idx, text_chars in enumerate(text_sizes):
