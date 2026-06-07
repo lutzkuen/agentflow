@@ -50,6 +50,12 @@ Or without editable install:
 pip install -r requirements.txt
 ```
 
+## Test
+
+```bash
+"${AGENTFLOW_TARGET_PYTHON:-python3}" -m unittest discover -s tests
+```
+
 ## Run
 
 Claude / Anthropic mode:
