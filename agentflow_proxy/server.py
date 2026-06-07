@@ -20,7 +20,7 @@ import httpx
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 load_dotenv()
 
@@ -202,7 +202,7 @@ def _log_recent_session_spending_summary(event: str, hours: int = 24, limit: int
 
 from agentflow_proxy.store import Store, utc_now, stable_json
 from agentflow_proxy import provider_handlers
-from agentflow_proxy import stats as stats_views
+from agentflow_proxy.dashboard_app import create_dashboard_router
 from agentflow_proxy.pricing import MODEL_PRICES, MODEL_ALIASES, estimate_blended_input_savings, estimate_cost
 from agentflow_proxy.headers import (
     ClientJsonRequestError,
@@ -267,6 +267,24 @@ _tier_semaphores = _limiter.semaphores
 store = Store(DEFAULT_DB)
 app = FastAPI(title=f"AgentFlow {PROVIDER.title()} Proxy", version="0.1.0")
 _SERVER_CONTEXT = sys.modules[__name__]
+
+
+def _dashboard_limiter_config() -> dict[str, Any]:
+    return {
+        "min_request_interval_ms": MIN_REQUEST_INTERVAL_MS,
+        "max_tier_backoff_wait_s": MAX_TIER_BACKOFF_WAIT,
+        "max_concurrent_per_tier": MAX_CONCURRENT_PER_TIER,
+    }
+
+
+app.include_router(
+    create_dashboard_router(
+        store_obj=lambda: store,
+        default_db=DEFAULT_DB,
+        limiter_status=_tier_backoff_status,
+        limiter_config=_dashboard_limiter_config(),
+    )
+)
 
 
 @app.on_event("startup")
@@ -1648,49 +1666,6 @@ async def openai_uploads_root_passthrough(request: Request) -> Response:
 @app.api_route("/v1/uploads/{rest:path}", methods=["GET", "POST", "DELETE"])
 async def openai_uploads_passthrough(request: Request, rest: str) -> Response:
     return await openai_passthrough(request, f"/v1/uploads/{rest}")
-
-
-@app.get("/agentflow/stats")
-async def stats() -> dict[str, Any]:
-    return await stats_views.stats(store, DEFAULT_DB)
-
-
-@app.get("/agentflow/stats/limiter")
-async def stats_limiter() -> dict[str, Any]:
-    return await stats_views.stats_limiter(
-        store,
-        _tier_backoff_status,
-        {
-            "min_request_interval_ms": MIN_REQUEST_INTERVAL_MS,
-            "max_tier_backoff_wait_s": MAX_TIER_BACKOFF_WAIT,
-            "max_concurrent_per_tier": MAX_CONCURRENT_PER_TIER,
-        },
-    )
-
-
-@app.get("/agentflow/stats/activity")
-async def stats_activity(limit: int = 100) -> dict[str, Any]:
-    return await stats_views.stats_activity(store, limit=limit)
-
-
-@app.get("/agentflow/stats/full")
-async def stats_full() -> dict[str, Any]:
-    return await stats_views.stats_full(store)
-
-
-@app.get("/agentflow/stats/weekly")
-async def stats_weekly() -> dict[str, Any]:
-    return await stats_views.stats_weekly(store)
-
-
-@app.get("/agentflow/stats/sessions")
-async def stats_sessions() -> dict[str, Any]:
-    return await stats_views.stats_sessions(store)
-
-
-@app.get("/agentflow/dashboard", response_class=HTMLResponse)
-async def dashboard() -> str:
-    return stats_views.dashboard_html()
 
 
 def main() -> None:

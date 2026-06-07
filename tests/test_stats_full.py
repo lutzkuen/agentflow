@@ -12,7 +12,9 @@ HAS_RUNTIME_DEPS = all(
 )
 
 if HAS_RUNTIME_DEPS:
-    from agentflow_proxy import server
+    from fastapi.testclient import TestClient
+
+    from agentflow_proxy import server, stats as stats_views
     from agentflow_proxy.store import Store, stable_json, utc_now
 
 
@@ -62,7 +64,7 @@ class StatsFullTest(unittest.TestCase):
             provider="anthropic",
         )
 
-        result = asyncio.run(server.stats_full())
+        result = asyncio.run(stats_views.stats_full(server.store))
         summary = result["summary"]
 
         self.assertAlmostEqual(summary["crunch_savings_usd"], 0.00057, places=6)
@@ -110,7 +112,7 @@ class StatsFullTest(unittest.TestCase):
                 provider="anthropic",
             )
 
-        result = asyncio.run(server.stats_full())
+        result = asyncio.run(stats_views.stats_full(server.store))
         summary = result["summary"]
 
         self.assertEqual(summary["old_context_summary_applied_count"], 2)
@@ -160,7 +162,7 @@ class StatsFullTest(unittest.TestCase):
                 provider="anthropic",
             )
 
-        result = asyncio.run(server.stats_full())
+        result = asyncio.run(stats_views.stats_full(server.store))
         breakdown = {
             (row["status"], row["reason"], row["hit_type"]): row["count"]
             for row in result["cache_decision_breakdown"]
@@ -203,7 +205,7 @@ class StatsFullTest(unittest.TestCase):
                 shadow_response_json=None,
             )
 
-        result = asyncio.run(server.stats_full())
+        result = asyncio.run(stats_views.stats_full(server.store))
         [row] = result["routing_experiment_summary"]
 
         self.assertEqual(result["summary"]["routing_experiment_samples"], 2)
@@ -249,7 +251,7 @@ class StatsFullTest(unittest.TestCase):
             provider="anthropic",
         )
 
-        result = asyncio.run(server.stats_sessions())
+        result = asyncio.run(stats_views.stats_sessions(server.store))
         [session] = result["sessions"]
 
         self.assertEqual(session["session_id"], "session-thinking")
@@ -289,7 +291,7 @@ class StatsFullTest(unittest.TestCase):
             provider="anthropic",
         )
 
-        result = asyncio.run(server.stats_sessions())
+        result = asyncio.run(stats_views.stats_sessions(server.store))
         [session] = result["sessions"]
 
         self.assertEqual(session["session_id"], "session-cache-warmup")
@@ -422,7 +424,7 @@ class StatsFullTest(unittest.TestCase):
             session_id="codex-session",
         )
 
-        result = asyncio.run(server.stats_activity())
+        result = asyncio.run(stats_views.stats_activity(server.store))
         units = {unit["unit_id"]: unit for unit in result["units"]}
         provider = units[f"provider_call:{provider_id}"]
         codex = units[f"codex_turn:{start_id}"]
@@ -462,7 +464,7 @@ class StatsFullTest(unittest.TestCase):
         json.dumps(result)
 
     def test_dashboard_exposes_unified_activity_and_debug_tables(self):
-        html = asyncio.run(server.dashboard())
+        html = stats_views.dashboard_html()
 
         self.assertIn("Unified recent activity", html)
         self.assertIn("id=\"activity-tbody\"", html)
@@ -474,12 +476,18 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("const tabs=['activity','provider','codex'", html)
 
     def test_dashboard_exposes_old_context_summary_card(self):
-        html = asyncio.run(server.dashboard())
+        html = stats_views.dashboard_html()
 
         self.assertIn("Old-context summaries", html)
         self.assertIn("id=\"c-summary-net\"", html)
         self.assertIn("today_old_context_summary_net_usd", html)
         self.assertIn("today_old_context_summary_cost_usd", html)
+
+    def test_proxy_dashboard_router_uses_current_store(self):
+        response = TestClient(server.app).get("/agentflow/stats")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["calls"], 0)
 
     def test_sessions_identify_context_plateaus(self):
         text_sizes = [10_000, 10_200, 10_150, 15_000]
@@ -515,7 +523,7 @@ class StatsFullTest(unittest.TestCase):
                 provider="anthropic",
             )
 
-        result = asyncio.run(server.stats_sessions())
+        result = asyncio.run(stats_views.stats_sessions(server.store))
         [session] = result["sessions"]
         [plateau] = result["context_plateaus"]
 
@@ -594,7 +602,7 @@ class StatsFullTest(unittest.TestCase):
             provider="anthropic",
         )
 
-        result = asyncio.run(server.stats_limiter())
+        result = asyncio.run(stats_views.stats_limiter(server.store, server._tier_backoff_status, server._dashboard_limiter_config()))
         tiers = {row["tier"]: row for row in result["tiers"]}
 
         self.assertTrue(tiers["haiku"]["active"])
