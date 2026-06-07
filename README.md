@@ -35,26 +35,10 @@ The intended product split is:
 
 See `ARCHITECTURE.md` before making architectural changes.
 
-## Development workflow
-
-The active backlog lives in GitHub Issues. `BACKLOG.md` is retained as historical context.
-
-The unattended orchestrator is GitHub-centered:
-
-1. If an open PR exists, the next run reviews that PR first.
-2. If the PR aligns with the architecture and verification passes, the run merges it on GitHub,
-   pulls the merged commit locally, and deploys prod.
-3. If no PR is open, the run picks an open issue, implements it on an isolated branch, pushes
-   the branch, opens a PR, and requests Codex cloud review with `@codex review`.
-
-Codex cloud code review uses the repository guidance in `AGENTS.md`. Enable it for this repo
-in ChatGPT Codex code review settings, then PR comments containing `@codex review` should
-trigger a GitHub review.
-
 ## Install
 
 ```bash
-cd agentflow_claude_proxy
+cd agentflow
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -135,18 +119,6 @@ or the safer experimental Codex app-server protocol:
 codex app-server --listen ws://127.0.0.1:4014
 agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1:4014
 printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.0.1:4013 --cd "$PWD"
-```
-
-The unattended orchestrator reads `$REPO/.env`, so put the transport setting there without
-changing the Claude fallback:
-
-```bash
-AGENTFLOW_WORKER=codex
-AGENTFLOW_CODEX_TRANSPORT=app-server
-AGENTFLOW_CODEX_APP_URL=ws://127.0.0.1:4013
-AGENTFLOW_CODEX_APP_AUTO_APPROVE=1
-# Optional. Leave unset to use the app-server account default model.
-AGENTFLOW_CODEX_APP_MODEL=
 ```
 
 This relay is pass-through telemetry first. It records redacted JSON-RPC method names and sizes
