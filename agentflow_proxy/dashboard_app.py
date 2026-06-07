@@ -38,6 +38,10 @@ def create_dashboard_router(
     async def stats_full() -> dict[str, Any]:
         return await stats_views.stats_full(_store(store_obj))
 
+    @router.get("/agentflow/stats/usage")
+    async def stats_usage() -> dict[str, Any]:
+        return await stats_views.stats_usage_by_owner(_store(store_obj))
+
     @router.get("/agentflow/stats/limiter")
     async def stats_limiter() -> dict[str, Any]:
         return await stats_views.stats_limiter(_store(store_obj), limiter_status, limiter_config)

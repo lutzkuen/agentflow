@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -553,6 +554,150 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(result["summary"]["by_source_surface"]["codex_turn"], 1)
         json.dumps(result)
 
+    def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
+        old_engineer = os.environ.get("AGENTFLOW_ENGINEER")
+        old_app = os.environ.get("AGENTFLOW_APP")
+        os.environ["AGENTFLOW_ENGINEER"] = "ada"
+        os.environ["AGENTFLOW_APP"] = "code-workbench"
+        try:
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=20,
+                input_tokens_est=1_000,
+                output_tokens_est=100,
+                actual_input_tokens=1_000,
+                actual_output_tokens=100,
+                cost_est_usd=0.02,
+                cost_baseline_usd=0.025,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"text_chars": 10_000, "category": "tool-result"}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="shared-session",
+                category="tool-result",
+                cache_creation_input_tokens=1_000,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                thinking_output_tokens=200,
+                provider="anthropic",
+            )
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/responses",
+                requested_model="gpt-5-codex",
+                routed_model="gpt-5-codex",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=30,
+                input_tokens_est=2_000,
+                output_tokens_est=300,
+                actual_input_tokens=2_000,
+                actual_output_tokens=300,
+                cost_est_usd=0.03,
+                cost_baseline_usd=0.05,
+                crunch_json=stable_json({"changed": True}),
+                routing_json=stable_json({"text_chars": 8_200, "category": "chat"}),
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="shared-session",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=500,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="openai",
+            )
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id="req-usage",
+                thread_id="thread-usage",
+                message_chars=500,
+                params_chars=50,
+                input_items=2,
+                input_text_chars=321,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="shared-session",
+            )
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="server_to_client",
+                method="turn/completed",
+                request_id="req-usage",
+                thread_id="thread-usage",
+                message_chars=100,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=123,
+                error_code=None,
+                error_message=None,
+                latency_ms=1200,
+                session_id="shared-session",
+            )
+
+            result = asyncio.run(stats_views.stats_usage_by_owner(server.store))
+        finally:
+            if old_engineer is None:
+                os.environ.pop("AGENTFLOW_ENGINEER", None)
+            else:
+                os.environ["AGENTFLOW_ENGINEER"] = old_engineer
+            if old_app is None:
+                os.environ.pop("AGENTFLOW_APP", None)
+            else:
+                os.environ["AGENTFLOW_APP"] = old_app
+
+        self.assertEqual(result["schema"], "agentflow.usage_by_owner.v1")
+        self.assertEqual(result["summary"]["buckets"], 1)
+        self.assertTrue(result["summary"]["codex_cost_unknown"])
+        [bucket] = result["buckets"]
+
+        self.assertEqual(bucket["bucket_kind"], "engineer_app")
+        self.assertEqual(bucket["bucket_label"], "ada / code-workbench")
+        self.assertEqual(bucket["provider_calls"], 2)
+        self.assertEqual(bucket["codex_turns"], 1)
+        self.assertEqual(bucket["turns"], 3)
+        self.assertEqual(bucket["provider_input_tokens"], 4_500)
+        self.assertEqual(bucket["provider_output_tokens"], 400)
+        self.assertEqual(bucket["provider_total_tokens"], 4_900)
+        self.assertEqual(bucket["codex_input_text_chars"], 321)
+        self.assertEqual(bucket["codex_result_chars"], 123)
+        self.assertTrue(bucket["provider_cost_known"])
+        self.assertFalse(bucket["codex_cost_known"])
+        self.assertTrue(bucket["excludes_unknown_codex_app_cost"])
+        self.assertEqual(bucket["cost_basis"], "provider-known; codex-telemetry-cost-unknown")
+        self.assertAlmostEqual(bucket["spend_usd"], 0.05, places=6)
+        self.assertAlmostEqual(bucket["captured_savings_usd"], 0.025, places=6)
+        self.assertAlmostEqual(bucket["hard_floor_usd"], 0.05, places=6)
+        self.assertEqual(bucket["thinking_tokens"], 200)
+        self.assertEqual(bucket["large_tool_result_calls"], 1)
+        self.assertGreater(bucket["potential_hint_count"], 0)
+        hint_codes = {hint["code"] for hint in bucket["remaining_saving_potential_hints"]}
+        self.assertIn("thinking_output", hint_codes)
+        self.assertIn("cache_warmup", hint_codes)
+        self.assertIn("large_tool_result_context", hint_codes)
+        self.assertFalse(result["grouping"]["raw_prompt_logging"])
+        json.dumps(result)
+
     def test_dashboard_exposes_unified_recent_calls_table(self):
         html = stats_views.dashboard_html()
 
@@ -568,7 +713,18 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['activity','weekly','categories','cache','limiter','sessions']", html)
+        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','limiter','sessions']", html)
+
+    def test_dashboard_exposes_usage_by_app_engineer_table(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn(">Usage by app / engineer</button>", html)
+        self.assertIn("<h2>Usage by app / engineer</h2>", html)
+        self.assertIn("id=\"usage-tbody\"", html)
+        self.assertIn("fetch('/agentflow/stats/usage')", html)
+        self.assertIn("<th>Bucket</th><th>Turns</th><th>Provider calls</th><th>Codex turns</th>", html)
+        self.assertIn("Remaining saving potential", html)
+        self.assertIn("Codex cost unknown", html)
 
     def test_dashboard_exposes_executive_summary_cards(self):
         html = stats_views.dashboard_html()

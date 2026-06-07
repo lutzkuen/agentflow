@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from typing import Any, Optional
 
@@ -45,6 +46,108 @@ def _app_family_for_call(provider: str, requested_model: Any, path: str) -> str:
     if provider_l == "openai":
         return "generic_openai"
     return "unknown"
+
+
+def _as_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_float(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _usage_bucket_identity(app_family: str, session_id: Any) -> dict[str, Any]:
+    engineer = os.getenv("AGENTFLOW_ENGINEER") or None
+    app = os.getenv("AGENTFLOW_APP") or app_family or "unknown"
+    session = str(session_id or "")
+    sid = session[:8] if session else None
+    if engineer:
+        bucket_id = f"engineer:{engineer}|app:{app}"
+        label = f"{engineer} / {app}"
+        bucket_kind = "engineer_app"
+    elif session:
+        bucket_id = f"app:{app}|session:{session}"
+        label = f"{app} / session {sid}"
+        bucket_kind = "app_session"
+    else:
+        bucket_id = f"app:{app}|session:unknown"
+        label = f"{app} / unknown session"
+        bucket_kind = "app_unknown_session"
+    return {
+        "bucket_id": bucket_id,
+        "bucket_label": label,
+        "bucket_kind": bucket_kind,
+        "engineer": engineer,
+        "app": app,
+        "app_family": app_family or "unknown",
+        "session_id": session or None,
+        "sid": sid,
+        "label_sources": {
+            "engineer": "env:AGENTFLOW_ENGINEER" if engineer else None,
+            "app": "env:AGENTFLOW_APP" if os.getenv("AGENTFLOW_APP") else "inferred_app_family",
+            "session": "stored_session_id" if session else None,
+        },
+    }
+
+
+def _new_usage_bucket(identity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **identity,
+        "provider_calls": 0,
+        "codex_turns": 0,
+        "turns": 0,
+        "provider_input_tokens": 0,
+        "provider_output_tokens": 0,
+        "provider_total_tokens": 0,
+        "codex_input_text_chars": 0,
+        "codex_result_chars": 0,
+        "spend_usd": 0.0,
+        "baseline_provider_cost_usd": 0.0,
+        "captured_savings_usd": 0.0,
+        "hard_floor_usd": None,
+        "provider_cost_known": False,
+        "codex_cost_known": False,
+        "excludes_unknown_codex_app_cost": False,
+        "optimized_calls": 0,
+        "routed_calls": 0,
+        "crunched_calls": 0,
+        "local_cache_hits": 0,
+        "prompt_cache_read_tokens": 0,
+        "prompt_cache_creation_tokens": 0,
+        "prompt_cache_read_savings_usd": 0.0,
+        "prompt_cache_creation_cost_usd": 0.0,
+        "thinking_tokens": 0,
+        "thinking_cost_usd": 0.0,
+        "errors": 0,
+        "rate_limited": 0,
+        "unrouted_high_cost_calls": 0,
+        "large_tool_result_calls": 0,
+        "context_plateau_pairs": 0,
+        "_prev_text_chars_by_session": {},
+        "_hint_codes": set(),
+        "remaining_saving_potential_hints": [],
+    }
+
+
+def _add_usage_hint(bucket: dict[str, Any], code: str, label: str, detail: str) -> None:
+    if code in bucket["_hint_codes"]:
+        return
+    bucket["_hint_codes"].add(code)
+    bucket["remaining_saving_potential_hints"].append({
+        "code": code,
+        "label": label,
+        "detail": detail,
+    })
 
 
 def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -356,6 +459,272 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
             "by_replayability_level": counts_by("replayability_level"),
         },
         "units": units,
+    }
+
+
+async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
+    conn = store_obj.conn
+    buckets: dict[str, dict[str, Any]] = {}
+
+    def bucket_for(app_family: str, session_id: Any) -> dict[str, Any]:
+        identity = _usage_bucket_identity(app_family, session_id)
+        bucket = buckets.get(identity["bucket_id"])
+        if bucket is None:
+            bucket = _new_usage_bucket(identity)
+            buckets[identity["bucket_id"]] = bucket
+        return bucket
+
+    provider_rows = conn.execute("""
+        select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+               requested_model, routed_model, status_code, input_tokens_est,
+               output_tokens_est, actual_input_tokens, actual_output_tokens,
+               cost_est_usd, cost_baseline_usd, cache_hit, crunch_json,
+               routing_json, cache_json, session_id, category,
+               cache_creation_input_tokens, cache_read_input_tokens,
+               thinking_output_tokens
+        from calls
+        where date(created_at) = date('now')
+        order by coalesce(session_id, ''), created_at
+    """).fetchall()
+
+    min_plateau_chars = 8_000
+    max_plateau_delta_ratio = 0.03
+    high_cost_unrouted_usd = 0.01
+
+    for row in provider_rows:
+        r = dict(row)
+        provider = str(r.get("provider") or "anthropic").lower()
+        requested_model = r.get("requested_model")
+        routed_model = r.get("routed_model")
+        target_model = routed_model or requested_model
+        app_family = _app_family_for_call(provider, requested_model, str(r.get("path") or ""))
+        bucket = bucket_for(app_family, r.get("session_id"))
+        routing = _json_obj(r.get("routing_json"))
+        crunch = _json_obj(r.get("crunch_json"))
+        cache = _json_obj(r.get("cache_json"))
+
+        input_tokens = _as_int(r.get("actual_input_tokens") if r.get("actual_input_tokens") is not None else r.get("input_tokens_est"))
+        output_tokens = _as_int(r.get("actual_output_tokens") if r.get("actual_output_tokens") is not None else r.get("output_tokens_est"))
+        cache_creation_tokens = _as_int(r.get("cache_creation_input_tokens"))
+        cache_read_tokens = _as_int(r.get("cache_read_input_tokens"))
+        provider_input_tokens = input_tokens + cache_creation_tokens + cache_read_tokens
+        cost = _as_float(r.get("cost_est_usd"))
+        baseline = _as_float(r.get("cost_baseline_usd")) or cost
+        status_code = _as_int(r.get("status_code"))
+        category = r.get("category") or routing.get("category") or "unknown"
+        text_chars = _as_int(routing.get("text_chars")) or input_tokens * 4
+        thinking_tokens = _as_int(r.get("thinking_output_tokens"))
+
+        bucket["provider_calls"] += 1
+        bucket["turns"] += 1
+        bucket["provider_input_tokens"] += provider_input_tokens
+        bucket["provider_output_tokens"] += output_tokens
+        bucket["provider_total_tokens"] += provider_input_tokens + output_tokens
+        bucket["spend_usd"] += cost
+        bucket["baseline_provider_cost_usd"] += baseline
+        bucket["captured_savings_usd"] += max(baseline - cost, 0.0)
+        bucket["provider_cost_known"] = True
+        bucket["hard_floor_usd"] = _as_float(bucket["hard_floor_usd"]) + cost
+        bucket["prompt_cache_creation_tokens"] += cache_creation_tokens
+        bucket["prompt_cache_read_tokens"] += cache_read_tokens
+        bucket["thinking_tokens"] += thinking_tokens
+
+        if status_code >= 400:
+            bucket["errors"] += 1
+        if status_code in (429, 529):
+            bucket["rate_limited"] += 1
+        if routed_model and requested_model != routed_model:
+            bucket["routed_calls"] += 1
+        if crunch.get("changed"):
+            bucket["crunched_calls"] += 1
+        if r.get("cache_hit"):
+            bucket["local_cache_hits"] += 1
+        if routed_model and requested_model != routed_model or crunch.get("changed") or r.get("cache_hit") or cache_read_tokens:
+            bucket["optimized_calls"] += 1
+        if (not routed_model or requested_model == routed_model) and cost >= high_cost_unrouted_usd:
+            bucket["unrouted_high_cost_calls"] += 1
+        if category == "tool-result" and text_chars >= min_plateau_chars:
+            bucket["large_tool_result_calls"] += 1
+
+        session_key = str(r.get("session_id") or f"call:{r.get('id')}")
+        prev_text = bucket["_prev_text_chars_by_session"].get(session_key)
+        if (
+            prev_text is not None
+            and prev_text >= min_plateau_chars
+            and text_chars >= min_plateau_chars
+            and abs(text_chars - prev_text) / max(prev_text, 1) <= max_plateau_delta_ratio
+        ):
+            bucket["context_plateau_pairs"] += 1
+        bucket["_prev_text_chars_by_session"][session_key] = text_chars
+
+        if cache_creation_tokens:
+            bucket["prompt_cache_creation_cost_usd"] += estimate_cost(
+                target_model,
+                0,
+                0,
+                cache_creation=cache_creation_tokens,
+                provider=provider,
+            ) or 0.0
+        if cache_read_tokens:
+            full_read_cost = estimate_cost(target_model, cache_read_tokens, 0, provider=provider) or 0.0
+            cached_read_input_tokens = cache_read_tokens if provider == "openai" else 0
+            cached_read_cost = estimate_cost(
+                target_model,
+                cached_read_input_tokens,
+                0,
+                cache_read=cache_read_tokens,
+                provider=provider,
+            ) or 0.0
+            bucket["prompt_cache_read_savings_usd"] += max(full_read_cost - cached_read_cost, 0.0)
+        if thinking_tokens:
+            bucket["thinking_cost_usd"] += estimate_cost(target_model, 0, thinking_tokens, provider=provider) or 0.0
+
+    codex_rows = conn.execute("""
+        select s.id as start_event_id,
+               s.created_at,
+               s.request_id,
+               s.thread_id,
+               s.session_id,
+               s.input_text_chars,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code
+        from codex_app_events s
+        where s.direction = 'client_to_server'
+          and s.method = 'turn/start'
+          and date(s.created_at) = date('now')
+        order by coalesce(s.session_id, ''), s.created_at
+    """).fetchall()
+
+    for row in codex_rows:
+        r = dict(row)
+        bucket = bucket_for("codex", r.get("session_id"))
+        bucket["codex_turns"] += 1
+        bucket["turns"] += 1
+        bucket["codex_input_text_chars"] += _as_int(r.get("input_text_chars"))
+        bucket["codex_result_chars"] += _as_int(r.get("response_result_chars"))
+        bucket["excludes_unknown_codex_app_cost"] = True
+        if r.get("response_error_code") is not None:
+            bucket["errors"] += 1
+
+    rows = []
+    for bucket in buckets.values():
+        if bucket["context_plateau_pairs"]:
+            _add_usage_hint(
+                bucket,
+                "context_plateau",
+                "Repeated context plateau",
+                f"{bucket['context_plateau_pairs']} adjacent large-context turns stayed within 3% size.",
+            )
+        if bucket["thinking_tokens"]:
+            _add_usage_hint(
+                bucket,
+                "thinking_output",
+                "High thinking output",
+                f"{bucket['thinking_tokens']:,} thinking tokens cost about ${bucket['thinking_cost_usd']:.4f}.",
+            )
+        if bucket["prompt_cache_creation_cost_usd"] > bucket["prompt_cache_read_savings_usd"] and bucket["prompt_cache_creation_tokens"]:
+            _add_usage_hint(
+                bucket,
+                "cache_warmup",
+                "Cache warmup not recouped",
+                "Provider prompt-cache writes cost more than reads saved in this bucket today.",
+            )
+        if bucket["unrouted_high_cost_calls"]:
+            _add_usage_hint(
+                bucket,
+                "unrouted_high_cost",
+                "Unrouted high-cost calls",
+                f"{bucket['unrouted_high_cost_calls']} provider calls cost at least ${high_cost_unrouted_usd:.2f} and stayed on the requested model.",
+            )
+        if bucket["large_tool_result_calls"]:
+            _add_usage_hint(
+                bucket,
+                "large_tool_result_context",
+                "Large tool-result context",
+                f"{bucket['large_tool_result_calls']} tool-result turns carried at least {min_plateau_chars:,} chars.",
+            )
+        if bucket["rate_limited"]:
+            _add_usage_hint(
+                bucket,
+                "rate_limited",
+                "Rate-limit pressure",
+                f"{bucket['rate_limited']} turns hit 429/529 responses.",
+            )
+        elif bucket["errors"]:
+            _add_usage_hint(
+                bucket,
+                "errors",
+                "Error signal",
+                f"{bucket['errors']} turns returned errors.",
+            )
+        if bucket["provider_calls"] and not bucket["prompt_cache_read_tokens"] and bucket["provider_input_tokens"] >= 50_000:
+            _add_usage_hint(
+                bucket,
+                "low_prompt_cache_reads",
+                "Low prompt-cache reuse",
+                "High provider input tokens had no prompt-cache reads today.",
+            )
+
+        bucket["spend_usd"] = round(float(bucket["spend_usd"]), 6)
+        bucket["baseline_provider_cost_usd"] = round(float(bucket["baseline_provider_cost_usd"]), 6)
+        bucket["captured_savings_usd"] = round(float(bucket["captured_savings_usd"]), 6)
+        bucket["hard_floor_usd"] = round(float(bucket["hard_floor_usd"]), 6) if bucket["provider_cost_known"] else None
+        bucket["prompt_cache_read_savings_usd"] = round(float(bucket["prompt_cache_read_savings_usd"]), 6)
+        bucket["prompt_cache_creation_cost_usd"] = round(float(bucket["prompt_cache_creation_cost_usd"]), 6)
+        bucket["thinking_cost_usd"] = round(float(bucket["thinking_cost_usd"]), 6)
+        bucket["optimization_rate"] = round(bucket["optimized_calls"] / bucket["provider_calls"], 4) if bucket["provider_calls"] else None
+        bucket["error_rate"] = round(bucket["errors"] / bucket["turns"], 4) if bucket["turns"] else 0.0
+        bucket["potential_hint_count"] = len(bucket["remaining_saving_potential_hints"])
+        bucket["cost_basis"] = (
+            "provider-known; codex-telemetry-cost-unknown"
+            if bucket["codex_turns"] else "provider-known"
+        ) if bucket["provider_calls"] else "codex-telemetry-cost-unknown"
+        bucket.pop("_prev_text_chars_by_session", None)
+        bucket.pop("_hint_codes", None)
+        rows.append(bucket)
+
+    rows.sort(
+        key=lambda row: (
+            row["spend_usd"] if row["provider_cost_known"] else -1.0,
+            row["provider_total_tokens"],
+            row["codex_turns"],
+        ),
+        reverse=True,
+    )
+
+    return {
+        "generated_at": utc_now(),
+        "schema": "agentflow.usage_by_owner.v1",
+        "scope": "today",
+        "grouping": {
+            "priority": ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family", "session_id"],
+            "cost_unknown_for": ["codex_app_events"],
+            "raw_prompt_logging": False,
+        },
+        "summary": {
+            "buckets": len(rows),
+            "provider_calls": sum(row["provider_calls"] for row in rows),
+            "codex_turns": sum(row["codex_turns"] for row in rows),
+            "known_provider_spend_usd": round(sum(row["spend_usd"] for row in rows), 6),
+            "captured_savings_usd": round(sum(row["captured_savings_usd"] for row in rows), 6),
+            "hard_floor_usd": round(sum(row["hard_floor_usd"] or 0.0 for row in rows), 6),
+            "codex_cost_unknown": any(row["codex_turns"] for row in rows),
+        },
+        "buckets": rows,
     }
 
 
@@ -1181,6 +1550,7 @@ def dashboard_html() -> str:
 
 <div class="tabs">
   <button class="tab-btn active" onclick="showTab('activity')">Recent calls</button>
+  <button class="tab-btn" onclick="showTab('usage')">Usage by app / engineer</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
@@ -1197,6 +1567,20 @@ def dashboard_html() -> str:
       <th>Time</th><th>Surface</th><th>Granularity</th><th>App family</th><th>Requested</th><th>Target</th><th>Input</th><th>Output / status</th><th>Latency</th><th>Flags</th>
     </tr></thead>
     <tbody id="activity-tbody"></tbody>
+  </table>
+  </div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-usage">
+<div class="section">
+  <h2>Usage by app / engineer</h2>
+  <div class="table-wrap">
+  <table class="activity-table">
+    <thead><tr>
+      <th>Bucket</th><th>Turns</th><th>Provider calls</th><th>Codex turns</th><th>Tokens</th><th>Spend</th><th>Captured savings</th><th>Hard floor</th><th>Optimized</th><th>Errors</th><th>Remaining saving potential</th><th>Cost basis</th>
+    </tr></thead>
+    <tbody id="usage-tbody"></tbody>
   </table>
   </div>
 </div>
@@ -1360,15 +1744,50 @@ function activityFlags(unit){
   if(category)flags.push(`<span class="badge provider">${esc(category)}</span>`);
   return flags.join(' ')||'<span class="badge miss">observed</span>';
 }
+function usageHints(row){
+  const hints=row.remaining_saving_potential_hints||[];
+  if(!hints.length)return'<span class="badge hit">no obvious signal</span>';
+  return hints.slice(0,3).map(h=>`<span class="badge routed" title="${esc(h.detail)}">${esc(h.label)}</span>`).join(' ');
+}
 
 function showTab(name){
-  const tabs=['activity','weekly','categories','cache','limiter','sessions'];
+  const tabs=['activity','usage','weekly','categories','cache','limiter','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
     b.classList.toggle('active',tabs[i]===name);
   });
+}
+
+async function refreshUsage(){
+  try{
+    const r=await fetch('/agentflow/stats/usage');
+    const d=await r.json();
+    const tb=document.getElementById('usage-tbody');
+    const rows=d.buckets||[];
+    tb.innerHTML=rows.map(row=>{
+      const optimized=row.optimization_rate==null?'—':Math.round(row.optimization_rate*100)+'%';
+      const errors=(row.errors||0)>0
+        ? `<span class="badge err">${row.errors} (${Math.round((row.error_rate||0)*100)}%)</span>`
+        : '<span class="badge hit">0</span>';
+      const codexCost=row.excludes_unknown_codex_app_cost?'<span class="badge miss">Codex cost unknown</span>':'';
+      return `<tr>
+        <td><span class="badge provider">${esc(row.bucket_label)}</span></td>
+        <td>${(row.turns||0).toLocaleString()}</td>
+        <td>${(row.provider_calls||0).toLocaleString()}</td>
+        <td>${(row.codex_turns||0).toLocaleString()}</td>
+        <td class="tokens">${fmtTok(row.provider_total_tokens||0)} provider · ${fmtTok(row.codex_input_text_chars||0)} Codex chars</td>
+        <td class="cost">${row.provider_cost_known?fmt(row.spend_usd||0,5):'—'}</td>
+        <td class="savings">${fmt(row.captured_savings_usd||0,5)}</td>
+        <td class="cost">${row.hard_floor_usd==null?'—':fmt(row.hard_floor_usd,5)}</td>
+        <td class="tokens">${optimized}</td>
+        <td>${errors}</td>
+        <td class="flags">${usageHints(row)}</td>
+        <td class="flags"><span class="badge provider">${esc(row.cost_basis)}</span> ${codexCost}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="12" style="color:#8b949e">No app or engineer usage today</td></tr>';
+  }catch(e){}
 }
 
 async function refreshActivity(){
@@ -1574,6 +1993,7 @@ async function refreshSessions(){
 }
 
 refreshActivity();
+refreshUsage();
 refresh();
 refreshWeekly();
 refreshCategories();
@@ -1581,6 +2001,7 @@ refreshCache();
 refreshLimiter();
 refreshSessions();
 setInterval(refreshActivity,5000);
+setInterval(refreshUsage,30000);
 setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
