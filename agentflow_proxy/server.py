@@ -518,7 +518,11 @@ from agentflow_proxy.cache import (
     streaming_cache_lookup_meta,
     cache_file_dependency_snapshots,
 )
-from agentflow_proxy.errors import upstream_error_text
+from agentflow_proxy.errors import (
+    INTERNAL_PROXY_ERROR_MESSAGE,
+    public_proxy_error_body,
+    upstream_error_text,
+)
 from agentflow_proxy.routing_experiments import (
     ROUTING_EXPERIMENT_MIN_SAMPLES,
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
@@ -633,11 +637,12 @@ async def _fetch_old_context_summary(summary_request: dict[str, Any], headers: d
                     headers=headers,
                     json=summary_request,
                 )
-    except Exception as exc:
+    except Exception:
+        logging.exception("agentflow old-context summary error")
         return {
             "summary": None,
             "summary_status_code": None,
-            "summary_error": repr(exc),
+            "summary_error": INTERNAL_PROXY_ERROR_MESSAGE,
         }
 
     try:
@@ -1169,8 +1174,13 @@ async def messages(request: Request) -> Response:
                     payload = _tier_backoff_payload(exc)
                     yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
                 except Exception as exc:
+                    logging.exception("agentflow anthropic streaming proxy error")
+                    status_code = 500
                     error = repr(exc)
-                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
+                    yield (
+                        "event: error\n"
+                        f"data: {json.dumps(public_proxy_error_body('anthropic', exc))}\n\n"
+                    ).encode("utf-8")
                 finally:
                     latency_ms = int((time.time() - started) * 1000)
                     cost_in = actual_in if actual_in is not None else input_tokens
@@ -1433,6 +1443,7 @@ async def messages(request: Request) -> Response:
             headers=_tier_backoff_headers(exc, routed_model_for_log or ""),
         )
     except Exception as exc:
+        logging.exception("agentflow anthropic proxy error")
         error = repr(exc)
         latency_ms = int((time.time() - started) * 1000)
         store.log_call(
@@ -1445,7 +1456,7 @@ async def messages(request: Request) -> Response:
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
         )
-        return JSONResponse({"type": "error", "error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
+        return JSONResponse(public_proxy_error_body("anthropic", exc), status_code=500)
 
 
 async def openai_optimized(request: Request, path: str) -> Response:
@@ -1574,8 +1585,13 @@ async def openai_optimized(request: Request, path: str) -> Response:
                                     continue
                                 raise
                 except Exception as exc:
+                    logging.exception("agentflow openai streaming proxy error")
+                    status_code = 500
                     error = repr(exc)
-                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n".encode("utf-8")
+                    yield (
+                        "event: error\n"
+                        f"data: {json.dumps(public_proxy_error_body('openai', exc))}\n\n"
+                    ).encode("utf-8")
                 finally:
                     latency_ms = int((time.time() - started) * 1000)
                     cost_in = actual_in if actual_in is not None else input_tokens
@@ -1765,6 +1781,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
             headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))},
         )
     except Exception as exc:
+        logging.exception("agentflow openai proxy error")
         error = repr(exc)
         latency_ms = int((time.time() - started) * 1000)
         store.log_call(
@@ -1777,7 +1794,7 @@ async def openai_optimized(request: Request, path: str) -> Response:
             error=error, request_json=stable_json(raw_body) if LOG_BODIES else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
         )
-        return JSONResponse({"error": {"type": "agentflow_proxy_error", "message": error}}, status_code=500)
+        return JSONResponse(public_proxy_error_body("openai", exc), status_code=500)
 
 
 async def openai_passthrough(request: Request, path: str) -> Response:
@@ -1855,8 +1872,9 @@ async def openai_responses_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         return
     except Exception as exc:
+        logging.exception("agentflow openai websocket proxy error")
         try:
-            await websocket.close(code=1011, reason=str(exc)[:120])
+            await websocket.close(code=1011, reason=INTERNAL_PROXY_ERROR_MESSAGE)
         except Exception:
             pass
 
