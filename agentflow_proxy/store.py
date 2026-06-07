@@ -50,6 +50,16 @@ class Store:
         )
         """)
         cur.execute("""
+        create table if not exists cache_file_deps (
+          cache_key text not null,
+          path text not null,
+          exists_flag integer not null,
+          mtime_ns integer,
+          size integer,
+          primary key(cache_key, path)
+        )
+        """)
+        cur.execute("""
         create table if not exists calls (
           id text primary key,
           created_at text not null,
@@ -142,18 +152,67 @@ class Store:
             self.conn.execute(f"alter table {table} add column {column} {definition}")
 
     def get_cache(self, key: str) -> Optional[dict[str, Any]]:
+        if self._cache_file_deps_changed(key):
+            self.delete_cache(key)
+            return None
         row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
         if not row:
             return None
         return json.loads(row["response_json"])
 
-    def set_cache(self, key: str, model: str, request_chars: int, response: dict[str, Any]) -> None:
+    def set_cache(
+        self,
+        key: str,
+        model: str,
+        request_chars: int,
+        response: dict[str, Any],
+        file_deps: list[dict[str, Any]] | None = None,
+    ) -> None:
         response_json = stable_json(response)
         self.conn.execute(
             "insert or replace into cache(cache_key, created_at, model, response_json, request_chars, response_chars) values (?, ?, ?, ?, ?, ?)",
             (key, utc_now(), model, response_json, request_chars, len(response_json)),
         )
+        self.conn.execute("delete from cache_file_deps where cache_key = ?", (key,))
+        for dep in file_deps or []:
+            path = dep.get("path")
+            if not path:
+                continue
+            self.conn.execute(
+                "insert or replace into cache_file_deps(cache_key, path, exists_flag, mtime_ns, size) values (?, ?, ?, ?, ?)",
+                (
+                    key,
+                    str(path),
+                    1 if dep.get("exists") else 0,
+                    dep.get("mtime_ns"),
+                    dep.get("size"),
+                ),
+            )
         self.conn.commit()
+
+    def delete_cache(self, key: str) -> None:
+        self.conn.execute("delete from cache where cache_key = ?", (key,))
+        self.conn.execute("delete from cache_file_deps where cache_key = ?", (key,))
+        self.conn.commit()
+
+    def _cache_file_deps_changed(self, key: str) -> bool:
+        rows = self.conn.execute(
+            "select path, exists_flag, mtime_ns, size from cache_file_deps where cache_key = ?",
+            (key,),
+        ).fetchall()
+        for row in rows:
+            path = Path(row["path"])
+            try:
+                stat = path.stat()
+                exists = path.is_file()
+            except OSError:
+                stat = None
+                exists = False
+            if bool(row["exists_flag"]) != bool(exists):
+                return True
+            if exists and (row["mtime_ns"] != stat.st_mtime_ns or row["size"] != stat.st_size):
+                return True
+        return False
 
     def get_semantic_cache(self, embedding: list[float], model: str, threshold: float) -> Optional[dict[str, Any]]:
         rows = self.conn.execute(

@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import agentflow_proxy.cache as cache_module
+from agentflow_proxy.store import Store
 
 
 class CacheDecisionMetaTest(unittest.TestCase):
@@ -18,6 +19,9 @@ class CacheDecisionMetaTest(unittest.TestCase):
         "AGENTFLOW_ANTHROPIC_UPSTREAM",
         "AGENTFLOW_OPENAI_UPSTREAM",
         "AGENTFLOW_CACHE_NAMESPACE",
+        "AGENTFLOW_CACHE_FILE_WATCH",
+        "AGENTFLOW_CACHE_WATCH_ROOT",
+        "AGENTFLOW_CACHE_WATCH_MAX_PATHS",
         "HOME",
     )
 
@@ -192,6 +196,82 @@ semantic_cache:
             self.assertEqual(meta["reason"], "exact-miss")
             self.assertEqual(meta["policy_source"], "local-manual")
             self.assertTrue(meta["tool_cache_enabled"])
+            self.assertTrue(meta["file_watch_enabled"])
+
+    def test_file_dependency_snapshots_capture_paths_under_watch_root(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('hello')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            snapshots = cache_module.cache_file_dependency_snapshots({
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Read src/example.py:12 and ./missing.txt. Ignore https://example.com/a.py",
+                    }
+                ]
+            })
+
+            by_name = {Path(item["path"]).name: item for item in snapshots}
+            self.assertEqual(by_name["example.py"]["exists"], True)
+            self.assertEqual(by_name["example.py"]["size"], watched.stat().st_size)
+            self.assertEqual(by_name["missing.txt"]["exists"], False)
+            self.assertNotIn("a.py", by_name)
+
+    def test_file_dependency_snapshots_can_be_disabled_by_policy(self):
+        os.environ["AGENTFLOW_CACHE_FILE_WATCH"] = "0"
+        disabled = importlib.reload(cache_module)
+
+        snapshots = disabled.cache_file_dependency_snapshots({
+            "messages": [{"role": "user", "content": "Read agentflow_proxy/cache.py"}]
+        })
+
+        self.assertEqual(snapshots, [])
+
+    def test_exact_cache_entry_is_invalidated_when_watched_file_changes(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('old')\n", encoding="utf-8")
+            body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
+            os.chdir(tmp_path)
+            deps = cache_module.cache_file_dependency_snapshots(body)
+            store = Store(str(tmp_path / "cache.sqlite3"))
+            try:
+                store.set_cache("cache-key", "model", 10, {"content": "old"}, file_deps=deps)
+                self.assertEqual(store.get_cache("cache-key"), {"content": "old"})
+
+                watched.write_text("print('newer content')\n", encoding="utf-8")
+
+                self.assertIsNone(store.get_cache("cache-key"))
+                cache_row = store.conn.execute(
+                    "select 1 from cache where cache_key = ?",
+                    ("cache-key",),
+                ).fetchone()
+                self.assertIsNone(cache_row)
+            finally:
+                store.conn.close()
+
+    def test_exact_cache_entry_is_invalidated_when_missing_file_appears(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            body = {"messages": [{"role": "user", "content": "Read ./missing.txt"}]}
+            os.chdir(tmp_path)
+            deps = cache_module.cache_file_dependency_snapshots(body)
+            store = Store(str(tmp_path / "cache.sqlite3"))
+            try:
+                store.set_cache("cache-key", "model", 10, {"content": "missing"}, file_deps=deps)
+                self.assertEqual(store.get_cache("cache-key"), {"content": "missing"})
+
+                (tmp_path / "missing.txt").write_text("created\n", encoding="utf-8")
+
+                self.assertIsNone(store.get_cache("cache-key"))
+            finally:
+                store.conn.close()
 
     def test_streaming_cache_lookup_is_exact_only_and_skips_tools_by_default(self):
         can_cache, meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=False)

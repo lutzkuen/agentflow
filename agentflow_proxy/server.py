@@ -497,6 +497,7 @@ from agentflow_proxy.cache import (
     cache_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
     is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
     streaming_cache_lookup_meta,
+    cache_file_dependency_snapshots,
 )
 from agentflow_proxy.routing_experiments import (
     ROUTING_EXPERIMENT_MIN_SAMPLES,
@@ -1183,6 +1184,7 @@ async def messages(request: Request) -> Response:
                                 usage=stream_usage,
                                 output_text="".join(output_text_parts),
                             ),
+                            file_deps=cache_file_dependency_snapshots(crunched),
                         )
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
@@ -1325,7 +1327,13 @@ async def messages(request: Request) -> Response:
             return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "text/plain"))
 
         if r.status_code < 400 and can_cache and response_body is not None:
-            store.set_cache(key, str(crunched.get("model")), len(stable_json(crunched)), response_body)
+            store.set_cache(
+                key,
+                str(crunched.get("model")),
+                len(stable_json(crunched)),
+                response_body,
+                file_deps=cache_file_dependency_snapshots(crunched),
+            )
         if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
             store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))
 
@@ -1694,7 +1702,13 @@ async def openai_optimized(request: Request, path: str) -> Response:
             )
 
         if r.status_code < 400 and can_cache and response_body is not None:
-            store.set_cache(key, str(crunched.get("model")), len(stable_json(crunched)), response_body)
+            store.set_cache(
+                key,
+                str(crunched.get("model")),
+                len(stable_json(crunched)),
+                response_body,
+                file_deps=cache_file_dependency_snapshots(crunched),
+            )
         if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
             store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))
 

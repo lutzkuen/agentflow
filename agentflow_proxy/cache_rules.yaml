@@ -4,3 +4,7 @@ exact_cache:
 semantic_cache:
   enabled: false
   threshold: 0.95
+file_watch:
+  enabled: true
+  root: .
+  max_paths: 128

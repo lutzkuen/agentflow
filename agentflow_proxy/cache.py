@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import yaml
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,11 @@ def _default_cache_policy() -> dict[str, Any]:
             "enabled": False,
             "threshold": 0.95,
         },
+        "file_watch": {
+            "enabled": True,
+            "root": ".",
+            "max_paths": 128,
+        },
     }
 
 
@@ -62,6 +68,16 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
         )
         if semantic.get("threshold") is not None:
             policy["semantic_cache"]["threshold"] = float(semantic["threshold"])
+    file_watch = data.get("file_watch") or {}
+    if isinstance(file_watch, dict):
+        policy["file_watch"]["enabled"] = _as_bool(
+            file_watch.get("enabled"),
+            policy["file_watch"]["enabled"],
+        )
+        if file_watch.get("root") is not None:
+            policy["file_watch"]["root"] = str(file_watch["root"])
+        if file_watch.get("max_paths") is not None:
+            policy["file_watch"]["max_paths"] = int(file_watch["max_paths"])
     return policy
 
 
@@ -87,6 +103,17 @@ def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
     policy["semantic_cache"]["threshold"] = float(
         os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
     )
+    policy["file_watch"]["enabled"] = _as_bool(
+        os.getenv("AGENTFLOW_CACHE_FILE_WATCH"),
+        policy["file_watch"]["enabled"],
+    )
+    policy["file_watch"]["root"] = os.getenv(
+        "AGENTFLOW_CACHE_WATCH_ROOT",
+        str(policy["file_watch"]["root"]),
+    )
+    policy["file_watch"]["max_paths"] = int(
+        os.getenv("AGENTFLOW_CACHE_WATCH_MAX_PATHS", str(policy["file_watch"]["max_paths"]))
+    )
     return policy, "local-default", str(defaults_path)
 
 
@@ -95,6 +122,9 @@ CACHE_ENABLED = bool(CACHE_POLICY["exact_cache"]["enabled"])
 CACHE_TOOL_CALLS = bool(CACHE_POLICY["exact_cache"]["cache_tool_calls"])
 SEMANTIC_CACHE_ENABLED = bool(CACHE_POLICY["semantic_cache"]["enabled"])
 SEMANTIC_CACHE_THRESHOLD = float(CACHE_POLICY["semantic_cache"]["threshold"])
+CACHE_FILE_WATCH_ENABLED = bool(CACHE_POLICY["file_watch"]["enabled"])
+CACHE_FILE_WATCH_ROOT = str(CACHE_POLICY["file_watch"]["root"])
+CACHE_FILE_WATCH_MAX_PATHS = int(CACHE_POLICY["file_watch"]["max_paths"])
 
 
 def cache_decision_meta(
@@ -121,10 +151,107 @@ def cache_decision_meta(
         "semantic_enabled": bool(semantic),
         "tool_cache_enabled": bool(tool_cache),
         "semantic_threshold": SEMANTIC_CACHE_THRESHOLD,
+        "file_watch_enabled": CACHE_FILE_WATCH_ENABLED,
     }
     if hit_type:
         meta["hit_type"] = hit_type
     return meta
+
+
+_PATH_TRAILING_JUNK = ".,;:)\\]}>\"'"
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _walk_strings(value: Any) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, str):
+        strings.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            strings.extend(_walk_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            strings.extend(_walk_strings(item))
+    return strings
+
+
+def _candidate_path_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw in re.split(r"\s+", text):
+        token = raw.strip("`'\"(<[{")
+        token = token.rstrip(_PATH_TRAILING_JUNK)
+        if not token or "://" in token or token.startswith("data:"):
+            continue
+        if "\x00" in token or "*" in token or "?" in token:
+            continue
+        if ":" in token and not _WINDOWS_DRIVE_RE.match(token):
+            before, after = token.rsplit(":", 1)
+            if after.isdigit():
+                token = before.rstrip(_PATH_TRAILING_JUNK)
+        if not token:
+            continue
+        path_like = (
+            token.startswith(("/", "./", "../", "~/"))
+            or _WINDOWS_DRIVE_RE.match(token) is not None
+            or "/" in token
+            or "\\" in token
+        )
+        if path_like:
+            tokens.append(token)
+    return tokens
+
+
+def _resolve_under_root(token: str, root: Path) -> Path | None:
+    expanded = Path(token).expanduser()
+    if expanded.is_absolute():
+        resolved = expanded.resolve(strict=False)
+    else:
+        resolved = (root / expanded).resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def cache_file_dependency_snapshots(
+    body: dict[str, Any],
+    *,
+    root: str | Path | None = None,
+    max_paths: int | None = None,
+) -> list[dict[str, Any]]:
+    if not CACHE_FILE_WATCH_ENABLED:
+        return []
+    watch_root = Path(root if root is not None else CACHE_FILE_WATCH_ROOT).expanduser().resolve(strict=False)
+    limit = CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else max_paths
+    paths: dict[str, Path] = {}
+    for text in _walk_strings(body):
+        for token in _candidate_path_tokens(text):
+            resolved = _resolve_under_root(token, watch_root)
+            if resolved is None:
+                continue
+            paths[str(resolved)] = resolved
+            if len(paths) >= limit:
+                break
+        if len(paths) >= limit:
+            break
+
+    snapshots: list[dict[str, Any]] = []
+    for path in sorted(paths):
+        file_path = paths[path]
+        try:
+            stat = file_path.stat()
+            exists = file_path.is_file()
+        except OSError:
+            stat = None
+            exists = False
+        snapshots.append({
+            "path": path,
+            "exists": bool(exists),
+            "mtime_ns": int(stat.st_mtime_ns) if stat and exists else None,
+            "size": int(stat.st_size) if stat and exists else None,
+        })
+    return snapshots
 
 
 def cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, bool, dict[str, Any]]:
