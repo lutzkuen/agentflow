@@ -82,6 +82,37 @@ class Store:
         self._ensure_column("calls", "thinking_output_tokens", "integer")
         self._ensure_column("calls", "provider", "text")
         cur.execute("""
+        create table if not exists routing_experiments (
+          id text primary key,
+          call_id text not null,
+          created_at text not null,
+          requested_model text not null,
+          routed_model text not null,
+          primary_model text not null,
+          shadow_model text not null,
+          category text,
+          routing_reason text,
+          input_tokens_est integer,
+          primary_status_code integer,
+          shadow_status_code integer,
+          primary_latency_ms integer,
+          shadow_latency_ms integer,
+          primary_output_chars integer,
+          shadow_output_chars integer,
+          primary_output_sha256 text,
+          shadow_output_sha256 text,
+          output_similarity real,
+          passed_threshold integer,
+          primary_cost_est_usd real,
+          shadow_cost_est_usd real,
+          error text,
+          routing_json text,
+          experiment_json text,
+          primary_response_json text,
+          shadow_response_json text
+        )
+        """)
+        cur.execute("""
         create table if not exists codex_app_events (
           id text primary key,
           created_at text not null,
@@ -171,6 +202,24 @@ class Store:
         values = [kwargs.get(c) for c in cols]
         self.conn.execute(
             f"insert into codex_app_events({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+            values,
+        )
+        self.conn.commit()
+
+    def log_routing_experiment(self, **kwargs: Any) -> None:
+        cols = [
+            "id", "call_id", "created_at", "requested_model", "routed_model",
+            "primary_model", "shadow_model", "category", "routing_reason",
+            "input_tokens_est", "primary_status_code", "shadow_status_code",
+            "primary_latency_ms", "shadow_latency_ms", "primary_output_chars",
+            "shadow_output_chars", "primary_output_sha256", "shadow_output_sha256",
+            "output_similarity", "passed_threshold", "primary_cost_est_usd",
+            "shadow_cost_est_usd", "error", "routing_json", "experiment_json",
+            "primary_response_json", "shadow_response_json",
+        ]
+        values = [kwargs.get(c) for c in cols]
+        self.conn.execute(
+            f"insert into routing_experiments({','.join(cols)}) values ({','.join(['?']*len(cols))})",
             values,
         )
         self.conn.commit()

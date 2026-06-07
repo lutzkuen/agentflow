@@ -172,6 +172,31 @@ export AGENTFLOW_SONNET_MODEL="claude-sonnet-4.5"
 export AGENTFLOW_OPUS_MODEL="claude-opus-4.5"
 ```
 
+## Routing experiments
+
+A/B routing experiments are disabled by default because they send an additional shadow
+request to the originally requested model.
+
+To opt in, copy `agentflow_proxy/routing_experiments.yaml` to
+`~/.agentflow/routing_experiments.yaml` or set `AGENTFLOW_ROUTING_EXPERIMENTS` to a local
+YAML file. A minimal policy is:
+
+```yaml
+enabled: true
+sample_rate: 0.05
+categories:
+  - tool-result
+similarity_threshold: 0.86
+store_response_bodies: false
+```
+
+Experiments only sample non-streaming calls that AgentFlow routed down. The normal client
+receives the routed response; AgentFlow sends a shadow request to the original model and
+stores status, latency, output hashes, output similarity, and estimated costs in SQLite.
+`/agentflow/stats/full` exposes `routing_experiment_summary` with average similarity,
+pass rate, and a conservative confidence score by route/category. Response bodies are only
+stored when `store_response_bodies: true` or `AGENTFLOW_LOG_BODIES=1` is enabled.
+
 ## Caching behavior
 
 By default, exact cache is enabled only for non-streaming requests without tool blocks.

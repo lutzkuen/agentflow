@@ -117,6 +117,52 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_routing_experiment_stats_produce_confidence_scores(self):
+        for similarity, passed in ((0.9, 1), (0.7, 0)):
+            server.store.log_routing_experiment(
+                id=str(uuid.uuid4()),
+                call_id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001",
+                primary_model="claude-haiku-4-5-20251001",
+                shadow_model="claude-sonnet-4-6",
+                category="tool-result",
+                routing_reason="tool-result processing turn routed to Haiku",
+                input_tokens_est=100,
+                primary_status_code=200,
+                shadow_status_code=200,
+                primary_latency_ms=50,
+                shadow_latency_ms=75,
+                primary_output_chars=12,
+                shadow_output_chars=14,
+                primary_output_sha256="primary",
+                shadow_output_sha256="shadow",
+                output_similarity=similarity,
+                passed_threshold=passed,
+                primary_cost_est_usd=0.001,
+                shadow_cost_est_usd=0.003,
+                error=None,
+                routing_json=stable_json({"reason": "tool-result processing turn routed to Haiku"}),
+                experiment_json=stable_json({"sampled": True}),
+                primary_response_json=None,
+                shadow_response_json=None,
+            )
+
+        result = asyncio.run(server.stats_full())
+        [row] = result["routing_experiment_summary"]
+
+        self.assertEqual(result["summary"]["routing_experiment_samples"], 2)
+        self.assertEqual(result["summary"]["routing_experiment_compared_samples"], 2)
+        self.assertAlmostEqual(result["summary"]["routing_experiment_avg_similarity"], 0.8, places=6)
+        self.assertEqual(row["samples"], 2)
+        self.assertEqual(row["compared_samples"], 2)
+        self.assertAlmostEqual(row["avg_similarity"], 0.8, places=6)
+        self.assertAlmostEqual(row["pass_rate"], 0.5, places=6)
+        self.assertAlmostEqual(row["confidence_score"], 0.08, places=6)
+        self.assertEqual(row["min_samples_for_confidence"], 20)
+        json.dumps(result["routing_experiment_summary"])
+
     def test_sessions_include_thinking_token_breakdown(self):
         server.store.log_call(
             id=str(uuid.uuid4()),

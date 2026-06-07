@@ -1,0 +1,16 @@
+# AgentFlow default A/B routing experiment policy.
+# Copy to ~/.agentflow/routing_experiments.yaml (or set AGENTFLOW_ROUTING_EXPERIMENTS)
+# to sample routed-down non-streaming calls and compare the cheaper response against
+# the originally requested model.
+#
+# This is disabled by default because it sends an additional shadow request upstream.
+# Response bodies are not stored unless store_response_bodies is explicitly enabled.
+
+enabled: false
+sample_rate: 0.0
+min_text_chars: 0
+max_text_chars: 30000
+categories: []
+similarity_threshold: 0.86
+min_samples_for_confidence: 20
+store_response_bodies: false

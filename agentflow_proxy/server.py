@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import gzip
 import hashlib
 import json
@@ -494,6 +495,12 @@ from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
     cache_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
 )
+from agentflow_proxy.routing_experiments import (
+    ROUTING_EXPERIMENT_MIN_SAMPLES,
+    ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
+    compare_response_outputs,
+    routing_experiment_decision,
+)
 
 
 store = Store(DEFAULT_DB)
@@ -615,6 +622,97 @@ async def _fetch_old_context_summary(summary_request: dict[str, Any], headers: d
     if r.status_code >= 400:
         meta["summary_error"] = stable_json(body)[:500]
     return meta
+
+
+async def _run_anthropic_routing_experiment(
+    *,
+    call_id: str,
+    path: str,
+    headers: dict[str, str],
+    request_body: dict[str, Any],
+    routing_meta: dict[str, Any],
+    experiment_meta: dict[str, Any],
+    primary_response_body: dict[str, Any],
+    primary_status_code: int,
+    primary_latency_ms: int,
+    primary_cost_est_usd: Optional[float],
+    input_tokens_est: int,
+) -> None:
+    experiment_id = str(uuid.uuid4())
+    shadow_model = str(experiment_meta.get("shadow_model") or routing_meta.get("requested_model") or "")
+    primary_model = str(request_body.get("model") or routing_meta.get("routed_model") or "")
+    shadow_body = copy.deepcopy(request_body)
+    shadow_body["model"] = shadow_model
+    shadow_status_code: Optional[int] = None
+    shadow_response_body: Optional[dict[str, Any]] = None
+    shadow_latency_ms: Optional[int] = None
+    shadow_cost: Optional[float] = None
+    error: Optional[str] = None
+
+    shadow_started = time.time()
+    try:
+        async with _tier_semaphores[_model_tier(shadow_model)]:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                await _await_tier_backoff(shadow_model)
+                await _throttle_forward()
+                r = await client.post(ANTHROPIC_UPSTREAM.rstrip("/") + path, headers=headers, json=shadow_body)
+        shadow_latency_ms = int((time.time() - shadow_started) * 1000)
+        shadow_status_code = r.status_code
+        try:
+            shadow_response_body = r.json()
+        except Exception:
+            error = r.text[:1000]
+            shadow_response_body = None
+    except Exception as exc:
+        shadow_latency_ms = int((time.time() - shadow_started) * 1000)
+        error = repr(exc)
+
+    if shadow_response_body is not None:
+        usage = shadow_response_body.get("usage") or {}
+        shadow_in = usage.get("input_tokens")
+        shadow_out = usage.get("output_tokens")
+        cache_creation = usage.get("cache_creation_input_tokens") or 0
+        cache_read = usage.get("cache_read_input_tokens") or 0
+        shadow_out_est = estimate_tokens_from_text(response_output_text(shadow_response_body))
+        shadow_cost = estimate_cost(
+            shadow_model,
+            shadow_in if shadow_in is not None else input_tokens_est,
+            shadow_out if shadow_out is not None else shadow_out_est,
+            cache_creation,
+            cache_read,
+        )
+
+    comparison = compare_response_outputs(primary_response_body, shadow_response_body)
+    store_bodies = LOG_BODIES or ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES
+    store.log_routing_experiment(
+        id=experiment_id,
+        call_id=call_id,
+        created_at=utc_now(),
+        requested_model=routing_meta.get("requested_model"),
+        routed_model=routing_meta.get("routed_model"),
+        primary_model=primary_model,
+        shadow_model=shadow_model,
+        category=routing_meta.get("category"),
+        routing_reason=routing_meta.get("reason"),
+        input_tokens_est=input_tokens_est,
+        primary_status_code=primary_status_code,
+        shadow_status_code=shadow_status_code,
+        primary_latency_ms=primary_latency_ms,
+        shadow_latency_ms=shadow_latency_ms,
+        primary_output_chars=comparison["primary_output_chars"],
+        shadow_output_chars=comparison["shadow_output_chars"],
+        primary_output_sha256=comparison["primary_output_sha256"],
+        shadow_output_sha256=comparison["shadow_output_sha256"],
+        output_similarity=comparison["output_similarity"],
+        passed_threshold=1 if comparison["passed_threshold"] else 0,
+        primary_cost_est_usd=primary_cost_est_usd,
+        shadow_cost_est_usd=shadow_cost,
+        error=error,
+        routing_json=stable_json(routing_meta),
+        experiment_json=stable_json(experiment_meta),
+        primary_response_json=stable_json(primary_response_body) if store_bodies else None,
+        shadow_response_json=stable_json(shadow_response_body) if store_bodies and shadow_response_body is not None else None,
+    )
 
 
 def build_openai_forward_headers(request: Request, *, force_json: bool = True) -> dict[str, str]:
@@ -1114,6 +1212,22 @@ async def messages(request: Request) -> Response:
             cost += summary_extra_cost
         cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
+        experiment_meta = routing_experiment_decision(crunched, routing_meta, stream=False)
+        routing_meta["routing_experiment"] = experiment_meta
+        if experiment_meta.get("sampled") and status_code < 400 and response_body is not None:
+            await _run_anthropic_routing_experiment(
+                call_id=call_id,
+                path=path,
+                headers=headers,
+                request_body=crunched,
+                routing_meta=routing_meta,
+                experiment_meta=experiment_meta,
+                primary_response_body=response_body,
+                primary_status_code=status_code,
+                primary_latency_ms=latency_ms,
+                primary_cost_est_usd=cost,
+                input_tokens_est=input_tokens,
+            )
         store.log_call(
             id=call_id, created_at=utc_now(), path=path,
             requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -1927,6 +2041,60 @@ async def stats_full() -> dict[str, Any]:
         order by count desc
     """)
 
+    routing_experiment_rows = q("""
+        select requested_model,
+               routed_model,
+               coalesce(category, 'unknown') as category,
+               coalesce(routing_reason, 'unknown') as routing_reason,
+               count(*) as samples,
+               sum(case when primary_status_code < 400
+                         and shadow_status_code < 400
+                         and output_similarity is not null
+                        then 1 else 0 end) as compared_samples,
+               avg(case when primary_status_code < 400
+                         and shadow_status_code < 400
+                         and output_similarity is not null
+                        then output_similarity else null end) as avg_similarity,
+               avg(case when primary_status_code < 400
+                         and shadow_status_code < 400
+                         and output_similarity is not null
+                        then passed_threshold else null end) as pass_rate,
+               round(sum(coalesce(primary_cost_est_usd, 0)), 6) as primary_cost_usd,
+               round(sum(coalesce(shadow_cost_est_usd, 0)), 6) as shadow_cost_usd,
+               max(created_at) as last_sample_at
+        from routing_experiments
+        group by requested_model, routed_model, coalesce(category, 'unknown'), coalesce(routing_reason, 'unknown')
+        order by samples desc, last_sample_at desc
+        limit 20
+    """)
+    routing_experiment_summary = []
+    for row in routing_experiment_rows:
+        compared_samples = int(row["compared_samples"] or 0)
+        avg_similarity = row["avg_similarity"]
+        pass_rate = row["pass_rate"]
+        confidence_score = 0.0
+        if avg_similarity is not None and compared_samples > 0:
+            confidence_score = float(avg_similarity) * min(1.0, compared_samples / ROUTING_EXPERIMENT_MIN_SAMPLES)
+        row["compared_samples"] = compared_samples
+        row["avg_similarity"] = round(float(avg_similarity), 6) if avg_similarity is not None else None
+        row["pass_rate"] = round(float(pass_rate), 4) if pass_rate is not None else None
+        row["confidence_score"] = round(confidence_score, 6)
+        row["min_samples_for_confidence"] = ROUTING_EXPERIMENT_MIN_SAMPLES
+        routing_experiment_summary.append(row)
+    routing_experiment_samples = int(s("select count(*) from routing_experiments") or 0)
+    routing_experiment_compared = int(s("""
+        select count(*) from routing_experiments
+        where primary_status_code < 400
+          and shadow_status_code < 400
+          and output_similarity is not null
+    """) or 0)
+    routing_experiment_avg_similarity = s("""
+        select avg(output_similarity) from routing_experiments
+        where primary_status_code < 400
+          and shadow_status_code < 400
+          and output_similarity is not null
+    """)
+
     provider_breakdown = q("""
         select coalesce(provider, 'anthropic') as provider, count(*) as count,
                round(sum(coalesce(cost_est_usd, 0)), 6) as cost_usd,
@@ -1999,11 +2167,18 @@ async def stats_full() -> dict[str, Any]:
             "codex_app_last_event_at": codex_app_last_event_at,
             "codex_app_input_text_chars": codex_app_input_text_chars,
             "codex_app_avg_latency_ms": round(codex_app_avg_latency),
+            "routing_experiment_samples": routing_experiment_samples,
+            "routing_experiment_compared_samples": routing_experiment_compared,
+            "routing_experiment_avg_similarity": (
+                round(float(routing_experiment_avg_similarity), 6)
+                if routing_experiment_avg_similarity is not None else None
+            ),
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
+        "routing_experiment_summary": routing_experiment_summary,
         "provider_breakdown": provider_breakdown,
         "codex_app_methods": codex_app_methods,
         "codex_app_recent": codex_app_recent,
