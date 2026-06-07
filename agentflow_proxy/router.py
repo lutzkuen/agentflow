@@ -174,9 +174,10 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             continue
         if "has_tools" in cond and bool(cond["has_tools"]) != tools:
             continue
-        # absent max_tokens means unconstrained — treat as matching any max_tokens_lte rule
-        if "max_tokens_lte" in cond and max_tokens is not None and not (int(max_tokens) <= int(cond["max_tokens_lte"])):
-            continue
+        # A missing max_tokens value is unknown, not safely bounded.
+        if "max_tokens_lte" in cond:
+            if max_tokens is None or not (int(max_tokens) <= int(cond["max_tokens_lte"])):
+                continue
         if "category" in cond and cond["category"] != category:
             continue
 
