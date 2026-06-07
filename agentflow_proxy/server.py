@@ -495,6 +495,8 @@ from agentflow_proxy.crunch import (
 from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
     cache_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
+    is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
+    streaming_cache_lookup_meta,
 )
 from agentflow_proxy.routing_experiments import (
     ROUTING_EXPERIMENT_MIN_SAMPLES,
@@ -1001,8 +1003,64 @@ async def messages(request: Request) -> Response:
             if "prompt-caching" not in existing:
                 headers["anthropic-beta"] = (existing + ",prompt-caching-2024-07-31" if existing else "prompt-caching-2024-07-31")
 
-        # Streaming is passed through and not cached, but still logged when the stream finishes.
         if stream:
+            has_tool_blocks = has_tools(crunched)
+            can_stream_cache, cache_meta = streaming_cache_lookup_meta(has_tool_blocks)
+            key = cache_key_for(
+                crunched,
+                path,
+                provider="anthropic",
+                upstream=ANTHROPIC_UPSTREAM,
+            )
+            if can_stream_cache:
+                cached = store.get_cache(key)
+                if is_stream_cache_payload(cached, provider="anthropic"):
+                    cached_frames = stream_cache_frames(cached)
+                    cached_usage = cached.get("usage") or {}
+                    cached_output_text = str(cached.get("output_text") or "")
+
+                    async def replay_cached_stream() -> AsyncIterator[bytes]:
+                        try:
+                            for frame in cached_frames:
+                                yield frame
+                        finally:
+                            latency_ms = int((time.time() - started) * 1000)
+                            cached_out = cached_usage.get("output_tokens")
+                            out_tokens = (
+                                int(cached_out)
+                                if isinstance(cached_out, int)
+                                else estimate_tokens_from_text(cached_output_text)
+                            )
+                            cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
+                            store.log_call(
+                                id=call_id, created_at=utc_now(), path=path,
+                                requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
+                                cache_hit=1, status_code=200, latency_ms=latency_ms,
+                                input_tokens_est=input_tokens, output_tokens_est=out_tokens,
+                                actual_input_tokens=None, actual_output_tokens=None,
+                                cost_est_usd=summary_extra_cost, cost_baseline_usd=cost_baseline,
+                                crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+                                cache_json=stable_json(cache_decision_meta(
+                                    "hit",
+                                    "streaming-exact-match",
+                                    hit_type="streaming-exact",
+                                    exact_enabled=can_stream_cache,
+                                    semantic_enabled=False,
+                                )),
+                                error=None, request_json=stable_json(crunched) if LOG_BODIES else None,
+                                response_json=stable_json(cached) if LOG_BODIES else None,
+                                session_id=session_id, category=category,
+                                cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                                retry_count=0,
+                            )
+                            await _check_session_cost_alert(session_id)
+
+                    return StreamingResponse(
+                        replay_cached_stream(),
+                        media_type="text/event-stream",
+                        headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))},
+                    )
+
             async def gen() -> AsyncIterator[bytes]:
                 nonlocal status_code, error
                 actual_in: Optional[int] = None
@@ -1010,6 +1068,8 @@ async def messages(request: Request) -> Response:
                 cache_creation_in: int = 0
                 cache_read_in: int = 0
                 thinking_chars: int = 0
+                stream_frames: list[bytes] = []
+                output_text_parts: list[str] = []
                 sse_frame_buf = b""
                 stream_retry_count = 0
                 stream_net_retries = 0
@@ -1040,6 +1100,8 @@ async def messages(request: Request) -> Response:
                             delta = (data.get("delta") or {})
                             if delta.get("type") == "thinking_delta":
                                 thinking_chars += len(delta.get("thinking") or "")
+                            elif delta.get("type") == "text_delta":
+                                output_text_parts.append(str(delta.get("text") or ""))
 
                 try:
                     async with _tier_semaphores[_model_tier(crunched["model"])]:
@@ -1067,9 +1129,11 @@ async def messages(request: Request) -> Response:
                                             while b"\n\n" in sse_frame_buf:
                                                 frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
                                                 event_bytes = frame + b"\n\n"
+                                                stream_frames.append(event_bytes)
                                                 yield event_bytes
                                                 parse_sse_usage(frame)
                                         if sse_frame_buf:
+                                            stream_frames.append(sse_frame_buf)
                                             yield sse_frame_buf
                                             parse_sse_usage(sse_frame_buf)
                                             sse_frame_buf = b""
@@ -1101,6 +1165,25 @@ async def messages(request: Request) -> Response:
                         print(f"prompt_cache: creation={cache_creation_in} read={cache_read_in}")
                     if status_code >= 400 and error is None:
                         error = f"upstream_error: status={status_code}"
+                    if status_code < 400 and error is None and can_stream_cache and stream_frames:
+                        stream_usage = {
+                            "input_tokens": actual_in,
+                            "output_tokens": actual_out,
+                            "cache_creation_input_tokens": cache_creation_in,
+                            "cache_read_input_tokens": cache_read_in,
+                            "thinking_output_tokens": thinking_chars // TOKEN_CHARS if thinking_chars else None,
+                        }
+                        store.set_cache(
+                            key,
+                            str(crunched.get("model")),
+                            len(stable_json(crunched)),
+                            stream_cache_payload(
+                                stream_frames,
+                                provider="anthropic",
+                                usage=stream_usage,
+                                output_text="".join(output_text_parts),
+                            ),
+                        )
                     store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -1109,7 +1192,7 @@ async def messages(request: Request) -> Response:
                         actual_input_tokens=actual_in, actual_output_tokens=actual_out,
                         cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                         crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                        cache_json=stable_json(cache_decision_meta("skipped", "streaming")),
+                        cache_json=stable_json(cache_meta),
                         error=error, request_json=stable_json(crunched) if LOG_BODIES else None, response_json=None,
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
@@ -1118,7 +1201,11 @@ async def messages(request: Request) -> Response:
                     )
                     await _check_session_cost_alert(session_id)
 
-            return StreamingResponse(gen(), media_type="text/event-stream")
+            return StreamingResponse(
+                gen(),
+                media_type="text/event-stream",
+                headers={"x-agentflow-cache": "miss" if can_stream_cache else "skip-streaming", "x-agentflow-routed-model": str(crunched.get("model"))},
+            )
 
         has_tool_blocks = has_tools(crunched)
         can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)

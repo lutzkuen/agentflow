@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import yaml
 from pathlib import Path
@@ -150,6 +151,61 @@ def cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, bool, dict[str, Any]
         exact_enabled=exact_enabled,
         semantic_enabled=semantic_enabled,
     )
+
+
+def streaming_cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, dict[str, Any]]:
+    exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
+    if exact_enabled:
+        status = "miss"
+        reason = "streaming-exact-miss"
+    elif has_tool_blocks and CACHE_ENABLED:
+        status = "skipped"
+        reason = "streaming-tools-disabled"
+    else:
+        status = "skipped"
+        reason = "streaming-cache-disabled"
+    return exact_enabled, cache_decision_meta(
+        status,
+        reason,
+        enabled=CACHE_ENABLED,
+        exact_enabled=exact_enabled,
+        semantic_enabled=False,
+    )
+
+
+def stream_cache_payload(
+    frames: list[bytes],
+    *,
+    provider: str,
+    usage: dict[str, Any] | None = None,
+    output_text: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "agentflow_cache_type": "sse-stream",
+        "version": 1,
+        "provider": provider,
+        "frames_b64": [base64.b64encode(frame).decode("ascii") for frame in frames],
+        "usage": usage or {},
+        "output_text": output_text or "",
+    }
+
+
+def is_stream_cache_payload(payload: Any, *, provider: str | None = None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("agentflow_cache_type") != "sse-stream":
+        return False
+    if provider is not None and payload.get("provider") != provider:
+        return False
+    return isinstance(payload.get("frames_b64"), list)
+
+
+def stream_cache_frames(payload: dict[str, Any]) -> list[bytes]:
+    frames: list[bytes] = []
+    for item in payload.get("frames_b64") or []:
+        if isinstance(item, str):
+            frames.append(base64.b64decode(item.encode("ascii")))
+    return frames
 
 
 def _default_cache_provider() -> str:

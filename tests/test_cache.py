@@ -193,6 +193,40 @@ semantic_cache:
             self.assertEqual(meta["policy_source"], "local-manual")
             self.assertTrue(meta["tool_cache_enabled"])
 
+    def test_streaming_cache_lookup_is_exact_only_and_skips_tools_by_default(self):
+        can_cache, meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=False)
+
+        self.assertTrue(can_cache)
+        self.assertEqual(meta["status"], "miss")
+        self.assertEqual(meta["reason"], "streaming-exact-miss")
+        self.assertTrue(meta["exact_enabled"])
+        self.assertFalse(meta["semantic_enabled"])
+
+        can_tool_cache, tool_meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=True)
+
+        self.assertFalse(can_tool_cache)
+        self.assertEqual(tool_meta["status"], "skipped")
+        self.assertEqual(tool_meta["reason"], "streaming-tools-disabled")
+
+    def test_stream_cache_payload_round_trips_sse_frames(self):
+        frames = [
+            b'event: message_start\ndata: {"type":"message_start"}\n\n',
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ]
+
+        payload = cache_module.stream_cache_payload(
+            frames,
+            provider="anthropic",
+            usage={"input_tokens": 12, "output_tokens": 3},
+            output_text="hello",
+        )
+
+        self.assertTrue(cache_module.is_stream_cache_payload(payload, provider="anthropic"))
+        self.assertFalse(cache_module.is_stream_cache_payload(payload, provider="openai"))
+        self.assertEqual(cache_module.stream_cache_frames(payload), frames)
+        self.assertEqual(payload["usage"]["input_tokens"], 12)
+        self.assertEqual(payload["output_text"], "hello")
+
 
 if __name__ == "__main__":
     unittest.main()
