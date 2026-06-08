@@ -29,6 +29,8 @@ from agentflow_proxy.codex_app_policy import (
     codex_model_state_signal,
     codex_app_cache_enabled,
     codex_app_optimize_enabled,
+    codex_app_summary_model_hint_enabled,
+    codex_app_summary_model_hint_target,
 )
 from agentflow_proxy.crunch import TOKEN_CHARS, crunch_body, crunch_codex_turn_params
 from agentflow_proxy.recommendations import (
@@ -51,6 +53,8 @@ LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
 DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
 CODEX_APP_OPTIMIZE = codex_app_optimize_enabled()
 CODEX_APP_CACHE = codex_app_cache_enabled()
+CODEX_APP_SUMMARY_MODEL_HINT = codex_app_summary_model_hint_enabled()
+CODEX_APP_SUMMARY_MODEL_HINT_TARGET = codex_app_summary_model_hint_target()
 CODEX_APP_SESSION_COST_ALERT_USD = float(os.getenv(
     "AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD",
     os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"),
@@ -389,7 +393,65 @@ def _model_field(params: dict[str, Any]) -> tuple[str | None, str | None]:
 def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     model_field, requested_model = _model_field(params)
     if not requested_model:
-        return params, _policy_decision("routing", "not-applicable", "codex-turn-start-model-field-absent")
+        meta = _policy_decision(
+            "routing",
+            "skipped" if CODEX_APP_SUMMARY_MODEL_HINT else "not-applicable",
+            "codex-turn-start-model-field-absent",
+        )
+        meta.update({
+            "canary": "codex-app-summary-model-hint",
+            "canary_enabled": bool(CODEX_APP_SUMMARY_MODEL_HINT),
+        })
+        return params, meta
+
+    if CODEX_APP_SUMMARY_MODEL_HINT:
+        target_model = str(CODEX_APP_SUMMARY_MODEL_HINT_TARGET or "").strip()
+        base_meta = _policy_decision("routing", "skipped", "summary-model-hint-not-applied")
+        base_meta.update({
+            "canary": "codex-app-summary-model-hint",
+            "canary_enabled": True,
+            "model_field": model_field,
+            "requested_model": requested_model,
+            "routed_model": requested_model,
+            "target_model": target_model,
+        })
+        if not target_model:
+            base_meta["reason"] = "summary-model-hint-target-absent"
+            return params, base_meta
+        if _contains_action_hint(params):
+            base_meta["reason"] = "action-like-params"
+            return params, base_meta
+        eligible, reason, eligibility_meta = _codex_cache_eligibility(params)
+        base_meta.update({
+            "workflow_phase": eligibility_meta.get("workflow_phase") or "unknown",
+            "workflow_phase_reason": eligibility_meta.get("workflow_phase_reason"),
+        })
+        if eligibility_meta.get("unknown_keys"):
+            base_meta["unknown_keys"] = eligibility_meta["unknown_keys"]
+        if not eligible:
+            base_meta["reason"] = reason
+            return params, base_meta
+        if target_model == requested_model:
+            base_meta["reason"] = "summary-model-hint-target-matches-requested"
+            return params, base_meta
+        routed_params = copy.deepcopy(params)
+        routed_params[model_field] = target_model
+        base_meta.update({
+            "status": "applied",
+            "reason": "safe-summary-model-hint-canary",
+            "routed_model": target_model,
+            "applied": True,
+            "policy_id": "local-codex-app-summary-model-hint-canary",
+            "hint_type": "model",
+            "safety_gates": {
+                "known_model_field": True,
+                "safe_param_shape": True,
+                "text_only_input": True,
+                "action_like_params": False,
+                "workflow_phase": "summary",
+            },
+        })
+        return routed_params, base_meta
 
     route_body = copy.deepcopy(params)
     route_body["model"] = requested_model

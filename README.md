@@ -193,6 +193,8 @@ Status and flush output is metadata-only; queued feedback payload JSON is not pr
 | `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Host for `agentflow-dashboard` |
 | `AGENTFLOW_DASHBOARD_PORT` | `4002` | Port for `agentflow-dashboard` |
 | `AGENTFLOW_CODEX_APP_MODEL` | current bundled default | Model used for Codex app-server token/cost estimates |
+| `AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT` | `0` | Opt into local canary routing for safe Codex app summary turns |
+| `AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET` | `gpt-5-codex` | Target model for the summary-turn model hint canary |
 | `AGENTFLOW_CODEX_APP_CACHE` | `0` | Opt into exact Codex app summary-turn replay for safe, action-free JSON-RPC turns |
 | `AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD` | `AGENTFLOW_SESSION_COST_ALERT_USD` or `5.0` | Log a local warning when one Codex app thread/session crosses a daily estimated spend threshold |
 

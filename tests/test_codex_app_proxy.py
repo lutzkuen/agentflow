@@ -583,6 +583,152 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(metadata["routing"]["status"], "skipped")
         self.assertIn("thinking request", metadata["routing"]["reason"])
 
+    def test_summary_model_hint_canary_routes_safe_summary_turn(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-summary-hint",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-summary-hint",
+                "model": "gpt-5.3-codex",
+                "input": [{"type": "text", "text": "Summarize the completed work for the run log."}],
+                "temperature": 0,
+            },
+        }
+
+        with (
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", True),
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_TARGET", "gpt-5-codex"),
+        ):
+            forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+
+        forwarded_obj = json.loads(forwarded)
+        routing = metadata["routing"]
+        self.assertEqual(forwarded_obj["params"]["model"], "gpt-5-codex")
+        self.assertEqual(routing["status"], "applied")
+        self.assertTrue(routing["applied"])
+        self.assertEqual(routing["reason"], "safe-summary-model-hint-canary")
+        self.assertEqual(routing["requested_model"], "gpt-5.3-codex")
+        self.assertEqual(routing["routed_model"], "gpt-5-codex")
+        self.assertEqual(routing["workflow_phase"], "summary")
+        self.assertEqual(routing["policy_source"], "local-default")
+        self.assertEqual(routing["canary"], "codex-app-summary-model-hint")
+
+    def test_summary_model_hint_canary_skips_uncertain_turns(self):
+        cases = [
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": "turn-tool-execution",
+                    "method": "turn/start",
+                    "params": {
+                        "model": "gpt-5.3-codex",
+                        "input": [{"type": "structured_output", "text": "pytest output"}],
+                    },
+                },
+                "non-text-input",
+            ),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": "turn-unknown-param",
+                    "method": "turn/start",
+                    "params": {
+                        "model": "gpt-5.3-codex",
+                        "input": [{"type": "text", "text": "Summarize the completed work."}],
+                        "unknownFutureParam": True,
+                    },
+                },
+                "unknown-param-shape",
+            ),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": "turn-missing-model",
+                    "method": "turn/start",
+                    "params": {
+                        "input": [{"type": "text", "text": "Summarize the completed work."}],
+                    },
+                },
+                "codex-turn-start-model-field-absent",
+            ),
+        ]
+
+        with (
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", True),
+            patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_TARGET", "gpt-5-codex"),
+        ):
+            for message, reason in cases:
+                raw = json.dumps(message)
+                forwarded, metadata = codex_app_proxy._optimize_client_message(raw)
+                self.assertEqual(json.loads(forwarded), message)
+                self.assertEqual(metadata["routing"]["status"], "skipped")
+                self.assertFalse(metadata["routing"]["applied"])
+                self.assertEqual(metadata["routing"]["reason"], reason)
+                self.assertTrue(metadata["routing"]["canary_enabled"])
+
+        self.assertEqual(metadata["routing"]["canary"], "codex-app-summary-model-hint")
+
+    def test_summary_model_hint_canary_metadata_is_redacted_and_counted(self):
+        secret = "secret summary prompt must stay out of metadata"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-summary-counted",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-summary-counted",
+                "model": "gpt-5.3-codex",
+                "input": [{"type": "text", "text": f"Summarize this result: {secret}"}],
+                "temperature": 0,
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-summary-counted",
+            "result": {"message": "summary complete"},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            request_started: dict = {}
+            try:
+                with (
+                    patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", True),
+                    patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_TARGET", "gpt-5-codex"),
+                    patch.object(codex_app_proxy, "store", test_store),
+                ):
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                    start_event_id = codex_app_proxy._record_message(
+                        forwarded,
+                        direction="client_to_server",
+                        session_id="session-summary-counted",
+                        request_started=request_started,
+                        optimization_metadata=metadata,
+                    )
+                    codex_app_proxy._record_message(
+                        json.dumps(response),
+                        direction="server_to_client",
+                        session_id="session-summary-counted",
+                        request_started=request_started,
+                    )
+
+                row = test_store.conn.execute(
+                    "select routing_json, input_text_chars from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+                stats = asyncio.run(stats_views.stats_codex_effectiveness(test_store, limit=10))
+            finally:
+                test_store.conn.close()
+
+        routing = json.loads(row["routing_json"])
+        self.assertEqual(routing["status"], "applied")
+        self.assertEqual(routing["routed_model"], "gpt-5-codex")
+        self.assertGreater(row["input_text_chars"], 0)
+        self.assertEqual(stats["summary"]["routing_applied"], 1)
+        forbidden = {"prompt", "messages", "content", "raw_request", "raw_response", "params", "transcript", "input"}
+        self.assertTrue(forbidden.isdisjoint(self._keys_in(routing)))
+        self.assertNotIn(secret, json.dumps(routing))
+
     def test_safe_codex_turn_exact_cache_hit_when_enabled(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
             test_store = Store(tmp.name)

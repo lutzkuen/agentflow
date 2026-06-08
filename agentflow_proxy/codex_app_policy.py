@@ -187,6 +187,17 @@ def codex_app_cache_enabled() -> bool:
     return _env_bool("AGENTFLOW_CODEX_APP_CACHE", False)
 
 
+def codex_app_summary_model_hint_enabled() -> bool:
+    return _env_bool("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT", False)
+
+
+def codex_app_summary_model_hint_target() -> str:
+    return os.getenv(
+        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
+        os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_TARGET_MODEL", "gpt-5-codex"),
+    ).strip()
+
+
 def codex_app_cache_namespace() -> str:
     return os.getenv("AGENTFLOW_CODEX_APP_CACHE_NAMESPACE", os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default"))
 
@@ -215,6 +226,8 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
 
     optimize_enabled = codex_app_optimize_enabled()
     cache_enabled = codex_app_cache_enabled()
+    summary_model_hint_enabled = codex_app_summary_model_hint_enabled()
+    summary_model_hint_target = codex_app_summary_model_hint_target()
     upstream = codex_app_upstream()
     namespace = codex_app_cache_namespace()
     return {
@@ -225,13 +238,23 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
         "runtime_flags": {
             "optimization_enabled": optimize_enabled,
             "cache_enabled": cache_enabled,
+            "summary_model_hint_enabled": summary_model_hint_enabled,
         },
         "optimization": {
             "enabled": optimize_enabled,
             "disabled_reason": None if optimize_enabled else "AGENTFLOW_CODEX_APP_OPTIMIZE=0",
             "scope": "metadata-only local JSON-RPC turn optimization",
         },
-        "routing": inherited_sections.get("routing", {}),
+        "routing": {
+            **inherited_sections.get("routing", {}),
+            "summary_model_hint": {
+                "enabled": summary_model_hint_enabled,
+                "target_model": summary_model_hint_target,
+                "scope": "safe summary-phase turn/start frames with text-only input and known model field",
+                "disabled_reason": None if summary_model_hint_enabled else "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT is not 1",
+                "policy_source": "local-default",
+            },
+        },
         "crunch": inherited_sections.get("crunch", {}),
         "cache": {
             **inherited_sections.get("cache", {}),
@@ -252,7 +275,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
             "allowed_key_count": len(CODEX_SAFE_TURN_PARAM_KEYS),
             "model_fields": list(CODEX_MODEL_FIELDS),
             "text_input_types": sorted(CODEX_TEXT_INPUT_TYPES),
-            "unknown_key_behavior": "skip-cache-and-keep-features-only",
+            "unknown_key_behavior": "skip-cache-and-summary-model-hint-and-keep-features-only",
         },
         "action_like_skip_behavior": {
             "enabled": True,
