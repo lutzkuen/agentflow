@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 agentflow-proxy = "agentflow_proxy.cli:proxy_main"
 agentflow-claude-proxy = "agentflow_proxy.cli:proxy_main"
+agentflow-policy-reload = "agentflow_proxy.cli:policy_reload_main"
 agentflow-codex-app-proxy = "agentflow_proxy.codex_app_proxy:main"
 agentflow-codex-app-client = "agentflow_proxy.codex_app_client:main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"

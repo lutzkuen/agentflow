@@ -84,6 +84,16 @@ Stats:
 curl http://127.0.0.1:4000/agentflow/stats | python -m json.tool
 ```
 
+Reload local policy files after editing YAML rules:
+
+```bash
+agentflow-policy-reload | python -m json.tool
+```
+
+The command posts to the proxy's loopback-only admin endpoint at
+`http://127.0.0.1:${AGENTFLOW_PORT:-4000}/agentflow/admin/reload-policies` and prints the
+refreshed `agentflow.policy_reload.v1` JSON. It refuses non-loopback URLs by default.
+
 ## Point Claude Code / Claude CLI at it
 
 The exact environment variable names can differ by Claude Code version, but the intended setup is:
