@@ -1378,6 +1378,19 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("refreshErrors", html)
         self.assertIn("<th>Type</th><th>Status</th><th>Provider</th><th>Tier</th>", html)
 
+    def test_dashboard_coalesces_full_stats_loading(self):
+        html = stats_views.dashboard_html()
+
+        self.assertEqual(html.count("fetch('/agentflow/stats/full')"), 1)
+        self.assertIn("const FULL_STATS_TTL_MS=5000", html)
+        self.assertIn("let fullStatsInFlight=null", html)
+        self.assertIn("if(fullStatsInFlight)return fullStatsInFlight", html)
+        self.assertEqual(html.count("const d=await loadFullStats();"), 4)
+        self.assertIn("async function refresh()", html)
+        self.assertIn("async function refreshCategories()", html)
+        self.assertIn("async function refreshCache()", html)
+        self.assertIn("async function refreshErrors()", html)
+
     def test_proxy_dashboard_router_uses_current_store(self):
         response = TestClient(server.app).get("/agentflow/stats")
 

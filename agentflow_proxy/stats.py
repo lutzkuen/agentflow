@@ -2900,6 +2900,28 @@ function usageHints(row){
   return hints.slice(0,3).map(h=>`<span class="badge routed" title="${esc(h.detail)}">${esc(h.label)}</span>`).join(' ');
 }
 
+const FULL_STATS_TTL_MS=5000;
+let fullStatsCache=null;
+let fullStatsCacheAt=0;
+let fullStatsInFlight=null;
+async function loadFullStats(){
+  const now=Date.now();
+  if(fullStatsCache&&now-fullStatsCacheAt<FULL_STATS_TTL_MS)return fullStatsCache;
+  if(fullStatsInFlight)return fullStatsInFlight;
+  fullStatsInFlight=fetch('/agentflow/stats/full')
+    .then(r=>{
+      if(!r.ok)throw new Error('full stats HTTP '+r.status);
+      return r.json();
+    })
+    .then(d=>{
+      fullStatsCache=d;
+      fullStatsCacheAt=Date.now();
+      return d;
+    })
+    .finally(()=>{fullStatsInFlight=null;});
+  return fullStatsInFlight;
+}
+
 function showTab(name){
   const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','sessions'];
   tabs.forEach(t=>{
@@ -2994,8 +3016,7 @@ async function refreshWeekly(){
 
 async function refresh(){
   try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
+    const d=await loadFullStats();
     const s=d.summary;
     const e=d.executive_summary||{};
     const acct=e.accounting_today||{};
@@ -3034,8 +3055,7 @@ async function refresh(){
 
 async function refreshCategories(){
   try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
+    const d=await loadFullStats();
     const tb=document.getElementById('cat-tbody');
     const rows=d.category_breakdown||[];
     const total=rows.reduce((s,r)=>s+(r.count||0),0)||1;
@@ -3053,8 +3073,7 @@ async function refreshCategories(){
 
 async function refreshCache(){
   try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
+    const d=await loadFullStats();
     const renderRows=(rows)=>rows.map(row=>`<tr>
       <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
       <td><span class="badge ${row.status==='hit'?'hit':row.status==='miss'?'miss':'stream'}">${row.status}</span></td>
@@ -3070,8 +3089,7 @@ async function refreshCache(){
 
 async function refreshErrors(){
   try{
-    const r=await fetch('/agentflow/stats/full');
-    const d=await r.json();
+    const d=await loadFullStats();
     const renderRows=(rows)=>rows.map(row=>`<tr>
       <td><span class="badge err">${esc(row.error_type||'unknown_error')}</span></td>
       <td>${row.status_code>=500?`<span class="badge err">${row.status_code}</span>`:`<span class="badge routed">${row.status_code}</span>`}</td>

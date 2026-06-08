@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import importlib.util
 import os
 from pathlib import Path
@@ -6,11 +7,16 @@ import tempfile
 import unittest
 
 
-HAS_RUNTIME_DEPS = importlib.util.find_spec("fastapi") is not None
+HAS_RUNTIME_DEPS = all(
+    importlib.util.find_spec(module_name) is not None
+    for module_name in ("fastapi", "httpx")
+)
 
 if HAS_RUNTIME_DEPS:
+    import httpx
     from fastapi.testclient import TestClient
 
+    import agentflow_proxy.dashboard_app as dashboard_app
     from agentflow_proxy.dashboard_app import create_dashboard_app
     from agentflow_proxy.store import Store
 
@@ -121,6 +127,58 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_full_stats_endpoint_coalesces_concurrent_requests(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        old_stats_full = dashboard_app.stats_views.stats_full
+        call_count = {"value": 0}
+
+        async def fake_stats_full(store_obj):
+            call_count["value"] += 1
+            await asyncio.sleep(0.05)
+            return {
+                "summary": {"total_calls": call_count["value"]},
+                "generated_by": call_count["value"],
+            }
+
+        dashboard_app.stats_views.stats_full = fake_stats_full
+        try:
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={
+                    "min_request_interval_ms": 0,
+                    "max_tier_backoff_wait_s": 30,
+                    "max_concurrent_per_tier": 2,
+                },
+                full_stats_ttl_s=60,
+            )
+
+            async def exercise():
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    responses = await asyncio.gather(
+                        client.get("/agentflow/stats/full"),
+                        client.get("/agentflow/stats/full"),
+                        client.get("/agentflow/stats/full"),
+                    )
+                    cached = await client.get("/agentflow/stats/full")
+                    return responses, cached
+
+            responses, cached = asyncio.run(exercise())
+
+            self.assertEqual([response.status_code for response in responses], [200, 200, 200])
+            self.assertEqual(cached.status_code, 200)
+            self.assertEqual(call_count["value"], 1)
+            self.assertEqual([response.json()["generated_by"] for response in responses], [1, 1, 1])
+            self.assertEqual(cached.json()["generated_by"], 1)
+        finally:
+            dashboard_app.stats_views.stats_full = old_stats_full
+            store.conn.close()
+            tmp.close()
 
 
 if __name__ == "__main__":

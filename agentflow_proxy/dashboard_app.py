@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import sys
+import time
 from typing import Any, Callable
 
 from fastapi import APIRouter, FastAPI
@@ -17,14 +21,46 @@ def _store(store_source: StoreSource) -> Any:
     return store_source() if callable(store_source) else store_source
 
 
+def _full_stats_ttl_s() -> float:
+    raw = os.getenv("AGENTFLOW_DASHBOARD_FULL_STATS_TTL_SECONDS", "5")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 5.0
+
+
 def create_dashboard_router(
     *,
     store_obj: StoreSource,
     default_db: str,
     limiter_status: LimiterStatus,
     limiter_config: dict[str, Any],
+    full_stats_ttl_s: float | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    stats_ttl_s = _full_stats_ttl_s() if full_stats_ttl_s is None else max(0.0, float(full_stats_ttl_s))
+    full_stats_cache: dict[str, Any] | None = None
+    full_stats_cache_at = 0.0
+    full_stats_task: asyncio.Task[dict[str, Any]] | None = None
+    full_stats_lock = asyncio.Lock()
+
+    async def load_full_stats() -> dict[str, Any]:
+        nonlocal full_stats_cache, full_stats_cache_at
+        result = await stats_views.stats_full(_store(store_obj))
+        full_stats_cache = result
+        full_stats_cache_at = time.monotonic()
+        return result
+
+    def consume_task_exception(task: asyncio.Task[dict[str, Any]]) -> None:
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"agentflow_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
+            return
+        if exc is not None:
+            print(f"agentflow_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
 
     @router.get("/agentflow/stats")
     async def stats() -> dict[str, Any]:
@@ -36,7 +72,27 @@ def create_dashboard_router(
 
     @router.get("/agentflow/stats/full")
     async def stats_full() -> dict[str, Any]:
-        return await stats_views.stats_full(_store(store_obj))
+        nonlocal full_stats_cache, full_stats_cache_at, full_stats_task
+        if stats_ttl_s <= 0:
+            return await stats_views.stats_full(_store(store_obj))
+
+        now = time.monotonic()
+        if full_stats_cache is not None and now - full_stats_cache_at < stats_ttl_s:
+            return full_stats_cache
+
+        async with full_stats_lock:
+            now = time.monotonic()
+            if full_stats_cache is not None and now - full_stats_cache_at < stats_ttl_s:
+                return full_stats_cache
+            if full_stats_task is None or full_stats_task.done():
+                full_stats_task = asyncio.create_task(load_full_stats())
+                full_stats_task.add_done_callback(consume_task_exception)
+            task = full_stats_task
+            stale = full_stats_cache
+
+        if stale is not None:
+            return stale
+        return await task
 
     @router.get("/agentflow/stats/usage")
     async def stats_usage() -> dict[str, Any]:
@@ -76,6 +132,7 @@ def create_dashboard_app(
     upstream: str,
     limiter_status: LimiterStatus,
     limiter_config: dict[str, Any],
+    full_stats_ttl_s: float | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AgentFlow Dashboard", version="0.1.0")
 
@@ -99,6 +156,7 @@ def create_dashboard_app(
             default_db=default_db,
             limiter_status=limiter_status,
             limiter_config=limiter_config,
+            full_stats_ttl_s=full_stats_ttl_s,
         )
     )
     return app
