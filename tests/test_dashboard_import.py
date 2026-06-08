@@ -80,6 +80,10 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(policy_events.json()["events"][0]["action"], "validate")
             policy_json = policies.json()
             self.assertEqual(policy_json["schema"], "agentflow.policy_state.v1")
+            self.assertIn("summary", policy_json)
+            self.assertIn("reload_required", policy_json["summary"])
+            self.assertIn("reload_required_sections", policy_json["summary"])
+            self.assertEqual(policy_json["summary"]["policy_count"], 4)
             self.assertIn("routing", policy_json)
             self.assertIn("crunch", policy_json)
             self.assertIn("cache", policy_json)
@@ -106,6 +110,8 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Policies", dashboard.text)
             self.assertIn("/agentflow/stats/policies", dashboard.text)
             self.assertIn("/agentflow/stats/policy-events", dashboard.text)
+            self.assertIn("Policy reload summary", dashboard.text)
+            self.assertIn("policy-summary-tbody", dashboard.text)
             self.assertIn("Recent policy events", dashboard.text)
         finally:
             if old_event_log is None:

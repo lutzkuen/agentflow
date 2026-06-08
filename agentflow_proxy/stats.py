@@ -32,7 +32,7 @@ def _copy_policy(value: Any) -> Any:
 async def stats_policies() -> dict[str, Any]:
     from agentflow_proxy import cache, crunch, router, routing_experiments
 
-    return {
+    state = {
         "schema": "agentflow.policy_state.v1",
         "routing": {
             "enabled": bool(router.ROUTING_ENABLED),
@@ -109,6 +109,35 @@ async def stats_policies() -> dict[str, Any]:
             "policy": _copy_policy(routing_experiments.ROUTING_EXPERIMENT_POLICY),
         },
     }
+    sections = ("routing", "crunch", "cache", "routing_experiments")
+    reload_required_sections = [
+        section
+        for section in sections
+        if bool((state.get(section, {}).get("file") or {}).get("reload_required"))
+    ]
+    state["summary"] = {
+        "policy_count": len(sections),
+        "loaded_file_count": sum(
+            1
+            for section in sections
+            if bool(
+                (((state.get(section, {}).get("file") or {}).get("loaded") or {}).get("exists"))
+            )
+        ),
+        "manual_policy_count": sum(
+            1
+            for section in sections
+            if state.get(section, {}).get("policy_source") == "local-manual"
+        ),
+        "local_default_policy_count": sum(
+            1
+            for section in sections
+            if state.get(section, {}).get("policy_source") == "local-default"
+        ),
+        "reload_required": bool(reload_required_sections),
+        "reload_required_sections": reload_required_sections,
+    }
+    return state
 
 
 async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
@@ -1970,6 +1999,15 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-policies">
 <div class="section">
+  <h2>Policy reload summary</h2>
+  <table>
+    <thead><tr>
+      <th>Status</th><th>Policies</th><th>Loaded files</th><th>Manual</th><th>Local default</th><th>Reload needed</th>
+    </tr></thead>
+    <tbody id="policy-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Effective policy files</h2>
   <table>
     <thead><tr>
@@ -2340,10 +2378,26 @@ function policyReloadSetting(file){
   if(!file) return '';
   return file.reload_required?'reload required':'loaded';
 }
+function policyReloadBadge(summary){
+  if(summary&&summary.reload_required){
+    return '<span class="badge err">reload required</span>';
+  }
+  return '<span class="badge hit">loaded</span>';
+}
 async function refreshPolicies(){
   try{
     const r=await fetch('/agentflow/stats/policies');
     const d=await r.json();
+    const summary=d.summary||{};
+    const stale=(summary.reload_required_sections||[]).join(', ');
+    document.getElementById('policy-summary-tbody').innerHTML=`<tr>
+      <td>${policyReloadBadge(summary)}</td>
+      <td class="tokens">${summary.policy_count??'—'}</td>
+      <td class="tokens">${summary.loaded_file_count??'—'}</td>
+      <td class="tokens">${summary.manual_policy_count??'—'}</td>
+      <td class="tokens">${summary.local_default_policy_count??'—'}</td>
+      <td class="flags">${stale?`<span class="badge err">${esc(stale)}</span>`:'<span class="badge hit">none</span>'}</td>
+    </tr>`;
     const rows=[
       {
         name:'Routing',

@@ -34,6 +34,9 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertEqual(bundle["generator"]["mode"], "local-offline")
         self.assertFalse(bundle["managed_optimizer"]["enabled"])
         self.assertEqual(bundle["policies"]["schema"], "agentflow.policy_state.v1")
+        self.assertEqual(bundle["policies"]["summary"]["policy_count"], 4)
+        self.assertFalse(bundle["policies"]["summary"]["reload_required"])
+        self.assertEqual(bundle["policies"]["summary"]["reload_required_sections"], [])
         self.assertIn("routing", bundle["policies"])
         self.assertIn("crunch", bundle["policies"])
         self.assertIn("cache", bundle["policies"])
@@ -152,6 +155,9 @@ rules:
                 self.assertEqual(first["routing"]["policy_source"], "local-manual")
                 self.assertEqual(first["routing"]["rule_path"], str(rules_path))
                 self.assertFalse(first["routing"]["file"]["reload_required"])
+                self.assertFalse(first["summary"]["reload_required"])
+                self.assertEqual(first["summary"]["reload_required_sections"], [])
+                self.assertEqual(first["summary"]["manual_policy_count"], 1)
                 self.assertTrue(first["routing"]["file"]["loaded"]["exists"])
                 self.assertIsNotNone(first["routing"]["file"]["loaded"]["size"])
                 self.assertIsNotNone(first["routing"]["file"]["loaded"]["mtime_ns"])
@@ -171,6 +177,8 @@ rules:
 
                 changed = asyncio.run(stats.stats_policies())
                 self.assertTrue(changed["routing"]["file"]["reload_required"])
+                self.assertTrue(changed["summary"]["reload_required"])
+                self.assertEqual(changed["summary"]["reload_required_sections"], ["routing"])
                 self.assertNotEqual(
                     changed["routing"]["file"]["loaded"]["sha256"],
                     changed["routing"]["file"]["current"]["sha256"],
