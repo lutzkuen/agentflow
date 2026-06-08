@@ -220,6 +220,7 @@ class StatsFullTest(unittest.TestCase):
             {"status": "skipped", "reason": "streaming", "policy_source": "local-default"},
             {"status": "skipped", "reason": "streaming", "policy_source": "local-default"},
             {"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            {"status": "miss", "reason": "file-dependency-changed", "policy_source": "local-default"},
             {"status": "hit", "reason": "exact-match", "hit_type": "exact", "policy_source": "local-default"},
         ]
         for cache_json in rows:
@@ -261,6 +262,7 @@ class StatsFullTest(unittest.TestCase):
 
         self.assertEqual(breakdown[("skipped", "streaming", "")], 2)
         self.assertEqual(breakdown[("miss", "exact-miss", "")], 1)
+        self.assertEqual(breakdown[("miss", "file-dependency-changed", "")], 1)
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 

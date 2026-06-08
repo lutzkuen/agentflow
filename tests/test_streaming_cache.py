@@ -208,7 +208,9 @@ class StreamingCacheTest(unittest.TestCase):
                 ).fetchall()
                 self.assertEqual([row["cache_hit"] for row in rows], [0, 1, 0])
                 self.assertEqual(json.loads(rows[1]["cache_json"])["reason"], "streaming-exact-match")
-                self.assertEqual(json.loads(rows[2]["cache_json"])["reason"], "streaming-exact-miss")
+                third_cache = json.loads(rows[2]["cache_json"])
+                self.assertEqual(third_cache["reason"], "file-dependency-changed")
+                self.assertTrue(third_cache["invalidated"])
         finally:
             os.chdir(old_cwd)
             cache_module.CACHE_TOOL_CALLS = old_cache_tool_calls

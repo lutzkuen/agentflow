@@ -432,7 +432,10 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         )
         emb: Optional[list[float]] = None
         if can_cache:
-            cached = context.store.get_cache(key)
+            cached, invalidated_reason = context.store.get_cache_with_reason(key)
+            if invalidated_reason:
+                cache_meta["reason"] = invalidated_reason
+                cache_meta["invalidated"] = True
             if cached is not None:
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(cached))

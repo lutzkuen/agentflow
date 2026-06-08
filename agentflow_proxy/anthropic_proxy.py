@@ -410,7 +410,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 upstream=context.anthropic_upstream,
             )
             if can_stream_cache:
-                cached = context.store.get_cache(key)
+                cached, invalidated_reason = context.store.get_cache_with_reason(key)
+                if invalidated_reason:
+                    cache_meta["reason"] = invalidated_reason
+                    cache_meta["invalidated"] = True
                 if is_stream_cache_payload(cached, provider="anthropic"):
                     cached_frames = stream_cache_frames(cached)
                     cached_usage = cached.get("usage") or {}
@@ -625,7 +628,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         )
         emb: Optional[list[float]] = None
         if can_cache:
-            cached = context.store.get_cache(key)
+            cached, invalidated_reason = context.store.get_cache_with_reason(key)
+            if invalidated_reason:
+                cache_meta["reason"] = invalidated_reason
+                cache_meta["invalidated"] = True
             if cached is not None:
                 cache_hit = True
                 response_body = cached

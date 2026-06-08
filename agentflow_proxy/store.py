@@ -277,15 +277,19 @@ class SQLiteStore:
         if column not in existing:
             self.conn.execute(f"alter table {table} add column {column} {definition}")
 
-    def get_cache(self, key: str) -> Optional[dict[str, Any]]:
+    def get_cache_with_reason(self, key: str) -> tuple[Optional[dict[str, Any]], str | None]:
         with self._lock:
             if self._cache_file_deps_changed(key):
                 self.delete_cache(key)
-                return None
+                return None, "file-dependency-changed"
             row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
             if not row:
-                return None
-            return json.loads(row["response_json"])
+                return None, None
+            return json.loads(row["response_json"]), None
+
+    def get_cache(self, key: str) -> Optional[dict[str, Any]]:
+        response, _reason = self.get_cache_with_reason(key)
+        return response
 
     def set_cache(
         self,

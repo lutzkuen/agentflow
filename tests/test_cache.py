@@ -244,10 +244,15 @@ semantic_cache:
             try:
                 store.set_cache("cache-key", "model", 10, {"content": "old"}, file_deps=deps)
                 self.assertEqual(store.get_cache("cache-key"), {"content": "old"})
+                cached, reason = store.get_cache_with_reason("cache-key")
+                self.assertEqual(cached, {"content": "old"})
+                self.assertIsNone(reason)
 
                 watched.write_text("print('newer content')\n", encoding="utf-8")
 
-                self.assertIsNone(store.get_cache("cache-key"))
+                cached, reason = store.get_cache_with_reason("cache-key")
+                self.assertIsNone(cached)
+                self.assertEqual(reason, "file-dependency-changed")
                 cache_row = store.conn.execute(
                     "select 1 from cache where cache_key = ?",
                     ("cache-key",),
