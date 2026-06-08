@@ -1478,7 +1478,9 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("<h2>Recent calls</h2>", html)
         self.assertIn("id=\"activity-tbody\"", html)
         self.assertIn("fetch('/agentflow/stats/activity?limit=100')", html)
-        self.assertIn("<th>Surface</th><th>Granularity</th><th>App family</th>", html)
+        self.assertIn('<th data-sort-type="text">Surface</th>', html)
+        self.assertIn('<th data-sort-type="text">Granularity</th>', html)
+        self.assertIn('<th data-sort-type="text">App family</th>', html)
         self.assertIn("not provider-replayable", html)
         self.assertIn("Codex estimated from chars", html)
         self.assertNotIn(">Activity</button>", html)
@@ -1495,7 +1497,10 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("<h2>Usage by app / engineer</h2>", html)
         self.assertIn("id=\"usage-tbody\"", html)
         self.assertIn("fetch('/agentflow/stats/usage')", html)
-        self.assertIn("<th>Bucket</th><th>Turns</th><th>Provider calls</th><th>Codex turns</th>", html)
+        self.assertIn('<th data-sort-type="text">Bucket</th>', html)
+        self.assertIn('<th data-sort-type="number">Turns</th>', html)
+        self.assertIn('<th data-sort-type="number">Provider calls</th>', html)
+        self.assertIn('<th data-sort-type="number">Codex turns</th>', html)
         self.assertIn("Remaining saving potential", html)
         self.assertIn("Codex estimated", html)
         self.assertNotIn("Codex cost unknown", html)
@@ -1532,7 +1537,37 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("today_error_breakdown", html)
         self.assertIn("error_breakdown", html)
         self.assertIn("refreshErrors", html)
-        self.assertIn("<th>Type</th><th>Status</th><th>Provider</th><th>Tier</th>", html)
+        self.assertIn('<th data-sort-type="text">Type</th>', html)
+        self.assertIn('<th data-sort-type="number">Status</th>', html)
+        self.assertIn('<th data-sort-type="text">Provider</th>', html)
+        self.assertIn('<th data-sort-type="text">Tier</th>', html)
+
+    def test_dashboard_tables_are_sortable_and_filterable(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn("function initDataTables", html)
+        self.assertIn("function applyDataTableState", html)
+        self.assertIn("function applyAllDataTables", html)
+        self.assertIn("const tableState={}", html)
+        self.assertIn("className='table-filter'", html)
+        self.assertIn("setTableSort(table,index)", html)
+        self.assertIn("data-sort-type=\"money\"", html)
+        self.assertIn("data-sort-type=\"percent\"", html)
+        self.assertIn("data-sort-type=\"latency\"", html)
+        self.assertIn("data-sort-type=\"time\"", html)
+        self.assertIn("No matching rows", html)
+        self.assertIn("applyAllDataTables();", html)
+
+        for table_id in (
+            "activity",
+            "usage",
+            "cache-today",
+            "cache-all",
+            "errors-today",
+            "errors-all",
+            "sessions",
+        ):
+            self.assertIn(f'data-table-id="{table_id}"', html)
 
     def test_dashboard_coalesces_full_stats_loading(self):
         html = stats_views.dashboard_html()

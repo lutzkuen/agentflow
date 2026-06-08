@@ -2874,10 +2874,20 @@ def dashboard_html() -> str:
   .tab-panel.active{display:block}
   .section{padding:0 24px 24px}
   .section h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8b949e;margin-bottom:10px;padding-top:4px}
+  .table-tools{display:flex;gap:8px;align-items:center;margin:0 0 8px;max-width:420px}
+  .table-filter{background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-family:inherit;font-size:12px;min-width:180px;padding:6px 8px;width:100%}
+  .table-filter:focus{border-color:#58a6ff;outline:none}
+  .table-clear{background:#161b22;border:1px solid #30363d;border-radius:6px;color:#8b949e;cursor:pointer;font-family:inherit;font-size:12px;padding:6px 8px}
+  .table-clear:hover{color:#f0f6fc;border-color:#58a6ff}
   .table-wrap{overflow-x:auto}
   table{width:100%;border-collapse:collapse}
   .activity-table{min-width:1080px}
   th{text-align:left;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:6px 10px;border-bottom:1px solid #21262d;font-weight:400}
+  th[data-sort-type]{cursor:pointer;user-select:none}
+  th[data-sort-type]:hover{color:#f0f6fc}
+  th.sort-asc,th.sort-desc{color:#58a6ff}
+  th.sort-asc::after{content:" ^";color:#58a6ff}
+  th.sort-desc::after{content:" v";color:#58a6ff}
   td{padding:6px 10px;border-bottom:1px solid #161b22;vertical-align:middle;white-space:nowrap}
   tr:hover td{background:#161b22}
   .badge{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:500}
@@ -2908,6 +2918,7 @@ def dashboard_html() -> str:
     .tabs{padding:0 12px;overflow-x:auto}
     .tab-btn{padding:10px 12px;white-space:nowrap}
     .section{padding:0 12px 18px}
+    .table-tools{max-width:none}
   }
 </style>
 </head>
@@ -2943,9 +2954,9 @@ def dashboard_html() -> str:
 <div class="section">
   <h2>Recent calls</h2>
   <div class="table-wrap">
-  <table class="activity-table">
+  <table class="activity-table" data-table-id="activity" data-filter-label="Filter recent calls">
     <thead><tr>
-      <th>Time</th><th>Surface</th><th>Granularity</th><th>App family</th><th>Requested</th><th>Target</th><th>Input</th><th>Output / status</th><th>Latency</th><th>Flags</th>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Granularity</th><th data-sort-type="text">App family</th><th data-sort-type="text">Requested</th><th data-sort-type="text">Target</th><th data-sort-type="number">Input</th><th data-sort-type="number">Output / status</th><th data-sort-type="latency">Latency</th><th data-sort-type="text">Flags</th>
     </tr></thead>
     <tbody id="activity-tbody"></tbody>
   </table>
@@ -2957,9 +2968,9 @@ def dashboard_html() -> str:
 <div class="section">
   <h2>Usage by app / engineer</h2>
   <div class="table-wrap">
-  <table class="activity-table">
+  <table class="activity-table" data-table-id="usage" data-filter-label="Filter usage buckets">
     <thead><tr>
-      <th>Bucket</th><th>Turns</th><th>Provider calls</th><th>Codex turns</th><th>Tokens</th><th>Spend</th><th>Captured savings</th><th>Hard floor</th><th>Optimized</th><th>Errors</th><th>Remaining saving potential</th><th>Cost basis</th>
+      <th data-sort-type="text">Bucket</th><th data-sort-type="number">Turns</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="number">Tokens</th><th data-sort-type="money">Spend</th><th data-sort-type="money">Captured savings</th><th data-sort-type="money">Hard floor</th><th data-sort-type="percent">Optimized</th><th data-sort-type="number">Errors</th><th data-sort-type="text">Remaining saving potential</th><th data-sort-type="text">Cost basis</th>
     </tr></thead>
     <tbody id="usage-tbody"></tbody>
   </table>
@@ -2970,9 +2981,9 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-weekly">
 <div class="section">
   <h2>7-day daily statistics</h2>
-  <table>
+  <table data-table-id="weekly" data-filter-label="Filter 7-day stats">
     <thead><tr>
-      <th>Date</th><th>Calls</th><th>Success</th><th>Errors</th><th>Cache hits</th><th>Avg latency</th><th>Cost (actual)</th><th>Cost (baseline)</th><th>Savings</th>
+      <th data-sort-type="timestamp">Date</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Success</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Cache hits</th><th data-sort-type="latency">Avg latency</th><th data-sort-type="money">Cost (actual)</th><th data-sort-type="money">Cost (baseline)</th><th data-sort-type="money">Savings</th>
     </tr></thead>
     <tbody id="weekly-tbody"></tbody>
   </table>
@@ -2982,9 +2993,9 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-categories">
 <div class="section">
   <h2>Calls by request category</h2>
-  <table>
+  <table data-table-id="categories" data-filter-label="Filter categories">
     <thead><tr>
-      <th>Category</th><th>Calls</th><th>Cost</th><th>Routed</th>
+      <th data-sort-type="text">Category</th><th data-sort-type="number">Calls</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Routed</th>
     </tr></thead>
     <tbody id="cat-tbody"></tbody>
   </table>
@@ -2994,18 +3005,18 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-cache">
 <div class="section">
   <h2>Cache decisions today</h2>
-  <table>
+  <table data-table-id="cache-today" data-filter-label="Filter cache decisions today">
     <thead><tr>
-      <th>Surface</th><th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Hit type</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Calls</th>
     </tr></thead>
     <tbody id="cache-today-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Cache decisions all time</h2>
-  <table>
+  <table data-table-id="cache-all" data-filter-label="Filter all cache decisions">
     <thead><tr>
-      <th>Surface</th><th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Hit type</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Calls</th>
     </tr></thead>
     <tbody id="cache-tbody"></tbody>
   </table>
@@ -3015,18 +3026,18 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-errors">
 <div class="section">
   <h2>Errors today</h2>
-  <table>
+  <table data-table-id="errors-today" data-filter-label="Filter errors today">
     <thead><tr>
-      <th>Type</th><th>Status</th><th>Provider</th><th>Tier</th><th>Requested</th><th>Routed</th><th>Calls</th><th>Last seen</th><th>Sample</th>
+      <th data-sort-type="text">Type</th><th data-sort-type="number">Status</th><th data-sort-type="text">Provider</th><th data-sort-type="text">Tier</th><th data-sort-type="text">Requested</th><th data-sort-type="text">Routed</th><th data-sort-type="number">Calls</th><th data-sort-type="time">Last seen</th><th data-sort-type="text">Sample</th>
     </tr></thead>
     <tbody id="errors-today-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Errors all time</h2>
-  <table>
+  <table data-table-id="errors-all" data-filter-label="Filter all errors">
     <thead><tr>
-      <th>Type</th><th>Status</th><th>Provider</th><th>Tier</th><th>Requested</th><th>Routed</th><th>Calls</th><th>Last seen</th><th>Sample</th>
+      <th data-sort-type="text">Type</th><th data-sort-type="number">Status</th><th data-sort-type="text">Provider</th><th data-sort-type="text">Tier</th><th data-sort-type="text">Requested</th><th data-sort-type="text">Routed</th><th data-sort-type="number">Calls</th><th data-sort-type="time">Last seen</th><th data-sort-type="text">Sample</th>
     </tr></thead>
     <tbody id="errors-tbody"></tbody>
   </table>
@@ -3036,18 +3047,18 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-limiter">
 <div class="section">
   <h2>Tier limiter state</h2>
-  <table>
+  <table data-table-id="limiter-state" data-filter-label="Filter limiter tiers">
     <thead><tr>
-      <th>Tier</th><th>Status</th><th>Remaining</th><th>Cooldown until</th><th>Slots</th><th>Queued</th><th>Last upstream 429</th>
+      <th data-sort-type="text">Tier</th><th data-sort-type="text">Status</th><th data-sort-type="latency">Remaining</th><th data-sort-type="time">Cooldown until</th><th data-sort-type="number">Slots</th><th data-sort-type="number">Queued</th><th data-sort-type="time">Last upstream 429</th>
     </tr></thead>
     <tbody id="limiter-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Recent rate limits</h2>
-  <table>
+  <table data-table-id="limiter-recent" data-filter-label="Filter recent rate limits">
     <thead><tr>
-      <th>Time</th><th>Tier</th><th>Provider</th><th>Status</th><th>Retries</th><th>Latency</th><th>Source</th><th>Error</th>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Tier</th><th data-sort-type="text">Provider</th><th data-sort-type="number">Status</th><th data-sort-type="number">Retries</th><th data-sort-type="latency">Latency</th><th data-sort-type="text">Source</th><th data-sort-type="text">Error</th>
     </tr></thead>
     <tbody id="limiter-recent-tbody"></tbody>
   </table>
@@ -3057,36 +3068,36 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-policies">
 <div class="section">
   <h2>Policy reload summary</h2>
-  <table>
+  <table data-table-id="policy-summary" data-filter-label="Filter policy summary">
     <thead><tr>
-      <th>Status</th><th>Policies</th><th>Loaded files</th><th>Manual</th><th>Local default</th><th>Reload needed</th>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Policies</th><th data-sort-type="number">Loaded files</th><th data-sort-type="number">Manual</th><th data-sort-type="number">Local default</th><th data-sort-type="text">Reload needed</th>
     </tr></thead>
     <tbody id="policy-summary-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Effective policy files</h2>
-  <table>
+  <table data-table-id="policies" data-filter-label="Filter policy files">
     <thead><tr>
-      <th>Policy</th><th>Status</th><th>Source</th><th>Rule path</th><th>Effective settings</th>
+      <th data-sort-type="text">Policy</th><th data-sort-type="text">Status</th><th data-sort-type="text">Source</th><th data-sort-type="text">Rule path</th><th data-sort-type="text">Effective settings</th>
     </tr></thead>
     <tbody id="policies-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Routing rules</h2>
-  <table>
+  <table data-table-id="routing-rules" data-filter-label="Filter routing rules">
     <thead><tr>
-      <th>#</th><th>Conditions</th><th>Action</th>
+      <th data-sort-type="number">#</th><th data-sort-type="text">Conditions</th><th data-sort-type="text">Action</th>
     </tr></thead>
     <tbody id="routing-rules-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Recent policy events</h2>
-  <table>
+  <table data-table-id="policy-events" data-filter-label="Filter policy events">
     <thead><tr>
-      <th>Time</th><th>Action</th><th>Status</th><th>Source</th><th>Details</th>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Action</th><th data-sort-type="text">Status</th><th data-sort-type="text">Source</th><th data-sort-type="text">Details</th>
     </tr></thead>
     <tbody id="policy-events-tbody"></tbody>
   </table>
@@ -3096,18 +3107,18 @@ def dashboard_html() -> str:
 <div class="tab-panel" id="tab-sessions">
 <div class="section">
   <h2>Sessions today</h2>
-  <table>
+  <table data-table-id="sessions" data-filter-label="Filter sessions">
     <thead><tr>
-      <th>Session</th><th>Calls</th><th>Cost</th><th>Thinking</th><th>Thinking cost</th><th>Cache write</th><th>Cache read</th><th>Write/read</th><th>Write cost</th><th>Read saved</th><th>Payback</th><th>tool-result</th><th>tool-heavy</th><th>short-comp</th><th>code-gen</th><th>chat</th><th>other</th>
+      <th data-sort-type="text">Session</th><th data-sort-type="number">Calls</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Thinking</th><th data-sort-type="money">Thinking cost</th><th data-sort-type="number">Cache write</th><th data-sort-type="number">Cache read</th><th data-sort-type="number">Write/read</th><th data-sort-type="money">Write cost</th><th data-sort-type="money">Read saved</th><th data-sort-type="number">Payback</th><th data-sort-type="number">tool-result</th><th data-sort-type="number">tool-heavy</th><th data-sort-type="number">short-comp</th><th data-sort-type="number">code-gen</th><th data-sort-type="number">chat</th><th data-sort-type="number">other</th>
     </tr></thead>
     <tbody id="sess-tbody"></tbody>
   </table>
 </div>
 <div class="section">
   <h2>Context plateaus today</h2>
-  <table>
+  <table data-table-id="context-plateaus" data-filter-label="Filter context plateaus">
     <thead><tr>
-      <th>Session</th><th>Calls</th><th>Cost</th><th>Plateau pairs</th><th>Median chars</th><th>P90 chars</th><th>Cache read saved</th><th>Crunch saved chars</th><th>Flag</th>
+      <th data-sort-type="text">Session</th><th data-sort-type="number">Calls</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Plateau pairs</th><th data-sort-type="number">Median chars</th><th data-sort-type="number">P90 chars</th><th data-sort-type="money">Cache read saved</th><th data-sort-type="number">Crunch saved chars</th><th data-sort-type="text">Flag</th>
     </tr></thead>
     <tbody id="plateau-tbody"></tbody>
   </table>
@@ -3201,6 +3212,166 @@ function usageHints(row){
   return hints.slice(0,3).map(h=>`<span class="badge routed" title="${esc(h.detail)}">${esc(h.label)}</span>`).join(' ');
 }
 
+const tableState={};
+let applyingTableState=false;
+function tableId(table){return table.dataset.tableId;}
+function tableStateFor(table){
+  const id=tableId(table);
+  if(!tableState[id])tableState[id]={filter:'',sortIndex:null,sortDir:'asc'};
+  return tableState[id];
+}
+function numericText(text){
+  const raw=String(text||'').trim().toLowerCase();
+  if(!raw||raw==='—')return Number.NEGATIVE_INFINITY;
+  const first=(raw.match(/-?\\$?[\\d,.]+\\s*[mk%]?/)||[''])[0].replace(/[$,\\s]/g,'');
+  if(!first)return Number.NEGATIVE_INFINITY;
+  let multiplier=1;
+  if(first.endsWith('m'))multiplier=1000000;
+  if(first.endsWith('k'))multiplier=1000;
+  const cleaned=first.replace(/[mk%]/g,'');
+  const value=parseFloat(cleaned);
+  return Number.isFinite(value)?value*multiplier:Number.NEGATIVE_INFINITY;
+}
+function durationSeconds(text){
+  const raw=String(text||'').trim().toLowerCase();
+  if(!raw||raw==='—')return Number.NEGATIVE_INFINITY;
+  if(raw==='now')return 0;
+  const value=parseFloat(raw.replace(/[$,]/g,''));
+  if(!Number.isFinite(value))return Number.NEGATIVE_INFINITY;
+  if(raw.includes('ms'))return value/1000;
+  if(raw.endsWith('s'))return value;
+  if(raw.endsWith('m'))return value*60;
+  if(raw.endsWith('h'))return value*3600;
+  if(raw.endsWith('d'))return value*86400;
+  return value;
+}
+function sortValue(cell,type){
+  const text=(cell&&cell.innerText||'').trim();
+  if(type==='number'||type==='money'||type==='percent')return numericText(text);
+  if(type==='latency'||type==='time')return durationSeconds(text);
+  if(type==='timestamp'){
+    const parsed=Date.parse(text);
+    return Number.isNaN(parsed)?durationSeconds(text):parsed;
+  }
+  return text.toLowerCase();
+}
+function isPlaceholderRow(row,table){
+  const cell=row.cells&&row.cells.length===1?row.cells[0]:null;
+  const colCount=table.tHead&&table.tHead.rows[0]?table.tHead.rows[0].cells.length:1;
+  return Boolean(cell&&cell.colSpan>=colCount&&cell.textContent.trim().toLowerCase().startsWith('no '));
+}
+function ensureTableControls(table){
+  if(table.dataset.tableReady)return;
+  table.dataset.tableReady='1';
+  const state=tableStateFor(table);
+  const tools=document.createElement('div');
+  tools.className='table-tools';
+  tools.dataset.forTable=tableId(table);
+  const input=document.createElement('input');
+  input.className='table-filter';
+  input.type='search';
+  input.placeholder=table.dataset.filterLabel||'Filter rows';
+  input.value=state.filter;
+  input.setAttribute('aria-label',input.placeholder);
+  const clear=document.createElement('button');
+  clear.className='table-clear';
+  clear.type='button';
+  clear.textContent='Clear';
+  clear.addEventListener('click',()=>{
+    state.filter='';
+    input.value='';
+    applyDataTableState(table);
+  });
+  input.addEventListener('input',()=>{
+    state.filter=input.value;
+    applyDataTableState(table);
+  });
+  tools.appendChild(input);
+  tools.appendChild(clear);
+  table.parentNode.insertBefore(tools,table);
+  table.querySelectorAll('thead th[data-sort-type]').forEach((th,index)=>{
+    th.tabIndex=0;
+    th.setAttribute('role','button');
+    th.setAttribute('aria-sort','none');
+    th.addEventListener('click',()=>setTableSort(table,index));
+    th.addEventListener('keydown',event=>{
+      if(event.key==='Enter'||event.key===' '){
+        event.preventDefault();
+        setTableSort(table,index);
+      }
+    });
+  });
+}
+function setTableSort(table,index){
+  const state=tableStateFor(table);
+  if(state.sortIndex===index){
+    state.sortDir=state.sortDir==='asc'?'desc':'asc';
+  }else{
+    state.sortIndex=index;
+    state.sortDir='asc';
+  }
+  applyDataTableState(table);
+}
+function applyDataTableState(table){
+  if(!table||applyingTableState)return;
+  applyingTableState=true;
+  try{
+    const state=tableStateFor(table);
+    const tbody=table.tBodies[0];
+    if(!tbody)return;
+    tbody.querySelectorAll('tr.filter-empty-row').forEach(row=>row.remove());
+    const rows=Array.from(tbody.rows);
+    const dataRows=rows.filter(row=>!isPlaceholderRow(row,table));
+    if(!dataRows.length){
+      table.querySelectorAll('thead th[data-sort-type]').forEach(th=>{th.classList.remove('sort-asc','sort-desc');th.setAttribute('aria-sort','none');});
+      return;
+    }
+    const filter=state.filter.trim().toLowerCase();
+    let visibleRows=dataRows;
+    dataRows.forEach(row=>{
+      const match=!filter||row.innerText.toLowerCase().includes(filter);
+      row.style.display=match?'':'none';
+    });
+    visibleRows=dataRows.filter(row=>row.style.display!=='none');
+    if(state.sortIndex!==null){
+      const header=table.tHead&&table.tHead.rows[0]&&table.tHead.rows[0].cells[state.sortIndex];
+      const type=header?header.dataset.sortType||'text':'text';
+      const dir=state.sortDir==='desc'?-1:1;
+      visibleRows.sort((a,b)=>{
+        const av=sortValue(a.cells[state.sortIndex],type);
+        const bv=sortValue(b.cells[state.sortIndex],type);
+        if(typeof av==='number'&&typeof bv==='number')return (av-bv)*dir;
+        return String(av).localeCompare(String(bv))*dir;
+      });
+      visibleRows.forEach(row=>tbody.appendChild(row));
+    }
+    table.querySelectorAll('thead th[data-sort-type]').forEach((th,index)=>{
+      const active=state.sortIndex===index;
+      th.classList.toggle('sort-asc',active&&state.sortDir==='asc');
+      th.classList.toggle('sort-desc',active&&state.sortDir==='desc');
+      th.setAttribute('aria-sort',active?(state.sortDir==='asc'?'ascending':'descending'):'none');
+    });
+    if(filter&&!visibleRows.length){
+      const colCount=table.tHead&&table.tHead.rows[0]?table.tHead.rows[0].cells.length:1;
+      const empty=document.createElement('tr');
+      empty.className='filter-empty-row';
+      empty.innerHTML=`<td colspan="${colCount}" style="color:#8b949e">No matching rows</td>`;
+      tbody.appendChild(empty);
+    }
+  }finally{
+    applyingTableState=false;
+  }
+}
+function applyAllDataTables(){
+  document.querySelectorAll('table[data-table-id]').forEach(table=>{
+    ensureTableControls(table);
+    applyDataTableState(table);
+  });
+}
+function initDataTables(){
+  applyAllDataTables();
+}
+
 const FULL_STATS_TTL_MS=5000;
 let fullStatsCache=null;
 let fullStatsCacheAt=0;
@@ -3261,6 +3432,7 @@ async function refreshUsage(){
         <td class="flags"><span class="badge provider">${esc(row.cost_basis)}</span> ${codexCost}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="12" style="color:#8b949e">No app or engineer usage today</td></tr>';
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3288,6 +3460,7 @@ async function refreshActivity(){
         <td class="flags">${activityFlags(unit)}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="10" style="color:#8b949e">No recent activity yet</td></tr>';
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3312,6 +3485,7 @@ async function refreshWeekly(){
         <td class="savings">${fmt(row.savings_usd,5)}</td>
       </tr>`;
     }).join('');
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3369,6 +3543,7 @@ async function refreshCategories(){
         <td class="tokens">${(row.routed_count||0).toLocaleString()}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="4" style="color:#8b949e">No data yet</td></tr>';
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3385,6 +3560,7 @@ async function refreshCache(){
     </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No cache decision data yet</td></tr>';
     document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
     document.getElementById('cache-tbody').innerHTML=renderRows(d.cache_decision_breakdown||[]);
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3404,6 +3580,7 @@ async function refreshErrors(){
     </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No errors recorded</td></tr>';
     document.getElementById('errors-today-tbody').innerHTML=renderRows(d.today_error_breakdown||[]);
     document.getElementById('errors-tbody').innerHTML=renderRows(d.error_breakdown||[]);
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3448,6 +3625,7 @@ async function refreshLimiter(){
       <td>${row.local_throttled?'<span class="badge err">local cooldown</span>':'<span class="badge routed">upstream</span>'}</td>
       <td class="model">${row.error||'—'}</td>
     </tr>`).join('')||'<tr><td colspan="8" style="color:#8b949e">No recent rate-limit responses</td></tr>';
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3571,6 +3749,7 @@ async function refreshPolicies(){
         <td class="flags">${parts.map(p=>`<span class="badge miss">${esc(p)}</span>`).join(' ')||'<span class="badge miss">recorded</span>'}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="5" style="color:#8b949e">No policy operator events recorded</td></tr>';
+    applyAllDataTables();
   }catch(e){}
 }
 
@@ -3612,9 +3791,11 @@ async function refreshSessions(){
       <td class="tokens">${fmtTok(row.crunch_saved_chars||0)}</td>
       <td>${row.flagged?'<span class="badge err">flagged</span>':'<span class="badge miss">watch</span>'}</td>
     </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
+    applyAllDataTables();
   }catch(e){}
 }
 
+initDataTables();
 refreshActivity();
 refreshUsage();
 refresh();
