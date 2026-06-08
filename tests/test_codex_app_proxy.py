@@ -269,6 +269,91 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertGreater(window["server_message_chars"], 0)
         self.assertNotIn(secret, json.dumps(window))
 
+    def test_turn_start_event_window_derives_session_model_state_without_raw_params(self):
+        secret = "raw startup instructions must not be stored"
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                active_windows = {}
+                model_states = {}
+                request_started = {}
+                initialize = {
+                    "jsonrpc": "2.0",
+                    "id": "init-model",
+                    "method": "initialize",
+                    "params": {
+                        "model": "gpt-5-codex",
+                        "instructions": secret,
+                    },
+                }
+                start = {
+                    "jsonrpc": "2.0",
+                    "id": "turn-derived-model",
+                    "method": "turn/start",
+                    "params": {
+                        "threadId": "thread-derived-model",
+                        "input": [{"type": "text", "text": "derive model state"}],
+                    },
+                }
+
+                with patch.object(codex_app_proxy, "store", test_store):
+                    codex_app_proxy._record_message(
+                        json.dumps(initialize),
+                        direction="client_to_server",
+                        session_id="session-derived-model",
+                        request_started=request_started,
+                        active_turn_windows=active_windows,
+                        model_states=model_states,
+                    )
+                    start_event_id = codex_app_proxy._record_message(
+                        json.dumps(start),
+                        direction="client_to_server",
+                        session_id="session-derived-model",
+                        request_started=request_started,
+                        optimization_metadata={
+                            "routing": {
+                                "status": "not-applicable",
+                                "reason": "codex-turn-start-model-field-absent",
+                                "applied": False,
+                            },
+                            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+                            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+                        },
+                        active_turn_windows=active_windows,
+                        model_states=model_states,
+                    )
+
+                row = test_store.conn.execute(
+                    "select event_window_json from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+                window = json.loads(row["event_window_json"])
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(window["model_field_state"], "derived_present")
+        self.assertEqual(window["model_field"], "model")
+        self.assertEqual(window["model_state"]["normalized_model"], "gpt-5-codex")
+        self.assertEqual(window["model_state"]["source_method"], "initialize")
+        self.assertEqual(window["model_state"]["reason"], "metadata-model-field")
+        self.assertNotIn(secret, json.dumps(window))
+
+    def test_codex_model_state_signal_ignores_prompt_payload_shapes(self):
+        signal = codex_app_proxy.codex_model_state_signal(
+            "turn/start",
+            {
+                "input": [
+                    {
+                        "type": "text",
+                        "text": "this is user content, not config",
+                        "model": "prompt-provided-model-name",
+                    }
+                ],
+            },
+        )
+
+        self.assertIsNone(signal)
+
     def test_codex_repeated_scaffolding_crunch_preserves_latest_task_tail(self):
         scaffold = "## Agent context scaffold\n" + ("stable instruction header " * 80)
         log_block = "## Repeated command log\n" + ("same deterministic log line " * 80)

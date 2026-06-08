@@ -1411,6 +1411,99 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(cache_rows[("codex_turn", "hit", "exact-match", "exact")], 2)
         self.assertNotIn(("codex_app_turn", "hit", "exact-match", "exact"), cache_rows)
 
+    def test_codex_effectiveness_counts_direct_derived_absent_and_unknown_model_state(self):
+        rows = [
+            (
+                "direct-model",
+                stable_json({
+                    "status": "skipped",
+                    "reason": "keep requested model",
+                    "model_field": "model",
+                    "applied": False,
+                }),
+                None,
+            ),
+            (
+                "derived-model",
+                stable_json({
+                    "status": "not-applicable",
+                    "reason": "codex-turn-start-model-field-absent",
+                    "applied": False,
+                }),
+                stable_json({
+                    "schema": "agentflow.codex_app_event_window.v1",
+                    "event_count": 2,
+                    "method_counts": {"turn/start": 1, "initialize": 1},
+                    "direction_counts": {"client_to_server": 2},
+                    "model_field_state": "derived_present",
+                    "model_field": "model",
+                    "model_state": {
+                        "state": "derived_present",
+                        "field": "model",
+                        "normalized_model": "gpt-5-codex",
+                        "source_method": "initialize",
+                        "confidence": "high",
+                        "reason": "metadata-model-field",
+                    },
+                }),
+            ),
+            (
+                "absent-model",
+                stable_json({
+                    "status": "not-applicable",
+                    "reason": "codex-turn-start-model-field-absent",
+                    "applied": False,
+                }),
+                None,
+            ),
+            ("legacy-unknown", None, None),
+        ]
+        for index, (suffix, routing_json, event_window_json) in enumerate(rows):
+            server.store.log_codex_app_event(
+                id=f"start-{suffix}",
+                created_at=f"2026-06-08T10:00:0{index}+00:00",
+                direction="client_to_server",
+                method="turn/start",
+                request_id=f"req-{suffix}",
+                thread_id=f"thread-{suffix}",
+                message_chars=120,
+                params_chars=80,
+                input_items=1,
+                input_text_chars=64,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="session-model-state",
+                routing_json=routing_json,
+                crunch_json=stable_json({"status": "skipped", "reason": "no-change", "applied": False}),
+                cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False}),
+                event_window_json=event_window_json,
+            )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
+        summary = result["summary"]
+        breakdown = {row["value"]: row["count"] for row in result["model_field_breakdown"]}
+        names = {row["value"]: row["count"] for row in result["model_field_names"]}
+        derived_sample = next(
+            sample for sample in result["recent_samples"]
+            if sample["event_window"].get("model_field_state") == "derived_present"
+        )
+
+        self.assertEqual(summary["turn_start_rows"], 4)
+        self.assertEqual(summary["model_field_present"], 2)
+        self.assertEqual(summary["model_field_derived"], 1)
+        self.assertEqual(summary["model_field_absent"], 1)
+        self.assertEqual(summary["model_field_unknown"], 1)
+        self.assertEqual(breakdown["present"], 1)
+        self.assertEqual(breakdown["derived_present"], 1)
+        self.assertEqual(breakdown["absent"], 1)
+        self.assertEqual(breakdown["unknown"], 1)
+        self.assertEqual(names["model"], 2)
+        self.assertEqual(derived_sample["model_field"], "derived_present")
+        self.assertEqual(derived_sample["event_window"]["model_state"]["normalized_model"], "gpt-5-codex")
+        self.assertFalse(result["privacy"]["raw_params_included"])
+
     def test_codex_app_cache_hit_counts_decision_and_saved_cost(self):
         cache_meta = {
             "enabled": True,

@@ -24,6 +24,7 @@ from agentflow_proxy.codex_app_policy import (
     CODEX_TEXT_INPUT_TYPES,
     CODEX_APP_SOURCE_SURFACE,
     DEFAULT_CODEX_APP_UPSTREAM,
+    codex_model_state_signal,
     codex_app_cache_enabled,
     codex_app_optimize_enabled,
 )
@@ -374,6 +375,76 @@ def _model_field_state_from_metadata(optimization_metadata: dict[str, dict[str, 
     return "unknown", None
 
 
+def _public_model_state(signal: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(signal, dict):
+        return None
+    state = str(signal.get("state") or "")
+    if state not in {"derived_present", "derived_absent"}:
+        return None
+    summary = {
+        "state": state,
+        "field": signal.get("field"),
+        "source_method": signal.get("source_method"),
+        "confidence": signal.get("confidence") or "medium",
+        "reason": signal.get("reason") or "metadata-model-state",
+    }
+    if state == "derived_present" and signal.get("normalized_model"):
+        summary["normalized_model"] = signal.get("normalized_model")
+    return summary
+
+
+def _model_state_scope_keys(session_id: str, thread_id: str | None) -> list[str]:
+    keys = []
+    if thread_id:
+        keys.append(f"{session_id}\0thread-model\0{thread_id}")
+    keys.append(f"{session_id}\0session-model")
+    return keys
+
+
+def _remember_model_state(
+    model_states: dict[str, dict[str, Any]] | None,
+    *,
+    session_id: str,
+    thread_id: str | None,
+    signal: dict[str, Any] | None,
+) -> None:
+    public = _public_model_state(signal)
+    if model_states is None or not public:
+        return
+    keys = _model_state_scope_keys(session_id, thread_id)
+    for key in keys[:1 if thread_id else 1]:
+        model_states[key] = dict(public)
+
+
+def _lookup_model_state(
+    model_states: dict[str, dict[str, Any]] | None,
+    *,
+    session_id: str,
+    thread_id: str | None,
+) -> dict[str, Any] | None:
+    if model_states is None:
+        return None
+    for key in _model_state_scope_keys(session_id, thread_id):
+        signal = model_states.get(key)
+        if signal:
+            return dict(signal)
+    return None
+
+
+def _apply_derived_model_state(window: dict[str, Any], signal: dict[str, Any] | None) -> None:
+    public = _public_model_state(signal)
+    if not public:
+        return
+    current = str(window.get("model_field_state") or "unknown")
+    if current not in {"unknown", "absent", "derived_absent"} and public["state"] != "derived_present":
+        return
+    if current in {"present", "present_unknown_field"}:
+        return
+    window["model_field_state"] = public["state"]
+    window["model_field"] = public.get("field")
+    window["model_state"] = public
+
+
 def _update_method_count(target: dict[str, int], method: str | None) -> None:
     key = str(method or "response")
     target[key] = int(target.get(key) or 0) + 1
@@ -393,6 +464,7 @@ def _new_event_window(
     input_items: int | None,
     input_text_chars: int,
     optimization_metadata: dict[str, dict[str, Any]] | None,
+    derived_model_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_state, model_field = _model_field_state_from_metadata(optimization_metadata)
     window = {
@@ -418,6 +490,7 @@ def _new_event_window(
         "model_field": model_field,
         "_monotonic_started_at": monotonic_started_at,
     }
+    _apply_derived_model_state(window, derived_model_state)
     _update_method_count(window["method_counts"], method)
     return window
 
@@ -449,6 +522,8 @@ def _record_event_window(
     result_chars: int | None,
     error_code: Any,
     optimization_metadata: dict[str, dict[str, Any]] | None,
+    model_state_signal: dict[str, Any] | None = None,
+    model_states: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     if active_turn_windows is None:
         return
@@ -456,6 +531,11 @@ def _record_event_window(
     if not key:
         return
     if direction == "client_to_server" and method == "turn/start":
+        derived_model_state = _lookup_model_state(
+            model_states,
+            session_id=session_id,
+            thread_id=thread_id,
+        )
         window = _new_event_window(
             start_event_id=event_id,
             monotonic_started_at=time.time(),
@@ -469,6 +549,7 @@ def _record_event_window(
             input_items=input_items,
             input_text_chars=input_text_chars,
             optimization_metadata=optimization_metadata,
+            derived_model_state=derived_model_state,
         )
         active_turn_windows[key] = window
         _persist_event_window(event_id, window)
@@ -488,6 +569,7 @@ def _record_event_window(
         window["result_chars"] = int(window.get("result_chars") or 0) + int(result_chars or 0)
     if error_code is not None:
         window["error_count"] = int(window.get("error_count") or 0) + 1
+    _apply_derived_model_state(window, model_state_signal)
     started_at = float(window.get("_monotonic_started_at") or time.time())
     window["last_event_delta_ms"] = max(0, int((time.time() - started_at) * 1000))
     start_event_id = str(window.get("start_event_id") or "")
@@ -651,6 +733,7 @@ def _record_message(
     request_started: dict[str, float],
     optimization_metadata: dict[str, dict[str, Any]] | None = None,
     active_turn_windows: dict[str, dict[str, Any]] | None = None,
+    model_states: dict[str, dict[str, Any]] | None = None,
 ) -> str | None:
     if not LOG_EVENTS:
         return None
@@ -711,6 +794,13 @@ def _record_message(
     input_items = len(input_value) if isinstance(input_value, list) else None
     input_text_chars = _input_text_chars(input_value)
     thread_id = _thread_id(params)
+    model_state_signal = codex_model_state_signal(method, params)
+    _remember_model_state(
+        model_states,
+        session_id=session_id,
+        thread_id=thread_id,
+        signal=model_state_signal,
+    )
     result = msg.get("result")
     error = msg.get("error")
     latency_ms: Optional[int] = None
@@ -757,6 +847,8 @@ def _record_message(
         result_chars=len(stable_json(result)) if result is not None else None,
         error_code=error.get("code") if isinstance(error, dict) else None,
         optimization_metadata=optimization_metadata,
+        model_state_signal=model_state_signal,
+        model_states=model_states,
     )
     return event_id
 
@@ -867,6 +959,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     pending_cache: dict[str, dict[str, Any]] = {}
     pending_managed: dict[str, dict[str, Any]] = {}
     active_turn_windows: dict[str, dict[str, Any]] = {}
+    model_states: dict[str, dict[str, Any]] = {}
 
     try:
         async with websockets.connect(upstream_url) as upstream:
@@ -887,6 +980,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
                             active_turn_windows=active_turn_windows,
+                            model_states=model_states,
                         )
                         if managed_pending and isinstance(managed_pending.get("request_id"), str):
                             managed_pending["start_event_id"] = start_event_id
@@ -905,6 +999,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                                 session_id=session_id,
                                 request_started=request_started,
                                 active_turn_windows=active_turn_windows,
+                                model_states=model_states,
                             )
                             await websocket.send_text(replay_frame)
                             continue
@@ -933,6 +1028,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
                             active_turn_windows=active_turn_windows,
+                            model_states=model_states,
                         )
                         if managed_pending and isinstance(managed_pending.get("request_id"), str):
                             managed_pending["start_event_id"] = start_event_id
@@ -954,6 +1050,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         session_id=session_id,
                         request_started=request_started,
                         active_turn_windows=active_turn_windows,
+                        model_states=model_states,
                     )
                     if isinstance(msg, bytes):
                         await websocket.send_bytes(msg)

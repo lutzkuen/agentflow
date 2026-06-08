@@ -1040,15 +1040,26 @@ def _codex_crunch_pattern_breakdown(rows: list[dict[str, Any]]) -> list[dict[str
     return result
 
 
-def _codex_model_field_state(routing: dict[str, Any]) -> tuple[str, str | None]:
+def _codex_model_field_state(routing: dict[str, Any], event_window_raw: Any = None) -> tuple[str, str | None]:
     field = routing.get("model_field")
     if field:
         return "present", str(field)
     reason = str(routing.get("reason") or "")
-    if reason == "codex-turn-start-model-field-absent":
-        return "absent", None
     if routing.get("requested_model") or routing.get("routed_model"):
         return "present_unknown_field", None
+    event_window = _json_obj(event_window_raw)
+    window_state = str(event_window.get("model_field_state") or "")
+    if window_state in {"derived_present", "derived_absent"}:
+        window_field = event_window.get("model_field")
+        return window_state, str(window_field) if window_field else None
+    model_state = event_window.get("model_state")
+    if isinstance(model_state, dict):
+        state = str(model_state.get("state") or "")
+        if state in {"derived_present", "derived_absent"}:
+            field = model_state.get("field")
+            return state, str(field) if field else None
+    if reason == "codex-turn-start-model-field-absent":
+        return "absent", None
     return "unknown", None
 
 
@@ -1153,6 +1164,7 @@ def _codex_public_event_window(raw: Any) -> dict[str, Any]:
         "error_count": _as_int(window.get("error_count")),
         "model_field_state": window.get("model_field_state") or "unknown",
         "model_field": window.get("model_field"),
+        "model_state": dict(window.get("model_state") or {}) if isinstance(window.get("model_state"), dict) else {},
         "request_id_present": bool(window.get("request_id")),
         "thread_id_present": bool(window.get("thread_id")),
         "session_id_present": bool(window.get("session_id")),
@@ -1456,7 +1468,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 _increment_count(managed_feedback_reason_counts, feedback.get("reason") or "unknown")
             else:
                 _increment_count(managed_feedback_status_counts, "pending")
-        model_state, model_field = _codex_model_field_state(routing)
+        model_state, model_field = _codex_model_field_state(routing, row.get("event_window_json"))
         _increment_count(model_field_counts, model_state)
         if model_field:
             _increment_count(model_field_names, model_field)
@@ -1618,8 +1630,13 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "completed_rows": success_count,
             "error_rows": error_count,
             "pending_rows": pending_count,
-            "model_field_present": model_field_counts.get("present", 0) + model_field_counts.get("present_unknown_field", 0),
-            "model_field_absent": model_field_counts.get("absent", 0),
+            "model_field_present": (
+                model_field_counts.get("present", 0)
+                + model_field_counts.get("present_unknown_field", 0)
+                + model_field_counts.get("derived_present", 0)
+            ),
+            "model_field_derived": model_field_counts.get("derived_present", 0),
+            "model_field_absent": model_field_counts.get("absent", 0) + model_field_counts.get("derived_absent", 0),
             "model_field_unknown": model_field_counts.get("unknown", 0),
             "routing_applied": sum(1 for row in turn_rows if _json_obj(row.get("routing_json")).get("applied")),
             "crunch_applied": sum(1 for row in turn_rows if _json_obj(row.get("crunch_json")).get("applied")),
