@@ -9,7 +9,7 @@ import ipaddress
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from agentflow_proxy.codex_app_policy import codex_app_surface_policy_state
+from agentflow_proxy.codex_app_policy import codex_app_bundle_policy_state, codex_app_surface_policy_state
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
@@ -358,21 +358,23 @@ async def stats_policies() -> dict[str, Any]:
             ),
             "policy": _copy_policy(routing_experiments.ROUTING_EXPERIMENT_POLICY),
         },
+        "codex_app": codex_app_bundle_policy_state(),
     }
-    sections = ("routing", "crunch", "cache", "routing_experiments")
+    sections = ("routing", "crunch", "cache", "routing_experiments", "codex_app")
+    file_backed_sections = ("routing", "crunch", "cache", "routing_experiments")
     state["source_surfaces"] = {
         "codex_app_turn": codex_app_surface_policy_state(state),
     }
     reload_required_sections = [
         section
-        for section in sections
+        for section in file_backed_sections
         if bool((state.get(section, {}).get("file") or {}).get("reload_required"))
     ]
     state["summary"] = {
         "policy_count": len(sections),
         "loaded_file_count": sum(
             1
-            for section in sections
+            for section in file_backed_sections
             if bool(
                 (((state.get(section, {}).get("file") or {}).get("loaded") or {}).get("exists"))
             )

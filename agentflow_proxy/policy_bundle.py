@@ -31,6 +31,13 @@ REQUIRED_POLICY_SECTIONS = (
     "crunch",
     "cache",
     "routing_experiments",
+    "codex_app",
+)
+APPLY_POLICY_SECTIONS = (
+    "routing",
+    "crunch",
+    "cache",
+    "routing_experiments",
 )
 _POLICY_SECTION_FILES = {
     "routing": "routing_rules.yaml",
@@ -355,6 +362,77 @@ def _validate_routing_experiment_policy(policy: dict[str, Any], errors: list[dic
         _validate_boolish(errors, f"{base}.store_response_bodies", experiment["store_response_bodies"])
 
 
+_CODEX_APP_CONDITION_KEYS = {
+    "app_family",
+    "workflow_phase",
+    "model_field_state",
+    "input_size_bucket",
+    "cache_eligible",
+    "cache_status",
+    "replayability_level",
+    "has_action_like_params",
+}
+_CODEX_APP_ACTION_KEYS = {
+    "recommended_model",
+    "model_hint",
+    "crunch_profile",
+    "cache_eligible",
+    "cache_eligibility_reason",
+    "pass_through_reason",
+    "reason",
+}
+
+
+def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    base = "$.policies.codex_app"
+    if policy.get("policy_source") == "managed-enforced":
+        _add_error(errors, f"{base}.policy_source", "managed-enforced is not accepted for review-only Codex app policies")
+    if "enabled" in policy:
+        _validate_boolish(errors, f"{base}.enabled", policy["enabled"])
+    if "review_only" in policy:
+        _validate_boolish(errors, f"{base}.review_only", policy["review_only"])
+    if "surface" in policy:
+        _validate_non_empty_string(errors, f"{base}.surface", policy["surface"])
+
+    rules = policy.get("rules", [])
+    if not isinstance(rules, list):
+        _add_error(errors, f"{base}.rules", "expected list")
+        return
+
+    for index, rule in enumerate(rules):
+        rule_path = f"{base}.rules[{index}]"
+        if not isinstance(rule, dict):
+            _add_error(errors, rule_path, "expected rule object")
+            continue
+
+        conditions = rule.get("conditions", {})
+        if not isinstance(conditions, dict):
+            _add_error(errors, f"{rule_path}.conditions", "expected object")
+        else:
+            for key in sorted(set(conditions) - _CODEX_APP_CONDITION_KEYS):
+                _add_error(errors, f"{rule_path}.conditions.{key}", "unknown Codex app condition")
+            for key in ("app_family", "workflow_phase", "model_field_state", "input_size_bucket", "cache_status", "replayability_level"):
+                if key in conditions:
+                    _validate_non_empty_string(errors, f"{rule_path}.conditions.{key}", conditions[key])
+            for key in ("cache_eligible", "has_action_like_params"):
+                if key in conditions:
+                    _validate_boolish(errors, f"{rule_path}.conditions.{key}", conditions[key])
+
+        action = rule.get("action")
+        if not isinstance(action, dict):
+            _add_error(errors, f"{rule_path}.action", "expected object")
+            continue
+        if not action:
+            _add_error(errors, f"{rule_path}.action", "expected at least one reviewable action")
+        for key in sorted(set(action) - _CODEX_APP_ACTION_KEYS):
+            _add_error(errors, f"{rule_path}.action.{key}", "unknown Codex app action")
+        for key in ("recommended_model", "model_hint", "crunch_profile", "cache_eligibility_reason", "pass_through_reason", "reason"):
+            if key in action:
+                _validate_non_empty_string(errors, f"{rule_path}.action.{key}", action[key])
+        if "cache_eligible" in action:
+            _validate_boolish(errors, f"{rule_path}.action.cache_eligible", action["cache_eligible"])
+
+
 def _validate_policy_section_shape(section: str, value: dict[str, Any], errors: list[dict[str, str]]) -> None:
     if section == "routing":
         _validate_routing_policy(value, errors)
@@ -364,6 +442,8 @@ def _validate_policy_section_shape(section: str, value: dict[str, Any], errors: 
         _validate_cache_policy(value, errors)
     elif section == "routing_experiments":
         _validate_routing_experiment_policy(value, errors)
+    elif section == "codex_app":
+        _validate_codex_app_policy(value, errors)
 
 
 def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
@@ -938,6 +1018,21 @@ def _routing_experiment_impact(policy: dict[str, Any], calls: list[dict[str, Any
     }
 
 
+def _codex_app_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    return {
+        "status": "review-only",
+        "policy_source": policy.get("policy_source"),
+        "surface": policy.get("surface", "codex_app_turn"),
+        "rule_count": len(rules),
+        "applied_to_provider_routing": False,
+        "applied_to_codex_app_proxy": False,
+        "metadata_only": True,
+        "raw_bodies_read": False,
+        "note": "Codex app turn-level recommendations are reviewed in local bundles but are not applied to provider routing rules.",
+    }
+
+
 def simulate_policy_bundle_impact(
     proposed: Any,
     *,
@@ -978,6 +1073,8 @@ def simulate_policy_bundle_impact(
         sections["cache"] = _cache_impact(policies["cache"], calls)
     if isinstance(policies.get("routing_experiments"), dict):
         sections["routing_experiments"] = _routing_experiment_impact(policies["routing_experiments"], calls)
+    if isinstance(policies.get("codex_app"), dict):
+        sections["codex_app"] = _codex_app_impact(policies["codex_app"], calls)
     warnings = [
         warning
         for section in sections.values()
@@ -1150,8 +1247,8 @@ def apply_policy_bundle(
 ) -> dict[str, Any]:
     validation = validate_policy_bundle(bundle)
     warnings = policy_bundle_safety_warnings(bundle)
-    requested_sections = list(sections or REQUIRED_POLICY_SECTIONS)
-    invalid_sections = sorted(set(requested_sections) - set(REQUIRED_POLICY_SECTIONS))
+    requested_sections = list(sections or APPLY_POLICY_SECTIONS)
+    invalid_sections = sorted(set(requested_sections) - set(APPLY_POLICY_SECTIONS))
     config_path = Path(config_dir).expanduser()
     result: dict[str, Any] = {
         "schema": POLICY_BUNDLE_APPLY_SCHEMA,
@@ -1170,7 +1267,7 @@ def apply_policy_bundle(
     if invalid_sections:
         result["error"] = {
             "type": "invalid_sections",
-            "message": "unknown policy section requested",
+            "message": "unknown or review-only policy section requested",
             "sections": invalid_sections,
         }
         return result
@@ -1185,7 +1282,7 @@ def apply_policy_bundle(
         return result
 
     policies = bundle["policies"]
-    for section in REQUIRED_POLICY_SECTIONS:
+    for section in APPLY_POLICY_SECTIONS:
         if section not in requested_sections:
             result["skipped_sections"].append({"section": section, "reason": "not-requested"})
             continue
@@ -1226,8 +1323,8 @@ def rollback_policy_files(
     dry_run: bool = False,
     sections: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    requested_sections = list(sections or REQUIRED_POLICY_SECTIONS)
-    invalid_sections = sorted(set(requested_sections) - set(REQUIRED_POLICY_SECTIONS))
+    requested_sections = list(sections or APPLY_POLICY_SECTIONS)
+    invalid_sections = sorted(set(requested_sections) - set(APPLY_POLICY_SECTIONS))
     config_path = Path(config_dir).expanduser()
     result: dict[str, Any] = {
         "schema": POLICY_BUNDLE_ROLLBACK_SCHEMA,
@@ -1243,7 +1340,7 @@ def rollback_policy_files(
     if invalid_sections:
         result["error"] = {
             "type": "invalid_sections",
-            "message": "unknown policy section requested",
+            "message": "unknown or review-only policy section requested",
             "sections": invalid_sections,
         }
         return result
@@ -1251,7 +1348,7 @@ def rollback_policy_files(
     plans: list[dict[str, Any]] = []
     missing_sections: list[str] = []
     unreadable_backups: list[dict[str, str]] = []
-    for section in REQUIRED_POLICY_SECTIONS:
+    for section in APPLY_POLICY_SECTIONS:
         if section not in requested_sections:
             result["skipped_sections"].append({"section": section, "reason": "not-requested"})
             continue

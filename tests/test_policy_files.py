@@ -10,7 +10,7 @@ import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
-from agentflow_proxy.policy_bundle import build_policy_bundle, compare_policy_bundles, validate_policy_bundle
+from agentflow_proxy.policy_bundle import build_policy_bundle, compare_policy_bundles, review_policy_bundle, validate_policy_bundle
 
 
 class PolicyFileStatusTest(unittest.TestCase):
@@ -34,13 +34,15 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertEqual(bundle["generator"]["mode"], "local-offline")
         self.assertFalse(bundle["managed_optimizer"]["enabled"])
         self.assertEqual(bundle["policies"]["schema"], "agentflow.policy_state.v1")
-        self.assertEqual(bundle["policies"]["summary"]["policy_count"], 4)
+        self.assertEqual(bundle["policies"]["summary"]["policy_count"], 5)
         self.assertFalse(bundle["policies"]["summary"]["reload_required"])
         self.assertEqual(bundle["policies"]["summary"]["reload_required_sections"], [])
         self.assertIn("routing", bundle["policies"])
         self.assertIn("crunch", bundle["policies"])
         self.assertIn("cache", bundle["policies"])
         self.assertIn("routing_experiments", bundle["policies"])
+        self.assertIn("codex_app", bundle["policies"])
+        self.assertTrue(bundle["policies"]["codex_app"]["review_only"])
 
     def test_policy_bundle_validation_accepts_exported_bundle(self):
         bundle = asyncio.run(build_policy_bundle())
@@ -81,6 +83,78 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("$.policies.crunch.thinking_deduplication.similarity_threshold", paths)
         self.assertIn("$.policies.cache.semantic_cache.threshold", paths)
         self.assertIn("$.policies.cache.file_watch.max_paths", paths)
+
+    def test_policy_bundle_validation_accepts_reviewable_codex_app_policy(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["codex_app"] = {
+            "enabled": True,
+            "policy_source": "managed-recommended",
+            "surface": "codex_app_turn",
+            "review_only": True,
+            "rules": [
+                {
+                    "conditions": {
+                        "app_family": "codex",
+                        "workflow_phase": "summary",
+                        "model_field_state": "missing",
+                        "input_size_bucket": "medium",
+                        "cache_eligible": False,
+                        "replayability_level": "turn-metadata-only",
+                        "has_action_like_params": False,
+                    },
+                    "action": {
+                        "model_hint": "gpt-5-mini",
+                        "crunch_profile": "codex-summary",
+                        "cache_eligible": False,
+                        "cache_eligibility_reason": "metadata-only recommendation requires local replayability review",
+                        "pass_through_reason": "review-only Codex app recommendation",
+                    },
+                }
+            ],
+        }
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+
+    def test_policy_bundle_validation_rejects_codex_app_managed_enforced(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["codex_app"]["policy_source"] = "managed-enforced"
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("$.policies.codex_app.policy_source", {error["path"] for error in result["errors"]})
+
+    def test_policy_review_reports_codex_app_section_without_provider_routing_apply(self):
+        current = asyncio.run(build_policy_bundle())
+        proposed = json.loads(json.dumps(current))
+        proposed["policies"]["codex_app"]["policy_source"] = "managed-recommended"
+        proposed["policies"]["codex_app"]["rules"] = [
+            {
+                "conditions": {
+                    "app_family": "codex",
+                    "workflow_phase": "tool_execution",
+                    "model_field_state": "present",
+                    "input_size_bucket": "small",
+                    "cache_eligible": True,
+                    "replayability_level": "local-exact-response",
+                },
+                "action": {
+                    "recommended_model": "gpt-5-mini",
+                    "crunch_profile": "pass-through",
+                    "cache_eligibility_reason": "local exact replay only",
+                    "reason": "managed Codex app turn policy for local review",
+                },
+            }
+        ]
+
+        result = review_policy_bundle(current, proposed, include_impact=False)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["changed_sections"], ["codex_app"])
+        self.assertTrue(any(change["path"].startswith("$.policies.codex_app") for change in result["diff"]["changes"]))
 
     def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
         bundle = asyncio.run(build_policy_bundle())

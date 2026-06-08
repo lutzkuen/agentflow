@@ -103,6 +103,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["managed_optimizer"]["enabled"])
         self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
         self.assertIn("routing", payload["policies"])
+        self.assertIn("codex_app", payload["policies"])
+        self.assertTrue(payload["policies"]["codex_app"]["review_only"])
         surface = payload["policies"]["source_surfaces"]["codex_app_turn"]
         self.assertTrue(surface["optimization"]["enabled"])
         self.assertFalse(surface["cache"]["enabled"])

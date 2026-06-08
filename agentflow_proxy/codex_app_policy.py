@@ -6,6 +6,25 @@ from typing import Any
 
 DEFAULT_CODEX_APP_UPSTREAM = "ws://127.0.0.1:4014"
 CODEX_APP_SOURCE_SURFACE = "codex_app_turn"
+CODEX_APP_POLICY_CONDITION_KEYS = (
+    "app_family",
+    "workflow_phase",
+    "model_field_state",
+    "input_size_bucket",
+    "cache_eligible",
+    "cache_status",
+    "replayability_level",
+    "has_action_like_params",
+)
+CODEX_APP_POLICY_ACTION_KEYS = (
+    "recommended_model",
+    "model_hint",
+    "crunch_profile",
+    "cache_eligible",
+    "cache_eligibility_reason",
+    "pass_through_reason",
+    "reason",
+)
 
 CODEX_ACTION_KEY_HINTS = {
     "approval",
@@ -142,4 +161,27 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
         "reload_required_sections": reload_required_sections,
         "managed_optimizer_required": False,
         "note": "Codex app-server runtime flags are local process settings; managed optimizer use remains opt-in.",
+    }
+
+
+def codex_app_bundle_policy_state() -> dict[str, Any]:
+    optimize_enabled = codex_app_optimize_enabled()
+    cache_enabled = codex_app_cache_enabled()
+    return {
+        "enabled": optimize_enabled,
+        "policy_source": "local-default",
+        "surface": CODEX_APP_SOURCE_SURFACE,
+        "review_only": True,
+        "runtime_flags": {
+            "optimization_enabled": optimize_enabled,
+            "cache_enabled": cache_enabled,
+        },
+        "rules": [],
+        "supported_conditions": list(CODEX_APP_POLICY_CONDITION_KEYS),
+        "supported_actions": list(CODEX_APP_POLICY_ACTION_KEYS),
+        "application": {
+            "status": "not-applied",
+            "reason": "Codex app turn-level policies are reviewable metadata only until the Codex app proxy explicitly implements an action.",
+        },
+        "managed_optimizer_required": False,
     }
