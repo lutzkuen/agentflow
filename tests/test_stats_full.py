@@ -861,6 +861,93 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
 
+    def test_codex_effectiveness_normalizes_historical_missing_decision_metadata(self):
+        fixtures = [
+            (
+                "complete",
+                stable_json({"status": "not-applied", "reason": "fixture-route", "applied": False, "policy_source": "local-default"}),
+                stable_json({"status": "skipped", "reason": "no-change", "applied": False, "changed": False}),
+                stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False, "policy_source": "local-default"}),
+                None,
+            ),
+            ("historical", None, None, None, None),
+            (
+                "partial",
+                None,
+                stable_json({"status": "skipped", "reason": "no-change", "applied": False, "changed": False}),
+                stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False, "policy_source": "local-default"}),
+                None,
+            ),
+            (
+                "current-missing",
+                None,
+                None,
+                None,
+                stable_json({
+                    "schema": "agentflow.codex_app_event_window.v1",
+                    "event_count": 1,
+                    "method_counts": {"turn/start": 1},
+                    "direction_counts": {"client_to_server": 1},
+                    "model_field_state": "derived_absent",
+                }),
+            ),
+        ]
+        for index, (suffix, routing_json, crunch_json, cache_json, event_window_json) in enumerate(fixtures):
+            server.store.log_codex_app_event(
+                id=f"start-decision-{suffix}",
+                created_at=f"2026-06-08T11:00:0{index}+00:00",
+                direction="client_to_server",
+                method="turn/start",
+                request_id=f"req-decision-{suffix}",
+                thread_id=f"thread-decision-{suffix}",
+                message_chars=160,
+                params_chars=90,
+                input_items=1,
+                input_text_chars=72,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="session-decision-metadata",
+                routing_json=routing_json,
+                crunch_json=crunch_json,
+                cache_json=cache_json,
+                event_window_json=event_window_json,
+            )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
+        summary = result["summary"]
+        metadata = {row["value"]: row["count"] for row in result["decision_metadata_breakdown"]}
+        routing = {row["status"]: row["count"] for row in result["routing_breakdown"]}
+        current_missing = {row["value"]: row["count"] for row in result["current_missing_decision_breakdown"]}
+        not_instrumented = {row["value"]: row["count"] for row in result["not_instrumented_decision_breakdown"]}
+        historical = {row["value"]: row["count"] for row in result["historical_unavailable_decision_breakdown"]}
+        sample_states = {row["decision_metadata_state"] for row in result["recent_samples"]}
+
+        self.assertEqual(summary["turn_start_rows"], 4)
+        self.assertEqual(summary["decision_metadata_complete_rows"], 1)
+        self.assertEqual(summary["decision_metadata_historical_unavailable_rows"], 1)
+        self.assertEqual(summary["decision_metadata_not_instrumented_rows"], 1)
+        self.assertEqual(summary["decision_metadata_current_missing_rows"], 1)
+        self.assertEqual(summary["current_missing_decisions"], 3)
+        self.assertEqual(summary["not_instrumented_decisions"], 1)
+        self.assertEqual(summary["historical_unavailable_decisions"], 3)
+        self.assertEqual(metadata, {
+            "complete": 1,
+            "historical-unavailable": 1,
+            "not-instrumented": 1,
+            "current-missing": 1,
+        })
+        self.assertEqual(routing["not-applied"], 1)
+        self.assertEqual(routing["historical-unavailable"], 1)
+        self.assertEqual(routing["not-instrumented"], 1)
+        self.assertEqual(routing["missing"], 1)
+        self.assertEqual(current_missing, {"routing": 1, "crunch": 1, "cache": 1})
+        self.assertEqual(not_instrumented, {"routing": 1})
+        self.assertEqual(historical, {"routing": 1, "crunch": 1, "cache": 1})
+        self.assertIn("historical-unavailable", sample_states)
+        self.assertFalse(result["privacy"]["raw_params_included"])
+
     def test_codex_effectiveness_classifies_workflow_phases_from_event_sequences(self):
         def log_turn(
             name,

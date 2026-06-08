@@ -59,6 +59,18 @@ def _json_obj(raw: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _json_obj_has_value(raw: Any) -> bool:
+    if not raw:
+        return False
+    if isinstance(raw, dict):
+        return bool(raw)
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return True
+    return bool(value) if isinstance(value, dict) else True
+
+
 def _copy_policy(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
@@ -1313,7 +1325,9 @@ def _count_breakdown(grouped: dict[str, int]) -> list[dict[str, Any]]:
 def _decision_breakdown(rows: list[dict[str, Any]], decision_key: str) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
-        decision = _json_obj(row.get(decision_key))
+        decision = row.get(f"{decision_key}_normalized")
+        if not isinstance(decision, dict):
+            decision = _json_obj(row.get(decision_key))
         status = str(decision.get("status") or "missing")
         reason = str(decision.get("reason") or "unknown")
         policy_source = str(decision.get("policy_source") or "unknown")
@@ -1357,6 +1371,54 @@ def _codex_crunch_pattern_breakdown(rows: list[dict[str, Any]]) -> list[dict[str
     result = list(grouped.values())
     result.sort(key=lambda r: (r["saved_chars_est"], r["count"]), reverse=True)
     return result
+
+
+_CODEX_DECISION_KEYS = ("routing_json", "crunch_json", "cache_json")
+
+
+def _codex_decision_metadata_state(row: dict[str, Any]) -> str:
+    present = sum(1 for key in _CODEX_DECISION_KEYS if _json_obj_has_value(row.get(key)))
+    if present == len(_CODEX_DECISION_KEYS):
+        return "complete"
+    if present:
+        return "not-instrumented"
+    if _json_obj_has_value(row.get("event_window_json")):
+        return "current-missing"
+    return "historical-unavailable"
+
+
+def _codex_missing_decision(decision_key: str, metadata_state: str) -> dict[str, Any]:
+    decision_name = decision_key.replace("_json", "")
+    if metadata_state == "historical-unavailable":
+        return {
+            "status": "historical-unavailable",
+            "reason": f"{decision_name}-decision-metadata-historical-unavailable",
+            "applied": False,
+            "eligible": False,
+            "policy_source": "unknown",
+        }
+    if metadata_state == "not-instrumented":
+        return {
+            "status": "not-instrumented",
+            "reason": f"{decision_name}-decision-metadata-not-instrumented",
+            "applied": False,
+            "eligible": False,
+            "policy_source": "unknown",
+        }
+    return {
+        "status": "missing",
+        "reason": f"{decision_name}-decision-metadata-current-missing",
+        "applied": False,
+        "eligible": False,
+        "policy_source": "unknown",
+    }
+
+
+def _codex_normalized_decision(row: dict[str, Any], decision_key: str, metadata_state: str) -> dict[str, Any]:
+    decision = _json_obj(row.get(decision_key))
+    if decision:
+        return decision
+    return _codex_missing_decision(decision_key, metadata_state)
 
 
 def _codex_model_field_state(routing: dict[str, Any], event_window_raw: Any = None) -> tuple[str, str | None]:
@@ -1769,6 +1831,10 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     action_like_skips = 0
     unknown_param_skips = 0
     non_text_skips = 0
+    decision_metadata_counts: dict[str, int] = {}
+    current_missing_decision_counts: dict[str, int] = {}
+    not_instrumented_decision_counts: dict[str, int] = {}
+    historical_unavailable_decision_counts: dict[str, int] = {}
     managed_status_counts: dict[str, int] = {}
     managed_feedback_status_counts: dict[str, int] = {}
     managed_feedback_reason_counts: dict[str, int] = {}
@@ -1782,9 +1848,27 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
 
     recent_samples: list[dict[str, Any]] = []
     for row in turn_rows:
-        routing = _json_obj(row.get("routing_json"))
-        crunch = _json_obj(row.get("crunch_json"))
-        cache = _json_obj(row.get("cache_json"))
+        metadata_state = _codex_decision_metadata_state(row)
+        row["decision_metadata_state"] = metadata_state
+        _increment_count(decision_metadata_counts, metadata_state)
+        routing = _codex_normalized_decision(row, "routing_json", metadata_state)
+        crunch = _codex_normalized_decision(row, "crunch_json", metadata_state)
+        cache = _codex_normalized_decision(row, "cache_json", metadata_state)
+        row["routing_json_normalized"] = routing
+        row["crunch_json_normalized"] = crunch
+        row["cache_json_normalized"] = cache
+        for decision_key, decision in (
+            ("routing", routing),
+            ("crunch", crunch),
+            ("cache", cache),
+        ):
+            status = str(decision.get("status") or "")
+            if status == "missing":
+                _increment_count(current_missing_decision_counts, decision_key)
+            elif status == "not-instrumented":
+                _increment_count(not_instrumented_decision_counts, decision_key)
+            elif status == "historical-unavailable":
+                _increment_count(historical_unavailable_decision_counts, decision_key)
         managed = routing.get("managed_recommendation") if isinstance(routing, dict) else None
         feedback = managed.get("outcome_feedback") if isinstance(managed, dict) else None
         if isinstance(managed, dict):
@@ -1910,6 +1994,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "workflow_phase_source": phase_meta.get("source"),
                 "workflow_phase_signals": phase_meta.get("signals") or [],
                 "event_window": _codex_public_event_window(row.get("event_window_json")),
+                "decision_metadata_state": metadata_state,
                 "model_field": model_state,
                 "param_shape": shape,
                 "routing_status": routing.get("status") or "missing",
@@ -1964,10 +2049,17 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "model_field_derived": model_field_counts.get("derived_present", 0),
             "model_field_absent": model_field_counts.get("absent", 0) + model_field_counts.get("derived_absent", 0),
             "model_field_unknown": model_field_counts.get("unknown", 0),
-            "routing_applied": sum(1 for row in turn_rows if _json_obj(row.get("routing_json")).get("applied")),
-            "crunch_applied": sum(1 for row in turn_rows if _json_obj(row.get("crunch_json")).get("applied")),
-            "cache_hits": sum(1 for row in turn_rows if _json_obj(row.get("cache_json")).get("status") == "hit"),
-            "cache_eligible": sum(1 for row in turn_rows if bool(_json_obj(row.get("cache_json")).get("eligible"))),
+            "decision_metadata_complete_rows": decision_metadata_counts.get("complete", 0),
+            "decision_metadata_historical_unavailable_rows": decision_metadata_counts.get("historical-unavailable", 0),
+            "decision_metadata_not_instrumented_rows": decision_metadata_counts.get("not-instrumented", 0),
+            "decision_metadata_current_missing_rows": decision_metadata_counts.get("current-missing", 0),
+            "current_missing_decisions": sum(current_missing_decision_counts.values()),
+            "not_instrumented_decisions": sum(not_instrumented_decision_counts.values()),
+            "historical_unavailable_decisions": sum(historical_unavailable_decision_counts.values()),
+            "routing_applied": sum(1 for row in turn_rows if _json_obj(row.get("routing_json_normalized")).get("applied")),
+            "crunch_applied": sum(1 for row in turn_rows if _json_obj(row.get("crunch_json_normalized")).get("applied")),
+            "cache_hits": sum(1 for row in turn_rows if _json_obj(row.get("cache_json_normalized")).get("status") == "hit"),
+            "cache_eligible": sum(1 for row in turn_rows if bool(_json_obj(row.get("cache_json_normalized")).get("eligible"))),
             "action_like_skips": action_like_skips,
             "unknown_param_skips": unknown_param_skips,
             "non_text_input_skips": non_text_skips,
@@ -1987,13 +2079,13 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "managed_recommendation_enabled": sum(
                 1
                 for row in turn_rows
-                if bool((_json_obj(row.get("routing_json")).get("managed_recommendation") or {}).get("enabled"))
+                if bool((_json_obj(row.get("routing_json_normalized")).get("managed_recommendation") or {}).get("enabled"))
             ),
             "managed_recommendation_disabled": sum(
                 1
                 for row in turn_rows
-                if isinstance(_json_obj(row.get("routing_json")).get("managed_recommendation"), dict)
-                and not bool((_json_obj(row.get("routing_json")).get("managed_recommendation") or {}).get("enabled"))
+                if isinstance(_json_obj(row.get("routing_json_normalized")).get("managed_recommendation"), dict)
+                and not bool((_json_obj(row.get("routing_json_normalized")).get("managed_recommendation") or {}).get("enabled"))
             ),
             "managed_feedback_sent": managed_feedback_status_counts.get("sent", 0),
             "managed_feedback_skipped": (
@@ -2016,6 +2108,10 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 + managed_feedback_queue_counts.get("dropped-after-limit", 0)
             ),
         },
+        "decision_metadata_breakdown": _count_breakdown(decision_metadata_counts),
+        "current_missing_decision_breakdown": _count_breakdown(current_missing_decision_counts),
+        "not_instrumented_decision_breakdown": _count_breakdown(not_instrumented_decision_counts),
+        "historical_unavailable_decision_breakdown": _count_breakdown(historical_unavailable_decision_counts),
         "model_field_breakdown": _count_breakdown(model_field_counts),
         "model_field_names": _count_breakdown(model_field_names),
         "method_breakdown": _count_breakdown(method_counts),
