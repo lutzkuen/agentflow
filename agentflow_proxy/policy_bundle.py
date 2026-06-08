@@ -1105,6 +1105,7 @@ def _call_features(row: dict[str, Any]) -> dict[str, Any]:
     crunch = _json_obj(row.get("crunch_json"))
     cache = _json_obj(row.get("cache_json"))
     category = row.get("category") or routing.get("category")
+    pattern_features = routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {}
     text_chars = _as_int(routing.get("text_chars"))
     if text_chars <= 0:
         text_chars = max(_as_int(row.get("actual_input_tokens")), _as_int(row.get("input_tokens_est"))) * 4
@@ -1118,6 +1119,9 @@ def _call_features(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row.get("id"),
         "provider": row.get("provider") or "anthropic",
+        "source_surface": _source_surface_for_call(row.get("provider") or "anthropic", row.get("path")),
+        "app_family": _app_family_for_call(row.get("provider") or "anthropic", row.get("requested_model"), row.get("path")),
+        "granularity": "provider_request",
         "requested_model": row.get("requested_model"),
         "routed_model": row.get("routed_model") or row.get("requested_model"),
         "stream": bool(row.get("stream")),
@@ -1131,9 +1135,19 @@ def _call_features(row: dict[str, Any]) -> dict[str, Any]:
         "cost_est_usd": _as_float(row.get("cost_est_usd")),
         "cost_baseline_usd": _as_float(row.get("cost_baseline_usd")),
         "category": category,
+        "workflow_phase": pattern_features.get("workflow_phase") or routing.get("workflow_phase") or category,
+        "text_bucket": pattern_features.get("text_bucket"),
+        "token_bucket": pattern_features.get("token_bucket"),
+        "replayability_level": pattern_features.get("replayability_level") or "metadata_only",
         "text_chars": text_chars,
         "has_tools": bool(has_tools),
         "thinking": thinking,
+        "pattern_hashes": _collect_pattern_hashes(pattern_features) or _collect_pattern_hashes({
+            "routing": routing,
+            "crunch": crunch,
+            "cache": cache,
+        }),
+        "pattern_types": pattern_features.get("pattern_types") if isinstance(pattern_features.get("pattern_types"), list) else [],
         "routing": routing,
         "crunch": crunch,
         "cache": cache,
@@ -1175,7 +1189,7 @@ def _load_recent_call_features(db_path: str, *, limit: int) -> tuple[list[dict[s
         rows = conn.execute(
             """
             select id, created_at, provider, requested_model, routed_model, stream, status_code,
-                   latency_ms, input_tokens_est, output_tokens_est, actual_input_tokens,
+                   path, latency_ms, input_tokens_est, output_tokens_est, actual_input_tokens,
                    actual_output_tokens, cost_est_usd, cost_baseline_usd, crunch_json,
                    routing_json, cache_json, category, cache_creation_input_tokens,
                    cache_read_input_tokens, retry_count, thinking_output_tokens
@@ -1194,6 +1208,82 @@ def _load_recent_call_features(db_path: str, *, limit: int) -> tuple[list[dict[s
     finally:
         conn.close()
     return [_call_features(dict(row)) for row in rows], None
+
+
+def _codex_event_features(row: dict[str, Any]) -> dict[str, Any]:
+    routing = _json_obj(row.get("routing_json"))
+    crunch = _json_obj(row.get("crunch_json"))
+    cache = _json_obj(row.get("cache_json"))
+    pattern_features = routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {}
+    text_chars = max(_as_int(row.get("input_text_chars")), _as_int(row.get("params_chars")), _as_int(row.get("message_chars")))
+    input_tokens = max(1, text_chars // 4) if text_chars > 0 else 0
+    output_tokens = max(0, _as_int(row.get("result_chars")) // 4)
+    return {
+        "id": row.get("id"),
+        "provider": "codex-app",
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "app_family": "codex",
+        "granularity": "agent_turn",
+        "requested_model": routing.get("requested_model") or routing.get("requested_model_value"),
+        "routed_model": routing.get("routed_model") or routing.get("target_model") or routing.get("requested_model"),
+        "stream": False,
+        "status_code": 500 if row.get("error_code") else 200,
+        "retry_count": 0,
+        "latency_ms": _as_int(row.get("latency_ms")),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cost_est_usd": 0.0,
+        "cost_baseline_usd": 0.0,
+        "category": routing.get("category") or "codex_turn",
+        "workflow_phase": pattern_features.get("workflow_phase") or routing.get("workflow_phase") or "codex_turn",
+        "text_bucket": pattern_features.get("text_bucket"),
+        "token_bucket": pattern_features.get("token_bucket"),
+        "replayability_level": pattern_features.get("replayability_level") or cache.get("replayability_level") or "metadata_only",
+        "text_chars": text_chars,
+        "has_tools": bool(routing.get("has_tools") or routing.get("has_action_like_params")),
+        "thinking": False,
+        "pattern_hashes": _collect_pattern_hashes(pattern_features) or _collect_pattern_hashes({
+            "routing": routing,
+            "crunch": crunch,
+            "cache": cache,
+        }),
+        "pattern_types": pattern_features.get("pattern_types") if isinstance(pattern_features.get("pattern_types"), list) else [],
+        "routing": routing,
+        "crunch": crunch,
+        "cache": cache,
+    }
+
+
+def _load_recent_codex_event_features(db_path: str, *, limit: int) -> list[dict[str, Any]]:
+    path = _sqlite_db_path(db_path)
+    if path is None or not path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            select id, created_at, direction, method, request_id, thread_id, message_chars,
+                   params_chars, input_items, input_text_chars, result_chars, error_code,
+                   error_message, latency_ms, session_id, routing_json, crunch_json,
+                   cache_json, event_window_json, metadata_json
+            from codex_app_events
+            where direction = 'client_to_server'
+            order by datetime(created_at) desc
+            limit ?
+            """,
+            (limit,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+    return [_codex_event_features(dict(row)) for row in rows]
 
 
 def _rollup(features: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1297,7 +1387,240 @@ def _routing_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict
     }
 
 
-def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+def _pattern_candidate_entries(policy: dict[str, Any], *, section: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if section == "crunch":
+        for index, rule in enumerate(policy.get("pattern_rules") if isinstance(policy.get("pattern_rules"), list) else []):
+            if not isinstance(rule, dict):
+                continue
+            managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+            hashes = _collect_pattern_hashes(rule.get("conditions")) or _collect_pattern_hashes(rule) or _collect_pattern_hashes(managed)
+            entries.append({
+                "path": f"$.policies.crunch.pattern_rules[{index}]",
+                "source": "pattern_rules",
+                "section": section,
+                "rule_id": rule.get("id") or rule.get("rule_id"),
+                "candidate_id": rule.get("candidate_id") or managed.get("candidate_id"),
+                "policy_source": rule.get("policy_source") or managed.get("policy_source") or policy.get("policy_source"),
+                "enabled": _enabled(rule.get("enabled", True)),
+                "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
+                "action": rule.get("action") if isinstance(rule.get("action"), dict) else {},
+                "rollout": rule.get("rollout") if isinstance(rule.get("rollout"), dict) else managed.get("rollout"),
+                "pattern_hashes": hashes,
+                "estimated_savings_usd": managed.get("estimated_savings_usd"),
+            })
+
+    recommendation = policy.get("recommendation") if isinstance(policy.get("recommendation"), dict) else {}
+    for list_name in ("candidates", "review_only_candidates", "omitted_candidates"):
+        candidates = recommendation.get(list_name) if isinstance(recommendation.get(list_name), list) else []
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            hashes = _collect_pattern_hashes(candidate)
+            action = {}
+            if section == "cache" and isinstance(candidate.get("cache_action"), dict):
+                action = candidate["cache_action"]
+            elif isinstance(candidate.get("action"), dict):
+                action = candidate["action"]
+            dimensions = candidate.get("dimensions") if isinstance(candidate.get("dimensions"), dict) else {}
+            buckets = candidate.get("buckets") if isinstance(candidate.get("buckets"), dict) else {}
+            conditions = {
+                key: value
+                for key, value in {
+                    "source_surface": dimensions.get("source_surface") or candidate.get("source_surface"),
+                    "app_family": dimensions.get("app_family") or candidate.get("app_family"),
+                    "category": dimensions.get("category") or candidate.get("category"),
+                    "workflow_phase": dimensions.get("phase") or candidate.get("phase"),
+                    "text_bucket": buckets.get("text_bucket") or candidate.get("text_bucket"),
+                    "token_bucket": buckets.get("token_bucket") or candidate.get("token_bucket"),
+                    "has_tools": buckets.get("has_tools") if "has_tools" in buckets else candidate.get("has_tools"),
+                }.items()
+                if value is not None
+            }
+            entries.append({
+                "path": f"$.policies.{section}.recommendation.{list_name}[{index}]",
+                "source": list_name,
+                "section": section,
+                "rule_id": candidate.get("rule_id") or candidate.get("policy_id"),
+                "candidate_id": candidate.get("candidate_id") or candidate.get("policy_id") or candidate.get("recommendation_id"),
+                "policy_source": candidate.get("policy_source") or recommendation.get("policy_source") or policy.get("policy_source"),
+                "enabled": list_name == "candidates",
+                "conditions": conditions,
+                "action": action,
+                "rollout": candidate.get("rollout") if isinstance(candidate.get("rollout"), dict) else action.get("rollout"),
+                "pattern_hashes": hashes,
+                "estimated_savings_usd": candidate.get("estimated_savings_usd"),
+                "recommendation_status": list_name.removesuffix("s"),
+            })
+    return entries
+
+
+def _condition_values_match(item: dict[str, Any], conditions: dict[str, Any], blockers: list[str]) -> bool:
+    model_pattern = conditions.get("model_pattern")
+    if model_pattern and str(model_pattern).lower() not in str(item.get("requested_model") or "").lower():
+        blockers.append("model-pattern-mismatch")
+        return False
+    for key in ("source_surface", "app_family", "category", "workflow_phase", "text_bucket", "token_bucket"):
+        value = conditions.get(key)
+        if value is not None and str(item.get(key) or "") != str(value):
+            blockers.append(f"{key.replace('_', '-')}-mismatch")
+            return False
+    if "category_not_in" in conditions:
+        excluded = conditions["category_not_in"]
+        excluded_values = {str(value) for value in (excluded if isinstance(excluded, list) else [excluded])}
+        if str(item.get("category") or "") in excluded_values:
+            blockers.append("category-excluded")
+            return False
+    if "has_tools" in conditions and bool(conditions.get("has_tools")) != bool(item.get("has_tools")):
+        blockers.append("has-tools-mismatch")
+        return False
+    if "min_text_chars" in conditions and item["text_chars"] < _as_int(conditions.get("min_text_chars")):
+        blockers.append("min-text-chars-not-met")
+        return False
+    if "max_text_chars" in conditions and item["text_chars"] > _as_int(conditions.get("max_text_chars")):
+        blockers.append("max-text-chars-exceeded")
+        return False
+    return True
+
+
+def _canary_selected(item: dict[str, Any], rollout: dict[str, Any]) -> bool:
+    fraction = _as_float(rollout.get("canary_fraction"), 0.0)
+    if fraction >= 1.0:
+        return True
+    if fraction <= 0.0:
+        return False
+    salt = str(rollout.get("canary_salt") or "")
+    digest = hashlib.sha256(f"{salt}:{item.get('id') or ''}".encode("utf-8")).hexdigest()
+    bucket = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    return bucket < fraction
+
+
+def _pattern_traffic_rollup(items: list[dict[str, Any]]) -> dict[str, Any]:
+    rollup = _rollup(items)
+    return {
+        **rollup,
+        "estimated_chars_affected": sum(item["text_chars"] for item in items),
+        "estimated_tokens_affected": sum(item["input_tokens"] for item in items),
+        "estimated_cost_exposure_usd": _round_usd(sum(item["cost_est_usd"] for item in items)),
+        "source_surfaces": sorted({str(item.get("source_surface") or "unknown") for item in items}),
+        "app_families": sorted({str(item.get("app_family") or "unknown") for item in items}),
+        "workflow_phases": sorted({str(item.get("workflow_phase") or "unknown") for item in items}),
+        "categories": sorted({str(item.get("category") or "unknown") for item in items}),
+        "policy_sources": sorted({
+            str(
+                item.get("crunch", {}).get("policy_source")
+                or item.get("cache", {}).get("policy_source")
+                or item.get("routing", {}).get("policy_source")
+                or "unknown"
+            )
+            for item in items
+        }),
+    }
+
+
+def _pattern_bundle_impact(section: str, policy: dict[str, Any], traffic: list[dict[str, Any]]) -> dict[str, Any]:
+    entries = _pattern_candidate_entries(policy, section=section)
+    summaries: list[dict[str, Any]] = []
+    warnings: list[dict[str, str]] = []
+    for entry in entries:
+        hashes = set(entry.get("pattern_hashes") or [])
+        matched: list[dict[str, Any]] = []
+        applied: list[dict[str, Any]] = []
+        holdout = 0
+        bypass = 0
+        blocker_counts: dict[str, int] = {}
+        for item in traffic:
+            if hashes and not hashes.intersection(set(item.get("pattern_hashes") or [])):
+                continue
+            if not hashes and not item.get("pattern_hashes"):
+                continue
+            blockers: list[str] = []
+            if not _condition_values_match(item, entry.get("conditions") or {}, blockers):
+                for blocker in blockers:
+                    blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+                continue
+            matched.append(item)
+            rollout = entry.get("rollout") if isinstance(entry.get("rollout"), dict) else {}
+            recommendation_mode = str(rollout.get("recommendation_mode") or "").lower()
+            if not entry.get("enabled"):
+                blocker_counts["recommendation-not-enabled-for-local-apply"] = blocker_counts.get("recommendation-not-enabled-for-local-apply", 0) + 1
+                bypass += 1
+                continue
+            if recommendation_mode in {"omitted", "warning-only"}:
+                blocker_counts[f"recommendation-mode-{recommendation_mode}"] = blocker_counts.get(f"recommendation-mode-{recommendation_mode}", 0) + 1
+                bypass += 1
+                continue
+            if section == "cache":
+                if item.get("stream") and (entry.get("action") or {}).get("streaming") is False:
+                    blocker_counts["streaming-cache-safety-block"] = blocker_counts.get("streaming-cache-safety-block", 0) + 1
+                    bypass += 1
+                    continue
+                if item.get("replayability_level") == "features_only":
+                    blocker_counts["features-only-cache-replay-block"] = blocker_counts.get("features-only-cache-replay-block", 0) + 1
+                    bypass += 1
+                    continue
+            if isinstance(rollout, dict) and rollout.get("canary_enabled") and not _canary_selected(item, rollout):
+                holdout += 1
+                continue
+            applied.append(item)
+        safety_blockers = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(blocker_counts.items())
+        ]
+        summary = {
+            **_pattern_traffic_rollup(applied),
+            "path": entry["path"],
+            "source": entry.get("source"),
+            "candidate_id": entry.get("candidate_id"),
+            "rule_id": entry.get("rule_id"),
+            "policy_source": entry.get("policy_source"),
+            "pattern_hashes": sorted(hashes),
+            "recommendation_mode": (entry.get("rollout") or {}).get("recommendation_mode") if isinstance(entry.get("rollout"), dict) else entry.get("recommendation_status"),
+            "canary": {
+                "enabled": bool((entry.get("rollout") or {}).get("canary_enabled")) if isinstance(entry.get("rollout"), dict) else False,
+                "fraction": (entry.get("rollout") or {}).get("canary_fraction") if isinstance(entry.get("rollout"), dict) else None,
+                "salt": (entry.get("rollout") or {}).get("canary_salt") if isinstance(entry.get("rollout"), dict) else None,
+            },
+            "would_match_count": len(matched),
+            "would_apply_count": len(applied),
+            "would_holdout_count": holdout,
+            "would_bypass_count": bypass,
+            "safety_blocker_count": sum(blocker_counts.values()),
+            "safety_blockers": safety_blockers,
+            "estimated_candidate_savings_usd": entry.get("estimated_savings_usd"),
+        }
+        matched_dimensions = _pattern_traffic_rollup(matched)
+        for key in ("source_surfaces", "app_families", "workflow_phases", "categories", "policy_sources"):
+            summary[key] = matched_dimensions[key]
+        if summary["historical_error_rate"] > 0.05:
+            warning = _impact_warning(
+                f"high-error-rate-{section}-pattern-match",
+                entry["path"],
+                f"pattern-matched historical rows had {summary['historical_error_rate']:.1%} error rate",
+            )
+            warnings.append(warning)
+            summary.setdefault("warnings", []).append(warning)
+        summaries.append(summary)
+    return {
+        "status": "simulated",
+        "policy_source": policy.get("policy_source") or (policy.get("recommendation") or {}).get("policy_source"),
+        "candidate_count": len(summaries),
+        "would_match_count": sum(item["would_match_count"] for item in summaries),
+        "would_apply_count": sum(item["would_apply_count"] for item in summaries),
+        "would_holdout_count": sum(item["would_holdout_count"] for item in summaries),
+        "would_bypass_count": sum(item["would_bypass_count"] for item in summaries),
+        "safety_blocker_count": sum(item["safety_blocker_count"] for item in summaries),
+        "estimated_chars_affected": sum(item["estimated_chars_affected"] for item in summaries),
+        "estimated_tokens_affected": sum(item["estimated_tokens_affected"] for item in summaries),
+        "estimated_cost_exposure_usd": _round_usd(sum(item["estimated_cost_exposure_usd"] for item in summaries)),
+        "metadata_only": True,
+        "raw_bodies_read": False,
+        "candidates": summaries,
+        "warnings": warnings,
+    }
+
+
+def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]], traffic: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     enabled = _enabled(policy.get("enabled", True))
     threshold = _as_int(policy.get("threshold_chars"), 24000)
     eligible = [item for item in calls if enabled and item["text_chars"] >= threshold]
@@ -1341,16 +1664,18 @@ def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[
             **{k: v for k, v in _rollup(matched).items() if k != "would_match_count"},
         })
 
+    pattern_impact = _pattern_bundle_impact("crunch", policy, traffic or calls)
     return {
         "status": "simulated",
         "policy_source": policy.get("policy_source"),
         "enabled": enabled,
         "features": features,
-        "warnings": warnings,
+        "pattern_rules": pattern_impact,
+        "warnings": [*warnings, *pattern_impact.get("warnings", [])],
     }
 
 
-def _cache_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+def _cache_impact(policy: dict[str, Any], calls: list[dict[str, Any]], traffic: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     exact = policy.get("exact_cache") if isinstance(policy.get("exact_cache"), dict) else {}
     semantic = policy.get("semantic_cache") if isinstance(policy.get("semantic_cache"), dict) else {}
     exact_enabled = _enabled(exact.get("enabled", policy.get("enabled", True)))
@@ -1373,6 +1698,7 @@ def _cache_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[s
             "$.policies.cache.semantic_cache.enabled",
             "semantic cache impact cannot be proven from metadata-only review; false-positive reuse requires quality checks",
         ))
+    pattern_impact = _pattern_bundle_impact("cache", policy, traffic or calls)
     return {
         "status": "simulated",
         "policy_source": policy.get("policy_source"),
@@ -1390,7 +1716,8 @@ def _cache_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[s
             "enabled": _enabled(semantic.get("enabled")),
             "threshold": semantic.get("threshold"),
         },
-        "warnings": warnings,
+        "pattern_rules": pattern_impact,
+        "warnings": [*warnings, *pattern_impact.get("warnings", [])],
     }
 
 
@@ -1449,6 +1776,67 @@ def _as_string_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value]
     return []
+
+
+def _normalize_pattern_hash(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text.startswith("sha256:"):
+        digest = text.removeprefix("sha256:")
+    else:
+        digest = text
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return f"sha256:{digest}"
+
+
+def _collect_pattern_hashes(value: Any) -> list[str]:
+    hashes: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_l = str(key).lower()
+            if (
+                key_l in {"pattern_hash", "normalized_pattern_hash", "crunch_pattern_hash", "cache_pattern_hash"}
+                or key_l.endswith(("_pattern_hash", "_pattern_sha256"))
+                or ("pattern" in key_l and key_l.endswith(("_hash", "_hashes", "_sha256")))
+                or key_l in {"pattern_hashes", "hashes"}
+            ):
+                if isinstance(item, list):
+                    hashes.extend(hash_value for nested in item if (hash_value := _normalize_pattern_hash(nested)))
+                elif (hash_value := _normalize_pattern_hash(item)) is not None:
+                    hashes.append(hash_value)
+            hashes.extend(_collect_pattern_hashes(item))
+    elif isinstance(value, list):
+        for item in value:
+            hashes.extend(_collect_pattern_hashes(item))
+    return sorted(set(hashes))
+
+
+def _source_surface_for_call(provider: Any, path: Any) -> str:
+    provider_l = str(provider or "").lower()
+    path_l = str(path or "").lower()
+    if provider_l in {"codex-app", "codex_app"}:
+        return CODEX_APP_SOURCE_SURFACE
+    if provider_l == "anthropic":
+        return "anthropic_messages"
+    if provider_l == "openai":
+        if "chat/completions" in path_l:
+            return "openai_chat"
+        return "openai_responses"
+    return "unknown"
+
+
+def _app_family_for_call(provider: Any, requested_model: Any, path: Any) -> str:
+    provider_l = str(provider or "").lower()
+    model_l = str(requested_model or "").lower()
+    if provider_l == "anthropic" and "messages" in str(path or "").lower():
+        return "claude_code"
+    if provider_l == "openai" and "codex" in model_l:
+        return "codex"
+    if provider_l == "openai":
+        return "generic_openai"
+    return "unknown"
 
 
 def _codex_app_rule_candidate_id(rule: dict[str, Any], index: int) -> str:
@@ -1887,15 +2275,17 @@ def simulate_policy_bundle_impact(
             "sections": {},
             "warnings": [],
         }
+    codex_events = _load_recent_codex_event_features(str(path), limit=limit)
+    traffic = [*calls, *codex_events]
 
     policies = proposed.get("policies") if isinstance(proposed.get("policies"), dict) else {}
     sections: dict[str, Any] = {}
     if isinstance(policies.get("routing"), dict):
         sections["routing"] = _routing_impact(policies["routing"], calls)
     if isinstance(policies.get("crunch"), dict):
-        sections["crunch"] = _crunch_impact(policies["crunch"], calls)
+        sections["crunch"] = _crunch_impact(policies["crunch"], calls, traffic)
     if isinstance(policies.get("cache"), dict):
-        sections["cache"] = _cache_impact(policies["cache"], calls)
+        sections["cache"] = _cache_impact(policies["cache"], calls, traffic)
     if isinstance(policies.get("routing_experiments"), dict):
         sections["routing_experiments"] = _routing_experiment_impact(policies["routing_experiments"], calls)
     if isinstance(policies.get("codex_app"), dict):
@@ -1915,6 +2305,8 @@ def simulate_policy_bundle_impact(
         "db_path": str(path),
         "lookback_call_limit": limit,
         "sampled_call_count": len(calls),
+        "sampled_codex_turn_count": len(codex_events),
+        "sampled_metadata_row_count": len(traffic),
         "sections": sections,
         "warning_count": len(warnings),
         "warnings": warnings,

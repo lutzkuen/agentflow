@@ -516,6 +516,232 @@ class PolicyReloadCliTests(unittest.TestCase):
         warning_codes = {warning["code"] for warning in impact["warnings"]}
         self.assertIn("high-error-rate-routing-match", warning_codes)
 
+    def test_policy_impact_simulates_managed_pattern_bundle_without_mutation(self):
+        from agentflow_proxy.policy_bundle import simulate_policy_bundle_impact
+        from agentflow_proxy.store import Store, stable_json
+
+        crunch_hash = "sha256:" + ("a" * 64)
+        cache_hash = "sha256:" + ("b" * 64)
+        blocked_cache_hash = "sha256:" + ("c" * 64)
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["crunch"]["policy_source"] = "managed-recommended"
+        proposed["policies"]["crunch"]["pattern_rules"] = [{
+            "id": "managed-crunch-pattern-test",
+            "enabled": True,
+            "policy_source": "managed-recommended",
+            "candidate_id": "crunch-candidate-test",
+            "conditions": {
+                "pattern_hashes": [crunch_hash],
+                "model_pattern": "sonnet",
+                "category": "tool-result",
+                "workflow_phase": "tool-result",
+                "min_text_chars": 1000,
+            },
+            "rollout": {
+                "schema": "agentflow.pattern_policy_rollout.v1",
+                "recommendation_mode": "full-review",
+                "canary_enabled": False,
+                "canary_fraction": 1.0,
+                "canary_salt": "sha256:" + ("1" * 64),
+                "canary_unit": "request_fingerprint",
+            },
+            "action": {"type": "shorten", "head_chars": 100, "tail_chars": 100},
+            "managed_recommendation": {"estimated_savings_usd": 0.12},
+        }]
+        proposed["policies"]["cache"]["policy_source"] = "managed-recommended"
+        proposed["policies"]["cache"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 2,
+            "candidates": [
+                {
+                    "candidate_id": "cache-canary-test",
+                    "policy_source": "managed-recommended",
+                    "pattern_hash": cache_hash,
+                    "estimated_savings_usd": 0.25,
+                    "dimensions": {"source_surface": "anthropic_messages", "app_family": "claude_code", "category": "chat", "phase": "chat"},
+                    "buckets": {"has_tools": False},
+                    "rollout": {
+                        "schema": "agentflow.pattern_policy_rollout.v1",
+                        "recommendation_mode": "canary-only",
+                        "canary_enabled": True,
+                        "canary_fraction": 0.0,
+                        "canary_salt": "sha256:" + ("2" * 64),
+                        "canary_unit": "request_fingerprint",
+                    },
+                    "cache_action": {"type": "exact_cache_pattern_review", "streaming": False, "pattern_hashes": [cache_hash]},
+                },
+                {
+                    "candidate_id": "cache-features-only-test",
+                    "policy_source": "managed-recommended",
+                    "pattern_hash": blocked_cache_hash,
+                    "estimated_savings_usd": 0.05,
+                    "dimensions": {"source_surface": "codex_turn", "app_family": "codex", "category": "summary", "phase": "summary"},
+                    "buckets": {"has_tools": False},
+                    "rollout": {
+                        "schema": "agentflow.pattern_policy_rollout.v1",
+                        "recommendation_mode": "full-review",
+                        "canary_enabled": False,
+                        "canary_fraction": 1.0,
+                        "canary_salt": "sha256:" + ("3" * 64),
+                        "canary_unit": "request_fingerprint",
+                    },
+                    "cache_action": {"type": "exact_cache_pattern_review", "streaming": False, "pattern_hashes": [blocked_cache_hash]},
+                },
+            ],
+            "review_only_candidate_count": 0,
+            "omitted_candidate_count": 0,
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            config_path = Path(tmp) / "crunch_rules.yaml"
+            config_path.write_text("enabled: true\n", encoding="utf-8")
+            store = Store(db_path)
+            try:
+                store.set_cache("cache-key", "claude-sonnet-4-6", 10, {"content": "cached"})
+                store.log_call(
+                    id="pattern-crunch-call",
+                    created_at="2026-06-08T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=2000,
+                    output_tokens_est=200,
+                    actual_input_tokens=2000,
+                    actual_output_tokens=200,
+                    cost_est_usd=0.006,
+                    routing_json=stable_json({
+                        "category": "tool-result",
+                        "text_chars": 8000,
+                        "has_tools": False,
+                        "managed_pattern_features": {
+                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "present": True,
+                            "pattern_hashes": [crunch_hash],
+                            "pattern_hash_count": 1,
+                            "workflow_phase": "tool-result",
+                            "category": "tool-result",
+                            "text_bucket": "2k_8k_chars",
+                            "token_bucket": "1k_4k_tokens",
+                            "raw_pattern_strings_included": False,
+                        },
+                    }),
+                    cache_json=stable_json({"status": "miss"}),
+                    retry_count=0,
+                )
+                store.log_call(
+                    id="pattern-cache-call",
+                    created_at="2026-06-08T10:01:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=900,
+                    input_tokens_est=1200,
+                    output_tokens_est=120,
+                    actual_input_tokens=1200,
+                    actual_output_tokens=120,
+                    cost_est_usd=0.004,
+                    routing_json=stable_json({
+                        "category": "chat",
+                        "text_chars": 4800,
+                        "has_tools": False,
+                        "managed_pattern_features": {
+                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "present": True,
+                            "pattern_hashes": [cache_hash],
+                            "pattern_hash_count": 1,
+                            "workflow_phase": "chat",
+                            "category": "chat",
+                            "text_bucket": "2k_8k_chars",
+                            "token_bucket": "1k_4k_tokens",
+                            "raw_pattern_strings_included": False,
+                        },
+                    }),
+                    cache_json=stable_json({"status": "miss"}),
+                    retry_count=0,
+                )
+                store.log_codex_app_event(
+                    id="pattern-codex-turn",
+                    created_at="2026-06-08T10:02:00+00:00",
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="req-pattern",
+                    thread_id="thread-pattern",
+                    message_chars=160,
+                    params_chars=5200,
+                    input_items=1,
+                    input_text_chars=5000,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    session_id="session-pattern",
+                    routing_json=stable_json({
+                        "category": "summary",
+                        "workflow_phase": "summary",
+                        "managed_pattern_features": {
+                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "present": True,
+                            "pattern_hashes": [blocked_cache_hash],
+                            "pattern_hash_count": 1,
+                            "workflow_phase": "summary",
+                            "category": "summary",
+                            "text_bucket": "2k_8k_chars",
+                            "token_bucket": "1k_4k_tokens",
+                            "replayability_level": "features_only",
+                            "raw_pattern_strings_included": False,
+                        },
+                    }),
+                    cache_json=stable_json({"status": "skipped", "reason": "features-only"}),
+                )
+
+                before_cache = store.get_cache("cache-key")
+                event_log = Path(os.environ["AGENTFLOW_POLICY_EVENTS_LOG"])
+                before_event_text = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+
+                impact = simulate_policy_bundle_impact(proposed, db_path=db_path, limit=10)
+
+                after_cache = store.get_cache("cache-key")
+                after_event_text = event_log.read_text(encoding="utf-8") if event_log.exists() else ""
+            finally:
+                store.conn.close()
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), "enabled: true\n")
+
+        self.assertEqual(before_cache, {"content": "cached"})
+        self.assertEqual(after_cache, {"content": "cached"})
+        self.assertEqual(before_event_text, after_event_text)
+        self.assertEqual(impact["status"], "simulated")
+        self.assertEqual(impact["sampled_call_count"], 2)
+        self.assertEqual(impact["sampled_codex_turn_count"], 1)
+        crunch_patterns = impact["sections"]["crunch"]["pattern_rules"]
+        self.assertEqual(crunch_patterns["would_match_count"], 1)
+        self.assertEqual(crunch_patterns["would_apply_count"], 1)
+        crunch_candidate = crunch_patterns["candidates"][0]
+        self.assertEqual(crunch_candidate["candidate_id"], "crunch-candidate-test")
+        self.assertEqual(crunch_candidate["estimated_tokens_affected"], 2000)
+        cache_patterns = impact["sections"]["cache"]["pattern_rules"]
+        self.assertEqual(cache_patterns["would_match_count"], 2)
+        self.assertEqual(cache_patterns["would_apply_count"], 0)
+        self.assertEqual(cache_patterns["would_holdout_count"], 1)
+        self.assertEqual(cache_patterns["would_bypass_count"], 1)
+        blocker_reasons = {
+            blocker["reason"]
+            for candidate in cache_patterns["candidates"]
+            for blocker in candidate["safety_blockers"]
+        }
+        self.assertIn("features-only-cache-replay-block", blocker_reasons)
+        self.assertIn("codex_turn", cache_patterns["candidates"][1]["source_surfaces"])
+
     def test_policy_review_cli_rejects_invalid_bundle(self):
         stdout = io.StringIO()
 
