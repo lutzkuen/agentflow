@@ -2965,12 +2965,14 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
         cache_meta=cache,
     )
     return {
+        "feature_schema_version": "agentflow.optimization_unit_features.v1",
         "unit_id": f"provider_call:{r.get('id')}",
         "created_at": r.get("created_at"),
         "source_surface": source_surface,
         "granularity": "provider_request",
         "app_family": _app_family_for_call(provider, requested_model, str(r.get("path") or "")),
         "requested_model": requested_model,
+        "candidate_target_model": target_model,
         "target_model": target_model,
         "routed_model": routed_model,
         "input_features": {
@@ -3019,6 +3021,12 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
         },
         "quality_signals": quality_signals,
         "replayability_level": "raw_body_opt_in" if r.get("request_json") else "features_only",
+        "privacy_summary": {
+            "telemetry_profile": "metadata-only",
+            "raw_body_storage": bool(r.get("request_json")),
+            "metadata_only": not bool(r.get("request_json")),
+            "aggregate_only": False,
+        },
         "local_ids": {
             "calls_id": r.get("id"),
             "session_id": r.get("session_id"),
@@ -3072,6 +3080,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         if source
     }) or ["local-default"]
     return {
+        "feature_schema_version": "agentflow.optimization_unit_features.v1",
         "schema": "agentflow.optimization_unit.v1",
         "unit_id": f"codex_turn:{r.get('start_event_id')}",
         "created_at": r.get("created_at"),
@@ -3079,6 +3088,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "granularity": "agent_turn",
         "app_family": "codex",
         "requested_model": requested_model,
+        "candidate_target_model": target_model,
         "target_model": target_model,
         "routed_model": routing.get("routed_model") if routing.get("applied") else None,
         "model_basis": "estimated",
@@ -3130,6 +3140,12 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         },
         "quality_signals": quality_signals,
         "replayability_level": str(cache.get("replayability_level") or "features_only"),
+        "privacy_summary": {
+            "telemetry_profile": "metadata-only",
+            "raw_body_storage": False,
+            "metadata_only": True,
+            "aggregate_only": False,
+        },
         "local_ids": {
             "codex_app_start_event_id": r.get("start_event_id"),
             "codex_app_response_event_id": response_event_id,

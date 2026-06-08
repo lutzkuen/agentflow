@@ -61,6 +61,9 @@ class ManagedFeedbackAsyncClient:
     calls = []
     provider_body = {}
     provider_status = 200
+    recommendation_body = None
+    recommendation_status = 200
+    recommendation_error = None
     feedback_error = None
 
     def __init__(self, *args, **kwargs):
@@ -74,6 +77,8 @@ class ManagedFeedbackAsyncClient:
 
     async def post(self, url, *, headers=None, json=None, **kwargs):
         if url.endswith("/v1/recommendation"):
+            if ManagedFeedbackAsyncClient.recommendation_error is not None:
+                raise ManagedFeedbackAsyncClient.recommendation_error
             ManagedFeedbackAsyncClient.calls.append({
                 "kind": "recommendation",
                 "url": url,
@@ -81,6 +86,11 @@ class ManagedFeedbackAsyncClient:
                 "json": json,
                 "kwargs": kwargs,
             })
+            if ManagedFeedbackAsyncClient.recommendation_body is not None:
+                return FakeJsonResponse(
+                    ManagedFeedbackAsyncClient.recommendation_body,
+                    ManagedFeedbackAsyncClient.recommendation_status,
+                )
             requested = str((json or {}).get("requested_model") or "")
             target = "claude-haiku-4-5-20251001" if requested.startswith("claude-") else requested
             return FakeJsonResponse({
@@ -209,6 +219,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         ManagedFeedbackAsyncClient.calls = []
         ManagedFeedbackAsyncClient.provider_body = {}
         ManagedFeedbackAsyncClient.provider_status = 200
+        ManagedFeedbackAsyncClient.recommendation_body = None
+        ManagedFeedbackAsyncClient.recommendation_status = 200
+        ManagedFeedbackAsyncClient.recommendation_error = None
         ManagedFeedbackAsyncClient.feedback_error = None
         SequencedAsyncClient.calls = []
         SequencedAsyncClient.responses = []
@@ -308,6 +321,125 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         feedback_meta = routing["managed_recommendation"]["outcome_feedback"]
         self.assertEqual(feedback_meta["status"], "sent")
         self.assertEqual(feedback_meta["optimization_unit_id"], 42)
+
+    def test_anthropic_managed_recommendation_records_feature_unit_and_model_change(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.recommendation_body = {
+            "target_model": "claude-sonnet-4-6",
+            "replacement_prompt": None,
+            "confidence": 0.91,
+            "policy_id": "policy-managed-test",
+            "reason": "test recommendation",
+            "optimization_unit_id": 42,
+        }
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw prompt secret"}],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post(
+                "/v1/messages",
+                json=request_body,
+                headers={"x-session-id": "session-managed-secret"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        recommendation = ManagedFeedbackAsyncClient.calls[0]["json"]
+        upstream = ManagedFeedbackAsyncClient.calls[1]["json"]
+        self.assertEqual(recommendation["feature_schema_version"], "agentflow.optimization_unit_features.v1")
+        self.assertEqual(recommendation["candidate_target_model"], "claude-haiku-4-5-20251001")
+        self.assertTrue(recommendation["privacy_summary"]["metadata_only"])
+        self.assertFalse(recommendation["privacy_summary"]["raw_body_storage"])
+        self.assertIn("session_id_hash", recommendation["grouping_identifiers"])
+        self.assertTrue(recommendation["grouping_identifiers"]["session_id_hash"].startswith("sha256:"))
+        self.assertNotIn("session-managed-secret", str(recommendation))
+        self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(recommendation)))
+        self.assertNotIn("raw prompt secret", str(recommendation))
+        self.assertEqual(upstream["model"], "claude-sonnet-4-6")
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        managed = json.loads(row["routing_json"])["managed_recommendation"]
+        self.assertEqual(managed["status"], "received")
+        self.assertTrue(managed["applied"])
+        self.assertTrue(managed["changed_model"])
+
+    def test_anthropic_managed_recommendation_rejects_replacement_prompt(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.recommendation_body = {
+            "target_model": "claude-sonnet-4-6",
+            "replacement_prompt": "raw replacement prompt secret",
+            "confidence": 0.91,
+            "policy_id": "policy-replacement-disabled",
+            "reason": "replace unsafe prompt",
+            "optimization_unit_id": 43,
+        }
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw prompt secret"}],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        upstream = ManagedFeedbackAsyncClient.calls[1]["json"]
+        self.assertEqual(upstream["model"], "claude-haiku-4-5-20251001")
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        managed = json.loads(row["routing_json"])["managed_recommendation"]
+        self.assertEqual(managed["status"], "received")
+        self.assertFalse(managed["applied"])
+        self.assertEqual(managed["apply_reason"], "unsafe-replacement-prompt")
+        self.assertFalse(managed["replacement_prompt_applied"])
+        self.assertIn("replacement_prompt_sha256", managed)
+        self.assertNotIn("raw replacement prompt secret", str(managed))
+
+    def test_anthropic_managed_server_error_falls_back_to_provider_call(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.recommendation_body = {"error": "managed unavailable"}
+        ManagedFeedbackAsyncClient.recommendation_status = 503
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw prompt secret"}],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["recommendation", "upstream"])
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        managed = json.loads(row["routing_json"])["managed_recommendation"]
+        self.assertEqual(managed["status"], "error")
+        self.assertEqual(managed["reason"], "server-error")
+        self.assertEqual(managed["fallback"], "local-policy")
+        self.assertFalse(managed["applied"])
 
     def test_anthropic_routing_experiment_exports_metadata_only_feedback(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

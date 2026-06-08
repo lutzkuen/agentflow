@@ -498,6 +498,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             category=category,
             stream=stream,
             input_tokens_est=input_tokens,
+            session_id=session_id,
         )
         recommendation_meta = await fetch_recommendation(recommendation_unit)
         recommendation_meta = apply_recommendation_to_body(

@@ -1142,19 +1142,22 @@ async def _attach_codex_managed_recommendation(
     crunch = metadata.setdefault("crunch", _policy_decision("crunch", "not-applied", "missing-crunch-metadata"))
     cache = metadata.setdefault("cache", _codex_cache_decision("skipped", "missing-cache-metadata", eligible=False))
     request_id = _request_id(msg)
+    thread_id = _thread_id(params)
     input_value = params.get("input")
     input_text_chars = _input_text_chars(input_value)
     input_items = len(input_value) if isinstance(input_value, list) else None
     unit = build_codex_turn_optimization_unit(
         method="turn/start",
         request_id_present=request_id is not None,
-        thread_id_present=_thread_id(params) is not None,
+        thread_id_present=thread_id is not None,
         params_chars=len(stable_json(params)),
         input_items=input_items,
         input_text_chars=input_text_chars if input_text_chars else None,
         routing_meta=routing,
         crunch_meta=crunch,
         cache_meta=cache,
+        request_id=str(request_id) if request_id is not None else None,
+        thread_id=thread_id,
     )
     managed = await fetch_recommendation(unit)
     managed.setdefault("applied", False)

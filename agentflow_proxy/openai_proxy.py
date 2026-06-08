@@ -357,6 +357,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             category=category,
             stream=stream,
             input_tokens_est=input_tokens,
+            session_id=session_id,
         )
         recommendation_meta = await fetch_recommendation(recommendation_unit)
         recommendation_meta = apply_recommendation_to_body(

@@ -1063,6 +1063,16 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         outcome = ManagedCodexClient.calls[1]["json"]
         self.assertEqual(unit["source_surface"], "codex_turn")
         self.assertEqual(unit["granularity"], "agent_turn")
+        self.assertEqual(unit["feature_schema_version"], recommendations.FEATURE_SCHEMA_VERSION)
+        self.assertEqual(unit["candidate_target_model"], "gpt-5-codex")
+        self.assertEqual(
+            sorted(unit["grouping_identifiers"]),
+            ["request_id_hash", "thread_id_hash"],
+        )
+        self.assertTrue(unit["grouping_identifiers"]["request_id_hash"].startswith("sha256:"))
+        self.assertTrue(unit["grouping_identifiers"]["thread_id_hash"].startswith("sha256:"))
+        self.assertTrue(unit["privacy_summary"]["metadata_only"])
+        self.assertFalse(unit["privacy_summary"]["raw_body_storage"])
         self.assertEqual(outcome["source_surface"], "codex_turn")
         self.assertEqual(outcome["status"], "success")
         self.assertEqual(outcome["quality_signals"]["status"], "success")
@@ -1072,6 +1082,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertTrue(forbidden.isdisjoint(self._keys_in(unit)))
         self.assertTrue(forbidden.isdisjoint(self._keys_in(outcome)))
         self.assertNotIn(secret, json.dumps(unit))
+        self.assertNotIn("turn-managed", json.dumps(unit))
+        self.assertNotIn("thread-managed", json.dumps(unit))
         self.assertNotIn(secret, json.dumps(outcome))
         self.assertNotIn("must not leave", json.dumps(unit))
         self.assertNotIn("must be stripped", json.dumps(outcome))

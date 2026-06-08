@@ -199,6 +199,13 @@ decision and records the fallback reason in local managed recommendation metadat
 keys are sent as bearer tokens only when configured and are not included in dashboard or CLI
 metadata.
 
+Before eligible provider calls and Codex app turns, the bridge posts an
+`agentflow.optimization_unit_features.v1` metadata-only feature unit to the managed
+recommendation endpoint. The payload includes derived request size, category, local policy
+decisions, candidate target model, privacy summary, and hashed grouping identifiers. It does
+not include prompts, messages, params, provider request bodies, responses, transcripts, tool
+payloads, API keys, or raw local session IDs in the default profile.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -210,7 +217,7 @@ metadata.
 | `AGENTFLOW_ROUTING` | `1` | Enable local model routing |
 | `AGENTFLOW_LOG_BODIES` | `0` | Store raw request/response bodies for local debugging |
 | `AGENTFLOW_RECOMMENDATION_ENABLED` | `0` | Opt into runtime managed optimizer recommendations; disabled means local-only with no managed network call |
-| `AGENTFLOW_RECOMMENDATION_SERVER_URL` | `http://127.0.0.1:4100` | Managed optimizer recommendation server URL |
+| `AGENTFLOW_RECOMMENDATION_SERVER_URL` | `http://127.0.0.1:4100` | Managed optimizer base URL; runtime recommendations post feature units to `/v1/recommendation` |
 | `AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS` | `1.5` | Bounded timeout for managed recommendation and feedback calls |
 | `AGENTFLOW_RECOMMENDATION_FAILURE_MODE` | `fallback-local` | Keep local policy authoritative on managed bridge failure |
 | `AGENTFLOW_MANAGED_API_KEY` | unset | Optional bearer token for managed optimizer requests; value is not printed in status metadata |

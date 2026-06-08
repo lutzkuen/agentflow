@@ -18,6 +18,7 @@ from agentflow_proxy.store import stable_json, utc_now
 
 RECOMMENDATION_PATH = "/v1/recommendation"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
+FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
 MANAGED_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 RECOMMENDATION_SERVER_URL_ENV = "AGENTFLOW_RECOMMENDATION_SERVER_URL"
 RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
@@ -52,6 +53,30 @@ RAW_FEATURE_KEYS = {
 }
 
 TOKEN_CHARS = 4
+
+
+def _hash_identifier(value: str | None) -> str | None:
+    if not value:
+        return None
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _metadata_only_privacy_summary() -> dict[str, Any]:
+    return {
+        "telemetry_profile": "metadata-only",
+        "raw_body_storage": False,
+        "metadata_only": True,
+        "aggregate_only": False,
+        "raw_payload_included": False,
+    }
+
+
+def _compact_grouping_identifiers(values: dict[str, str | None]) -> dict[str, str]:
+    return {
+        key: hashed
+        for key, value in values.items()
+        if (hashed := _hash_identifier(value)) is not None
+    }
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -169,14 +194,18 @@ def build_optimization_unit(
     category: str | None,
     stream: bool,
     input_tokens_est: int | None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     text_chars = routing_meta.get("text_chars")
     has_tools = routing_meta.get("has_tools")
+    candidate_target_model = routed_model if routed_model else None
     unit = {
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "source_surface": _source_surface(provider, path),
         "granularity": "provider_request",
         "app_family": _app_family(provider, requested_model, path),
         "requested_model": requested_model,
+        "candidate_target_model": candidate_target_model,
         "input_features": {
             "path": path,
             "stream": bool(stream),
@@ -198,6 +227,10 @@ def build_optimization_unit(
             "stripped_params": routing_meta.get("stripped_params") or [],
         },
         "outcome_features": {},
+        "grouping_identifiers": _compact_grouping_identifiers({
+            "session_id_hash": session_id,
+        }),
+        "privacy_summary": _metadata_only_privacy_summary(),
         "replayability_level": "features_only",
     }
     return _sanitize_features(unit)
@@ -227,13 +260,17 @@ def build_codex_turn_optimization_unit(
     cache_meta: dict[str, Any],
     workflow_phase: str | None = None,
     workflow_phase_reason: str | None = None,
+    request_id: str | None = None,
+    thread_id: str | None = None,
 ) -> dict[str, Any]:
     model_state, model_field, requested_model, routed_model = _codex_model_state(routing_meta)
     unit = {
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "source_surface": CODEX_APP_SOURCE_SURFACE,
         "granularity": "agent_turn",
         "app_family": "codex",
         "requested_model": requested_model,
+        "candidate_target_model": routed_model,
         "input_features": {
             "jsonrpc_method": method,
             "request_id_present": bool(request_id_present),
@@ -266,6 +303,11 @@ def build_codex_turn_optimization_unit(
             "safe_param_policy_source": routing_meta.get("policy_source") or cache_meta.get("policy_source"),
         },
         "outcome_features": {},
+        "grouping_identifiers": _compact_grouping_identifiers({
+            "request_id_hash": request_id,
+            "thread_id_hash": thread_id,
+        }),
+        "privacy_summary": _metadata_only_privacy_summary(),
         "replayability_level": cache_meta.get("replayability_level") or "features_only",
     }
     return _sanitize_features(unit)

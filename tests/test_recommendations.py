@@ -137,6 +137,7 @@ class RecommendationTest(unittest.TestCase):
             category="chat",
             stream=False,
             input_tokens_est=300,
+            session_id="session-secret",
         )
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -153,6 +154,16 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.last_timeout, 0.25)
         self.assertEqual(FakeAsyncClient.last_headers["authorization"], "Bearer managed-secret")
         self.assertEqual(FakeAsyncClient.last_json["replayability_level"], "features_only")
+        self.assertEqual(
+            FakeAsyncClient.last_json["feature_schema_version"],
+            recommendations.FEATURE_SCHEMA_VERSION,
+        )
+        self.assertEqual(FakeAsyncClient.last_json["candidate_target_model"], "claude-sonnet-4-6")
+        self.assertIn("session_id_hash", FakeAsyncClient.last_json["grouping_identifiers"])
+        self.assertTrue(FakeAsyncClient.last_json["grouping_identifiers"]["session_id_hash"].startswith("sha256:"))
+        self.assertNotIn("session-secret", str(FakeAsyncClient.last_json))
+        self.assertTrue(FakeAsyncClient.last_json["privacy_summary"]["metadata_only"])
+        self.assertFalse(FakeAsyncClient.last_json["privacy_summary"]["raw_body_storage"])
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
         self.assertEqual(meta["status"], "received")
         self.assertTrue(meta["auth_configured"])
