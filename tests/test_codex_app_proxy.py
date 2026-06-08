@@ -101,6 +101,51 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
                 keys.update(self._keys_in(item))
         return keys
 
+    def _record_codex_turn(
+        self,
+        *,
+        request_id: str,
+        store: Store,
+        request_started: dict,
+        active_turn_windows: dict,
+        session_id: str = "ws-session-alert",
+        thread_id: str = "thread-alert-session",
+        input_text: str = "Summarize the completed work.",
+        result_text: str = "done",
+        optimization_metadata: dict | None = None,
+    ) -> None:
+        start = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "model": "gpt-5.3-codex",
+                "input": [{"type": "text", "text": input_text}],
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"message": result_text},
+        }
+        with patch.object(codex_app_proxy, "store", store):
+            codex_app_proxy._record_message(
+                json.dumps(start),
+                direction="client_to_server",
+                session_id=session_id,
+                request_started=request_started,
+                optimization_metadata=optimization_metadata,
+                active_turn_windows=active_turn_windows,
+            )
+            codex_app_proxy._record_message(
+                json.dumps(response),
+                direction="server_to_client",
+                session_id=session_id,
+                request_started=request_started,
+                active_turn_windows=active_turn_windows,
+            )
+
     def test_locked_telemetry_store_does_not_interrupt_relay_recording(self):
         request_started = {}
         message = {
@@ -121,6 +166,110 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
 
         self.assertIn("1", request_started)
         self.assertIn("database is locked", stderr.getvalue())
+
+    def test_codex_app_session_spend_alert_warns_once_per_threshold_window(self):
+        raw_prompt = "secret raw prompt must not be logged"
+        raw_result = "secret raw result must not be logged"
+        metadata = {
+            "routing": {
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5.3-codex",
+                "workflow_phase": "summary",
+                "policy_source": "local-default",
+            },
+            "crunch": {
+                "changed": True,
+                "applied": True,
+                "tokens_before_est": 1_000,
+                "workflow_phase": "summary",
+                "policy_source": "local-default",
+            },
+            "cache": {
+                "status": "miss",
+                "reason": "exact-miss",
+                "workflow_phase": "summary",
+                "policy_source": "local-default",
+            },
+        }
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            request_started: dict = {}
+            active_turn_windows: dict = {}
+            codex_app_proxy._codex_app_session_alert_windows.clear()
+            try:
+                with (
+                    patch.object(codex_app_proxy, "CODEX_APP_SESSION_COST_ALERT_USD", 0.02),
+                    patch.object(codex_app_proxy.logging, "warning") as warning,
+                ):
+                    self._record_codex_turn(
+                        request_id="alert-1",
+                        input_text=raw_prompt,
+                        result_text="x" * 3_000,
+                        optimization_metadata=metadata,
+                        store=test_store,
+                        request_started=request_started,
+                        active_turn_windows=active_turn_windows,
+                    )
+                    self.assertEqual(warning.call_count, 0)
+
+                    self._record_codex_turn(
+                        request_id="alert-2",
+                        input_text=raw_prompt,
+                        result_text="y" * 3_000,
+                        optimization_metadata=metadata,
+                        store=test_store,
+                        request_started=request_started,
+                        active_turn_windows=active_turn_windows,
+                    )
+                    self.assertEqual(warning.call_count, 1)
+
+                    self._record_codex_turn(
+                        request_id="alert-3",
+                        input_text=raw_prompt,
+                        result_text=raw_result,
+                        optimization_metadata=metadata,
+                        store=test_store,
+                        request_started=request_started,
+                        active_turn_windows=active_turn_windows,
+                    )
+                    self.assertEqual(warning.call_count, 1)
+
+                rendered = warning.call_args.args[0] % warning.call_args.args[1:]
+                self.assertIn("Codex app thread_id thread-a daily estimated cost", rendered)
+                self.assertIn("2 turns", rendered)
+                self.assertIn("phases=summary:2", rendered)
+                self.assertIn("crunched_turns=2", rendered)
+                self.assertNotIn(raw_prompt, rendered)
+                self.assertNotIn(raw_result, rendered)
+                self.assertNotIn("params", rendered.lower())
+                self.assertNotIn("response", rendered.lower())
+            finally:
+                codex_app_proxy._codex_app_session_alert_windows.clear()
+                test_store.conn.close()
+
+    def test_codex_app_session_spend_alert_ignores_low_cost_sessions(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            request_started: dict = {}
+            active_turn_windows: dict = {}
+            codex_app_proxy._codex_app_session_alert_windows.clear()
+            try:
+                with (
+                    patch.object(codex_app_proxy, "CODEX_APP_SESSION_COST_ALERT_USD", 0.02),
+                    patch.object(codex_app_proxy.logging, "warning") as warning,
+                ):
+                    self._record_codex_turn(
+                        request_id="normal-1",
+                        result_text="small result",
+                        store=test_store,
+                        request_started=request_started,
+                        active_turn_windows=active_turn_windows,
+                    )
+
+                self.assertEqual(warning.call_count, 0)
+            finally:
+                codex_app_proxy._codex_app_session_alert_windows.clear()
+                test_store.conn.close()
 
     def test_non_json_and_non_turn_start_pass_through_with_not_applied_metadata(self):
         raw = "not json"

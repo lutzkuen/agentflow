@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import copy
 import json
+import logging
 import os
 import re
 import sys
@@ -36,6 +37,7 @@ from agentflow_proxy.recommendations import (
     fetch_recommendation,
     queue_codex_outcome_feedback,
 )
+from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -49,6 +51,10 @@ LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
 DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
 CODEX_APP_OPTIMIZE = codex_app_optimize_enabled()
 CODEX_APP_CACHE = codex_app_cache_enabled()
+CODEX_APP_SESSION_COST_ALERT_USD = float(os.getenv(
+    "AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD",
+    os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"),
+))
 
 store = Store(DEFAULT_DB)
 if getattr(store, "backend", None) == "sqlite":
@@ -69,6 +75,19 @@ _CODEX_FILE_AFFECTING_TEXT_RE = re.compile(
     r"\b(apply\s+patch|edit|modify|delete|remove|rename|move|save\s+to|write\s+to|write\s+.*\bfile|create\s+(?:a\s+)?file|touch\s+|mkdir\s+|rm\s+|mv\s+|cp\s+)\b",
     re.IGNORECASE,
 )
+_codex_app_session_alert_windows: dict[tuple[str, str, str], int] = {}
+
+
+def _json_obj(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _input_text_chars(value: Any) -> int:
@@ -86,6 +105,15 @@ def _input_text_chars(value: Any) -> int:
     return total
 
 
+def _as_int(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _thread_id(params: Any) -> Optional[str]:
     if isinstance(params, dict):
         value = params.get("threadId") or params.get("thread_id")
@@ -96,6 +124,179 @@ def _thread_id(params: Any) -> Optional[str]:
 def _request_id(msg: dict[str, Any]) -> Optional[str]:
     value = msg.get("id")
     return str(value) if value is not None else None
+
+
+def _codex_alert_key(*, session_id: str | None, thread_id: str | None, request_id: str | None) -> tuple[str, str]:
+    if thread_id:
+        return str(thread_id), "thread_id"
+    if session_id:
+        return str(session_id), "session_id"
+    if request_id:
+        return f"request:{request_id}", "request_id"
+    return "codex:unknown", "unknown"
+
+
+def _workflow_phase_from_metadata(routing: dict[str, Any], crunch: dict[str, Any], cache: dict[str, Any]) -> str:
+    for meta in (cache, crunch, routing):
+        phase = meta.get("workflow_phase") if isinstance(meta, dict) else None
+        if phase:
+            return str(phase)
+    return "unknown"
+
+
+def _estimate_codex_turn_spend(row: Any) -> dict[str, Any]:
+    cache = _json_obj(row["cache_json"])
+    crunch = _json_obj(row["crunch_json"])
+    routing = _json_obj(row["routing_json"])
+    input_tokens = max(0, int(_as_int(row["input_text_chars"]) / TOKEN_CHARS))
+    output_tokens = max(0, int(_as_int(row["response_result_chars"]) / TOKEN_CHARS))
+    model = codex_app_model()
+    processing_mode = codex_app_processing_mode()
+    turn_cost = estimate_cost(
+        model,
+        input_tokens,
+        output_tokens,
+        provider="openai",
+        processing_mode=processing_mode,
+    )
+    if turn_cost is None:
+        turn_cost_value = 0.0
+        cost_known = False
+    else:
+        turn_cost_value = float(turn_cost)
+        cost_known = True
+    baseline_cost = turn_cost_value
+    if crunch.get("tokens_before_est") is not None:
+        crunch_baseline = estimate_cost(
+            str(routing.get("requested_model") or model),
+            _as_int(crunch.get("tokens_before_est")),
+            output_tokens,
+            provider="openai",
+            processing_mode=processing_mode,
+        )
+        if crunch_baseline is not None:
+            baseline_cost = float(crunch_baseline)
+    if cache.get("status") == "hit":
+        return {
+            "cost_usd": 0.0,
+            "baseline_cost_usd": baseline_cost,
+            "cache_savings_usd": baseline_cost,
+            "crunch_savings_usd": 0.0,
+            "cost_known": cost_known,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_hit": True,
+            "crunched": bool(crunch.get("changed") or crunch.get("applied")),
+            "workflow_phase": _workflow_phase_from_metadata(routing, crunch, cache),
+        }
+    return {
+        "cost_usd": turn_cost_value,
+        "baseline_cost_usd": baseline_cost,
+        "cache_savings_usd": 0.0,
+        "crunch_savings_usd": max(baseline_cost - turn_cost_value, 0.0),
+        "cost_known": cost_known,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_hit": False,
+        "crunched": bool(crunch.get("changed") or crunch.get("applied")),
+        "workflow_phase": _workflow_phase_from_metadata(routing, crunch, cache),
+    }
+
+
+def _check_codex_app_session_cost_alert(window: dict[str, Any]) -> None:
+    threshold = float(CODEX_APP_SESSION_COST_ALERT_USD)
+    if threshold <= 0:
+        return
+    session_key, basis = _codex_alert_key(
+        session_id=str(window.get("session_id") or "") or None,
+        thread_id=str(window.get("thread_id") or "") or None,
+        request_id=str(window.get("request_id") or "") or None,
+    )
+    if basis == "unknown":
+        return
+    if basis == "thread_id":
+        where = "s.thread_id = ?"
+    elif basis == "session_id":
+        where = "s.thread_id is null and s.session_id = ?"
+    else:
+        where = "s.thread_id is null and s.session_id is null and s.request_id = ?"
+    try:
+        rows = store.conn.execute(f"""
+            select s.request_id,
+                   s.input_text_chars,
+                   s.routing_json,
+                   s.crunch_json,
+                   s.cache_json,
+                   (
+                       select r.result_chars from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_result_chars
+            from codex_app_events s
+            where s.direction = 'client_to_server'
+              and s.method = 'turn/start'
+              and date(s.created_at) = date('now')
+              and {where}
+        """, (session_key if basis != "request_id" else session_key.removeprefix("request:"),)).fetchall()
+    except Exception as exc:
+        print(f"AgentFlow Codex app spend alert skipped: {exc}", file=sys.stderr)
+        return
+    turns = 0
+    cost_usd = 0.0
+    input_tokens = 0
+    output_tokens = 0
+    cache_savings_usd = 0.0
+    crunch_savings_usd = 0.0
+    cache_hits = 0
+    crunched_turns = 0
+    phase_counts: dict[str, int] = {}
+    cost_known = True
+    for row in rows:
+        turns += 1
+        features = _estimate_codex_turn_spend(row)
+        cost_usd += float(features["cost_usd"])
+        input_tokens += int(features["input_tokens"])
+        output_tokens += int(features["output_tokens"])
+        cache_savings_usd += float(features["cache_savings_usd"])
+        crunch_savings_usd += float(features["crunch_savings_usd"])
+        cache_hits += 1 if features["cache_hit"] else 0
+        crunched_turns += 1 if features["crunched"] else 0
+        cost_known = cost_known and bool(features["cost_known"])
+        phase = str(features["workflow_phase"] or "unknown")
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+    if not turns or cost_usd < threshold:
+        return
+    window_index = int(cost_usd / threshold)
+    today = utc_now()[:10]
+    state_key = (today, basis, session_key)
+    previous_window = int(_codex_app_session_alert_windows.get(state_key) or 0)
+    if window_index <= previous_window:
+        return
+    _codex_app_session_alert_windows[state_key] = window_index
+    phase_mix = ",".join(f"{phase}:{count}" for phase, count in sorted(phase_counts.items())) or "unknown:0"
+    logging.warning(
+        "Codex app %s %s daily estimated cost $%.2f (%d turns, input_tokens_est=%d, "
+        "output_tokens_est=%d, phases=%s, cache_hits=%d, crunched_turns=%d, "
+        "cache_savings_usd=%.4f, crunch_savings_usd=%.4f, cost_known=%s) "
+        "exceeds alert threshold $%.2f window=%d",
+        basis,
+        session_key[:8],
+        cost_usd,
+        turns,
+        input_tokens,
+        output_tokens,
+        phase_mix,
+        cache_hits,
+        crunched_turns,
+        cache_savings_usd,
+        crunch_savings_usd,
+        str(cost_known).lower(),
+        threshold,
+        window_index,
+    )
 
 
 def _policy_decision(kind: str, status: str, reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) -> dict[str, Any]:
@@ -627,6 +828,15 @@ def _record_event_window(
         return
 
     window = active_turn_windows.get(key)
+    if not window and direction == "server_to_client" and request_id is not None:
+        for active_key, candidate in active_turn_windows.items():
+            if (
+                str(candidate.get("session_id") or "") == str(session_id or "")
+                and str(candidate.get("request_id") or "") == str(request_id)
+            ):
+                key = active_key
+                window = candidate
+                break
     if not window:
         return
     window["event_count"] = int(window.get("event_count") or 0) + 1
@@ -646,6 +856,8 @@ def _record_event_window(
     start_event_id = str(window.get("start_event_id") or "")
     if start_event_id:
         _persist_event_window(start_event_id, window)
+    if direction == "server_to_client" and (result_chars is not None or error_code is not None):
+        _check_codex_app_session_cost_alert(window)
     if direction == "server_to_client" and method in {"turn/completed", "thread/closed"}:
         active_turn_windows.pop(key, None)
 
