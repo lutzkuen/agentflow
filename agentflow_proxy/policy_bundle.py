@@ -527,7 +527,69 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
             f"{base}.thinking_deduplication.skip_latest_assistant",
             thinking_dedup["skip_latest_assistant"],
         )
+    _validate_crunch_pattern_rules(policy.get("pattern_rules"), errors, base=base)
     _validate_pattern_recommendation(policy, errors, base=base, expected_section="crunch")
+
+
+def _validate_crunch_pattern_rules(value: Any, errors: list[dict[str, str]], *, base: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        _add_error(errors, f"{base}.pattern_rules", "expected list")
+        return
+    for index, rule in enumerate(value):
+        path = f"{base}.pattern_rules[{index}]"
+        if not isinstance(rule, dict):
+            _add_error(errors, path, "expected object")
+            continue
+        if "id" in rule:
+            _validate_non_empty_string(errors, f"{path}.id", rule["id"])
+        if "candidate_id" in rule:
+            _validate_non_empty_string(errors, f"{path}.candidate_id", rule["candidate_id"])
+        if "enabled" in rule:
+            _validate_boolish(errors, f"{path}.enabled", rule["enabled"])
+        if "policy_source" in rule and rule["policy_source"] not in POLICY_SOURCES:
+            _add_error(errors, f"{path}.policy_source", "expected known policy source")
+        conditions = rule.get("conditions")
+        if not isinstance(conditions, dict):
+            _add_error(errors, f"{path}.conditions", "expected object")
+            continue
+        hashes = conditions.get("pattern_hashes", conditions.get("pattern_hash"))
+        if isinstance(hashes, str):
+            _validate_non_empty_string(errors, f"{path}.conditions.pattern_hash", hashes)
+        elif isinstance(hashes, list):
+            if not hashes:
+                _add_error(errors, f"{path}.conditions.pattern_hashes", "expected at least one hash")
+            for hash_index, item in enumerate(hashes):
+                _validate_non_empty_string(errors, f"{path}.conditions.pattern_hashes[{hash_index}]", item)
+        else:
+            _add_error(errors, f"{path}.conditions.pattern_hashes", "expected string or list")
+        for key in ("model_pattern", "category", "workflow_phase"):
+            if key in conditions:
+                _validate_non_empty_string(errors, f"{path}.conditions.{key}", conditions[key])
+        if "category_not_in" in conditions:
+            categories = conditions["category_not_in"]
+            if isinstance(categories, str):
+                _validate_non_empty_string(errors, f"{path}.conditions.category_not_in", categories)
+            elif isinstance(categories, list):
+                for category_index, category in enumerate(categories):
+                    _validate_non_empty_string(errors, f"{path}.conditions.category_not_in[{category_index}]", category)
+            else:
+                _add_error(errors, f"{path}.conditions.category_not_in", "expected string or list")
+        for key in ("min_repeated_count", "keep_recent_matches", "min_text_chars", "max_text_chars", "max_applications"):
+            if key in conditions:
+                _validate_intish(errors, f"{path}.conditions.{key}", conditions[key], min_value=0)
+        action = rule.get("action")
+        if not isinstance(action, dict):
+            _add_error(errors, f"{path}.action", "expected object")
+            continue
+        if "type" in action and action["type"] not in {"shorten", "omit"}:
+            _add_error(errors, f"{path}.action.type", "expected shorten or omit")
+        for key in ("head_chars", "tail_chars", "max_replacement_chars"):
+            if key in action:
+                _validate_intish(errors, f"{path}.action.{key}", action[key], min_value=0)
+        if "marker" in action:
+            _validate_non_empty_string(errors, f"{path}.action.marker", action["marker"])
 
 
 def _validate_cache_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:

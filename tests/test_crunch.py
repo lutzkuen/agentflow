@@ -117,6 +117,150 @@ prompt_cache:
             self.assertEqual(meta["long_blocks_shortened"], 1)
             self.assertIn("middle of long older text block omitted", crunched["messages"][0]["content"])
 
+    def test_pattern_rules_shorten_older_repeated_text_from_local_file(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            scaffold = (
+                "Reviewed scaffold section.\n"
+                + "\n".join(f"stable repeated instruction line {i}" for i in range(80))
+            )
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+pattern_rules:
+  - id: reviewed-scaffold
+    enabled: true
+    policy_source: managed-recommended
+    candidate_id: candidate-123
+    conditions:
+      pattern_hashes:
+        - {pattern_hash}
+      min_repeated_count: 2
+      keep_recent_matches: 1
+      min_text_chars: 1000
+    action:
+      type: shorten
+      head_chars: 80
+      tail_chars: 70
+      max_replacement_chars: 260
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": scaffold},
+                    {"role": "assistant", "content": "ack"},
+                    {"role": "user", "content": scaffold},
+                ],
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertTrue(meta["changed"])
+            self.assertEqual(meta["policy_source"], "local-manual")
+            self.assertEqual(meta["pattern_rules_applied"], 1)
+            self.assertGreater(meta["pattern_rule_saved_chars"], 1000)
+            pattern_meta = meta["pattern_rules"]
+            self.assertEqual(pattern_meta["configured_count"], 1)
+            self.assertEqual(pattern_meta["applied_count"], 1)
+            self.assertEqual(pattern_meta["rules"][0]["rule_id"], "reviewed-scaffold")
+            self.assertEqual(pattern_meta["rules"][0]["candidate_id"], "candidate-123")
+            self.assertEqual(pattern_meta["rules"][0]["policy_source"], "managed-recommended")
+            self.assertEqual(pattern_meta["rules"][0]["matched_hashes"], [pattern_hash])
+            self.assertIn("reviewed crunch pattern applied", crunched["messages"][0]["content"])
+            self.assertIn("pattern_hash=", crunched["messages"][0]["content"])
+            self.assertEqual(crunched["messages"][2]["content"], scaffold)
+
+    def test_pattern_rules_skip_tool_bearing_payloads_with_reason(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            text = " ".join("unsafe repeated scaffold" for _ in range(80))
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(text))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+pattern_rules:
+  - id: reviewed-tool-skip
+    conditions:
+      pattern_hash: {pattern_hash}
+      min_repeated_count: 1
+    action:
+      type: omit
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text},
+                            {"type": "tool_result", "tool_use_id": "tool-1", "content": "stateful output"},
+                        ],
+                    }
+                ]
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertFalse(meta["changed"])
+            self.assertEqual(crunched, body)
+            reasons = {(item["rule_id"], item["reason"]) for item in meta["pattern_rules"]["skip_reasons"]}
+            self.assertIn(("reviewed-tool-skip", "unsafe-tool-or-action-payload"), reasons)
+
+    def test_pattern_rules_pass_through_non_matching_payloads(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+pattern_rules:
+  - id: reviewed-non-match
+    conditions:
+      pattern_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      min_repeated_count: 1
+    action:
+      type: omit
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {"messages": [{"role": "user", "content": "ordinary request"}]}
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertFalse(meta["changed"])
+            self.assertEqual(crunched, body)
+            self.assertEqual(meta["pattern_rules"]["applied_count"], 0)
+            self.assertIn(
+                {"rule_id": "reviewed-non-match", "reason": "min-repeated-count-not-met", "count": 1},
+                meta["pattern_rules"]["skip_reasons"],
+            )
+
+    def test_default_pattern_rules_are_inert(self):
+        manual = importlib.reload(crunch_module)
+        body = {"messages": [{"role": "user", "content": "hello"}]}
+
+        crunched, meta = manual.crunch_body(body)
+
+        self.assertEqual(crunched, body)
+        self.assertEqual(meta["policy_source"], "local-default")
+        self.assertEqual(meta["pattern_rules"]["configured_count"], 0)
+        self.assertEqual(meta["pattern_rules"]["applied_count"], 0)
+
     def test_thinking_near_duplicate_dedup_removes_older_assistant_block(self):
         manual = importlib.reload(crunch_module)
         base_words = [f"token{i}" for i in range(520)]

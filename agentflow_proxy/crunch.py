@@ -51,6 +51,7 @@ def _default_crunch_policy() -> dict[str, Any]:
             "similarity_threshold": 0.95,
             "skip_latest_assistant": True,
         },
+        "pattern_rules": [],
         "codex_repeated_scaffolding": {
             "enabled": True,
             "min_request_chars": 12000,
@@ -99,6 +100,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            pattern_rules = data.get("pattern_rules")
+            if pattern_rules is not None:
+                policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-manual")
             codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
@@ -127,6 +131,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            pattern_rules = data.get("pattern_rules")
+            if pattern_rules is not None:
+                policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-default")
             codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
@@ -183,6 +190,85 @@ def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: di
     )
 
 
+def _parse_pattern_hashes(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, list) else [value]
+    hashes: list[str] = []
+    for raw in raw_values:
+        if not isinstance(raw, str):
+            continue
+        item = raw.strip()
+        if not item:
+            continue
+        if not item.startswith("sha256:"):
+            item = f"sha256:{item}"
+        if item not in hashes:
+            hashes.append(item)
+    return hashes
+
+
+def _parse_pattern_rules_yaml(value: Any, *, default_policy_source: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        conditions = item.get("conditions") or {}
+        if not isinstance(conditions, dict):
+            conditions = {}
+        action = item.get("action") or {}
+        if not isinstance(action, dict):
+            action = {}
+        pattern_hashes = _parse_pattern_hashes(
+            conditions.get("pattern_hashes")
+            or conditions.get("pattern_hash")
+            or item.get("pattern_hashes")
+            or item.get("pattern_hash")
+        )
+        if not pattern_hashes:
+            continue
+        normalized_conditions: dict[str, Any] = {
+            "pattern_hashes": pattern_hashes,
+            "min_repeated_count": int(conditions.get("min_repeated_count", item.get("min_repeated_count", 2))),
+            "keep_recent_matches": int(conditions.get("keep_recent_matches", item.get("keep_recent_matches", 1))),
+        }
+        for key in ("model_pattern", "category", "workflow_phase"):
+            if conditions.get(key) is not None:
+                normalized_conditions[key] = str(conditions[key])
+        if conditions.get("category_not_in") is not None:
+            raw_categories = conditions["category_not_in"]
+            if isinstance(raw_categories, list):
+                normalized_conditions["category_not_in"] = [str(category) for category in raw_categories]
+            else:
+                normalized_conditions["category_not_in"] = [str(raw_categories)]
+        for key in ("min_text_chars", "max_text_chars", "max_applications"):
+            if conditions.get(key) is not None:
+                normalized_conditions[key] = int(conditions[key])
+        action_type = str(action.get("type") or action.get("kind") or "shorten").strip().lower()
+        if action_type not in {"shorten", "omit"}:
+            action_type = "shorten"
+        normalized_action: dict[str, Any] = {
+            "type": action_type,
+            "head_chars": int(action.get("head_chars", 1200)),
+            "tail_chars": int(action.get("tail_chars", 800)),
+            "max_replacement_chars": int(action.get("max_replacement_chars", item.get("max_replacement_chars", 2400))),
+        }
+        if action.get("marker") is not None:
+            normalized_action["marker"] = str(action["marker"])
+        rules.append({
+            "id": str(item.get("id") or item.get("rule_id") or item.get("candidate_id") or f"pattern-rule-{index + 1}"),
+            "candidate_id": item.get("candidate_id"),
+            "enabled": _as_bool(item.get("enabled"), True),
+            "policy_source": str(item.get("policy_source") or default_policy_source),
+            "description": str(item.get("description") or ""),
+            "conditions": normalized_conditions,
+            "action": normalized_action,
+        })
+    return rules
+
+
 def _apply_codex_scaffolding_policy_yaml(policy: dict[str, Any], codex_scaffolding: dict[str, Any]) -> None:
     target = policy["codex_repeated_scaffolding"]
     target["enabled"] = _as_bool(codex_scaffolding.get("enabled"), target["enabled"])
@@ -221,6 +307,7 @@ THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
 THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
 THINKING_DEDUP_SIMILARITY_THRESHOLD = float(THINKING_DEDUP_POLICY["similarity_threshold"])
 THINKING_DEDUP_SKIP_LATEST_ASSISTANT = bool(THINKING_DEDUP_POLICY["skip_latest_assistant"])
+PATTERN_RULES = list(CRUNCH_POLICY["pattern_rules"])
 CODEX_REPEATED_SCAFFOLDING_POLICY = CRUNCH_POLICY["codex_repeated_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_ENABLED = bool(CODEX_REPEATED_SCAFFOLDING_POLICY["enabled"])
 CODEX_REPEATED_SCAFFOLDING_MIN_REQUEST_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["min_request_chars"])
@@ -268,6 +355,324 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
     if union == 0:
         return 0.0
     return len(a & b) / union
+
+
+def _extract_text_for_category(obj: Any) -> str:
+    parts: list[str] = []
+    if isinstance(obj, str):
+        parts.append(obj)
+    elif isinstance(obj, list):
+        for item in obj:
+            text = _extract_text_for_category(item)
+            if text:
+                parts.append(text)
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in {"text", "content", "input", "system", "name", "type"}:
+                text = _extract_text_for_category(value)
+                if text:
+                    parts.append(text)
+            elif isinstance(value, (list, dict)):
+                text = _extract_text_for_category(value)
+                if text:
+                    parts.append(text)
+    return "\n".join(parts)
+
+
+def _body_has_tools(body: dict[str, Any]) -> bool:
+    if body.get("tools"):
+        return True
+    serialized = stable_json(body.get("messages", []))
+    return "tool_use" in serialized or "tool_result" in serialized
+
+
+def _crunch_request_category(body: dict[str, Any]) -> str:
+    tools = _body_has_tools(body)
+    text = _extract_text_for_category(body)
+    text_chars = len(text)
+    messages = body.get("messages") or []
+    if messages:
+        last = messages[-1]
+        if isinstance(last, dict) and last.get("role") == "user":
+            content = last.get("content", [])
+            if isinstance(content, list) and content and any(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+            ):
+                return "tool-result"
+    if tools and text_chars > 16000:
+        return "tool-heavy"
+    if tools:
+        return "tool-light"
+    if text_chars > 32000:
+        return "long-context"
+    if text_chars < 1500 and len(messages) <= 2:
+        return "short-completion"
+    if "```" in text:
+        return "code-gen"
+    return "chat"
+
+
+def _pattern_hash_for_text(text: str) -> str:
+    return f"sha256:{sha256_text(normalize_text(text))}"
+
+
+def _pattern_rule_base_meta() -> dict[str, Any]:
+    return {
+        "enabled": bool(PATTERN_RULES),
+        "configured_count": len(PATTERN_RULES),
+        "applied_count": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "rules": [],
+        "skip_reasons": [],
+    }
+
+
+def _pattern_rule_skip(skip_counts: dict[tuple[str, str], int], rule_id: str, reason: str, count: int = 1) -> None:
+    skip_counts[(rule_id, reason)] = skip_counts.get((rule_id, reason), 0) + count
+
+
+def _safe_pattern_text_entries(body: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    safe: list[dict[str, Any]] = []
+    unsafe: list[dict[str, Any]] = []
+
+    def add(container: Any, key: Any, text: str, location: str, *, unsafe_reason: str | None = None) -> None:
+        entry = {
+            "container": container,
+            "key": key,
+            "text": text,
+            "location": location,
+            "hash": _pattern_hash_for_text(text),
+            "normalized_chars": len(normalize_text(text)),
+        }
+        if unsafe_reason:
+            entry["unsafe_reason"] = unsafe_reason
+            unsafe.append(entry)
+        else:
+            safe.append(entry)
+
+    if isinstance(body.get("system"), str):
+        add(body, "system", body["system"], "system")
+    elif isinstance(body.get("system"), list):
+        for index, block in enumerate(body["system"]):
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                add(block, "text", block["text"], f"system[{index}].text")
+
+    if isinstance(body.get("instructions"), str):
+        add(body, "instructions", body["instructions"], "instructions")
+
+    input_value = body.get("input")
+    if isinstance(input_value, str):
+        add(body, "input", input_value, "input")
+    else:
+        for index, entry in enumerate(_codex_text_input_entries(input_value)):
+            add(entry.get("container"), entry.get("key"), str(entry.get("text") or ""), f"input[{index}]")
+
+    messages = body.get("messages") or []
+    if isinstance(messages, list):
+        for msg_index, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            role = str(msg.get("role") or "unknown")
+            if isinstance(content, str):
+                add(msg, "content", content, f"messages[{msg_index}].content", unsafe_reason=None)
+                continue
+            if not isinstance(content, list):
+                continue
+            unsafe_reason = None
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result", "thinking"}:
+                    unsafe_reason = "unsafe-tool-or-action-payload"
+                    break
+            for block_index, block in enumerate(content):
+                if isinstance(block, str):
+                    add(content, block_index, block, f"messages[{msg_index}].content[{block_index}]", unsafe_reason=unsafe_reason)
+                elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                    add(
+                        block,
+                        "text",
+                        block["text"],
+                        f"messages[{msg_index}].content[{block_index}].text",
+                        unsafe_reason=unsafe_reason,
+                    )
+                elif isinstance(block, dict) and role == "assistant" and block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                    add(
+                        block,
+                        "thinking",
+                        block["thinking"],
+                        f"messages[{msg_index}].content[{block_index}].thinking",
+                        unsafe_reason="unsafe-thinking-payload",
+                    )
+    return safe, unsafe
+
+
+def _set_pattern_text_entry(entry: dict[str, Any], text: str) -> None:
+    container = entry.get("container")
+    key = entry.get("key")
+    if isinstance(container, dict) and isinstance(key, str):
+        container[key] = text
+    elif isinstance(container, list) and isinstance(key, int):
+        container[key] = text
+
+
+def _pattern_rule_matches_request(rule: dict[str, Any], body: dict[str, Any], category: str) -> bool:
+    conditions = rule.get("conditions") or {}
+    model_pattern = conditions.get("model_pattern")
+    if model_pattern and str(model_pattern).lower() not in str(body.get("model") or "").lower():
+        return False
+    if conditions.get("category") and str(conditions["category"]) != category:
+        return False
+    if conditions.get("workflow_phase") and str(conditions["workflow_phase"]) != category:
+        return False
+    category_not_in = conditions.get("category_not_in") or []
+    if category in {str(item) for item in category_not_in}:
+        return False
+    return True
+
+
+def _build_pattern_replacement(entry: dict[str, Any], rule: dict[str, Any]) -> str | None:
+    action = rule.get("action") or {}
+    original = str(entry.get("text") or "")
+    pattern_hash = str(entry["hash"])
+    short_hash = pattern_hash.split("sha256:", 1)[-1][:12]
+    rule_id = str(rule.get("id") or "pattern-rule")
+    marker = str(action.get("marker") or "")
+    if not marker:
+        marker = (
+            f"[AgentFlow: reviewed crunch pattern applied; rule_id={rule_id}; "
+            f"pattern_hash={short_hash}; original_chars={len(original)}]"
+        )
+    max_replacement_chars = max(1, int(action.get("max_replacement_chars", 2400)))
+    if str(action.get("type") or "shorten") == "omit":
+        return marker[:max_replacement_chars]
+
+    head = max(0, int(action.get("head_chars", 1200)))
+    tail = max(0, int(action.get("tail_chars", 800)))
+    replacement = original[:head] + "\n\n" + marker + "\n\n" + (original[-tail:] if tail else "")
+    if len(replacement) > max_replacement_chars:
+        remaining = max_replacement_chars - len(marker) - 4
+        if remaining <= 0:
+            replacement = marker[:max_replacement_chars]
+        else:
+            head = min(head, max(0, remaining // 2))
+            tail = min(tail, max(0, remaining - head))
+            replacement = original[:head] + "\n\n" + marker + "\n\n" + (original[-tail:] if tail else "")
+            replacement = replacement[:max_replacement_chars]
+    return replacement if len(replacement) < len(original) else None
+
+
+def _apply_pattern_rules(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    meta = _pattern_rule_base_meta()
+    before_chars = len(stable_json(body))
+    if not PATTERN_RULES:
+        meta["before_chars"] = before_chars
+        meta["after_chars"] = before_chars
+        return 0, meta
+
+    entries, unsafe_entries = _safe_pattern_text_entries(body)
+    category = _crunch_request_category(body)
+    counts: dict[str, int] = {}
+    for entry in entries:
+        counts[str(entry["hash"])] = counts.get(str(entry["hash"]), 0) + 1
+    unsafe_counts: dict[str, int] = {}
+    for entry in unsafe_entries:
+        unsafe_counts[str(entry["hash"])] = unsafe_counts.get(str(entry["hash"]), 0) + 1
+
+    total_saved = 0
+    skip_counts: dict[tuple[str, str], int] = {}
+    applied_by_hash: dict[str, int] = {}
+
+    for rule in PATTERN_RULES:
+        rule_id = str(rule.get("id") or "pattern-rule")
+        rule_meta = {
+            "rule_id": rule_id,
+            "candidate_id": rule.get("candidate_id"),
+            "enabled": bool(rule.get("enabled", True)),
+            "policy_source": rule.get("policy_source") or CRUNCH_POLICY_SOURCE,
+            "action": (rule.get("action") or {}).get("type", "shorten"),
+            "matched_hashes": [],
+            "applied_count": 0,
+            "saved_chars": 0,
+            "skip_reasons": [],
+        }
+        if not rule_meta["enabled"]:
+            _pattern_rule_skip(skip_counts, rule_id, "disabled")
+            rule_meta["skip_reasons"].append({"reason": "disabled", "count": 1})
+            meta["rules"].append(rule_meta)
+            continue
+        if not _pattern_rule_matches_request(rule, body, category):
+            _pattern_rule_skip(skip_counts, rule_id, "request-gate-not-matched")
+            rule_meta["skip_reasons"].append({"reason": "request-gate-not-matched", "count": 1})
+            meta["rules"].append(rule_meta)
+            continue
+
+        conditions = rule.get("conditions") or {}
+        rule_hashes = [str(item) for item in conditions.get("pattern_hashes") or []]
+        min_repeated_count = max(1, int(conditions.get("min_repeated_count", 2)))
+        keep_recent_matches = max(0, int(conditions.get("keep_recent_matches", 1)))
+        max_applications = max(0, int(conditions.get("max_applications", len(entries))))
+        for pattern_hash in rule_hashes:
+            safe_count = counts.get(pattern_hash, 0)
+            unsafe_count = unsafe_counts.get(pattern_hash, 0)
+            if unsafe_count:
+                _pattern_rule_skip(skip_counts, rule_id, "unsafe-tool-or-action-payload", unsafe_count)
+                rule_meta["skip_reasons"].append({"reason": "unsafe-tool-or-action-payload", "pattern_hash": pattern_hash, "count": unsafe_count})
+            if safe_count < min_repeated_count:
+                _pattern_rule_skip(skip_counts, rule_id, "min-repeated-count-not-met")
+                rule_meta["skip_reasons"].append({"reason": "min-repeated-count-not-met", "pattern_hash": pattern_hash, "count": safe_count})
+                continue
+            occurrences = [entry for entry in entries if entry["hash"] == pattern_hash]
+            protected_start = max(0, len(occurrences) - keep_recent_matches)
+            for occurrence_index, entry in enumerate(occurrences):
+                if entry.get("pattern_rule_applied"):
+                    _pattern_rule_skip(skip_counts, rule_id, "already-applied-by-earlier-rule")
+                    continue
+                if rule_meta["applied_count"] >= max_applications:
+                    _pattern_rule_skip(skip_counts, rule_id, "max-applications-reached")
+                    break
+                if occurrence_index >= protected_start:
+                    _pattern_rule_skip(skip_counts, rule_id, "kept-recent-match")
+                    continue
+                if conditions.get("min_text_chars") is not None and int(entry["normalized_chars"]) < int(conditions["min_text_chars"]):
+                    _pattern_rule_skip(skip_counts, rule_id, "text-too-small")
+                    continue
+                if conditions.get("max_text_chars") is not None and int(entry["normalized_chars"]) > int(conditions["max_text_chars"]):
+                    _pattern_rule_skip(skip_counts, rule_id, "text-too-large")
+                    continue
+                replacement = _build_pattern_replacement(entry, rule)
+                if replacement is None:
+                    _pattern_rule_skip(skip_counts, rule_id, "replacement-not-smaller")
+                    continue
+                before_len = len(str(entry.get("text") or ""))
+                _set_pattern_text_entry(entry, replacement)
+                entry["pattern_rule_applied"] = True
+                saved = before_len - len(replacement)
+                total_saved += saved
+                rule_meta["applied_count"] += 1
+                rule_meta["saved_chars"] += saved
+                applied_by_hash[pattern_hash] = applied_by_hash.get(pattern_hash, 0) + 1
+                if pattern_hash not in rule_meta["matched_hashes"]:
+                    rule_meta["matched_hashes"].append(pattern_hash)
+        meta["rules"].append(rule_meta)
+
+    meta["applied_count"] = sum(int(rule.get("applied_count") or 0) for rule in meta["rules"])
+    meta["changed"] = meta["applied_count"] > 0
+    after_chars = len(stable_json(body))
+    meta["before_chars"] = before_chars
+    meta["after_chars"] = after_chars
+    meta["saved_chars"] = before_chars - after_chars
+    meta["text_saved_chars"] = total_saved
+    meta["tokens_saved_est"] = (before_chars - after_chars) // TOKEN_CHARS
+    meta["category"] = category
+    meta["applied_pattern_hashes"] = sorted(applied_by_hash)
+    meta["skip_reasons"] = [
+        {"rule_id": rule_id, "reason": reason, "count": count}
+        for (rule_id, reason), count in sorted(skip_counts.items())
+    ]
+    return total_saved, meta
 
 
 def _codex_scaffolding_meta(status: str, reason: str) -> dict[str, Any]:
@@ -795,6 +1200,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
+    _pattern_saved_chars, pattern_rules_meta = _apply_pattern_rules(new_body)
     seen: dict[str, int] = {}
     seen_shingles: list[tuple[frozenset, int]] = []
     replacements = 0
@@ -881,6 +1287,9 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         "near_duplicate_blocks_replaced": near_replacements,
         "thinking_near_duplicate_blocks_removed": thinking_near_replacements,
         "long_blocks_shortened": shortened,
+        "pattern_rules_applied": pattern_rules_meta["applied_count"],
+        "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
+        "pattern_rules": pattern_rules_meta,
         "policy_source": CRUNCH_POLICY_SOURCE,
         "rule_path": CRUNCH_RULES_PATH,
         "threshold_chars": CRUNCH_THRESHOLD_CHARS,

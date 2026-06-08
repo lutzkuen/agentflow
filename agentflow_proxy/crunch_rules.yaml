@@ -26,6 +26,26 @@ thinking_deduplication:
   min_chars: 2000
   similarity_threshold: 0.95
   skip_latest_assistant: true
+pattern_rules: []
+# Example local-only reviewed rule shape:
+# pattern_rules:
+#   - id: reviewed-scaffold-example
+#     enabled: true
+#     policy_source: managed-recommended
+#     candidate_id: crunch-pattern-candidate-123
+#     conditions:
+#       pattern_hashes:
+#         - sha256:...
+#       category: long-context
+#       min_repeated_count: 2
+#       keep_recent_matches: 1
+#       min_text_chars: 1000
+#       max_applications: 4
+#     action:
+#       type: shorten
+#       head_chars: 800
+#       tail_chars: 600
+#       max_replacement_chars: 1800
 codex_repeated_scaffolding:
   # Codex app-server turn/start only. Text-only input blocks may contain large
   # repeated context scaffolding that is not represented as provider messages.

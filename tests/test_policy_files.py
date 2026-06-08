@@ -62,6 +62,7 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("cache", bundle["policies"])
         self.assertIn("routing_experiments", bundle["policies"])
         self.assertIn("codex_app", bundle["policies"])
+        self.assertEqual(bundle["policies"]["crunch"]["pattern_rules"], [])
         self.assertFalse(bundle["policies"]["codex_app"]["review_only"])
         self.assertEqual(bundle["policies"]["codex_app"]["policy_source"], "local-default")
         self.assertIn("file", bundle["policies"]["codex_app"])
@@ -75,6 +76,38 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertEqual(result["schema"], "agentflow.policy_bundle_validation.v1")
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["provenance"]["status"], "not-configured")
+
+    def test_policy_bundle_validation_accepts_crunch_pattern_rules(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["crunch"]["pattern_rules"] = [
+            {
+                "id": "reviewed-scaffold",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "candidate_id": "candidate-123",
+                "conditions": {
+                    "pattern_hashes": [
+                        "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    ],
+                    "category": "chat",
+                    "min_repeated_count": 2,
+                    "keep_recent_matches": 1,
+                    "min_text_chars": 1000,
+                    "max_applications": 4,
+                },
+                "action": {
+                    "type": "shorten",
+                    "head_chars": 80,
+                    "tail_chars": 70,
+                    "max_replacement_chars": 260,
+                },
+            }
+        ]
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
 
     def _managed_policy_bundle(self):
         bundle = asyncio.run(build_policy_bundle())
