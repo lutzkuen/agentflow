@@ -2,6 +2,7 @@ import sys
 import asyncio
 import importlib.util
 import os
+import json
 import time
 from pathlib import Path
 import tempfile
@@ -188,6 +189,118 @@ class DashboardImportTests(unittest.TestCase):
             self.assertNotIn("managedsecret", redacted)
             self.assertNotIn("policysecret", redacted)
             self.assertNotIn("user:supersecret", redacted)
+        finally:
+            store.conn.close()
+            tmp.close()
+
+    def test_safety_stats_warn_on_stuck_managed_feedback_queue_without_payloads(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        try:
+            store.enqueue_managed_outcome_feedback(
+                id="queue-due",
+                created_at="2000-01-01T09:00:00+00:00",
+                updated_at="2000-01-01T09:00:00+00:00",
+                source_surface="codex_turn",
+                endpoint="/v1/optimization-units/77/outcome",
+                optimization_unit_id=77,
+                payload_json=json.dumps({
+                    "prompt": "must not appear in dashboard",
+                    "raw_response": "provider body must stay local",
+                    "params": {"secret": "raw params must stay local"},
+                }),
+                status="queued",
+                attempts=0,
+                next_attempt_at="2000-01-01T09:00:00+00:00",
+            )
+            store.enqueue_managed_outcome_feedback(
+                id="queue-retry",
+                created_at="2000-01-01T09:05:00+00:00",
+                updated_at="2000-01-01T09:05:00+00:00",
+                source_surface="anthropic_messages",
+                endpoint="/v1/optimization-units/88/outcome",
+                optimization_unit_id=88,
+                payload_json=json.dumps({"messages": ["raw prompt text"]}),
+                status="retryable-error",
+                attempts=2,
+                next_attempt_at="2000-01-01T09:05:00+00:00",
+                last_error="ConnectError: managed feedback down",
+                last_status_code=503,
+            )
+            store.enqueue_managed_outcome_feedback(
+                id="queue-dropped",
+                created_at="2000-01-01T09:10:00+00:00",
+                updated_at="2000-01-01T09:10:00+00:00",
+                source_surface="codex_turn",
+                endpoint="/v1/optimization-units/99/outcome",
+                optimization_unit_id=99,
+                payload_json=json.dumps({"raw_request": "dropped raw request"}),
+                status="dropped-after-limit",
+                attempts=3,
+                next_attempt_at="2000-01-01T09:10:00+00:00",
+                last_error="HTTP 500: raw failure body",
+                last_status_code=500,
+            )
+            store.enqueue_managed_outcome_feedback(
+                id="queue-sent",
+                created_at="2000-01-01T08:55:00+00:00",
+                updated_at="2000-01-01T09:15:00+00:00",
+                source_surface="codex_turn",
+                endpoint="/v1/optimization-units/66/outcome",
+                optimization_unit_id=66,
+                payload_json=json.dumps({"content": "sent raw content"}),
+                status="sent",
+                attempts=1,
+                next_attempt_at="2000-01-01T08:55:00+00:00",
+                sent_at="2000-01-01T09:15:00+00:00",
+                last_status_code=200,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_MANAGED_API_KEY": "test-key",
+                },
+                clear=False,
+            ):
+                app = create_dashboard_app(
+                    store_obj=lambda: store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                    full_stats_ttl_s=0,
+                )
+                client = TestClient(app)
+                response = client.get("/agentflow/stats/safety")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            queue = payload["checks"]["managed"]["feedback_queue"]
+            warning_codes = {row["code"] for row in payload["warnings"]}
+            self.assertIn("managed-feedback-due-queue", warning_codes)
+            self.assertIn("managed-feedback-retryable-errors", warning_codes)
+            self.assertIn("managed-feedback-dropped-after-limit", warning_codes)
+            self.assertEqual(queue["summary"]["queued"], 1)
+            self.assertEqual(queue["summary"]["due"], 2)
+            self.assertEqual(queue["summary"]["retryable_error"], 1)
+            self.assertEqual(queue["summary"]["dropped_after_limit"], 1)
+            self.assertEqual(queue["last_successful_flush"]["optimization_unit_id"], 66)
+            self.assertFalse(queue["due_samples"][0]["payload_included"])
+            self.assertFalse(queue["privacy"]["payload_json_included"])
+            self.assertFalse(payload["privacy"]["managed_feedback_payload_json_included"])
+            self.assertIn("safety-managed-feedback-tbody", dashboard.text)
+            self.assertIn("managed-feedback-queue-tbody", dashboard.text)
+            rendered = json.dumps(payload) + dashboard.text
+            self.assertNotIn("must not appear in dashboard", rendered)
+            self.assertNotIn("provider body must stay local", rendered)
+            self.assertNotIn("raw params must stay local", rendered)
+            self.assertNotIn("raw prompt text", rendered)
+            self.assertNotIn("dropped raw request", rendered)
+            self.assertNotIn("sent raw content", rendered)
         finally:
             store.conn.close()
             tmp.close()

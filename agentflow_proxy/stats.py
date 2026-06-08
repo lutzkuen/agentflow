@@ -5,7 +5,7 @@ import hashlib
 import math
 import os
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import ipaddress
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -80,6 +80,28 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _parse_utc_datetime(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        text = str(raw)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _seconds_since_iso(raw: Any, now: datetime) -> int | None:
+    parsed = _parse_utc_datetime(raw)
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds()))
 
 
 def _host_is_loopback(host: str | None) -> bool | None:
@@ -161,8 +183,151 @@ def _policy_events_path_class() -> str:
     return "local-path"
 
 
+def _breakdown_from_counts(counts: dict[str, int]) -> list[dict[str, Any]]:
+    return [
+        {"value": key, "count": value}
+        for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _managed_feedback_error_class(row: dict[str, Any]) -> str | None:
+    error = _sanitize_error_sample(row.get("last_error"), limit=240)
+    if not error:
+        status_code = _as_int(row.get("last_status_code"))
+        return f"http_{status_code}" if status_code else None
+    head = error.split(":", 1)[0].strip()
+    return head[:80] if head else "error"
+
+
+def _public_managed_feedback_row(row: dict[str, Any] | None, *, now: datetime) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "queue_id": row.get("id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "source_surface": row.get("source_surface"),
+        "endpoint": row.get("endpoint"),
+        "optimization_unit_id": row.get("optimization_unit_id"),
+        "status": row.get("status"),
+        "attempts": _as_int(row.get("attempts")),
+        "next_attempt_at": row.get("next_attempt_at"),
+        "last_status_code": row.get("last_status_code"),
+        "last_error_class": _managed_feedback_error_class(row),
+        "sent_at": row.get("sent_at"),
+        "age_seconds": _seconds_since_iso(row.get("created_at"), now),
+        "due_age_seconds": _seconds_since_iso(row.get("next_attempt_at"), now)
+        if row.get("status") in {"queued", "retryable-error"}
+        else None,
+        "payload_included": False,
+    }
+
+
+def _managed_feedback_queue_health(store_obj: Any | None, *, sample_limit: int = 5) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    if store_obj is None or not hasattr(store_obj, "managed_outcome_feedback_rows"):
+        return {
+            "available": False,
+            "summary": {
+                "total": 0,
+                "queued": 0,
+                "due": 0,
+                "retryable_error": 0,
+                "dropped_after_limit": 0,
+                "sent": 0,
+                "oldest_due_age_seconds": None,
+            },
+            "status_breakdown": [],
+            "source_surface_breakdown": [],
+            "oldest_due": None,
+            "last_successful_flush": None,
+            "due_samples": [],
+            "privacy": {
+                "metadata_only": True,
+                "payload_json_included": False,
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "provider_bodies_included": False,
+            },
+        }
+
+    try:
+        rows = store_obj.managed_outcome_feedback_rows(limit=10000)
+    except Exception:
+        rows = []
+
+    status_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    due_rows: list[dict[str, Any]] = []
+    sent_rows: list[dict[str, Any]] = []
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        source = str(row.get("source_surface") or "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        if status in {"queued", "retryable-error"}:
+            due_at = _parse_utc_datetime(row.get("next_attempt_at"))
+            if due_at is not None and due_at <= now:
+                due_rows.append(row)
+        if status == "sent":
+            sent_rows.append(row)
+
+    due_rows.sort(key=lambda row: _parse_utc_datetime(row.get("next_attempt_at")) or now)
+    oldest_due = due_rows[0] if due_rows else None
+    sent_rows.sort(
+        key=lambda row: _parse_utc_datetime(row.get("sent_at") or row.get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    last_successful = sent_rows[0] if sent_rows else None
+    summary = {
+        "total": sum(status_counts.values()),
+        "queued": status_counts.get("queued", 0),
+        "due": len(due_rows),
+        "retryable_error": status_counts.get("retryable-error", 0),
+        "sending": status_counts.get("sending", 0),
+        "sent": status_counts.get("sent", 0),
+        "dropped_after_limit": status_counts.get("dropped-after-limit", 0),
+        "error": status_counts.get("error", 0),
+        "oldest_due_age_seconds": _seconds_since_iso(oldest_due.get("next_attempt_at"), now) if oldest_due else None,
+        "oldest_pending_age_seconds": _seconds_since_iso(
+            min(
+                (row for row in rows if row.get("status") in {"queued", "retryable-error"}),
+                key=lambda row: _parse_utc_datetime(row.get("created_at")) or now,
+                default={},
+            ).get("created_at"),
+            now,
+        ),
+    }
+    return {
+        "available": True,
+        "summary": summary,
+        "status_breakdown": _breakdown_from_counts(status_counts),
+        "source_surface_breakdown": _breakdown_from_counts(source_counts),
+        "oldest_due": _public_managed_feedback_row(oldest_due, now=now),
+        "last_successful_flush": _public_managed_feedback_row(last_successful, now=now),
+        "due_samples": [
+            item
+            for item in (
+                _public_managed_feedback_row(row, now=now)
+                for row in due_rows[: max(0, int(sample_limit or 0))]
+            )
+            if item is not None
+        ],
+        "privacy": {
+            "metadata_only": True,
+            "payload_json_included": False,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "secrets_included": False,
+        },
+    }
+
+
 async def stats_safety(
     *,
+    store_obj: Any | None = None,
     default_db: str,
     proxy_host: str | None = None,
     dashboard_host: str | None = None,
@@ -180,6 +345,8 @@ async def stats_safety(
     db_class = _db_path_class(default_db)
     recommendation_state = _url_host_state(recommendation_url if recommendation_enabled or os.getenv("AGENTFLOW_RECOMMENDATION_SERVER_URL") else None)
     policy_bundle_state = _url_host_state(policy_bundle_url)
+    feedback_queue = _managed_feedback_queue_health(store_obj)
+    feedback_summary = feedback_queue.get("summary") or {}
 
     warnings: list[dict[str, Any]] = []
 
@@ -209,6 +376,24 @@ async def stats_safety(
             "managed-recommendation-unauthenticated",
             "high",
             "Managed recommendation and outcome feedback are enabled without a configured managed API key.",
+        )
+    if _as_int(feedback_summary.get("due")) > 0:
+        warn(
+            "managed-feedback-due-queue",
+            "medium",
+            "Managed outcome feedback has retryable rows due for flush; the managed feedback loop may be stuck.",
+        )
+    if _as_int(feedback_summary.get("retryable_error")) > 0:
+        warn(
+            "managed-feedback-retryable-errors",
+            "medium",
+            "Managed outcome feedback has rows waiting after retryable delivery errors.",
+        )
+    if _as_int(feedback_summary.get("dropped_after_limit")) > 0:
+        warn(
+            "managed-feedback-dropped-after-limit",
+            "high",
+            "Managed outcome feedback rows were dropped after reaching the retry limit.",
         )
     if policy_bundle_url and not managed_auth_configured:
         warn(
@@ -252,6 +437,9 @@ async def stats_safety(
             "body_logging_enabled": log_bodies_enabled,
             "managed_communication_enabled": bool(recommendation_enabled or policy_bundle_url),
             "managed_auth_configured": managed_auth_configured,
+            "managed_feedback_due": _as_int(feedback_summary.get("due")),
+            "managed_feedback_retryable_error": _as_int(feedback_summary.get("retryable_error")),
+            "managed_feedback_dropped_after_limit": _as_int(feedback_summary.get("dropped_after_limit")),
             "dashboard_read_only": bool(dashboard_read_only),
             "db_path_class": db_class,
             "policy_events_enabled": policy_events_enabled,
@@ -279,6 +467,7 @@ async def stats_safety(
                 "policy_bundle_recommendation": policy_bundle_state,
                 "auth_configured": managed_auth_configured,
                 "api_key_value_included": False,
+                "feedback_queue": feedback_queue,
             },
             "database": {
                 "path_class": db_class,
@@ -294,6 +483,7 @@ async def stats_safety(
             "raw_prompts_included": False,
             "raw_request_bodies_included": False,
             "raw_response_bodies_included": False,
+            "managed_feedback_payload_json_included": False,
             "secrets_included": False,
             "url_credentials_redacted": True,
             "sensitive_query_values_redacted": True,
@@ -5075,6 +5265,15 @@ def dashboard_html() -> str:
     <tbody id="safety-warnings-tbody"></tbody>
   </table>
 </div>
+<div class="section">
+  <h2>Managed feedback queue safety</h2>
+  <table data-table-id="safety-managed-feedback" data-filter-label="Filter safety managed feedback">
+    <thead><tr>
+      <th data-sort-type="time">Due age</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="number">Attempts</th><th data-sort-type="number">Unit</th><th data-sort-type="number">Status code</th><th data-sort-type="text">Error class</th><th data-sort-type="text">Payload</th>
+    </tr></thead>
+    <tbody id="safety-managed-feedback-tbody"></tbody>
+  </table>
+</div>
 </div>
 
 <div class="tab-panel active" id="tab-activity">
@@ -5266,6 +5465,15 @@ def dashboard_html() -> str:
       <th data-sort-type="number">Sent</th><th data-sort-type="number">Skipped</th><th data-sort-type="number">Failed</th><th data-sort-type="number">Sanitized</th><th data-sort-type="number">Historical null</th><th data-sort-type="text">Feedback reasons</th><th data-sort-type="text">Fallback reasons</th><th data-sort-type="text">Policy IDs</th>
     </tr></thead>
     <tbody id="managed-feedback-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Managed feedback queue</h2>
+  <table data-table-id="managed-feedback-queue" data-filter-label="Filter managed feedback queue">
+    <thead><tr>
+      <th data-sort-type="number">Queued</th><th data-sort-type="number">Due</th><th data-sort-type="number">Retryable errors</th><th data-sort-type="number">Dropped</th><th data-sort-type="number">Sent</th><th data-sort-type="time">Oldest due</th><th data-sort-type="time">Last sent</th><th data-sort-type="text">Sources</th>
+    </tr></thead>
+    <tbody id="managed-feedback-queue-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -5843,6 +6051,12 @@ function safetySeverityBadge(severity){
   if(severity==='info')return'miss';
   return'provider';
 }
+function queueStatusBadge(status){
+  if(status==='sent')return'hit';
+  if(status==='retryable-error'||status==='dropped-after-limit'||status==='error')return'err';
+  if(status==='queued'||status==='sending')return'routed';
+  return'provider';
+}
 async function refreshSafety(){
   try{
     const r=await fetch('/agentflow/stats/safety');
@@ -5857,6 +6071,10 @@ async function refreshSafety(){
     const policyEvents=checks.policy_events||{};
     const providerProxy=checks.provider_proxy||{};
     const dashboard=checks.dashboard||{};
+    const feedbackQueue=managed.feedback_queue||{};
+    const feedbackSummary=feedbackQueue.summary||{};
+    const oldestDue=feedbackQueue.oldest_due||{};
+    const lastSent=feedbackQueue.last_successful_flush||{};
     const rows=[
       {
         check:'Provider proxy bind',
@@ -5872,6 +6090,13 @@ async function refreshSafety(){
         check:'Managed communication',
         status:s.managed_communication_enabled?'<span class="badge routed">configured</span>':'<span class="badge hit">off</span>',
         detail:`auth ${managed.auth_configured?'configured':'not configured'} · recommendation ${recommendation.configured?recommendation.redacted_url:'off'} · policy bundle ${policyBundle.configured?policyBundle.redacted_url:'off'}`
+      },
+      {
+        check:'Managed feedback queue',
+        status:(feedbackSummary.due||feedbackSummary.retryable_error||feedbackSummary.dropped_after_limit)
+          ? '<span class="badge err">attention</span>'
+          : '<span class="badge hit">clear</span>',
+        detail:`queued ${(feedbackSummary.queued||0).toLocaleString()} · due ${(feedbackSummary.due||0).toLocaleString()} · retryable ${(feedbackSummary.retryable_error||0).toLocaleString()} · dropped ${(feedbackSummary.dropped_after_limit||0).toLocaleString()} · oldest due ${fmtSec(feedbackSummary.oldest_due_age_seconds)} · last sent ${lastSent.sent_at?ago(lastSent.sent_at):'—'} · payload omitted`
       },
       {
         check:'Dashboard mode',
@@ -5900,6 +6125,17 @@ async function refreshSafety(){
       <td class="model">${esc(row.code)}</td>
       <td class="flags">${esc(row.message)}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No safety or privacy warnings</td></tr>';
+    const dueRows=feedbackQueue.due_samples||[];
+    document.getElementById('safety-managed-feedback-tbody').innerHTML=dueRows.map(row=>`<tr>
+      <td class="latency">${fmtSec(row.due_age_seconds)}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
+      <td><span class="badge ${queueStatusBadge(row.status)}">${esc(row.status)}</span></td>
+      <td class="tokens">${row.attempts||0}</td>
+      <td class="tokens">${row.optimization_unit_id??'—'}</td>
+      <td class="tokens">${row.last_status_code??'—'}</td>
+      <td class="model">${esc(row.last_error_class||'—')}</td>
+      <td>${row.payload_included?'<span class="badge err">included</span>':'<span class="badge hit">omitted</span>'}</td>
+    </tr>`).join('')||`<tr><td colspan="8" style="color:#8b949e">No due managed feedback rows; ${oldestDue.queue_id?'oldest due '+esc(oldestDue.queue_id):'queue clear'}</td></tr>`;
     applyAllDataTables();
   }catch(e){}
 }
@@ -6085,10 +6321,17 @@ function managedHealthDetails(row){
 }
 async function refreshManaged(){
   try{
-    const r=await fetch('/agentflow/stats/managed-recommendations?limit=500');
-    const d=await r.json();
+    const [managedResponse,safetyResponse]=await Promise.all([
+      fetch('/agentflow/stats/managed-recommendations?limit=500'),
+      fetch('/agentflow/stats/safety')
+    ]);
+    const d=await managedResponse.json();
+    const safety=await safetyResponse.json();
     const s=d.summary||{};
     const cfg=d.current_config||{};
+    const queue=((((safety||{}).checks||{}).managed||{}).feedback_queue)||{};
+    const queueSummary=queue.summary||{};
+    const lastSent=queue.last_successful_flush||{};
     document.getElementById('managed-summary-tbody').innerHTML=`<tr>
       <td class="flags">${cfg.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">offline / local-only</span>'} <span class="badge provider">${esc(cfg.server_url||'—')}</span></td>
       <td class="tokens">${(s.window_calls||0).toLocaleString()}</td>
@@ -6110,6 +6353,16 @@ async function refreshManaged(){
       <td class="flags">${compactBreakdown(d.feedback_reason_breakdown,'no feedback')}</td>
       <td class="flags">${compactBreakdown(d.fallback_breakdown,'none')}</td>
       <td class="flags">${compactBreakdown(d.policy_ids,'none')}</td>
+    </tr>`;
+    document.getElementById('managed-feedback-queue-tbody').innerHTML=`<tr>
+      <td class="tokens">${(queueSummary.queued||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.due||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.retryable_error||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.dropped_after_limit||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.sent||0).toLocaleString()}</td>
+      <td class="latency">${fmtSec(queueSummary.oldest_due_age_seconds)}</td>
+      <td class="ts">${lastSent.sent_at?ago(lastSent.sent_at):'—'}</td>
+      <td class="flags">${compactBreakdown(queue.source_surface_breakdown,'none')} <span class="badge hit">payload omitted</span></td>
     </tr>`;
     const health=(d.recommendation_health||{}).latest_fetch_review||{};
     const healthRows=(d.recommendation_health||{}).rows||[];

@@ -132,6 +132,7 @@ def create_dashboard_router(
     @router.get("/agentflow/stats/safety")
     async def stats_safety() -> dict[str, Any]:
         return await stats_views.stats_safety(
+            store_obj=_store(store_obj),
             default_db=default_db,
             proxy_host=proxy_host,
             dashboard_host=dashboard_host,
