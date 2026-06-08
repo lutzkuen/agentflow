@@ -149,7 +149,7 @@ The standalone dashboard reads the same local database. It does not expose provi
 
 ## Local policies
 
-AgentFlow can use local YAML-backed policy files for routing, crunching, cache, and routing experiments. The dashboard shows which policies are loaded and whether any file needs reload.
+AgentFlow can use local YAML-backed policy files for routing, crunching, cache, routing experiments, and safe Codex app-server summary/cache actions. The dashboard shows which policies are loaded and whether any file needs reload.
 
 Common policy commands:
 
@@ -224,6 +224,7 @@ payloads, API keys, or raw local session IDs in the default profile.
 | `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Host for `agentflow-dashboard` |
 | `AGENTFLOW_DASHBOARD_PORT` | `4002` | Port for `agentflow-dashboard` |
 | `AGENTFLOW_CODEX_APP_MODEL` | current bundled default | Model used for Codex app-server token/cost estimates |
+| `AGENTFLOW_CODEX_APP_RULES` | `~/.agentflow/codex_app_rules.yaml` | Optional local Codex app-server rule file for safe summary model hints and exact summary cache |
 | `AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT` | `0` | Opt into local canary routing for safe Codex app summary turns |
 | `AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET` | `gpt-5-codex` | Target model for the summary-turn model hint canary |
 | `AGENTFLOW_CODEX_APP_CACHE` | `0` | Opt into exact Codex app summary-turn replay for safe, action-free JSON-RPC turns |

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import yaml
+from pathlib import Path
 from typing import Any
+
+from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
 
 
 DEFAULT_CODEX_APP_UPSTREAM = "ws://127.0.0.1:4014"
@@ -108,6 +112,118 @@ CODEX_SAFE_TURN_PARAM_KEYS = {
 CODEX_TEXT_INPUT_TYPES = {"text", "input_text"}
 
 
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    fallback = "1" if default else "0"
+    return os.getenv(name, fallback).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
+    env_path = os.getenv(env_name)
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path.cwd() / "config" / filename)
+    candidates.append(Path.home() / ".agentflow" / filename)
+    return candidates
+
+
+def _default_codex_app_policy() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "summary_model_hint": {
+            "enabled": False,
+            "target_model": "gpt-5-codex",
+        },
+        "exact_cache": {
+            "enabled": False,
+            "namespace": os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default"),
+        },
+        "crunch": {
+            "profiles": ["codex-repeated-scaffolding"],
+        },
+    }
+
+
+def _apply_codex_app_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    if "enabled" in data:
+        policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
+
+    hint = data.get("summary_model_hint") or {}
+    if isinstance(hint, dict):
+        policy["summary_model_hint"]["enabled"] = _as_bool(
+            hint.get("enabled"),
+            policy["summary_model_hint"]["enabled"],
+        )
+        target_model = hint.get("target_model", hint.get("model_hint"))
+        if target_model is not None:
+            policy["summary_model_hint"]["target_model"] = str(target_model).strip()
+
+    exact_cache = data.get("exact_cache", data.get("cache") if isinstance(data.get("cache"), dict) else {})
+    if isinstance(exact_cache, dict):
+        policy["exact_cache"]["enabled"] = _as_bool(
+            exact_cache.get("enabled"),
+            policy["exact_cache"]["enabled"],
+        )
+        if exact_cache.get("namespace") is not None:
+            policy["exact_cache"]["namespace"] = str(exact_cache["namespace"]).strip() or "default"
+
+    crunch = data.get("crunch") or {}
+    if isinstance(crunch, dict):
+        profiles = crunch.get("profiles")
+        if isinstance(profiles, list):
+            policy["crunch"]["profiles"] = [str(profile).strip() for profile in profiles if str(profile).strip()]
+    return policy
+
+
+def _load_codex_app_policy() -> tuple[dict[str, Any], str, str]:
+    for path in _manual_rule_candidates("codex_app_rules.yaml", "AGENTFLOW_CODEX_APP_RULES"):
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            return _apply_codex_app_policy_yaml(_default_codex_app_policy(), data), "local-manual", str(path)
+
+    defaults_path = Path(__file__).parent / "codex_app_rules.yaml"
+    policy = _default_codex_app_policy()
+    if defaults_path.exists():
+        with open(defaults_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if isinstance(data, dict):
+            policy = _apply_codex_app_policy_yaml(policy, data)
+
+    policy["enabled"] = _env_bool("AGENTFLOW_CODEX_APP_OPTIMIZE", policy["enabled"])
+    policy["summary_model_hint"]["enabled"] = _env_bool(
+        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT",
+        policy["summary_model_hint"]["enabled"],
+    )
+    policy["summary_model_hint"]["target_model"] = os.getenv(
+        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
+        os.getenv(
+            "AGENTFLOW_CODEX_APP_SUMMARY_TARGET_MODEL",
+            str(policy["summary_model_hint"]["target_model"]),
+        ),
+    ).strip()
+    policy["exact_cache"]["enabled"] = _env_bool("AGENTFLOW_CODEX_APP_CACHE", policy["exact_cache"]["enabled"])
+    policy["exact_cache"]["namespace"] = os.getenv(
+        "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE",
+        os.getenv("AGENTFLOW_CACHE_NAMESPACE", str(policy["exact_cache"]["namespace"])),
+    ).strip() or "default"
+    return policy, "local-default", str(defaults_path)
+
+
 def canonical_source_surface(value: Any) -> str:
     surface = str(value or "").strip()
     if surface in CODEX_APP_SOURCE_SURFACE_ALIASES:
@@ -174,32 +290,51 @@ def codex_model_state_signal(method: Any, params: Any) -> dict[str, Any] | None:
     return explicit_absent
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    fallback = "1" if default else "0"
-    return os.getenv(name, fallback).strip().lower() not in {"0", "false", "no", "off", ""}
+CODEX_APP_POLICY, CODEX_APP_POLICY_SOURCE, CODEX_APP_RULES_PATH = _load_codex_app_policy()
+CODEX_APP_RULES_LOADED_AT = utc_now()
+CODEX_APP_RULES_LOADED_FILE = policy_file_snapshot(CODEX_APP_RULES_PATH)
 
 
 def codex_app_optimize_enabled() -> bool:
-    return _env_bool("AGENTFLOW_CODEX_APP_OPTIMIZE", True)
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        return _env_bool("AGENTFLOW_CODEX_APP_OPTIMIZE", bool(CODEX_APP_POLICY["enabled"]))
+    return bool(CODEX_APP_POLICY["enabled"])
 
 
 def codex_app_cache_enabled() -> bool:
-    return _env_bool("AGENTFLOW_CODEX_APP_CACHE", False)
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        return _env_bool("AGENTFLOW_CODEX_APP_CACHE", bool(CODEX_APP_POLICY["exact_cache"]["enabled"]))
+    return bool(CODEX_APP_POLICY["exact_cache"]["enabled"])
 
 
 def codex_app_summary_model_hint_enabled() -> bool:
-    return _env_bool("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT", False)
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        return _env_bool(
+            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT",
+            bool(CODEX_APP_POLICY["summary_model_hint"]["enabled"]),
+        )
+    return bool(CODEX_APP_POLICY["summary_model_hint"]["enabled"])
 
 
 def codex_app_summary_model_hint_target() -> str:
-    return os.getenv(
-        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
-        os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_TARGET_MODEL", "gpt-5-codex"),
-    ).strip()
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        return os.getenv(
+            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET",
+            os.getenv(
+                "AGENTFLOW_CODEX_APP_SUMMARY_TARGET_MODEL",
+                str(CODEX_APP_POLICY["summary_model_hint"]["target_model"]),
+            ),
+        ).strip()
+    return str(CODEX_APP_POLICY["summary_model_hint"]["target_model"]).strip()
 
 
 def codex_app_cache_namespace() -> str:
-    return os.getenv("AGENTFLOW_CODEX_APP_CACHE_NAMESPACE", os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default"))
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        return os.getenv(
+            "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE",
+            os.getenv("AGENTFLOW_CACHE_NAMESPACE", str(CODEX_APP_POLICY["exact_cache"]["namespace"])),
+        ).strip() or "default"
+    return str(CODEX_APP_POLICY["exact_cache"]["namespace"]).strip() or "default"
 
 
 def codex_app_upstream() -> str:
@@ -230,11 +365,20 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
     summary_model_hint_target = codex_app_summary_model_hint_target()
     upstream = codex_app_upstream()
     namespace = codex_app_cache_namespace()
+    file_state = policy_file_status(
+        CODEX_APP_RULES_PATH,
+        loaded_at=CODEX_APP_RULES_LOADED_AT,
+        loaded_snapshot=CODEX_APP_RULES_LOADED_FILE,
+    )
+    reload_required = bool(file_state.get("reload_required"))
+    policy_source = CODEX_APP_POLICY_SOURCE
     return {
         "surface": CODEX_APP_SOURCE_SURFACE,
         "name": "Codex app-server",
         "enabled": optimize_enabled,
-        "policy_source": "local-default",
+        "policy_source": policy_source,
+        "rule_path": CODEX_APP_RULES_PATH,
+        "file": file_state,
         "runtime_flags": {
             "optimization_enabled": optimize_enabled,
             "cache_enabled": cache_enabled,
@@ -251,8 +395,8 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
                 "enabled": summary_model_hint_enabled,
                 "target_model": summary_model_hint_target,
                 "scope": "safe summary-phase turn/start frames with text-only input and known model field",
-                "disabled_reason": None if summary_model_hint_enabled else "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT is not 1",
-                "policy_source": "local-default",
+                "disabled_reason": None if summary_model_hint_enabled else "codex app summary model hint is disabled by local policy",
+                "policy_source": policy_source,
             },
         },
         "crunch": inherited_sections.get("crunch", {}),
@@ -269,6 +413,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
                 "replayability_level": "local-exact-response",
             },
             "disabled_reason": None if cache_enabled else "AGENTFLOW_CODEX_APP_CACHE is not 1",
+            "policy_source": policy_source,
         },
         "safe_turn_params": {
             "allowed_keys": sorted(CODEX_SAFE_TURN_PARAM_KEYS),
@@ -285,31 +430,83 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
             "value_hints": sorted(CODEX_ACTION_VALUE_HINTS),
         },
         "file_backed_policy_sections": inherited_sections,
-        "reload_required": bool(reload_required_sections),
-        "reload_required_sections": reload_required_sections,
+        "reload_required": bool(reload_required_sections) or reload_required,
+        "reload_required_sections": reload_required_sections + (["codex_app"] if reload_required else []),
         "managed_optimizer_required": False,
-        "note": "Codex app-server runtime flags are local process settings; managed optimizer use remains opt-in.",
+        "note": "Codex app-server local optimization is controlled by reviewable local policy; managed optimizer use remains opt-in.",
     }
 
 
 def codex_app_bundle_policy_state() -> dict[str, Any]:
     optimize_enabled = codex_app_optimize_enabled()
     cache_enabled = codex_app_cache_enabled()
+    hint_enabled = codex_app_summary_model_hint_enabled()
+    hint_target = codex_app_summary_model_hint_target()
+    namespace = codex_app_cache_namespace()
+    rules: list[dict[str, Any]] = []
+    if hint_enabled:
+        rules.append({
+            "conditions": {
+                "app_family": "codex",
+                "workflow_phase": "summary",
+                "model_field_state": "present",
+                "cache_eligible": True,
+                "has_action_like_params": False,
+            },
+            "action": {
+                "model_hint": hint_target,
+                "reason": "safe local summary-turn model hint",
+            },
+            "policy_source": CODEX_APP_POLICY_SOURCE,
+        })
+    if cache_enabled:
+        rules.append({
+            "conditions": {
+                "app_family": "codex",
+                "workflow_phase": "summary",
+                "cache_eligible": True,
+                "has_action_like_params": False,
+            },
+            "action": {
+                "cache_eligible": True,
+                "cache_eligibility_reason": "safe local exact summary-turn replay",
+            },
+            "policy_source": CODEX_APP_POLICY_SOURCE,
+        })
+    file_state = policy_file_status(
+        CODEX_APP_RULES_PATH,
+        loaded_at=CODEX_APP_RULES_LOADED_AT,
+        loaded_snapshot=CODEX_APP_RULES_LOADED_FILE,
+    )
     return {
         "enabled": optimize_enabled,
-        "policy_source": "local-default",
+        "policy_source": CODEX_APP_POLICY_SOURCE,
+        "rule_path": CODEX_APP_RULES_PATH,
+        "file": file_state,
         "surface": CODEX_APP_SOURCE_SURFACE,
-        "review_only": True,
+        "review_only": False,
         "runtime_flags": {
             "optimization_enabled": optimize_enabled,
             "cache_enabled": cache_enabled,
+            "summary_model_hint_enabled": hint_enabled,
         },
-        "rules": [],
+        "summary_model_hint": {
+            "enabled": hint_enabled,
+            "target_model": hint_target,
+        },
+        "exact_cache": {
+            "enabled": cache_enabled,
+            "namespace": namespace,
+        },
+        "crunch": {
+            "profiles": list(CODEX_APP_POLICY.get("crunch", {}).get("profiles") or []),
+        },
+        "rules": rules,
         "supported_conditions": list(CODEX_APP_POLICY_CONDITION_KEYS),
         "supported_actions": list(CODEX_APP_POLICY_ACTION_KEYS),
         "application": {
-            "status": "not-applied",
-            "reason": "Codex app turn-level policies are reviewable metadata only until the Codex app proxy explicitly implements an action.",
+            "status": "applied-locally",
+            "reason": "Safe Codex app summary hint and exact summary cache actions are applied by the local Codex app proxy when enabled.",
         },
         "managed_optimizer_required": False,
     }

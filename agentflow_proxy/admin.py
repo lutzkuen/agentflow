@@ -15,6 +15,7 @@ POLICY_RELOAD_MODULES = (
     "agentflow_proxy.crunch",
     "agentflow_proxy.cache",
     "agentflow_proxy.routing_experiments",
+    "agentflow_proxy.codex_app_policy",
     "agentflow_proxy.anthropic_proxy",
     "agentflow_proxy.openai_proxy",
     "agentflow_proxy.stats",

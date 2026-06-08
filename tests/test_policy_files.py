@@ -10,6 +10,7 @@ from unittest.mock import patch
 import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
+from agentflow_proxy import codex_app_policy as codex_app_policy_module
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
 from agentflow_proxy.policy_bundle import (
     MANAGED_POLICY_HMAC_SECRET_ENV,
@@ -61,7 +62,9 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("cache", bundle["policies"])
         self.assertIn("routing_experiments", bundle["policies"])
         self.assertIn("codex_app", bundle["policies"])
-        self.assertTrue(bundle["policies"]["codex_app"]["review_only"])
+        self.assertFalse(bundle["policies"]["codex_app"]["review_only"])
+        self.assertEqual(bundle["policies"]["codex_app"]["policy_source"], "local-default")
+        self.assertIn("file", bundle["policies"]["codex_app"])
 
     def test_policy_bundle_validation_accepts_exported_bundle(self):
         bundle = asyncio.run(build_policy_bundle())
@@ -324,6 +327,64 @@ class PolicyFileStatusTest(unittest.TestCase):
             self.assertFalse((Path(tmp) / "crunch_rules.yaml").exists())
             self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
             self.assertFalse(any("codex-summary-pass-through" in json.dumps(file) for file in result["files"]))
+
+    def test_codex_app_manual_policy_file_exports_and_applies_safe_actions(self):
+        try:
+            with TemporaryDirectory() as tmp:
+                rules_path = Path(tmp) / "codex_app_rules.yaml"
+                rules_path.write_text(
+                    """
+enabled: true
+summary_model_hint:
+  enabled: true
+  target_model: gpt-5-mini
+exact_cache:
+  enabled: true
+  namespace: reviewable-codex
+crunch:
+  profiles:
+    - codex-repeated-scaffolding
+""",
+                    encoding="utf-8",
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "AGENTFLOW_CODEX_APP_RULES": str(rules_path),
+                        "HOME": tmp,
+                        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT": "0",
+                        "AGENTFLOW_CODEX_APP_CACHE": "0",
+                    },
+                    clear=False,
+                ):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(stats)
+                    bundle = asyncio.run(build_policy_bundle())
+
+                codex_policy = bundle["policies"]["codex_app"]
+                surface = bundle["policies"]["source_surfaces"]["codex_turn"]
+                self.assertEqual(codex_policy["policy_source"], "local-manual")
+                self.assertEqual(codex_policy["rule_path"], str(rules_path))
+                self.assertFalse(codex_policy["file"]["reload_required"])
+                self.assertTrue(codex_policy["summary_model_hint"]["enabled"])
+                self.assertEqual(codex_policy["summary_model_hint"]["target_model"], "gpt-5-mini")
+                self.assertTrue(codex_policy["exact_cache"]["enabled"])
+                self.assertEqual(codex_policy["exact_cache"]["namespace"], "reviewable-codex")
+                self.assertEqual(surface["routing"]["summary_model_hint"]["policy_source"], "local-manual")
+                self.assertEqual(surface["cache"]["policy_source"], "local-manual")
+                self.assertEqual(bundle["policies"]["summary"]["manual_policy_count"], 1)
+
+                with TemporaryDirectory() as apply_tmp:
+                    result = apply_policy_bundle(bundle, config_dir=apply_tmp, dry_run=True, sections=["codex_app"])
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["applied_sections"], ["codex_app"])
+                self.assertTrue(all(item["reason"] == "not-requested" for item in result["skipped_sections"]))
+                codex_file = result["files"][0]
+                self.assertEqual(codex_file["section"], "codex_app")
+                self.assertEqual(Path(codex_file["path"]).name, "codex_app_rules.yaml")
+        finally:
+            asyncio.run(reload_policy_modules())
 
     def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
         bundle = asyncio.run(build_policy_bundle())

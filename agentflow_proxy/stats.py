@@ -594,7 +594,7 @@ async def stats_policies() -> dict[str, Any]:
         "codex_app": codex_app_bundle_policy_state(),
     }
     sections = ("routing", "crunch", "cache", "routing_experiments", "codex_app")
-    file_backed_sections = ("routing", "crunch", "cache", "routing_experiments")
+    file_backed_sections = ("routing", "crunch", "cache", "routing_experiments", "codex_app")
     state["source_surfaces"] = {
         CODEX_APP_SOURCE_SURFACE: codex_app_surface_policy_state(state),
     }

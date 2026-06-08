@@ -26,9 +26,11 @@ from agentflow_proxy.codex_app_policy import (
     CODEX_SAFE_TURN_PARAM_KEYS,
     CODEX_TEXT_INPUT_TYPES,
     CODEX_APP_SOURCE_SURFACE,
+    CODEX_APP_POLICY_SOURCE,
     DEFAULT_CODEX_APP_UPSTREAM,
     codex_model_state_signal,
     codex_app_cache_enabled,
+    codex_app_cache_namespace,
     codex_app_optimize_enabled,
     codex_app_summary_model_hint_enabled,
     codex_app_summary_model_hint_target,
@@ -511,7 +513,7 @@ def _policy_decision(kind: str, status: str, reason: str, *, enabled: bool = COD
         "enabled": enabled,
         "status": status,
         "reason": reason,
-        "policy_source": "local-default",
+        "policy_source": CODEX_APP_POLICY_SOURCE,
         "surface": CODEX_APP_SOURCE_SURFACE,
         "decision_type": kind,
         "applied": status == "applied",
@@ -824,7 +826,7 @@ def _codex_cache_key_for_message(msg: dict[str, Any]) -> str:
         "codex-app://turn/start",
         provider="codex-app",
         upstream=DEFAULT_UPSTREAM,
-        namespace=os.getenv("AGENTFLOW_CODEX_APP_CACHE_NAMESPACE", os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default")),
+        namespace=codex_app_cache_namespace(),
     )
 
 

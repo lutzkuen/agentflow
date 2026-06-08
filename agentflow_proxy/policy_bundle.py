@@ -45,12 +45,14 @@ APPLY_POLICY_SECTIONS = (
     "crunch",
     "cache",
     "routing_experiments",
+    "codex_app",
 )
 _POLICY_SECTION_FILES = {
     "routing": "routing_rules.yaml",
     "crunch": "crunch_rules.yaml",
     "cache": "cache_rules.yaml",
     "routing_experiments": "routing_experiments.yaml",
+    "codex_app": "codex_app_rules.yaml",
 }
 POLICY_IMPACT_SCHEMA = "agentflow.policy_bundle_impact.v1"
 _DEFAULT_IMPACT_LIMIT = 1000
@@ -617,6 +619,24 @@ def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, st
         _validate_boolish(errors, f"{base}.review_only", policy["review_only"])
     if "surface" in policy:
         _validate_non_empty_string(errors, f"{base}.surface", policy["surface"])
+    summary_hint = _validate_object_field(policy, base, "summary_model_hint", errors)
+    if "enabled" in summary_hint:
+        _validate_boolish(errors, f"{base}.summary_model_hint.enabled", summary_hint["enabled"])
+    if "target_model" in summary_hint:
+        _validate_non_empty_string(errors, f"{base}.summary_model_hint.target_model", summary_hint["target_model"])
+    exact_cache = _validate_object_field(policy, base, "exact_cache", errors)
+    if "enabled" in exact_cache:
+        _validate_boolish(errors, f"{base}.exact_cache.enabled", exact_cache["enabled"])
+    if "namespace" in exact_cache:
+        _validate_non_empty_string(errors, f"{base}.exact_cache.namespace", exact_cache["namespace"])
+    crunch = _validate_object_field(policy, base, "crunch", errors)
+    profiles = crunch.get("profiles")
+    if profiles is not None:
+        if not isinstance(profiles, list):
+            _add_error(errors, f"{base}.crunch.profiles", "expected list")
+        else:
+            for index, profile in enumerate(profiles):
+                _validate_non_empty_string(errors, f"{base}.crunch.profiles[{index}]", profile)
 
     rules = policy.get("rules", [])
     if not isinstance(rules, list):
@@ -1297,6 +1317,8 @@ def codex_app_policy_review_summary(policy: Any) -> dict[str, Any]:
     if not isinstance(policy, dict):
         policy = {}
     rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    policy_source = str(policy.get("policy_source") or "")
+    review_only = policy_source.startswith("managed-") or _enabled(policy.get("review_only", True))
     supported_conditions = _as_string_list(policy.get("supported_conditions")) or sorted(_CODEX_APP_CONDITION_KEYS)
     supported_actions = _as_string_list(policy.get("supported_actions")) or sorted(_CODEX_APP_ACTION_KEYS)
     application = policy.get("application") if isinstance(policy.get("application"), dict) else {}
@@ -1331,16 +1353,16 @@ def codex_app_policy_review_summary(policy: Any) -> dict[str, Any]:
             "action_keys": sorted(str(key) for key in action),
             "confidence": managed.get("confidence", rule.get("confidence")),
             "sample_count": managed.get("sample_count", rule.get("sample_count")),
-            "review_only": True,
-            "applied": False,
-            "application_status": "not-applied",
+            "review_only": review_only,
+            "applied": not review_only,
+            "application_status": "not-applied" if review_only else "applied-locally",
         })
 
     return {
-        "status": "review-only",
+        "status": "review-only" if review_only else "applied-locally",
         "policy_source": policy.get("policy_source"),
         "surface": canonical_source_surface(policy.get("surface", CODEX_APP_SOURCE_SURFACE)),
-        "review_only": _enabled(policy.get("review_only", True)),
+        "review_only": review_only,
         "enabled": _enabled(policy.get("enabled", False)),
         "rule_count": len(rule_summaries),
         "candidate_count": len(rule_summaries),
@@ -1350,12 +1372,16 @@ def codex_app_policy_review_summary(policy: Any) -> dict[str, Any]:
         "condition_keys_present": sorted(condition_keys),
         "action_keys_present": sorted(action_keys),
         "application": {
-            "status": application.get("status") or "not-applied",
+            "status": "not-applied" if review_only else (application.get("status") or "applied-locally"),
             "reason": application.get("reason")
-            or "Codex app recommendations are review-only until a future explicit local action exists.",
+            or (
+                "Codex app recommendations are review-only until a future explicit local action exists."
+                if review_only
+                else "Safe Codex app actions are represented as local policy file writes."
+            ),
             "applied_to_provider_routing": False,
-            "applied_to_codex_app_proxy": False,
-            "writes_local_policy_files": False,
+            "applied_to_codex_app_proxy": not review_only,
+            "writes_local_policy_files": not review_only,
         },
         "pass_through_reasons": sorted(set(pass_through_reasons)),
         "omission_reasons": sorted(set(omission_reasons)),
@@ -1576,6 +1602,29 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
     if section == "routing_experiments":
         experiment_policy = policy.get("policy")
         return experiment_policy if isinstance(experiment_policy, dict) else {}
+    if section == "codex_app":
+        payload: dict[str, Any] = {}
+        if "enabled" in policy:
+            payload["enabled"] = policy.get("enabled")
+        if isinstance(policy.get("summary_model_hint"), dict):
+            payload["summary_model_hint"] = {
+                key: policy["summary_model_hint"][key]
+                for key in ("enabled", "target_model")
+                if key in policy["summary_model_hint"]
+            }
+        if isinstance(policy.get("exact_cache"), dict):
+            payload["exact_cache"] = {
+                key: policy["exact_cache"][key]
+                for key in ("enabled", "namespace")
+                if key in policy["exact_cache"]
+            }
+        if isinstance(policy.get("crunch"), dict):
+            payload["crunch"] = {
+                key: policy["crunch"][key]
+                for key in ("profiles",)
+                if key in policy["crunch"]
+            }
+        return payload
     return {}
 
 
@@ -1653,6 +1702,15 @@ def apply_policy_bundle(
             continue
 
         policy = policies.get(section) if isinstance(policies.get(section), dict) else {}
+        if section == "codex_app" and (
+            str(policy.get("policy_source") or "").startswith("managed-") or bool(policy.get("review_only"))
+        ):
+            result["skipped_sections"].append({
+                "section": "codex_app",
+                "reason": "review-only-not-applied",
+                "message": "Managed Codex app recommendations are visible in review output but are not written to local YAML policy files.",
+            })
+            continue
         yaml_payload = _policy_apply_yaml(section, policy)
         text = yaml.safe_dump(yaml_payload, sort_keys=False)
         path = config_path / _POLICY_SECTION_FILES[section]
@@ -1677,13 +1735,6 @@ def apply_policy_bundle(
             "bytes_after": len(text.encode("utf-8")),
         })
         result["applied_sections"].append(section)
-
-    if isinstance(policies.get("codex_app"), dict):
-        result["skipped_sections"].append({
-            "section": "codex_app",
-            "reason": "review-only-not-applied",
-            "message": "Codex app managed recommendations are visible in review output but are not written to local YAML policy files.",
-        })
 
     result["ok"] = True
     return result

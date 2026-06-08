@@ -139,7 +139,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
         self.assertIn("routing", payload["policies"])
         self.assertIn("codex_app", payload["policies"])
-        self.assertTrue(payload["policies"]["codex_app"]["review_only"])
+        self.assertFalse(payload["policies"]["codex_app"]["review_only"])
         surface = payload["policies"]["source_surfaces"]["codex_turn"]
         self.assertTrue(surface["optimization"]["enabled"])
         self.assertFalse(surface["cache"]["enabled"])
@@ -848,13 +848,11 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["dry_run"])
-            self.assertEqual(set(payload["applied_sections"]), {"routing", "crunch", "cache", "routing_experiments"})
-            self.assertEqual(
-                [item for item in payload["skipped_sections"] if item["section"] == "codex_app"][0]["reason"],
-                "review-only-not-applied",
-            )
+            self.assertEqual(set(payload["applied_sections"]), {"routing", "crunch", "cache", "routing_experiments", "codex_app"})
+            self.assertFalse(payload["skipped_sections"])
             self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
             self.assertTrue(any(file["section"] == "cache" and file["changed"] for file in payload["files"]))
+            self.assertTrue(any(file["section"] == "codex_app" for file in payload["files"]))
 
     def test_policy_apply_cli_writes_selected_section_and_creates_backup(self):
         exported = io.StringIO()

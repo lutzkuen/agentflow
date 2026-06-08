@@ -101,7 +101,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(surface["cache"]["rule_path"], result["cache"]["rule_path"])
         self.assertEqual(surface["managed_optimizer_required"], False)
         self.assertIn("codex_app", result)
-        self.assertTrue(result["codex_app"]["review_only"])
+        self.assertFalse(result["codex_app"]["review_only"])
+        self.assertIn("file", result["codex_app"])
         self.assertEqual(result["summary"]["policy_count"], 5)
         self.assertEqual(result["summary"]["source_surface_policy_count"], 1)
 

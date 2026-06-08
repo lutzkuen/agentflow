@@ -1,11 +1,13 @@
 import io
 import asyncio
+import importlib
 import json
 import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from agentflow_proxy import codex_app_policy as codex_app_policy_module
 from agentflow_proxy import codex_app_proxy
 from agentflow_proxy import recommendations
 from agentflow_proxy import stats as stats_views
@@ -675,6 +677,63 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(routing["workflow_phase"], "summary")
         self.assertEqual(routing["policy_source"], "local-default")
         self.assertEqual(routing["canary"], "codex-app-summary-model-hint")
+
+    def test_local_codex_app_rules_enable_summary_hint_and_cache_without_env_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+            db_path = os.path.join(tmp, "codex.sqlite3")
+            with open(rules_path, "w", encoding="utf-8") as f:
+                f.write(
+                    """
+enabled: true
+summary_model_hint:
+  enabled: true
+  target_model: gpt-5-mini
+exact_cache:
+  enabled: true
+  namespace: local-file-test
+"""
+                )
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-file-backed-summary",
+                "method": "turn/start",
+                "params": {
+                    "threadId": "thread-file-backed-summary",
+                    "model": "gpt-5.3-codex",
+                    "input": [{"type": "text", "text": "Summarize the completed work for the run log."}],
+                    "temperature": 0,
+                },
+            }
+
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "AGENTFLOW_CODEX_APP_RULES": rules_path,
+                        "AGENTFLOW_DB": db_path,
+                        "HOME": tmp,
+                        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT": "0",
+                        "AGENTFLOW_CODEX_APP_CACHE": "0",
+                    },
+                    clear=False,
+                ):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+            finally:
+                importlib.reload(codex_app_policy_module)
+                importlib.reload(codex_app_proxy)
+
+        forwarded_obj = json.loads(forwarded)
+        self.assertEqual(forwarded_obj["params"]["model"], "gpt-5-mini")
+        self.assertEqual(metadata["routing"]["status"], "applied")
+        self.assertEqual(metadata["routing"]["policy_source"], "local-manual")
+        self.assertEqual(metadata["routing"]["target_model"], "gpt-5-mini")
+        self.assertEqual(metadata["cache"]["status"], "miss")
+        self.assertTrue(metadata["cache"]["enabled"])
+        self.assertEqual(metadata["cache"]["policy_source"], "local-manual")
+        self.assertEqual(metadata["cache"]["replayability_level"], "local-exact-response")
 
     def test_summary_model_hint_canary_skips_uncertain_turns(self):
         cases = [

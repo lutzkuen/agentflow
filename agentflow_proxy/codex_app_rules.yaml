@@ -1,0 +1,15 @@
+# Local Codex app-server optimization rules.
+#
+# Defaults are conservative: optimization metadata is enabled, but summary-turn
+# model hints and exact response replay remain off until a local manual policy
+# file or environment flag opts in.
+enabled: true
+summary_model_hint:
+  enabled: false
+  target_model: gpt-5-codex
+exact_cache:
+  enabled: false
+  namespace: default
+crunch:
+  profiles:
+    - codex-repeated-scaffolding
