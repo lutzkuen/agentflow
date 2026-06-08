@@ -102,6 +102,10 @@ def create_dashboard_router(
     async def stats_limiter() -> dict[str, Any]:
         return await stats_views.stats_limiter(_store(store_obj), limiter_status, limiter_config)
 
+    @router.get("/agentflow/stats/codex-effectiveness")
+    async def stats_codex_effectiveness(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_codex_effectiveness(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/policies")
     async def stats_policies() -> dict[str, Any]:
         return await stats_views.stats_policies()

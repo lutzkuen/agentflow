@@ -72,6 +72,7 @@ class DashboardImportTests(unittest.TestCase):
             stats = client.get("/agentflow/stats")
             policies = client.get("/agentflow/stats/policies")
             policy_events = client.get("/agentflow/stats/policy-events")
+            codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
             admin_reload = client.post("/agentflow/admin/reload-policies")
             dashboard = client.get("/agentflow/dashboard")
 
@@ -84,6 +85,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(policy_events.status_code, 200)
             self.assertEqual(policy_events.json()["schema"], "agentflow.policy_events.v1")
             self.assertEqual(policy_events.json()["events"][0]["action"], "validate")
+            self.assertEqual(codex_effectiveness.status_code, 200)
+            self.assertEqual(codex_effectiveness.json()["schema"], "agentflow.codex_app_effectiveness.v1")
+            self.assertFalse(codex_effectiveness.json()["privacy"]["raw_prompts_included"])
             policy_json = policies.json()
             self.assertEqual(policy_json["schema"], "agentflow.policy_state.v1")
             self.assertIn("summary", policy_json)

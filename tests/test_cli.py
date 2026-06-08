@@ -95,6 +95,68 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["managed_optimizer"]["enabled"])
         self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
 
+    def test_codex_diagnose_cli_reads_local_metadata_only(self):
+        from agentflow_proxy.store import Store, stable_json, utc_now
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_codex_app_event(
+                    id="start-cli",
+                    created_at=utc_now(),
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="req-cli",
+                    thread_id="thread-cli",
+                    message_chars=120,
+                    params_chars=80,
+                    input_items=1,
+                    input_text_chars=64,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    session_id="session-cli",
+                    routing_json=stable_json({
+                        "status": "not-applicable",
+                        "reason": "codex-turn-start-model-field-absent",
+                        "applied": False,
+                        "policy_source": "local-default",
+                    }),
+                    crunch_json=stable_json({"status": "skipped", "reason": "no-change", "applied": False}),
+                    cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True}),
+                )
+                store.log_codex_app_event(
+                    id="end-cli",
+                    created_at=utc_now(),
+                    direction="server_to_client",
+                    method="turn/completed",
+                    request_id="req-cli",
+                    thread_id="thread-cli",
+                    message_chars=90,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=40,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=25,
+                    session_id="session-cli",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.codex_diagnose_cli(["--db", db_path, "--limit", "10"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.codex_app_effectiveness.v1")
+        self.assertEqual(payload["summary"]["turn_start_rows"], 1)
+        self.assertEqual(payload["summary"]["model_field_absent"], 1)
+        self.assertFalse(payload["privacy"]["raw_params_included"])
+
     def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)

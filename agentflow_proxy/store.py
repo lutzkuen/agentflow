@@ -270,6 +270,14 @@ class SQLiteStore:
             self._ensure_column("codex_app_events", "routing_json", "text")
             self._ensure_column("codex_app_events", "crunch_json", "text")
             self._ensure_column("codex_app_events", "cache_json", "text")
+            cur.execute("""
+            create index if not exists idx_codex_app_events_start_recent
+            on codex_app_events(direction, method, created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_codex_app_events_response_lookup
+            on codex_app_events(direction, request_id, created_at)
+            """)
             self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -575,6 +583,14 @@ class PostgresStore(SQLiteStore):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json"):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
+        self.conn.execute("""
+            create index if not exists idx_codex_app_events_start_recent
+            on codex_app_events(direction, method, created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_codex_app_events_response_lookup
+            on codex_app_events(direction, request_id, created_at)
+        """)
 
     def set_cache(
         self,

@@ -299,6 +299,162 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(("codex_app_turn", "routing"), savings)
         json.dumps(result)
 
+    def test_codex_effectiveness_report_summarizes_live_like_metadata_without_raw_text(self):
+        secret = "secret prompt text"
+
+        def log_turn(
+            request_id,
+            *,
+            routing,
+            crunch,
+            cache,
+            input_text_chars=0,
+            params_chars=100,
+            response_error_code=None,
+            response_error_message=None,
+            response_latency_ms=100,
+        ):
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id=f"thread-{request_id}",
+                message_chars=200,
+                params_chars=params_chars,
+                input_items=1 if input_text_chars else 0,
+                input_text_chars=input_text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="codex-effectiveness",
+                routing_json=stable_json(routing),
+                crunch_json=stable_json(crunch),
+                cache_json=stable_json(cache),
+            )
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id=f"thread-{request_id}",
+                message_chars=160,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=80,
+                error_code=response_error_code,
+                error_message=response_error_message,
+                latency_ms=response_latency_ms,
+                session_id="codex-effectiveness",
+            )
+
+        log_turn(
+            "model-absent",
+            routing={
+                "status": "not-applicable",
+                "reason": "codex-turn-start-model-field-absent",
+                "applied": False,
+                "policy_source": "local-default",
+            },
+            crunch={"status": "skipped", "reason": "no-change", "applied": False, "changed": False},
+            cache={"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True, "policy_source": "local-default"},
+            input_text_chars=120,
+        )
+        log_turn(
+            "model-routed",
+            routing={
+                "status": "applied",
+                "reason": "small non-tool Sonnet request routed to Haiku",
+                "applied": True,
+                "model_field": "model",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "policy_source": "local-default",
+            },
+            crunch={"status": "skipped", "reason": "no-change", "applied": False, "changed": False},
+            cache={"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True, "policy_source": "local-default"},
+            input_text_chars=80,
+            response_error_code=-32000,
+            response_error_message="upstream rejected routed model",
+            response_latency_ms=250,
+        )
+        log_turn(
+            "action-like",
+            routing={"status": "not-applied", "reason": "action-like-params", "applied": False, "policy_source": "local-default"},
+            crunch={"status": "not-applied", "reason": "action-like-params", "applied": False},
+            cache={"status": "skipped", "reason": "action-like-params", "eligible": False, "policy_source": "local-default"},
+        )
+        log_turn(
+            "crunch-applied",
+            routing={
+                "status": "not-applicable",
+                "reason": "codex-turn-start-model-field-absent",
+                "applied": False,
+                "policy_source": "local-default",
+            },
+            crunch={
+                "status": "applied",
+                "reason": "codex-turn-start-crunched",
+                "applied": True,
+                "changed": True,
+                "saved_chars": 1600,
+                "tokens_saved_est": 400,
+                "note": secret,
+            },
+            cache={"status": "skipped", "reason": "unknown-param-shape", "eligible": False, "policy_source": "local-default"},
+            input_text_chars=3000,
+        )
+        log_turn(
+            "cache-hit",
+            routing={
+                "status": "not-applicable",
+                "reason": "codex-turn-start-model-field-absent",
+                "applied": False,
+                "policy_source": "local-default",
+            },
+            crunch={"status": "skipped", "reason": "no-change", "applied": False, "changed": False},
+            cache={"status": "hit", "reason": "exact-match", "eligible": True, "hit_type": "exact", "policy_source": "local-default"},
+            input_text_chars=200,
+        )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=20))
+        summary = result["summary"]
+
+        self.assertEqual(result["schema"], "agentflow.codex_app_effectiveness.v1")
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["raw_params_included"])
+        self.assertFalse(result["privacy"]["raw_responses_included"])
+        self.assertEqual(summary["turn_start_rows"], 5)
+        self.assertEqual(summary["model_field_present"], 1)
+        self.assertEqual(summary["model_field_absent"], 3)
+        self.assertEqual(summary["routing_applied"], 1)
+        self.assertEqual(summary["crunch_applied"], 1)
+        self.assertEqual(summary["cache_hits"], 1)
+        self.assertEqual(summary["cache_eligible"], 3)
+        self.assertEqual(summary["action_like_skips"], 1)
+        self.assertEqual(summary["unknown_param_skips"], 1)
+        self.assertEqual(summary["total_saved_chars"], 1600)
+        self.assertEqual(summary["total_saved_tokens_est"], 400)
+        self.assertEqual(summary["error_rows"], 1)
+        self.assertEqual(summary["optimized_rows"], 3)
+        self.assertEqual(summary["pass_through_rows"], 2)
+        self.assertGreater(summary["optimized_error_rate"], 0)
+
+        model_fields = {row["value"]: row["count"] for row in result["model_field_breakdown"]}
+        self.assertEqual(model_fields["present"], 1)
+        self.assertEqual(model_fields["absent"], 3)
+        shapes = {row["value"]: row["count"] for row in result["param_shape_breakdown"]}
+        self.assertEqual(shapes["action-like-params"], 1)
+        self.assertEqual(shapes["unknown-param-shape"], 1)
+        routing_statuses = {row["status"] for row in result["routing_breakdown"]}
+        self.assertIn("applied", routing_statuses)
+        self.assertIn("not-applicable", routing_statuses)
+        self.assertNotIn(secret, json.dumps(result))
+
     def test_old_context_summary_stats_are_attributed_separately(self):
         for cache_hit, cost in ((False, 0.0002), (True, 0.0)):
             server.store.log_call(

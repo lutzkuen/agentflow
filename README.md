@@ -99,6 +99,20 @@ printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.
 
 This path currently focuses on telemetry. It records redacted JSON-RPC method names and size-derived metadata without storing raw prompts by default. Codex token/cost accounting, routing, crunching, and cache support are being expanded incrementally.
 
+To inspect whether recent live Codex turns were routable, crunchable, or cache-eligible, run:
+
+```bash
+agentflow-codex-diagnose --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The same read-only report is available from a running dashboard or proxy at:
+
+```text
+/agentflow/stats/codex-effectiveness?limit=500
+```
+
+The report uses stored metadata, sizes, and decision JSON only. It does not include raw prompts, params, responses, transcripts, or tool payloads.
+
 ## Dashboard
 
 The dashboard shows local usage and optimization behavior, including:

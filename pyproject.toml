@@ -31,6 +31,7 @@ agentflow-policy-apply = "agentflow_proxy.cli:policy_apply_main"
 agentflow-policy-rollback = "agentflow_proxy.cli:policy_rollback_main"
 agentflow-codex-app-proxy = "agentflow_proxy.codex_app_proxy:main"
 agentflow-codex-app-client = "agentflow_proxy.codex_app_client:main"
+agentflow-codex-diagnose = "agentflow_proxy.cli:codex_diagnose_main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]

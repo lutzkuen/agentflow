@@ -568,6 +568,56 @@ def policy_rollback_cli(
     return 0 if result["ok"] else 1
 
 
+def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report Codex app-server routing, crunching, and cache effectiveness from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent turn/start rows to inspect, default: 500, max: 5000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.stats import stats_codex_effectiveness
+    from agentflow_proxy.store import Store
+
+    old_database_url = os.environ.get("AGENTFLOW_DATABASE_URL")
+    db_arg = str(args.db)
+    try:
+        if db_arg.startswith(("postgresql://", "postgres://")):
+            os.environ["AGENTFLOW_DATABASE_URL"] = db_arg
+            store = Store()
+        else:
+            os.environ.pop("AGENTFLOW_DATABASE_URL", None)
+            store = Store(db_arg)
+    finally:
+        if old_database_url is None:
+            os.environ.pop("AGENTFLOW_DATABASE_URL", None)
+        else:
+            os.environ["AGENTFLOW_DATABASE_URL"] = old_database_url
+    try:
+        result = asyncio.run(stats_codex_effectiveness(store, limit=args.limit))
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -640,3 +690,7 @@ def policy_apply_main() -> None:
 
 def policy_rollback_main() -> None:
     raise SystemExit(policy_rollback_cli())
+
+
+def codex_diagnose_main() -> None:
+    raise SystemExit(codex_diagnose_cli())

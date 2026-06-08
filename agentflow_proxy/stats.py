@@ -484,6 +484,289 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
     return breakdown
 
 
+def _increment_count(grouped: dict[str, int], key: Any) -> None:
+    label = str(key or "unknown")
+    grouped[label] = grouped.get(label, 0) + 1
+
+
+def _count_breakdown(grouped: dict[str, int]) -> list[dict[str, Any]]:
+    rows = [{"value": key, "count": count} for key, count in grouped.items()]
+    rows.sort(key=lambda row: row["count"], reverse=True)
+    return rows
+
+
+def _decision_breakdown(rows: list[dict[str, Any]], decision_key: str) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        decision = _json_obj(row.get(decision_key))
+        status = str(decision.get("status") or "missing")
+        reason = str(decision.get("reason") or "unknown")
+        policy_source = str(decision.get("policy_source") or "unknown")
+        key = (status, reason, policy_source)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "status": status,
+                "reason": reason,
+                "policy_source": policy_source,
+                "count": 0,
+            },
+        )
+        bucket["count"] += 1
+    result = list(grouped.values())
+    result.sort(key=lambda r: r["count"], reverse=True)
+    return result
+
+
+def _codex_model_field_state(routing: dict[str, Any]) -> tuple[str, str | None]:
+    field = routing.get("model_field")
+    if field:
+        return "present", str(field)
+    reason = str(routing.get("reason") or "")
+    if reason == "codex-turn-start-model-field-absent":
+        return "absent", None
+    if routing.get("requested_model") or routing.get("routed_model"):
+        return "present_unknown_field", None
+    return "unknown", None
+
+
+def _codex_param_shape_category(row: dict[str, Any], routing: dict[str, Any], crunch: dict[str, Any], cache: dict[str, Any]) -> str:
+    reasons = {
+        str(decision.get("reason") or "")
+        for decision in (routing, crunch, cache)
+        if isinstance(decision, dict)
+    }
+    if "action-like-params" in reasons:
+        return "action-like-params"
+    if "unknown-param-shape" in reasons:
+        return "unknown-param-shape"
+    if "non-text-input" in reasons:
+        return "non-text-input"
+    if "params-not-object" in reasons:
+        return "params-not-object"
+    if "codex-app-cache-disabled" in reasons:
+        if _as_int(row.get("input_text_chars")) > 0:
+            return "text-input-cache-disabled"
+        return "cache-disabled-unknown-shape"
+    if _as_int(row.get("input_text_chars")) > 0:
+        return "text-input"
+    if _as_int(row.get("params_chars")) > 0:
+        return "params-without-text"
+    return "unknown"
+
+
+def _avg_or_none(values: list[int]) -> int | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values))
+
+
+async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    conn = store_obj.conn
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    rows = conn.execute("""
+        select s.id as start_event_id,
+               s.created_at,
+               s.request_id,
+               s.thread_id,
+               s.session_id,
+               s.method,
+               s.message_chars,
+               s.params_chars,
+               s.input_items,
+               s.input_text_chars,
+               s.routing_json,
+               s.crunch_json,
+               s.cache_json,
+               (
+                   select r.id from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_event_id,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms
+        from codex_app_events s
+        where s.direction = 'client_to_server'
+          and s.method = 'turn/start'
+        order by s.created_at desc
+        limit ?
+    """, (capped_limit,)).fetchall()
+    turn_rows = [dict(row) for row in rows]
+
+    model_field_counts: dict[str, int] = {}
+    model_field_names: dict[str, int] = {}
+    param_shape_counts: dict[str, int] = {}
+    method_counts: dict[str, int] = {}
+    optimized_latency: list[int] = []
+    pass_through_latency: list[int] = []
+    optimized_errors = 0
+    pass_through_errors = 0
+    optimized_count = 0
+    pass_through_count = 0
+    pending_count = 0
+    error_count = 0
+    success_count = 0
+    total_saved_chars = 0
+    total_saved_tokens = 0
+    action_like_skips = 0
+    unknown_param_skips = 0
+    non_text_skips = 0
+
+    recent_samples: list[dict[str, Any]] = []
+    for row in turn_rows:
+        routing = _json_obj(row.get("routing_json"))
+        crunch = _json_obj(row.get("crunch_json"))
+        cache = _json_obj(row.get("cache_json"))
+        model_state, model_field = _codex_model_field_state(routing)
+        _increment_count(model_field_counts, model_state)
+        if model_field:
+            _increment_count(model_field_names, model_field)
+        shape = _codex_param_shape_category(row, routing, crunch, cache)
+        _increment_count(param_shape_counts, shape)
+        _increment_count(method_counts, row.get("method") or "turn/start")
+
+        reasons = {
+            str(decision.get("reason") or "")
+            for decision in (routing, crunch, cache)
+            if isinstance(decision, dict)
+        }
+        if "action-like-params" in reasons:
+            action_like_skips += 1
+        if "unknown-param-shape" in reasons:
+            unknown_param_skips += 1
+        if "non-text-input" in reasons:
+            non_text_skips += 1
+
+        saved_chars = _as_int(crunch.get("saved_chars"))
+        saved_tokens = _as_int(crunch.get("tokens_saved_est"))
+        total_saved_chars += saved_chars
+        total_saved_tokens += saved_tokens
+
+        optimized = bool(routing.get("applied") or crunch.get("applied") or cache.get("status") == "hit")
+        has_response = bool(row.get("response_event_id"))
+        has_error = row.get("response_error_code") is not None
+        latency = _as_int(row.get("response_latency_ms"))
+        if has_error:
+            error_count += 1
+        elif has_response:
+            success_count += 1
+        else:
+            pending_count += 1
+
+        if optimized:
+            optimized_count += 1
+            if has_error:
+                optimized_errors += 1
+            if latency:
+                optimized_latency.append(latency)
+        else:
+            pass_through_count += 1
+            if has_error:
+                pass_through_errors += 1
+            if latency:
+                pass_through_latency.append(latency)
+
+        if len(recent_samples) < 20:
+            recent_samples.append({
+                "created_at": row.get("created_at"),
+                "method": row.get("method") or "turn/start",
+                "model_field": model_state,
+                "param_shape": shape,
+                "routing_status": routing.get("status") or "missing",
+                "routing_reason": routing.get("reason") or "unknown",
+                "crunch_status": crunch.get("status") or "missing",
+                "crunch_reason": crunch.get("reason") or "unknown",
+                "cache_status": cache.get("status") or "missing",
+                "cache_reason": cache.get("reason") or "unknown",
+                "input_text_chars": _as_int(row.get("input_text_chars")),
+                "saved_chars": saved_chars,
+                "tokens_saved_est": saved_tokens,
+                "outcome": "error" if has_error else ("success" if has_response else "pending"),
+                "latency_ms": latency or None,
+                "error_code": row.get("response_error_code"),
+            })
+
+    total = len(turn_rows)
+    return {
+        "schema": "agentflow.codex_app_effectiveness.v1",
+        "generated_at": utc_now(),
+        "source_surface": "codex_app_turn",
+        "limit": capped_limit,
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_params_included": False,
+            "raw_responses_included": False,
+            "basis": "stored metadata, sizes, hashes, and decision JSON only",
+        },
+        "summary": {
+            "turn_start_rows": total,
+            "completed_rows": success_count,
+            "error_rows": error_count,
+            "pending_rows": pending_count,
+            "model_field_present": model_field_counts.get("present", 0) + model_field_counts.get("present_unknown_field", 0),
+            "model_field_absent": model_field_counts.get("absent", 0),
+            "model_field_unknown": model_field_counts.get("unknown", 0),
+            "routing_applied": sum(1 for row in turn_rows if _json_obj(row.get("routing_json")).get("applied")),
+            "crunch_applied": sum(1 for row in turn_rows if _json_obj(row.get("crunch_json")).get("applied")),
+            "cache_hits": sum(1 for row in turn_rows if _json_obj(row.get("cache_json")).get("status") == "hit"),
+            "cache_eligible": sum(1 for row in turn_rows if bool(_json_obj(row.get("cache_json")).get("eligible"))),
+            "action_like_skips": action_like_skips,
+            "unknown_param_skips": unknown_param_skips,
+            "non_text_input_skips": non_text_skips,
+            "total_input_text_chars": sum(_as_int(row.get("input_text_chars")) for row in turn_rows),
+            "total_saved_chars": total_saved_chars,
+            "total_saved_tokens_est": total_saved_tokens,
+            "optimized_rows": optimized_count,
+            "pass_through_rows": pass_through_count,
+            "optimized_error_rate": round(optimized_errors / optimized_count, 4) if optimized_count else 0,
+            "pass_through_error_rate": round(pass_through_errors / pass_through_count, 4) if pass_through_count else 0,
+            "optimized_avg_latency_ms": _avg_or_none(optimized_latency),
+            "pass_through_avg_latency_ms": _avg_or_none(pass_through_latency),
+        },
+        "model_field_breakdown": _count_breakdown(model_field_counts),
+        "model_field_names": _count_breakdown(model_field_names),
+        "method_breakdown": _count_breakdown(method_counts),
+        "param_shape_breakdown": _count_breakdown(param_shape_counts),
+        "routing_breakdown": _decision_breakdown(turn_rows, "routing_json"),
+        "crunch_breakdown": _decision_breakdown(turn_rows, "crunch_json"),
+        "cache_breakdown": _decision_breakdown(turn_rows, "cache_json"),
+        "outcome_by_optimization": [
+            {
+                "bucket": "optimized",
+                "count": optimized_count,
+                "errors": optimized_errors,
+                "error_rate": round(optimized_errors / optimized_count, 4) if optimized_count else 0,
+                "avg_latency_ms": _avg_or_none(optimized_latency),
+            },
+            {
+                "bucket": "pass_through",
+                "count": pass_through_count,
+                "errors": pass_through_errors,
+                "error_rate": round(pass_through_errors / pass_through_count, 4) if pass_through_count else 0,
+                "avg_latency_ms": _avg_or_none(pass_through_latency),
+            },
+        ],
+        "recent_samples": recent_samples,
+    }
+
+
 def _usage_bucket_identity(app_family: str, session_id: Any) -> dict[str, Any]:
     engineer = os.getenv("AGENTFLOW_ENGINEER") or None
     app = os.getenv("AGENTFLOW_APP") or app_family or "unknown"
