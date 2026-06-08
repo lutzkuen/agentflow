@@ -2292,8 +2292,14 @@ class StatsFullTest(unittest.TestCase):
         [plateau] = result["context_plateaus"]
         encoded = json.dumps(result)
 
-        self.assertEqual(session["session_id"], "thread-codex-sessions")
-        self.assertEqual(session["session_key_basis"], "thread_id")
+        self.assertTrue(session["session_id"].startswith("codex-workflow:"))
+        self.assertEqual(session["session_key_basis"], "workflow_thread_id")
+        self.assertEqual(
+            session["codex_workflow_grouping"]["original_key_basis_counts"],
+            {"thread_id": 3},
+        )
+        self.assertEqual(session["codex_workflow_grouping"]["original_key_count"], 1)
+        self.assertFalse(session["codex_workflow_grouping"]["raw_keys_included"])
         self.assertEqual(session["source_surface"], "codex_turn")
         self.assertEqual(session["app_family"], "codex")
         self.assertEqual(session["calls"], 3)
@@ -2312,7 +2318,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(session["codex_optimized_turns"], 2)
         self.assertEqual(session["codex_errors"], 1)
         self.assertEqual(session["codex_method_counts"], [{"method": "turn/start", "turns": 3}])
-        self.assertEqual(plateau["session_id"], "thread-codex-sessions")
+        self.assertEqual(plateau["session_id"], session["session_id"])
+        self.assertEqual(plateau["session_key_basis"], "workflow_thread_id")
         self.assertEqual(plateau["source_surface"], "codex_turn")
         self.assertEqual(plateau["calls"], 3)
         self.assertEqual(plateau["plateau_pairs"], 1)
@@ -2322,6 +2329,108 @@ class StatsFullTest(unittest.TestCase):
         self.assertGreater(plateau["cache_read_savings_usd"], 0.0)
         self.assertNotIn(raw_prompt_text, encoded)
         self.assertNotIn("raw_prompt", encoded)
+        self.assertNotIn("thread-codex-sessions", encoded)
+
+    def test_sessions_group_fragmented_codex_turns_into_workflow_window(self):
+        raw_prompt_text = "secret raw codex prompt must not appear"
+        created_base = utc_now()
+        text_sizes = [10_000, 10_100, 10_050, 10_080, 10_060]
+        phases = ["planning", "planning", "tool_execution", "summary", "summary"]
+        for idx, text_chars in enumerate(text_sizes):
+            request_id = f"request-fragment-{idx}"
+            session_id = f"codex-fragment-session-{idx}"
+            server.store.log_codex_app_event(
+                id=f"fragment-start-{idx}",
+                created_at=created_base,
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id=None,
+                message_chars=text_chars + 25,
+                params_chars=text_chars + 10,
+                input_items=2,
+                input_text_chars=text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id=session_id,
+                routing_json=stable_json({
+                    "status": "skipped",
+                    "applied": False,
+                    "workflow_phase": phases[idx],
+                    "reason": "test-metadata-only",
+                }),
+                crunch_json=stable_json({
+                    "changed": idx == 2,
+                    "saved_chars": 400 if idx == 2 else 0,
+                    "workflow_phase": phases[idx],
+                }),
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+            )
+            server.store.log_codex_app_event(
+                id=f"fragment-response-{idx}",
+                created_at=created_base,
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id=None,
+                message_chars=200,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=200,
+                error_code=None,
+                error_message=None,
+                latency_ms=100 + idx,
+                session_id=session_id,
+            )
+
+        app = create_dashboard_app(
+            store_obj=lambda: server.store,
+            default_db=self.tmp.name,
+            upstream="https://anthropic.test",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        response = TestClient(app).get("/agentflow/stats/sessions")
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        [session] = result["sessions"]
+        [plateau] = result["context_plateaus"]
+        encoded = json.dumps(result)
+
+        self.assertTrue(session["session_id"].startswith("codex-workflow:"))
+        self.assertEqual(session["session_key_basis"], "workflow_window")
+        self.assertEqual(session["source_surface"], "codex_turn")
+        self.assertEqual(session["app_family"], "codex")
+        self.assertEqual(session["calls"], 5)
+        self.assertEqual(session["codex_turns"], 5)
+        self.assertEqual(session["provider_calls"], 0)
+        self.assertEqual(session["codex_input_text_chars"], sum(text_sizes))
+        self.assertGreater(session["codex_cost_est_usd"], 0.0)
+        self.assertEqual(session["codex_crunched_turns"], 1)
+        self.assertEqual(
+            session["codex_workflow_grouping"]["original_key_basis_counts"],
+            {"session_id": 5},
+        )
+        self.assertEqual(session["codex_workflow_grouping"]["original_key_count"], 5)
+        self.assertFalse(session["codex_workflow_grouping"]["raw_keys_included"])
+        self.assertEqual(
+            {row["phase"]: row["turns"] for row in session["codex_workflow_phase_counts"]},
+            {"planning": 2, "summary": 2, "tool_execution": 1},
+        )
+        self.assertEqual(plateau["session_id"], session["session_id"])
+        self.assertEqual(plateau["session_key_basis"], "workflow_window")
+        self.assertEqual(plateau["calls"], 5)
+        self.assertEqual(plateau["plateau_pairs"], 4)
+        self.assertNotIn(raw_prompt_text, encoded)
+        self.assertNotIn("raw_prompt", encoded)
+        self.assertNotIn("raw_response", encoded)
+        self.assertNotIn("codex-fragment-session-", encoded)
+        self.assertNotIn("request-fragment-", encoded)
 
     def test_recent_session_spending_summary_breaks_down_cost_drivers(self):
         server.store.log_call(

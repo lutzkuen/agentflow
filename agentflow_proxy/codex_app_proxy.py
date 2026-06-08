@@ -220,11 +220,12 @@ def _check_codex_app_session_cost_alert(window: dict[str, Any]) -> None:
         return
     if basis == "thread_id":
         where = "s.thread_id = ?"
-    elif basis == "session_id":
-        where = "s.thread_id is null and s.session_id = ?"
     else:
-        where = "s.thread_id is null and s.session_id is null and s.request_id = ?"
+        basis = "workflow_window"
+        session_key = f"codex-workflow:{utc_now()[:10]}"
+        where = "s.thread_id is null"
     try:
+        params = (session_key,) if basis == "thread_id" else ()
         rows = store.conn.execute(f"""
             select s.request_id,
                    s.input_text_chars,
@@ -244,7 +245,7 @@ def _check_codex_app_session_cost_alert(window: dict[str, Any]) -> None:
               and s.method = 'turn/start'
               and date(s.created_at) = date('now')
               and {where}
-        """, (session_key if basis != "request_id" else session_key.removeprefix("request:"),)).fetchall()
+        """, params).fetchall()
     except Exception as exc:
         print(f"AgentFlow Codex app spend alert skipped: {exc}", file=sys.stderr)
         return

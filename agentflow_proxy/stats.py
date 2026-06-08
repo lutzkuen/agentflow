@@ -1964,6 +1964,120 @@ def _codex_plateau_scope(row: dict[str, Any]) -> tuple[str, str]:
     return "unknown", "unknown"
 
 
+def _codex_original_session_key(row: dict[str, Any]) -> tuple[str, str]:
+    if row.get("thread_id"):
+        return str(row["thread_id"]), "thread_id"
+    if row.get("session_id"):
+        return str(row["session_id"]), "session_id"
+    if row.get("request_id"):
+        return f"request:{row['request_id']}", "request_id"
+    return "codex:unknown", "unknown"
+
+
+def _codex_metadata_workflow_groups(
+    rows: list[dict[str, Any]],
+    *,
+    idle_gap_seconds: int = 30 * 60,
+) -> dict[str, dict[str, Any]]:
+    ordered = sorted(rows, key=lambda item: str(item.get("created_at") or ""))
+    groups_by_event: dict[str, dict[str, Any]] = {}
+    group_index = 0
+    current_group: dict[str, Any] | None = None
+    previous_at: datetime | None = None
+
+    def new_window(row: dict[str, Any], started_at: datetime | None) -> dict[str, Any]:
+        nonlocal group_index
+        group_index += 1
+        started_text = started_at.isoformat() if started_at else str(row.get("created_at") or "unknown")
+        model_state, _model_field = _codex_model_field_state(
+            _json_obj(row.get("routing_json")),
+            row.get("event_window_json"),
+        )
+        digest = hashlib.sha256(
+            f"codex_turn|codex|{started_text}|{model_state}|{group_index}".encode("utf-8")
+        ).hexdigest()[:16]
+        return {
+            "key": f"codex-workflow:{digest}",
+            "basis": "workflow_window",
+            "group_start_at": started_text,
+            "group_index": group_index,
+            "idle_gap_seconds": idle_gap_seconds,
+            "model_state_counts": {},
+            "original_key_basis_counts": {},
+            "original_key_count": 0,
+            "_original_keys": set(),
+        }
+
+    for row in ordered:
+        created_at = _parse_utc_datetime(row.get("created_at"))
+        thread_id = str(row.get("thread_id") or "").strip()
+        if thread_id:
+            digest = hashlib.sha256(f"codex_turn|codex|thread_id|{thread_id}".encode("utf-8")).hexdigest()[:16]
+            current = {
+                "key": f"codex-workflow:{digest}",
+                "basis": "workflow_thread_id",
+                "group_start_at": None,
+                "group_index": None,
+                "idle_gap_seconds": idle_gap_seconds,
+                "model_state_counts": {},
+                "original_key_basis_counts": {},
+                "original_key_count": 0,
+                "_original_keys": set(),
+            }
+        else:
+            gap_seconds = (
+                (created_at - previous_at).total_seconds()
+                if created_at is not None and previous_at is not None
+                else None
+            )
+            if current_group is None or (gap_seconds is not None and gap_seconds > idle_gap_seconds):
+                current_group = new_window(row, created_at)
+            current = current_group
+
+        model_state, _model_field = _codex_model_field_state(
+            _json_obj(row.get("routing_json")),
+            row.get("event_window_json"),
+        )
+        original_key, original_basis = _codex_original_session_key(row)
+        current["model_state_counts"][model_state] = current["model_state_counts"].get(model_state, 0) + 1
+        current["original_key_basis_counts"][original_basis] = (
+            current["original_key_basis_counts"].get(original_basis, 0) + 1
+        )
+        current["_original_keys"].add(f"{original_basis}:{original_key}")
+        current["original_key_count"] = len(current["_original_keys"])
+        event_id = str(row.get("start_event_id") or row.get("id") or row.get("request_id") or "")
+        if event_id:
+            groups_by_event[event_id] = current
+        if not thread_id and created_at is not None:
+            previous_at = created_at
+
+    public: dict[str, dict[str, Any]] = {}
+    for event_id, group in groups_by_event.items():
+        public[event_id] = {
+            "key": group["key"],
+            "basis": group["basis"],
+            "group_start_at": group.get("group_start_at"),
+            "group_index": group.get("group_index"),
+            "idle_gap_seconds": group["idle_gap_seconds"],
+            "model_state_counts": dict(group.get("model_state_counts") or {}),
+            "original_key_basis_counts": dict(group.get("original_key_basis_counts") or {}),
+            "original_key_count": int(group.get("original_key_count") or 0),
+        }
+    return public
+
+
+def _codex_phase_from_decision_metadata(
+    routing: dict[str, Any],
+    crunch: dict[str, Any],
+    cache: dict[str, Any],
+) -> str:
+    for meta in (cache, crunch, routing):
+        phase = meta.get("workflow_phase") if isinstance(meta, dict) else None
+        if phase:
+            return str(phase)
+    return "unknown"
+
+
 def _codex_meaningful_crunch(row: dict[str, Any], *, min_ratio: float) -> bool:
     input_chars = _as_int(row.get("input_text_chars"))
     if input_chars <= 0:
@@ -4679,9 +4793,13 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
                 "codex_errors": 0,
                 "codex_cost_basis": CODEX_APP_COST_BASIS,
                 "codex_app_model": CODEX_APP_MODEL,
+                "codex_workflow_grouping": None,
                 "_source_surface_counts": {},
                 "_app_family_counts": {},
                 "_codex_method_counts": {},
+                "_codex_phase_counts": {},
+                "_codex_original_key_basis_counts": {},
+                "_codex_original_keys": set(),
             }
             sessions_by_key[key] = bucket
         bucket["_source_surface_counts"][source_surface] = bucket["_source_surface_counts"].get(source_surface, 0) + int(units)
@@ -4904,21 +5022,19 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         where s.direction = 'client_to_server'
           and s.method = 'turn/start'
           and date(s.created_at) = date('now')
-        order by coalesce(s.session_id, s.thread_id, s.request_id, ''), s.created_at
+        order by s.created_at
     """).fetchall()
 
-    def codex_session_key(row: dict[str, Any]) -> tuple[str, str]:
-        if row.get("session_id"):
-            return str(row["session_id"]), "session_id"
-        if row.get("thread_id"):
-            return str(row["thread_id"]), "thread_id"
-        if row.get("request_id"):
-            return f"request:{row['request_id']}", "request_id"
-        return "codex:unknown", "unknown"
+    codex_dict_rows = [dict(row) for row in codex_rows]
+    codex_workflow_groups = _codex_metadata_workflow_groups(codex_dict_rows)
 
-    for row in codex_rows:
-        r = dict(row)
-        key, basis = codex_session_key(r)
+    for r in codex_dict_rows:
+        raw_key, raw_basis = _codex_original_session_key(r)
+        group = codex_workflow_groups.get(str(r.get("start_event_id") or ""))
+        if group:
+            key, basis = str(group["key"]), str(group["basis"])
+        else:
+            key, basis = raw_key, raw_basis
         unit = _codex_turn_activity_unit(r)
         input_features = unit["input_features"]
         outcome_features = unit["outcome_features"]
@@ -4931,6 +5047,20 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
             basis=basis,
             source_surface=CODEX_APP_SOURCE_SURFACE,
             app_family="codex",
+        )
+        bucket["codex_workflow_grouping"] = {
+            "basis": basis,
+            "derived_key": key,
+            "idle_gap_seconds": group.get("idle_gap_seconds") if group else None,
+            "group_start_at": group.get("group_start_at") if group else None,
+            "original_key_count": 0,
+            "original_key_basis_counts": {},
+            "model_state_counts": group.get("model_state_counts", {}) if group else {},
+            "raw_keys_included": False,
+        }
+        bucket["_codex_original_keys"].add(f"{raw_basis}:{raw_key}")
+        bucket["_codex_original_key_basis_counts"][raw_basis] = (
+            bucket["_codex_original_key_basis_counts"].get(raw_basis, 0) + 1
         )
         bucket["calls"] += 1
         bucket["turns"] += 1
@@ -4952,6 +5082,8 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         bucket["_codex_method_counts"][str(r.get("method") or "unknown")] = (
             bucket["_codex_method_counts"].get(str(r.get("method") or "unknown"), 0) + 1
         )
+        phase = _codex_phase_from_decision_metadata(routing, crunch, cache)
+        bucket["_codex_phase_counts"][phase] = bucket["_codex_phase_counts"].get(phase, 0) + 1
         optimized = False
         if routing.get("applied"):
             bucket["codex_routed_turns"] += 1
@@ -5106,6 +5238,13 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         source_counts = row.pop("_source_surface_counts", {})
         app_counts = row.pop("_app_family_counts", {})
         method_counts = row.pop("_codex_method_counts", {})
+        phase_counts = row.pop("_codex_phase_counts", {})
+        original_basis_counts = row.pop("_codex_original_key_basis_counts", {})
+        original_keys = row.pop("_codex_original_keys", set())
+        grouping = row.get("codex_workflow_grouping")
+        if isinstance(grouping, dict):
+            grouping["original_key_count"] = len(original_keys)
+            grouping["original_key_basis_counts"] = dict(original_basis_counts)
         row["source_surfaces"] = [
             {"source_surface": source, "units": count}
             for source, count in sorted(source_counts.items())
@@ -5115,6 +5254,10 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         row["codex_method_counts"] = [
             {"method": method, "turns": count}
             for method, count in sorted(method_counts.items())
+        ]
+        row["codex_workflow_phase_counts"] = [
+            {"phase": phase, "turns": count}
+            for phase, count in sorted(phase_counts.items())
         ]
         row["cost_usd"] = round(float(row["cost_usd"]), 6)
         for money_field in (
@@ -6401,7 +6544,7 @@ async function refreshSessions(){
     tb.innerHTML=rows.map(row=>`<tr>
       <td class="flags"><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
       <td>${esc(row.app_family||'unknown')}</td>
-      <td class="ts">${row.sid}</td>
+      <td class="ts" title="${esc(row.session_key_basis||'')}">${row.sid}<div class="sub">${esc(row.session_key_basis||'')}</div></td>
       <td>${(row.turns||row.calls||0).toLocaleString()}</td>
       <td>${(row.provider_calls||0).toLocaleString()}</td>
       <td>${(row.codex_turns||0).toLocaleString()}</td>
@@ -6427,7 +6570,7 @@ async function refreshSessions(){
     const plateaus=d.context_plateaus||[];
     pb.innerHTML=plateaus.map(row=>`<tr>
       <td class="flags"><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
-      <td class="ts">${row.sid}</td>
+      <td class="ts" title="${esc(row.session_key_basis||'')}">${row.sid}<div class="sub">${esc(row.session_key_basis||'')}</div></td>
       <td>${(row.calls||0).toLocaleString()}</td>
       <td class="cost">${fmt(row.cost_usd,5)}</td>
       <td class="tokens">${(row.plateau_pairs||0).toLocaleString()}</td>
