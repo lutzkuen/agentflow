@@ -131,6 +131,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/policy-events", dashboard.text)
             self.assertIn("Policy reload summary", dashboard.text)
             self.assertIn("policy-summary-tbody", dashboard.text)
+            self.assertIn("Codex rules", dashboard.text)
             self.assertIn("Recent policy events", dashboard.text)
             self.assertIn("Safety / privacy status", dashboard.text)
             self.assertIn("/agentflow/stats/safety", dashboard.text)

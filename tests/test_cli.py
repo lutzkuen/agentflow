@@ -564,6 +564,38 @@ class PolicyReloadCliTests(unittest.TestCase):
                 "category": "chat",
             },
         })
+        bundle["policies"]["codex_app"] = {
+            **bundle["policies"]["codex_app"],
+            "policy_source": "managed-recommended",
+            "review_only": True,
+            "application": {
+                "status": "not-applied",
+                "reason": "Codex app candidates are review-only in local policy tooling.",
+            },
+            "rules": [
+                {
+                    "candidate_id": "candidate-codex-summary",
+                    "conditions": {
+                        "app_family": "codex",
+                        "workflow_phase": "summary",
+                        "model_field_state": "derived_present",
+                        "input_size_bucket": "small",
+                        "cache_eligible": False,
+                    },
+                    "action": {
+                        "model_hint": "gpt-5-mini",
+                        "crunch_profile": "pass-through",
+                        "pass_through_reason": "review-only Codex app recommendation",
+                    },
+                    "managed_recommendation": {
+                        "policy_source": "managed-recommended",
+                        "candidate_id": "candidate-codex-summary",
+                        "confidence": 0.76,
+                        "sample_count": 18,
+                    },
+                }
+            ],
+        }
         return bundle
 
     def test_policy_fetch_review_cli_without_config_skips_network(self):
@@ -618,6 +650,13 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["wrote_local_files"])
         self.assertEqual(payload["recommendation"]["candidate_ids"], ["candidate-route-chat"])
         self.assertEqual(payload["recommendation"]["candidates"][0]["confidence"], 0.82)
+        self.assertEqual(payload["recommendation"]["codex_app_candidate_ids"], ["candidate-codex-summary"])
+        self.assertEqual(payload["recommendation"]["codex_app_application_status"], "not-applied")
+        self.assertTrue(payload["recommendation"]["codex_app_review_only"])
+        codex_review = payload["review"]["section_reviews"]["codex_app"]
+        self.assertEqual(codex_review["status"], "review-only")
+        self.assertEqual(codex_review["application"]["status"], "not-applied")
+        self.assertFalse(codex_review["application"]["writes_local_policy_files"])
         self.assertEqual(payload["bundle"]["schema"], "agentflow.policy_bundle.v1")
         self.assertIn("agentflow-policy-apply", payload["next_manual_command"])
         call = get.call_args
@@ -702,6 +741,10 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertTrue(payload["dry_run"])
             self.assertEqual(set(payload["applied_sections"]), {"routing", "crunch", "cache", "routing_experiments"})
+            self.assertEqual(
+                [item for item in payload["skipped_sections"] if item["section"] == "codex_app"][0]["reason"],
+                "review-only-not-applied",
+            )
             self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
             self.assertTrue(any(file["section"] == "cache" and file["changed"] for file in payload["files"]))
 

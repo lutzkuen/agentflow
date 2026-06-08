@@ -528,6 +528,7 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         recommendation = {}
     policies = bundle.get("policies")
     routing = policies.get("routing") if isinstance(policies, dict) and isinstance(policies.get("routing"), dict) else {}
+    codex_app = policies.get("codex_app") if isinstance(policies, dict) and isinstance(policies.get("codex_app"), dict) else {}
     routing_recommendation = (
         routing.get("recommendation")
         if isinstance(routing, dict) and isinstance(routing.get("recommendation"), dict)
@@ -563,18 +564,29 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
             if key in managed
         })
 
+    codex_app_summary: dict[str, Any] = {}
+    if codex_app:
+        from agentflow_proxy.policy_bundle import codex_app_policy_review_summary
+
+        codex_app_summary = codex_app_policy_review_summary(codex_app)
+
     return {
         "schema": recommendation.get("schema"),
         "policy_source": recommendation.get("policy_source"),
         "candidate_ids": recommendation.get("candidate_ids", []),
         "candidate_count": recommendation.get("candidate_count", len(candidates)),
         "routing_rule_count": recommendation.get("routing_rule_count", len(candidates)),
+        "codex_app_candidate_ids": codex_app_summary.get("candidate_ids", []),
+        "codex_app_candidate_count": codex_app_summary.get("candidate_count", 0),
+        "codex_app_review_only": codex_app_summary.get("review_only", False),
+        "codex_app_application_status": (codex_app_summary.get("application") or {}).get("status"),
         "omitted_candidate_count": recommendation.get(
             "omitted_candidate_count",
             routing_recommendation.get("omitted_candidate_count", 0),
         ),
         "filters": recommendation.get("filters", {}),
         "candidates": candidates,
+        "codex_app": codex_app_summary,
     }
 
 

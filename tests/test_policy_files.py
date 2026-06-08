@@ -10,7 +10,13 @@ import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
-from agentflow_proxy.policy_bundle import build_policy_bundle, compare_policy_bundles, review_policy_bundle, validate_policy_bundle
+from agentflow_proxy.policy_bundle import (
+    apply_policy_bundle,
+    build_policy_bundle,
+    compare_policy_bundles,
+    review_policy_bundle,
+    validate_policy_bundle,
+)
 
 
 class PolicyFileStatusTest(unittest.TestCase):
@@ -133,6 +139,7 @@ class PolicyFileStatusTest(unittest.TestCase):
         proposed["policies"]["codex_app"]["policy_source"] = "managed-recommended"
         proposed["policies"]["codex_app"]["rules"] = [
             {
+                "candidate_id": "codex-tool-execution-small",
                 "conditions": {
                     "app_family": "codex",
                     "workflow_phase": "tool_execution",
@@ -155,6 +162,48 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["changed_sections"], ["codex_app"])
         self.assertTrue(any(change["path"].startswith("$.policies.codex_app") for change in result["diff"]["changes"]))
+        codex_review = result["section_reviews"]["codex_app"]
+        self.assertEqual(codex_review["status"], "review-only")
+        self.assertTrue(codex_review["review_only"])
+        self.assertEqual(codex_review["candidate_ids"], ["codex-tool-execution-small"])
+        self.assertEqual(codex_review["application"]["status"], "not-applied")
+        self.assertFalse(codex_review["application"]["writes_local_policy_files"])
+        self.assertIn("workflow_phase", codex_review["condition_keys_present"])
+        self.assertIn("recommended_model", codex_review["action_keys_present"])
+        self.assertFalse(codex_review["privacy"]["raw_prompts_included"])
+
+    def test_policy_apply_reports_codex_app_review_only_and_writes_no_codex_yaml(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["codex_app"] = {
+            **bundle["policies"]["codex_app"],
+            "policy_source": "managed-recommended",
+            "rules": [
+                {
+                    "candidate_id": "codex-summary-pass-through",
+                    "conditions": {
+                        "app_family": "codex",
+                        "workflow_phase": "summary",
+                        "model_field_state": "derived_present",
+                    },
+                    "action": {
+                        "model_hint": "gpt-5-mini",
+                        "pass_through_reason": "review-only Codex app recommendation",
+                    },
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            result = apply_policy_bundle(bundle, config_dir=tmp, dry_run=True)
+
+            self.assertTrue(result["ok"])
+            skipped = {item["section"]: item for item in result["skipped_sections"]}
+            self.assertEqual(skipped["codex_app"]["reason"], "review-only-not-applied")
+            self.assertFalse((Path(tmp) / "codex_app_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "crunch_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+            self.assertFalse(any("codex-summary-pass-through" in json.dumps(file) for file in result["files"]))
 
     def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
         bundle = asyncio.run(build_policy_bundle())

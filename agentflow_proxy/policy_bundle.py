@@ -1034,6 +1034,105 @@ def _codex_app_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> di
     }
 
 
+def _as_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
+def _codex_app_rule_candidate_id(rule: dict[str, Any], index: int) -> str:
+    for key in ("candidate_id", "recommendation_id", "policy_id"):
+        value = rule.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    managed = rule.get("managed_recommendation")
+    if isinstance(managed, dict):
+        for key in ("candidate_id", "recommendation_id", "policy_id"):
+            value = managed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return f"codex-app-rule-{index + 1}"
+
+
+def codex_app_policy_review_summary(policy: Any) -> dict[str, Any]:
+    if not isinstance(policy, dict):
+        policy = {}
+    rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    supported_conditions = _as_string_list(policy.get("supported_conditions")) or sorted(_CODEX_APP_CONDITION_KEYS)
+    supported_actions = _as_string_list(policy.get("supported_actions")) or sorted(_CODEX_APP_ACTION_KEYS)
+    application = policy.get("application") if isinstance(policy.get("application"), dict) else {}
+    rule_summaries: list[dict[str, Any]] = []
+    condition_keys: set[str] = set()
+    action_keys: set[str] = set()
+    pass_through_reasons: list[str] = []
+    omission_reasons: list[str] = []
+
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+        condition_keys.update(str(key) for key in conditions)
+        action_keys.update(str(key) for key in action)
+        for key in ("pass_through_reason", "reason", "cache_eligibility_reason"):
+            value = action.get(key)
+            if isinstance(value, str) and value.strip():
+                pass_through_reasons.append(value)
+        for key in ("omission_reason", "omitted_reason", "pass_through_reason", "reason"):
+            value = rule.get(key, managed.get(key))
+            if isinstance(value, str) and value.strip():
+                omission_reasons.append(value)
+        rule_summaries.append({
+            "path": f"$.policies.codex_app.rules[{index}]",
+            "candidate_id": _codex_app_rule_candidate_id(rule, index),
+            "conditions": conditions,
+            "action": action,
+            "condition_keys": sorted(str(key) for key in conditions),
+            "action_keys": sorted(str(key) for key in action),
+            "confidence": managed.get("confidence", rule.get("confidence")),
+            "sample_count": managed.get("sample_count", rule.get("sample_count")),
+            "review_only": True,
+            "applied": False,
+            "application_status": "not-applied",
+        })
+
+    return {
+        "status": "review-only",
+        "policy_source": policy.get("policy_source"),
+        "surface": canonical_source_surface(policy.get("surface", CODEX_APP_SOURCE_SURFACE)),
+        "review_only": _enabled(policy.get("review_only", True)),
+        "enabled": _enabled(policy.get("enabled", False)),
+        "rule_count": len(rule_summaries),
+        "candidate_count": len(rule_summaries),
+        "candidate_ids": [rule["candidate_id"] for rule in rule_summaries],
+        "supported_conditions": supported_conditions,
+        "supported_actions": supported_actions,
+        "condition_keys_present": sorted(condition_keys),
+        "action_keys_present": sorted(action_keys),
+        "application": {
+            "status": application.get("status") or "not-applied",
+            "reason": application.get("reason")
+            or "Codex app recommendations are review-only until a future explicit local action exists.",
+            "applied_to_provider_routing": False,
+            "applied_to_codex_app_proxy": False,
+            "writes_local_policy_files": False,
+        },
+        "pass_through_reasons": sorted(set(pass_through_reasons)),
+        "omission_reasons": sorted(set(omission_reasons)),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_params_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+        },
+        "rules": rule_summaries,
+    }
+
+
 def simulate_policy_bundle_impact(
     proposed: Any,
     *,
@@ -1182,6 +1281,11 @@ def review_policy_bundle(
             "changes": diff.get("changes", []),
         },
     }
+    policies = proposed.get("policies") if isinstance(proposed, dict) and isinstance(proposed.get("policies"), dict) else {}
+    if isinstance(policies.get("codex_app"), dict):
+        result["section_reviews"] = {
+            "codex_app": codex_app_policy_review_summary(policies["codex_app"]),
+        }
     if include_impact:
         result["impact_summary"] = simulate_policy_bundle_impact(
             proposed,
@@ -1313,6 +1417,13 @@ def apply_policy_bundle(
             "bytes_after": len(text.encode("utf-8")),
         })
         result["applied_sections"].append(section)
+
+    if isinstance(policies.get("codex_app"), dict):
+        result["skipped_sections"].append({
+            "section": "codex_app",
+            "reason": "review-only-not-applied",
+            "message": "Codex app managed recommendations are visible in review output but are not written to local YAML policy files.",
+        })
 
     result["ok"] = True
     return result

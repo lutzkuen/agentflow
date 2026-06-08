@@ -5284,19 +5284,28 @@ async function refreshPolicies(){
       }
     ];
     const codexSurface=d.source_surfaces&&(d.source_surfaces.codex_turn||d.source_surfaces.codex_app_turn);
-    if(codexSurface){
-      const codexCache=codexSurface.cache||{};
+    const codexPolicy=d.codex_app||{};
+    if(codexSurface||codexPolicy.rules){
+      const codexRuntime=codexSurface||{};
+      const codexCache=codexRuntime.cache||{};
       const codexExact=codexCache.exact_cache||{};
-      const codexSafe=codexSurface.safe_turn_params||{};
-      const codexSkip=codexSurface.action_like_skip_behavior||{};
+      const codexSafe=codexRuntime.safe_turn_params||{};
+      const codexSkip=codexRuntime.action_like_skip_behavior||{};
+      const codexRules=codexPolicy.rules||[];
+      const codexApp=(codexPolicy.application||{});
       rows.push({
         name:'Codex app-server',
-        enabled:codexSurface.enabled,
-        source:codexSurface.policy_source,
+        enabled:codexPolicy.enabled??codexRuntime.enabled,
+        source:codexPolicy.policy_source||codexRuntime.policy_source,
         path:codexExact.namespace?('namespace '+codexExact.namespace):codexExact.upstream,
         settings:compactSettings([
-          codexSurface.reload_required?'reload required':'loaded',
-          codexSurface.optimization&&codexSurface.optimization.enabled?'optimization on':'optimization off',
+          codexRuntime.reload_required?'reload required':'loaded',
+          codexPolicy.review_only?'review only':'',
+          codexApp.status?('application '+codexApp.status):'not applied',
+          'Codex rules '+codexRules.length,
+          'conditions '+((codexPolicy.supported_conditions||[]).length),
+          'actions '+((codexPolicy.supported_actions||[]).length),
+          codexRuntime.optimization&&codexRuntime.optimization.enabled?'optimization on':'optimization off',
           codexCache.enabled?'Codex exact cache on':'Codex exact cache off',
           codexExact.upstream?('upstream '+codexExact.upstream):'',
           'safe keys '+(codexSafe.allowed_key_count??0),
