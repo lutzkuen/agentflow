@@ -118,6 +118,42 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(json.loads(event["crunch_json"])["status"], "applied")
         self.assertNotIn(secret, json.dumps(event))
 
+    def test_codex_repeated_scaffolding_crunch_preserves_latest_task_tail(self):
+        scaffold = "## Agent context scaffold\n" + ("stable instruction header " * 80)
+        log_block = "## Repeated command log\n" + ("same deterministic log line " * 80)
+        older_details = "## Older context\n" + ("old file context " * 2200)
+        latest_task = "## Current task\nImplement the billing-free local proxy change."
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-scaffold",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-scaffold",
+                "input": [
+                    {"type": "text", "text": f"{scaffold}\n\n{log_block}\n\n{older_details}"},
+                    {"type": "text", "text": f"{scaffold}\n\n{log_block}\n\n{latest_task}"},
+                ],
+            },
+        }
+
+        forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+        forwarded_obj = json.loads(forwarded)
+        first_text = forwarded_obj["params"]["input"][0]["text"]
+        latest_text = forwarded_obj["params"]["input"][1]["text"]
+        crunch = metadata["crunch"]
+
+        self.assertLess(len(forwarded), len(json.dumps(message)))
+        self.assertIn("older Codex input block shortened", first_text)
+        self.assertIn("repeated Codex input section omitted", latest_text)
+        self.assertIn(latest_task, latest_text)
+        self.assertEqual(crunch["status"], "applied")
+        self.assertEqual(crunch["reason"], "codex-repeated-scaffolding-crunched")
+        self.assertGreater(crunch["saved_chars"], 0)
+        pattern_types = {pattern["type"] for pattern in crunch["codex_patterns"]}
+        self.assertEqual(pattern_types, {"older_input_head_tail", "repeated_input_section"})
+        self.assertGreater(crunch["repeated_codex_sections_replaced"], 0)
+        self.assertGreater(crunch["older_codex_input_blocks_shortened"], 0)
+
     def test_explicit_model_field_is_routed_only_when_policy_matches(self):
         message = {
             "jsonrpc": "2.0",

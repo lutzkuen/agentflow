@@ -26,3 +26,17 @@ thinking_deduplication:
   min_chars: 2000
   similarity_threshold: 0.95
   skip_latest_assistant: true
+codex_repeated_scaffolding:
+  # Codex app-server turn/start only. Text-only input blocks may contain large
+  # repeated context scaffolding that is not represented as provider messages.
+  # This deterministic pass replaces exact repeated sections and shortens older
+  # input blocks with bounded head/tail retention. The newest input block tail
+  # is preserved so current task content remains intact.
+  enabled: true
+  min_request_chars: 12000
+  min_section_chars: 700
+  keep_recent_input_blocks: 1
+  older_block_min_chars: 24000
+  older_block_head_chars: 6000
+  older_block_tail_chars: 4000
+  max_replacements: 32

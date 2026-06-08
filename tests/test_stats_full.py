@@ -697,6 +697,29 @@ class StatsFullTest(unittest.TestCase):
                 "changed": True,
                 "saved_chars": 1600,
                 "tokens_saved_est": 400,
+                "codex_repeated_scaffolding": {
+                    "status": "applied",
+                    "reason": "codex-repeated-scaffolding-crunched",
+                    "saved_chars": 1200,
+                    "patterns": [
+                        {
+                            "type": "repeated_input_section",
+                            "count": 2,
+                            "saved_chars_est": 700,
+                            "hashes": ["abcdef123456"],
+                        },
+                        {
+                            "type": "older_input_head_tail",
+                            "count": 1,
+                            "saved_chars_est": 500,
+                            "hashes": ["123456abcdef"],
+                        },
+                    ],
+                },
+                "codex_patterns": [
+                    {"type": "repeated_input_section", "count": 2, "saved_chars_est": 700},
+                    {"type": "older_input_head_tail", "count": 1, "saved_chars_est": 500},
+                ],
                 "note": secret,
             },
             cache={"status": "skipped", "reason": "unknown-param-shape", "eligible": False, "policy_source": "local-default"},
@@ -733,6 +756,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(summary["unknown_param_skips"], 1)
         self.assertEqual(summary["total_saved_chars"], 1600)
         self.assertEqual(summary["total_saved_tokens_est"], 400)
+        self.assertEqual(summary["codex_repeated_scaffolding_saved_chars"], 1200)
         self.assertEqual(summary["error_rows"], 1)
         self.assertEqual(summary["optimized_rows"], 3)
         self.assertEqual(summary["pass_through_rows"], 2)
@@ -747,6 +771,11 @@ class StatsFullTest(unittest.TestCase):
         routing_statuses = {row["status"] for row in result["routing_breakdown"]}
         self.assertIn("applied", routing_statuses)
         self.assertIn("not-applicable", routing_statuses)
+        patterns = {row["type"]: row for row in result["crunch_pattern_breakdown"]}
+        self.assertEqual(patterns["repeated_input_section"]["count"], 2)
+        self.assertEqual(patterns["older_input_head_tail"]["saved_chars_est"], 500)
+        sample = next(row for row in result["recent_samples"] if row["saved_chars"] == 1600)
+        self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
 
     def test_old_context_summary_stats_are_attributed_separately(self):

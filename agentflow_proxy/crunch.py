@@ -51,6 +51,16 @@ def _default_crunch_policy() -> dict[str, Any]:
             "similarity_threshold": 0.95,
             "skip_latest_assistant": True,
         },
+        "codex_repeated_scaffolding": {
+            "enabled": True,
+            "min_request_chars": 12000,
+            "min_section_chars": 700,
+            "keep_recent_input_blocks": 1,
+            "older_block_min_chars": 24000,
+            "older_block_head_chars": 6000,
+            "older_block_tail_chars": 4000,
+            "max_replacements": 32,
+        },
     }
 
 
@@ -89,6 +99,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
+            if isinstance(codex_scaffolding, dict):
+                _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
             return policy, "local-manual", str(path)
 
     defaults_path = Path(__file__).parent / "crunch_rules.yaml"
@@ -114,6 +127,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
+            if isinstance(codex_scaffolding, dict):
+                _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
     policy["enabled"] = os.getenv("AGENTFLOW_CRUNCH", "1") != "0"
     policy["threshold_chars"] = int(os.getenv("AGENTFLOW_CRUNCH_THRESHOLD_CHARS", str(policy["threshold_chars"])))
     policy["prompt_cache"]["enabled"] = os.getenv("AGENTFLOW_PROMPT_CACHE", "1") != "0"
@@ -167,6 +183,22 @@ def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: di
     )
 
 
+def _apply_codex_scaffolding_policy_yaml(policy: dict[str, Any], codex_scaffolding: dict[str, Any]) -> None:
+    target = policy["codex_repeated_scaffolding"]
+    target["enabled"] = _as_bool(codex_scaffolding.get("enabled"), target["enabled"])
+    for key in (
+        "min_request_chars",
+        "min_section_chars",
+        "keep_recent_input_blocks",
+        "older_block_min_chars",
+        "older_block_head_chars",
+        "older_block_tail_chars",
+        "max_replacements",
+    ):
+        if codex_scaffolding.get(key) is not None:
+            target[key] = int(codex_scaffolding[key])
+
+
 CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()
 CRUNCH_RULES_LOADED_AT = utc_now()
 CRUNCH_RULES_LOADED_FILE = policy_file_snapshot(CRUNCH_RULES_PATH)
@@ -189,6 +221,15 @@ THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
 THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
 THINKING_DEDUP_SIMILARITY_THRESHOLD = float(THINKING_DEDUP_POLICY["similarity_threshold"])
 THINKING_DEDUP_SKIP_LATEST_ASSISTANT = bool(THINKING_DEDUP_POLICY["skip_latest_assistant"])
+CODEX_REPEATED_SCAFFOLDING_POLICY = CRUNCH_POLICY["codex_repeated_scaffolding"]
+CODEX_REPEATED_SCAFFOLDING_ENABLED = bool(CODEX_REPEATED_SCAFFOLDING_POLICY["enabled"])
+CODEX_REPEATED_SCAFFOLDING_MIN_REQUEST_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["min_request_chars"])
+CODEX_REPEATED_SCAFFOLDING_MIN_SECTION_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["min_section_chars"])
+CODEX_REPEATED_SCAFFOLDING_KEEP_RECENT_INPUT_BLOCKS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["keep_recent_input_blocks"])
+CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_MIN_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["older_block_min_chars"])
+CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_HEAD_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["older_block_head_chars"])
+CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_TAIL_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["older_block_tail_chars"])
+CODEX_REPEATED_SCAFFOLDING_MAX_REPLACEMENTS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["max_replacements"])
 
 
 def sha256_text(text: str) -> str:
@@ -227,6 +268,212 @@ def _jaccard(a: frozenset, b: frozenset) -> float:
     if union == 0:
         return 0.0
     return len(a & b) / union
+
+
+def _codex_scaffolding_meta(status: str, reason: str) -> dict[str, Any]:
+    return {
+        "enabled": CODEX_REPEATED_SCAFFOLDING_ENABLED,
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "policy": _copy_codex_scaffolding_policy(),
+        "patterns": [],
+    }
+
+
+def _copy_codex_scaffolding_policy() -> dict[str, Any]:
+    return {
+        "enabled": CODEX_REPEATED_SCAFFOLDING_ENABLED,
+        "min_request_chars": CODEX_REPEATED_SCAFFOLDING_MIN_REQUEST_CHARS,
+        "min_section_chars": CODEX_REPEATED_SCAFFOLDING_MIN_SECTION_CHARS,
+        "keep_recent_input_blocks": CODEX_REPEATED_SCAFFOLDING_KEEP_RECENT_INPUT_BLOCKS,
+        "older_block_min_chars": CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_MIN_CHARS,
+        "older_block_head_chars": CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_HEAD_CHARS,
+        "older_block_tail_chars": CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_TAIL_CHARS,
+        "max_replacements": CODEX_REPEATED_SCAFFOLDING_MAX_REPLACEMENTS,
+    }
+
+
+def _codex_text_input_entries(input_value: Any) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if isinstance(input_value, str):
+        entries.append({"container": None, "key": None, "text": input_value})
+        return entries
+    if isinstance(input_value, dict):
+        block_type = str(input_value.get("type") or "text").strip().lower()
+        for key in ("text", "input_text", "value"):
+            if block_type in {"text", "input_text"} and isinstance(input_value.get(key), str):
+                entries.append({"container": input_value, "key": key, "text": input_value[key]})
+                break
+        return entries
+    if isinstance(input_value, list):
+        for item_idx, item in enumerate(input_value):
+            if isinstance(item, str):
+                entries.append({"container": input_value, "key": item_idx, "text": item})
+            elif isinstance(item, dict):
+                block_type = str(item.get("type") or "text").strip().lower()
+                for key in ("text", "input_text", "value"):
+                    if block_type in {"text", "input_text"} and isinstance(item.get(key), str):
+                        entries.append({"container": item, "key": key, "text": item[key]})
+                        break
+    return entries
+
+
+def _set_codex_text_entry(entry: dict[str, Any], text: str) -> None:
+    container = entry.get("container")
+    key = entry.get("key")
+    if container is None:
+        entry["text"] = text
+    elif isinstance(container, list) and isinstance(key, int):
+        container[key] = text
+    elif isinstance(container, dict) and isinstance(key, str):
+        container[key] = text
+
+
+def _crunch_codex_repeated_sections(
+    text: str,
+    *,
+    block_number: int,
+    is_recent_block: bool,
+    seen_sections: dict[str, dict[str, int]],
+    counters: dict[str, Any],
+) -> str:
+    parts = re.split(r"(\n\s*\n+)", text)
+    section_part_indexes = [
+        idx
+        for idx in range(0, len(parts), 2)
+        if len(normalize_text(parts[idx])) >= CODEX_REPEATED_SCAFFOLDING_MIN_SECTION_CHARS
+    ]
+    protected_parts = set(section_part_indexes[-1:]) if is_recent_block else set()
+    section_number = 0
+
+    for idx in range(0, len(parts), 2):
+        section = parts[idx]
+        normalized = normalize_text(section)
+        if len(normalized) < CODEX_REPEATED_SCAFFOLDING_MIN_SECTION_CHARS:
+            continue
+        section_number += 1
+        h = sha256_text(normalized)
+        if idx in protected_parts:
+            seen_sections.setdefault(h, {"block": block_number, "section": section_number})
+            continue
+        previous = seen_sections.get(h)
+        if previous and counters["section_replacements"] < CODEX_REPEATED_SCAFFOLDING_MAX_REPLACEMENTS:
+            counters["section_replacements"] += 1
+            counters["section_saved_chars"] += max(0, len(section) - 140)
+            if len(counters["section_hashes"]) < 8:
+                counters["section_hashes"].append(h[:12])
+            parts[idx] = (
+                "[AgentFlow: repeated Codex input section omitted; "
+                f"same_as=block:{previous['block']}/section:{previous['section']}; "
+                f"hash={h[:12]}; original_chars={len(section)}]"
+            )
+        else:
+            seen_sections.setdefault(h, {"block": block_number, "section": section_number})
+    return "".join(parts)
+
+
+def crunch_codex_turn_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Codex app-server specific deterministic crunching for text-only turn/start input.
+
+    This operates only on input text blocks. It avoids tool/action payloads by being called
+    after the Codex proxy's action-shape guard and preserves the newest input tail.
+    """
+    if not CODEX_REPEATED_SCAFFOLDING_ENABLED:
+        return params, _codex_scaffolding_meta("skipped", "disabled")
+
+    before = len(stable_json(params))
+    if before < CODEX_REPEATED_SCAFFOLDING_MIN_REQUEST_CHARS:
+        meta = _codex_scaffolding_meta("skipped", "request-too-small")
+        meta["before_chars"] = before
+        return params, meta
+
+    input_value = params.get("input")
+    entries = _codex_text_input_entries(input_value)
+    if not entries:
+        meta = _codex_scaffolding_meta("skipped", "no-text-input")
+        meta["before_chars"] = before
+        return params, meta
+
+    new_params = copy.deepcopy(params)
+    new_entries = _codex_text_input_entries(new_params.get("input"))
+    recent_start = max(0, len(new_entries) - max(0, CODEX_REPEATED_SCAFFOLDING_KEEP_RECENT_INPUT_BLOCKS))
+    seen_sections: dict[str, dict[str, int]] = {}
+    counters: dict[str, Any] = {
+        "section_replacements": 0,
+        "section_saved_chars": 0,
+        "section_hashes": [],
+        "older_blocks_shortened": 0,
+        "older_block_saved_chars": 0,
+        "older_block_hashes": [],
+    }
+
+    for idx, entry in enumerate(new_entries):
+        text = str(entry["text"])
+        is_recent = idx >= recent_start
+        text = _crunch_codex_repeated_sections(
+            text,
+            block_number=idx + 1,
+            is_recent_block=is_recent,
+            seen_sections=seen_sections,
+            counters=counters,
+        )
+        if (
+            not is_recent
+            and len(text) >= CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_MIN_CHARS
+            and counters["older_blocks_shortened"] < CODEX_REPEATED_SCAFFOLDING_MAX_REPLACEMENTS
+        ):
+            h = sha256_text(text)
+            head = CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_HEAD_CHARS
+            tail = CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_TAIL_CHARS
+            notice = (
+                "\n\n[AgentFlow: older Codex input block shortened; "
+                f"hash={h[:12]}; original_chars={len(text)}]\n\n"
+            )
+            shortened = text[:head] + notice + text[-tail:]
+            if len(shortened) < len(text):
+                counters["older_blocks_shortened"] += 1
+                counters["older_block_saved_chars"] += len(text) - len(shortened)
+                if len(counters["older_block_hashes"]) < 8:
+                    counters["older_block_hashes"].append(h[:12])
+                text = shortened
+        _set_codex_text_entry(entry, text)
+
+    if isinstance(new_params.get("input"), str) and new_entries:
+        new_params["input"] = new_entries[0]["text"]
+
+    after = len(stable_json(new_params))
+    meta = _codex_scaffolding_meta("applied" if after != before else "skipped", "codex-repeated-scaffolding-crunched" if after != before else "no-repeated-scaffolding")
+    patterns: list[dict[str, Any]] = []
+    if counters["section_replacements"]:
+        patterns.append({
+            "type": "repeated_input_section",
+            "count": counters["section_replacements"],
+            "saved_chars_est": counters["section_saved_chars"],
+            "hashes": counters["section_hashes"],
+        })
+    if counters["older_blocks_shortened"]:
+        patterns.append({
+            "type": "older_input_head_tail",
+            "count": counters["older_blocks_shortened"],
+            "saved_chars_est": counters["older_block_saved_chars"],
+            "hashes": counters["older_block_hashes"],
+        })
+    meta.update({
+        "changed": after != before,
+        "before_chars": before,
+        "after_chars": after,
+        "saved_chars": before - after,
+        "tokens_saved_est": (before - after) // TOKEN_CHARS,
+        "input_text_blocks": len(new_entries),
+        "patterns": patterns,
+        "pattern_types": [pattern["type"] for pattern in patterns],
+        "repeated_sections_replaced": counters["section_replacements"],
+        "older_input_blocks_shortened": counters["older_blocks_shortened"],
+    })
+    return new_params, meta
 
 
 def _latest_assistant_message_index(messages: list[Any]) -> int | None:

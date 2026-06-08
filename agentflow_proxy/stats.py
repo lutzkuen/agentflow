@@ -92,6 +92,7 @@ async def stats_policies() -> dict[str, Any]:
             },
             "old_context_summarization": _copy_policy(crunch.OLD_CONTEXT_SUMMARY_POLICY),
             "thinking_deduplication": _copy_policy(crunch.THINKING_DEDUP_POLICY),
+            "codex_repeated_scaffolding": _copy_policy(crunch.CODEX_REPEATED_SCAFFOLDING_POLICY),
         },
         "cache": {
             "enabled": bool(cache.CACHE_ENABLED or cache.SEMANTIC_CACHE_ENABLED),
@@ -759,6 +760,32 @@ def _decision_breakdown(rows: list[dict[str, Any]], decision_key: str) -> list[d
     return result
 
 
+def _codex_crunch_pattern_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        crunch = _json_obj(row.get("crunch_json"))
+        patterns = crunch.get("codex_patterns")
+        if not isinstance(patterns, list):
+            codex_meta = crunch.get("codex_repeated_scaffolding")
+            patterns = codex_meta.get("patterns") if isinstance(codex_meta, dict) else []
+        if not isinstance(patterns, list):
+            continue
+        for pattern in patterns:
+            if not isinstance(pattern, dict):
+                continue
+            pattern_type = str(pattern.get("type") or "unknown")
+            bucket = grouped.setdefault(
+                pattern_type,
+                {"type": pattern_type, "turns": 0, "count": 0, "saved_chars_est": 0},
+            )
+            bucket["turns"] += 1
+            bucket["count"] += _as_int(pattern.get("count"))
+            bucket["saved_chars_est"] += _as_int(pattern.get("saved_chars_est"))
+    result = list(grouped.values())
+    result.sort(key=lambda r: (r["saved_chars_est"], r["count"]), reverse=True)
+    return result
+
+
 def _codex_model_field_state(routing: dict[str, Any]) -> tuple[str, str | None]:
     field = routing.get("model_field")
     if field:
@@ -866,6 +893,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     success_count = 0
     total_saved_chars = 0
     total_saved_tokens = 0
+    total_codex_scaffolding_saved_chars = 0
     action_like_skips = 0
     unknown_param_skips = 0
     non_text_skips = 0
@@ -899,6 +927,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         saved_tokens = _as_int(crunch.get("tokens_saved_est"))
         total_saved_chars += saved_chars
         total_saved_tokens += saved_tokens
+        codex_scaffolding = crunch.get("codex_repeated_scaffolding")
+        if isinstance(codex_scaffolding, dict):
+            total_codex_scaffolding_saved_chars += _as_int(codex_scaffolding.get("saved_chars"))
 
         optimized = bool(routing.get("applied") or crunch.get("applied") or cache.get("status") == "hit")
         has_response = bool(row.get("response_event_id"))
@@ -934,6 +965,11 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "routing_reason": routing.get("reason") or "unknown",
                 "crunch_status": crunch.get("status") or "missing",
                 "crunch_reason": crunch.get("reason") or "unknown",
+                "codex_pattern_types": [
+                    str(pattern.get("type"))
+                    for pattern in (crunch.get("codex_patterns") or [])
+                    if isinstance(pattern, dict) and pattern.get("type")
+                ],
                 "cache_status": cache.get("status") or "missing",
                 "cache_reason": cache.get("reason") or "unknown",
                 "input_text_chars": _as_int(row.get("input_text_chars")),
@@ -974,6 +1010,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "total_input_text_chars": sum(_as_int(row.get("input_text_chars")) for row in turn_rows),
             "total_saved_chars": total_saved_chars,
             "total_saved_tokens_est": total_saved_tokens,
+            "codex_repeated_scaffolding_saved_chars": total_codex_scaffolding_saved_chars,
             "optimized_rows": optimized_count,
             "pass_through_rows": pass_through_count,
             "optimized_error_rate": round(optimized_errors / optimized_count, 4) if optimized_count else 0,
@@ -987,6 +1024,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "param_shape_breakdown": _count_breakdown(param_shape_counts),
         "routing_breakdown": _decision_breakdown(turn_rows, "routing_json"),
         "crunch_breakdown": _decision_breakdown(turn_rows, "crunch_json"),
+        "crunch_pattern_breakdown": _codex_crunch_pattern_breakdown(turn_rows),
         "cache_breakdown": _decision_breakdown(turn_rows, "cache_json"),
         "outcome_by_optimization": [
             {

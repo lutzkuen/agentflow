@@ -124,7 +124,23 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "applied": False,
                         "policy_source": "local-default",
                     }),
-                    crunch_json=stable_json({"status": "skipped", "reason": "no-change", "applied": False}),
+                    crunch_json=stable_json({
+                        "status": "applied",
+                        "reason": "codex-repeated-scaffolding-crunched",
+                        "applied": True,
+                        "saved_chars": 48,
+                        "tokens_saved_est": 12,
+                        "codex_repeated_scaffolding": {
+                            "status": "applied",
+                            "saved_chars": 48,
+                            "patterns": [
+                                {"type": "repeated_input_section", "count": 1, "saved_chars_est": 48},
+                            ],
+                        },
+                        "codex_patterns": [
+                            {"type": "repeated_input_section", "count": 1, "saved_chars_est": 48},
+                        ],
+                    }),
                     cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True}),
                 )
                 store.log_codex_app_event(
@@ -155,6 +171,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.codex_app_effectiveness.v1")
         self.assertEqual(payload["summary"]["turn_start_rows"], 1)
         self.assertEqual(payload["summary"]["model_field_absent"], 1)
+        self.assertEqual(payload["summary"]["codex_repeated_scaffolding_saved_chars"], 48)
+        self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])
 
     def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):

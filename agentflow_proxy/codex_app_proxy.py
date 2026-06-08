@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from agentflow_proxy.cache import cache_file_dependency_snapshots, cache_key_for
-from agentflow_proxy.crunch import crunch_body
+from agentflow_proxy.crunch import TOKEN_CHARS, crunch_body, crunch_codex_turn_params
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -215,13 +215,42 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 def _codex_crunch_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     crunched, crunch_meta = crunch_body(params)
     crunch_meta = dict(crunch_meta)
-    changed = bool(crunch_meta.get("changed"))
+    if not crunch_meta.get("enabled", True):
+        crunch_meta.update({
+            "surface": "codex_app_turn",
+            "decision_type": "crunch",
+            "status": "skipped",
+            "reason": "disabled",
+            "applied": False,
+        })
+        return crunched, crunch_meta
+
+    codex_crunched, codex_meta = crunch_codex_turn_params(crunched)
+    before = int(crunch_meta.get("before_chars") or len(stable_json(params)))
+    after = len(stable_json(codex_crunched))
+    changed = after != before
+    if codex_meta.get("changed"):
+        crunched = codex_crunched
+        crunch_meta["codex_repeated_scaffolding"] = codex_meta
+        crunch_meta["codex_patterns"] = codex_meta.get("patterns") or []
+        crunch_meta["codex_pattern_types"] = codex_meta.get("pattern_types") or []
+        crunch_meta["repeated_codex_sections_replaced"] = codex_meta.get("repeated_sections_replaced", 0)
+        crunch_meta["older_codex_input_blocks_shortened"] = codex_meta.get("older_input_blocks_shortened", 0)
+    else:
+        crunch_meta["codex_repeated_scaffolding"] = codex_meta
+
     crunch_meta.update({
         "surface": "codex_app_turn",
         "decision_type": "crunch",
         "status": "applied" if changed else "skipped",
-        "reason": "codex-turn-start-crunched" if changed else "no-change",
+        "reason": "codex-repeated-scaffolding-crunched" if codex_meta.get("changed") else ("codex-turn-start-crunched" if changed else "no-change"),
         "applied": changed,
+        "changed": changed,
+        "after_chars": after,
+        "saved_chars": before - after,
+        "tokens_after_est": after // TOKEN_CHARS,
+        "tokens_saved_est": (before - after) // TOKEN_CHARS,
+        "crunch_ratio": round((before - after) / before, 4) if before > 0 else 0,
     })
     return crunched, crunch_meta
 
