@@ -5,6 +5,7 @@ import asyncio
 import copy
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -56,6 +57,18 @@ app = FastAPI(title="AgentFlow Codex App-Server Proxy", version="0.1.0")
 
 _INTERNAL_REPLAY_FRAME_KEY = "_agentflow_replay_frame"
 _INTERNAL_CACHE_KEY = "_agentflow_cache_key"
+_CODEX_SUMMARY_PHASE_RE = re.compile(
+    r"\b(summarize|summarise|summary|recap|wrap[- ]?up|final answer|final response|status update|handoff)\b",
+    re.IGNORECASE,
+)
+_CODEX_TERMINAL_TEXT_RE = re.compile(
+    r"(^|\s)(\$|bash|sh|zsh|terminal|shell|command|run\s+`|execute\s+`|python\s+-m|npm\s+|pnpm\s+|yarn\s+|pytest\b)",
+    re.IGNORECASE,
+)
+_CODEX_FILE_AFFECTING_TEXT_RE = re.compile(
+    r"\b(apply\s+patch|edit|modify|delete|remove|rename|move|save\s+to|write\s+to|write\s+.*\bfile|create\s+(?:a\s+)?file|touch\s+|mkdir\s+|rm\s+|mv\s+|cp\s+)\b",
+    re.IGNORECASE,
+)
 
 
 def _input_text_chars(value: Any) -> int:
@@ -108,6 +121,8 @@ def _codex_cache_decision(
     replayability_level: str = "features_only",
     file_dependencies: list[dict[str, Any]] | None = None,
     invalidation_reason: str | None = None,
+    workflow_phase: str | None = None,
+    workflow_phase_reason: str | None = None,
 ) -> dict[str, Any]:
     meta = _policy_decision("cache", status, reason, enabled=enabled)
     meta.update({
@@ -127,6 +142,10 @@ def _codex_cache_decision(
         ]
     if invalidation_reason:
         meta["invalidation_reason"] = invalidation_reason
+    if workflow_phase:
+        meta["workflow_phase"] = workflow_phase
+    if workflow_phase_reason:
+        meta["workflow_phase_reason"] = workflow_phase_reason
     return meta
 
 
@@ -248,6 +267,41 @@ def _is_text_only_input(value: Any) -> bool:
     return False
 
 
+def _codex_input_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        texts: list[str] = []
+        for item in value:
+            texts.extend(_codex_input_texts(item))
+        return texts
+    if isinstance(value, dict):
+        block_type = str(value.get("type") or "text").strip().lower()
+        if block_type not in CODEX_TEXT_INPUT_TYPES:
+            return []
+        text_value = value.get("text", value.get("input_text", value.get("value")))
+        return [text_value] if isinstance(text_value, str) else []
+    return []
+
+
+def _codex_summary_phase_reason(params: dict[str, Any]) -> str | None:
+    text = "\n".join(_codex_input_texts(params.get("input"))).strip()
+    if not text:
+        return None
+    if _CODEX_SUMMARY_PHASE_RE.search(text):
+        return "summary-text-intent"
+    return None
+
+
+def _codex_text_safety_skip_reason(params: dict[str, Any]) -> str | None:
+    text = "\n".join(_codex_input_texts(params.get("input")))
+    if _CODEX_TERMINAL_TEXT_RE.search(text):
+        return "terminal-interaction-text"
+    if _CODEX_FILE_AFFECTING_TEXT_RE.search(text):
+        return "file-affecting-text"
+    return None
+
+
 def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
     if "temperature" in params:
         try:
@@ -265,18 +319,35 @@ def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
     return True, None
 
 
-def _codex_cache_eligibility(params: dict[str, Any]) -> tuple[bool, str]:
+def _codex_cache_eligibility(params: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
     unknown_keys = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)
     if unknown_keys:
-        return False, "unknown-param-shape"
+        return False, "unknown-param-shape", {"unknown_keys": unknown_keys[:8]}
+    model_field, requested_model = _model_field(params)
+    if not model_field or not requested_model:
+        return False, "model-field-unknown", {"workflow_phase": "unknown"}
     if _contains_action_hint(params):
-        return False, "action-like-params"
+        return False, "action-like-params", {"workflow_phase": "unknown"}
     if not _is_text_only_input(params.get("input")):
-        return False, "non-text-input"
+        return False, "non-text-input", {"workflow_phase": "unknown"}
+    text_skip_reason = _codex_text_safety_skip_reason(params)
+    if text_skip_reason:
+        return False, text_skip_reason, {"workflow_phase": "unknown"}
+    phase_reason = _codex_summary_phase_reason(params)
+    if not phase_reason:
+        return False, "workflow-phase-not-summary", {"workflow_phase": "unknown"}
     deterministic, reason = _deterministic_sampling(params)
     if not deterministic:
-        return False, reason or "non-deterministic-sampling"
-    return True, "safe-text-only-turn-start"
+        return False, reason or "non-deterministic-sampling", {
+            "workflow_phase": "summary",
+            "workflow_phase_reason": phase_reason,
+            "model_field": model_field,
+        }
+    return True, "safe-summary-text-only-turn-start", {
+        "workflow_phase": "summary",
+        "workflow_phase_reason": phase_reason,
+        "model_field": model_field,
+    }
 
 
 def _codex_cache_key_for_message(msg: dict[str, Any]) -> str:
@@ -656,7 +727,9 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
 
     optimized = copy.deepcopy(msg)
     optimized["params"] = routed_params
-    eligible, eligible_reason = _codex_cache_eligibility(routed_params)
+    eligible, eligible_reason, eligibility_meta = _codex_cache_eligibility(routed_params)
+    workflow_phase = eligibility_meta.get("workflow_phase")
+    workflow_phase_reason = eligibility_meta.get("workflow_phase_reason")
     if not CODEX_APP_CACHE:
         cache_meta = _codex_cache_decision(
             "skipped",
@@ -664,9 +737,20 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
             enabled=False,
             eligible=eligible,
             replayability_level="local-exact-response" if eligible else "features_only",
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
         )
     elif not eligible:
-        cache_meta = _codex_cache_decision("skipped", eligible_reason, enabled=True, eligible=False)
+        cache_meta = _codex_cache_decision(
+            "skipped",
+            eligible_reason,
+            enabled=True,
+            eligible=False,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+        )
+        if eligibility_meta.get("unknown_keys"):
+            cache_meta["unknown_keys"] = eligibility_meta["unknown_keys"]
     else:
         cache_key = _codex_cache_key_for_message(optimized)
         file_deps = cache_file_dependency_snapshots(routed_params)
@@ -683,6 +767,8 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                     cache_key=cache_key,
                     replayability_level="local-exact-response",
                     file_dependencies=file_deps,
+                    workflow_phase=workflow_phase,
+                    workflow_phase_reason=workflow_phase_reason,
                 )
                 cache_meta[_INTERNAL_REPLAY_FRAME_KEY] = replay_frame
             else:
@@ -695,6 +781,8 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                     cache_key=cache_key,
                     replayability_level="local-exact-response",
                     file_dependencies=file_deps,
+                    workflow_phase=workflow_phase,
+                    workflow_phase_reason=workflow_phase_reason,
                 )
                 cache_meta[_INTERNAL_CACHE_KEY] = cache_key
         else:
@@ -707,6 +795,8 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                 replayability_level="local-exact-response",
                 file_dependencies=file_deps,
                 invalidation_reason=invalidation_reason,
+                workflow_phase=workflow_phase,
+                workflow_phase_reason=workflow_phase_reason,
             )
             cache_meta[_INTERNAL_CACHE_KEY] = cache_key
     if optimized == msg:

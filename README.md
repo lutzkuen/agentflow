@@ -189,6 +189,7 @@ Status and flush output is metadata-only; queued feedback payload JSON is not pr
 | `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Host for `agentflow-dashboard` |
 | `AGENTFLOW_DASHBOARD_PORT` | `4002` | Port for `agentflow-dashboard` |
 | `AGENTFLOW_CODEX_APP_MODEL` | current bundled default | Model used for Codex app-server token/cost estimates |
+| `AGENTFLOW_CODEX_APP_CACHE` | `0` | Opt into exact Codex app summary-turn replay for safe, action-free JSON-RPC turns |
 
 When `AGENTFLOW_DATABASE_URL` is set, AgentFlow uses Postgres with a small connection pool. SQLite remains the default because the local proxy must work offline.
 

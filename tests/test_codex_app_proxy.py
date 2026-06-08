@@ -442,7 +442,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
                 "id": "turn-cache-1",
                 "method": "turn/start",
                 "params": {
-                    "input": [{"type": "text", "text": "repeatable deterministic prompt"}],
+                    "model": "gpt-5-codex",
+                    "input": [{"type": "text", "text": "Please summarize the completed work for the run log."}],
                     "temperature": 0,
                 },
             }
@@ -455,7 +456,10 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
             with patch.object(codex_app_proxy, "store", test_store), patch.object(codex_app_proxy, "CODEX_APP_CACHE", True):
                 forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
                 self.assertEqual(metadata["cache"]["status"], "miss")
+                self.assertEqual(metadata["cache"]["reason"], "exact-miss")
                 self.assertTrue(metadata["cache"]["eligible"])
+                self.assertEqual(metadata["cache"]["workflow_phase"], "summary")
+                self.assertEqual(metadata["cache"]["replayability_level"], "local-exact-response")
                 pending = {
                     "turn-cache-1": {
                         "cache_key": metadata["cache"]["_agentflow_cache_key"],
@@ -477,6 +481,94 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
             self.assertEqual(json.loads(forwarded)["id"], "turn-cache-2")
             test_store.conn.close()
 
+    def test_codex_cache_disabled_records_safe_summary_eligibility_metadata(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-cache-disabled",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Summarize the last turn in one sentence."}],
+                "temperature": 0,
+            },
+        }
+
+        with patch.object(codex_app_proxy, "CODEX_APP_CACHE", False):
+            _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+
+        self.assertEqual(metadata["cache"]["status"], "skipped")
+        self.assertEqual(metadata["cache"]["reason"], "codex-app-cache-disabled")
+        self.assertFalse(metadata["cache"]["enabled"])
+        self.assertFalse(metadata["cache"]["exact_enabled"])
+        self.assertTrue(metadata["cache"]["eligible"])
+        self.assertEqual(metadata["cache"]["workflow_phase"], "summary")
+        self.assertEqual(metadata["cache"]["replayability_level"], "local-exact-response")
+
+    def test_codex_cache_skips_non_summary_and_model_unknown_turns(self):
+        not_summary = {
+            "jsonrpc": "2.0",
+            "id": "turn-not-summary",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Answer the question in detail."}],
+                "temperature": 0,
+            },
+        }
+        no_model = {
+            "jsonrpc": "2.0",
+            "id": "turn-no-model",
+            "method": "turn/start",
+            "params": {
+                "input": [{"type": "text", "text": "Summarize the result."}],
+                "temperature": 0,
+            },
+        }
+
+        with patch.object(codex_app_proxy, "CODEX_APP_CACHE", True):
+            _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(not_summary))
+            self.assertEqual(metadata["cache"]["status"], "skipped")
+            self.assertEqual(metadata["cache"]["reason"], "workflow-phase-not-summary")
+            self.assertFalse(metadata["cache"]["eligible"])
+
+            _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(no_model))
+            self.assertEqual(metadata["cache"]["status"], "skipped")
+            self.assertEqual(metadata["cache"]["reason"], "model-field-unknown")
+            self.assertFalse(metadata["cache"]["eligible"])
+
+    def test_codex_cache_skips_terminal_and_action_like_turns(self):
+        terminal_text = {
+            "jsonrpc": "2.0",
+            "id": "turn-terminal",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Summarize the result after pytest finishes."}],
+                "temperature": 0,
+            },
+        }
+        action_like = {
+            "jsonrpc": "2.0",
+            "id": "turn-action",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Summarize the command output."}],
+                "command": "python -m unittest",
+            },
+        }
+
+        with patch.object(codex_app_proxy, "CODEX_APP_CACHE", True):
+            _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(terminal_text))
+            self.assertEqual(metadata["cache"]["status"], "skipped")
+            self.assertEqual(metadata["cache"]["reason"], "terminal-interaction-text")
+            self.assertFalse(metadata["cache"]["eligible"])
+
+            _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(action_like))
+            self.assertEqual(metadata["cache"]["status"], "skipped")
+            self.assertEqual(metadata["cache"]["reason"], "action-like-params")
+            self.assertFalse(metadata["cache"]["eligible"])
+
     def test_file_dependency_change_invalidates_codex_cache_entry(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp, tempfile.TemporaryDirectory() as root:
             test_store = Store(tmp.name)
@@ -488,7 +580,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
                 "id": "turn-file-1",
                 "method": "turn/start",
                 "params": {
-                    "input": [{"type": "text", "text": f"summarize {path}"}],
+                    "model": "gpt-5-codex",
+                    "input": [{"type": "text", "text": f"Summarize {path}"}],
                     "temperature": 0,
                 },
             }
