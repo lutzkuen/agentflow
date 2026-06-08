@@ -297,6 +297,8 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(feedback["status_code"], 200)
         self.assertEqual(feedback["requested_model"], "claude-sonnet-4-6")
         self.assertEqual(feedback["managed_recommendation"]["optimization_unit_id"], 42)
+        self.assertEqual(feedback["quality_signals"]["status"], "success")
+        self.assertIn("success", feedback["quality_signals"]["signal_codes"])
         self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(recommendation)))
         self.assertTrue({"messages", "content", "raw_response"}.isdisjoint(self._keys_in(feedback)))
         self.assertNotIn("raw prompt secret", str(recommendation))
@@ -380,6 +382,8 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         feedback = ManagedFeedbackAsyncClient.calls[2]["json"]
         self.assertEqual(feedback["status_code"], 400)
         self.assertEqual(feedback["error_class"], "invalid_request_error")
+        self.assertEqual(feedback["quality_signals"]["status"], "failure")
+        self.assertIn("failure", feedback["quality_signals"]["signal_codes"])
         self.assertIn("provider rejected request", feedback["error_message_prefix"])
         self.assertNotIn("raw failing prompt", str(feedback))
 

@@ -517,6 +517,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(unit["granularity"], "agent_turn")
         self.assertEqual(outcome["source_surface"], "codex_turn")
         self.assertEqual(outcome["status"], "success")
+        self.assertEqual(outcome["quality_signals"]["status"], "success")
+        self.assertIn("success", outcome["quality_signals"]["signal_codes"])
         self.assertEqual(outcome["managed_recommendation"]["optimization_unit_id"], 77)
         forbidden = {"prompt", "messages", "content", "raw_request", "raw_response", "params", "transcript"}
         self.assertTrue(forbidden.isdisjoint(self._keys_in(unit)))

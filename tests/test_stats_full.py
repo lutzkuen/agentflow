@@ -2055,6 +2055,107 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(codex["replayability_level"], "features_only")
         json.dumps(result)
 
+    def test_quality_signal_summary_uses_metadata_only_provider_and_codex_rows(self):
+        def log_provider(status_code, *, retry_count=0, error=None, routing=None):
+            call_id = str(uuid.uuid4())
+            server.store.log_call(
+                id=call_id,
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model=(routing or {}).get("routed_model") or "claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=100,
+                input_tokens_est=10,
+                output_tokens_est=2,
+                actual_input_tokens=10,
+                actual_output_tokens=2,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.001,
+                crunch_json=stable_json({"changed": False, "policy_source": "local-default"}),
+                routing_json=stable_json(routing or {"policy_source": "local-default"}),
+                cache_json=stable_json({"status": "miss", "policy_source": "local-default"}),
+                error=error,
+                request_json=None,
+                response_json=None,
+                session_id="quality-session",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                provider="anthropic",
+            )
+            return call_id
+
+        log_provider(
+            200,
+            retry_count=1,
+            routing={
+                "applied": True,
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "policy_source": "local-default",
+            },
+        )
+        log_provider(400)
+        log_provider(429, error="temporarily limiting requests for tier sonnet")
+
+        abandoned_id = str(uuid.uuid4())
+        server.store.log_codex_app_event(
+            id=abandoned_id,
+            created_at="2000-01-01T00:00:00+00:00",
+            direction="client_to_server",
+            method="turn/start",
+            request_id="quality-abandoned",
+            thread_id="quality-thread",
+            message_chars=100,
+            params_chars=100,
+            input_items=1,
+            input_text_chars=100,
+            session_id="quality-codex",
+            routing_json=stable_json({"status": "not-applied", "policy_source": "local-default"}),
+            crunch_json=stable_json({"status": "not-applied", "policy_source": "local-default"}),
+            cache_json=stable_json({"status": "skipped", "policy_source": "local-default"}),
+        )
+        pending_id = str(uuid.uuid4())
+        server.store.log_codex_app_event(
+            id=pending_id,
+            created_at=utc_now(),
+            direction="client_to_server",
+            method="turn/start",
+            request_id="quality-pending",
+            thread_id="quality-thread",
+            message_chars=100,
+            params_chars=100,
+            input_items=1,
+            input_text_chars=100,
+            session_id="quality-codex",
+            routing_json=stable_json({"status": "not-applied", "policy_source": "local-default"}),
+            crunch_json=stable_json({"status": "not-applied", "policy_source": "local-default"}),
+            cache_json=stable_json({"status": "skipped", "policy_source": "local-default"}),
+        )
+
+        activity = asyncio.run(stats_views.stats_activity(server.store, limit=20))
+        quality = asyncio.run(stats_views.stats_quality_signals(server.store, limit=20))
+
+        summary = activity["summary"]["quality_signal_summary"]
+        by_status = {row["status"]: row["count"] for row in summary["by_status"]}
+        by_signal = {row["signal"]: row["count"] for row in summary["by_signal"]}
+        self.assertEqual(quality["schema"], "agentflow.quality_signal_report.v1")
+        self.assertFalse(quality["privacy"]["raw_prompts_included"])
+        self.assertEqual(quality["summary"], summary)
+        self.assertGreaterEqual(by_status["success"], 1)
+        self.assertGreaterEqual(by_status["failure"], 1)
+        self.assertGreaterEqual(by_status["local_throttled"], 1)
+        self.assertGreaterEqual(by_status["abandoned"], 1)
+        self.assertGreaterEqual(by_status["pending"], 1)
+        self.assertGreaterEqual(by_signal["retry-after-error"], 1)
+        self.assertGreaterEqual(by_signal["local-throttled"], 1)
+        self.assertGreaterEqual(by_signal["abandoned"], 1)
+        self.assertNotIn("request_json", json.dumps(quality))
+
     def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
         old_engineer = os.environ.get("AGENTFLOW_ENGINEER")
         old_app = os.environ.get("AGENTFLOW_APP")

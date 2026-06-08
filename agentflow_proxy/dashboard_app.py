@@ -73,6 +73,10 @@ def create_dashboard_router(
     async def stats_activity(limit: int = 100) -> dict[str, Any]:
         return await stats_views.stats_activity(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/quality-signals")
+    async def stats_quality_signals(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_quality_signals(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/full")
     async def stats_full() -> dict[str, Any]:
         nonlocal full_stats_cache, full_stats_cache_at, full_stats_task

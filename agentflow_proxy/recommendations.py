@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
+from agentflow_proxy.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 
 
 RECOMMENDATION_PATH = "/v1/recommendation"
@@ -424,9 +425,23 @@ def build_outcome_feedback(
     if not isinstance(managed, dict):
         managed = {}
     session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16] if session_id else None
+    source_surface = _source_surface(provider, path)
+    quality_signals = derive_provider_quality_signals(
+        source_surface=source_surface,
+        status_code=status_code,
+        retry_count=retry_count,
+        latency_ms=latency_ms,
+        error=error,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        cache_hit=cache_meta.get("status") == "hit",
+        routing_meta=routing_meta,
+        crunch_meta=crunch_meta,
+        cache_meta=cache_meta,
+    )
     features: dict[str, Any] = {
         "provider": provider,
-        "source_surface": _source_surface(provider, path),
+        "source_surface": source_surface,
         "path": path,
         "status_code": status_code,
         "latency_ms": latency_ms,
@@ -474,6 +489,7 @@ def build_outcome_feedback(
             "apply_reason": managed.get("apply_reason"),
             "target_model_normalized": managed.get("target_model_normalized"),
         },
+        "quality_signals": quality_signals,
     }
     experiment = routing_meta.get("routing_experiment") if isinstance(routing_meta, dict) else None
     if isinstance(experiment, dict):
@@ -521,6 +537,15 @@ def build_codex_turn_outcome_feedback(
     )
     session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16] if session_id else None
     status = "error" if error_code is not None else "success"
+    quality_signals = derive_codex_turn_quality_signals(
+        response_event_id="managed-feedback-response",
+        error_code=error_code,
+        error_message=error_message,
+        latency_ms=latency_ms,
+        routing_meta=routing_meta,
+        crunch_meta=crunch_meta,
+        cache_meta=cache_meta,
+    )
     features: dict[str, Any] = {
         "provider": "codex-app",
         "source_surface": "codex_turn",
@@ -570,6 +595,7 @@ def build_codex_turn_outcome_feedback(
             "applied": bool(recommendation_meta.get("applied")),
             "apply_reason": recommendation_meta.get("apply_reason"),
         },
+        "quality_signals": quality_signals,
     }
     if error_code is not None:
         features["error_class"] = "jsonrpc_error"

@@ -13,6 +13,11 @@ from agentflow_proxy.codex_app_policy import codex_app_bundle_policy_state, code
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
+from agentflow_proxy.quality import (
+    derive_codex_turn_quality_signals,
+    derive_provider_quality_signals,
+    summarize_quality_signals,
+)
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
 
@@ -1815,10 +1820,24 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
     output_tokens = r.get("actual_output_tokens")
     if output_tokens is None:
         output_tokens = r.get("output_tokens_est")
+    source_surface = _source_surface(provider, str(r.get("path") or ""))
+    quality_signals = derive_provider_quality_signals(
+        source_surface=source_surface,
+        status_code=r.get("status_code"),
+        retry_count=r.get("retry_count") or 0,
+        latency_ms=r.get("latency_ms"),
+        error=r.get("error"),
+        requested_model=requested_model,
+        routed_model=routed_model,
+        cache_hit=bool(r.get("cache_hit")),
+        routing_meta=routing,
+        crunch_meta=crunch,
+        cache_meta=cache,
+    )
     return {
         "unit_id": f"provider_call:{r.get('id')}",
         "created_at": r.get("created_at"),
-        "source_surface": _source_surface(provider, str(r.get("path") or "")),
+        "source_surface": source_surface,
         "granularity": "provider_request",
         "app_family": _app_family_for_call(provider, requested_model, str(r.get("path") or "")),
         "requested_model": requested_model,
@@ -1866,7 +1885,9 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
             "cost_est_usd": r.get("cost_est_usd"),
             "cost_baseline_usd": r.get("cost_baseline_usd"),
             "error": r.get("error"),
+            "quality_signals": quality_signals,
         },
+        "quality_signals": quality_signals,
         "replayability_level": "raw_body_opt_in" if r.get("request_json") else "features_only",
         "local_ids": {
             "calls_id": r.get("id"),
@@ -1900,6 +1921,16 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             if cache.get("status") == "hit":
                 estimates["cache_savings_usd"] = float(baseline_cost)
     risk = _codex_turn_risk_features(r)
+    quality_signals = derive_codex_turn_quality_signals(
+        created_at=r.get("created_at"),
+        response_event_id=response_event_id,
+        error_code=error_code,
+        error_message=r.get("response_error_message"),
+        latency_ms=r.get("response_latency_ms"),
+        routing_meta=routing,
+        crunch_meta=crunch,
+        cache_meta=cache,
+    )
     policy_sources = sorted({
         str(source)
         for source in (
@@ -1965,7 +1996,9 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "cost_estimated": estimates["cost_estimated"],
             "error_code": error_code,
             "error_message": r.get("response_error_message"),
+            "quality_signals": quality_signals,
         },
+        "quality_signals": quality_signals,
         "replayability_level": str(cache.get("replayability_level") or "features_only"),
         "local_ids": {
             "codex_app_start_event_id": r.get("start_event_id"),
@@ -2444,8 +2477,36 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
             "by_granularity": counts_by("granularity"),
             "by_app_family": counts_by("app_family"),
             "by_replayability_level": counts_by("replayability_level"),
+            "quality_signal_summary": summarize_quality_signals(units),
         },
         "units": units,
+    }
+
+
+async def stats_quality_signals(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    activity = await stats_activity(store_obj, limit=limit)
+    return {
+        "generated_at": utc_now(),
+        "schema": "agentflow.quality_signal_report.v1",
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "basis": "derived local metadata only",
+        },
+        "summary": activity["summary"]["quality_signal_summary"],
+        "recent": [
+            {
+                "unit_id": unit.get("unit_id"),
+                "created_at": unit.get("created_at"),
+                "source_surface": unit.get("source_surface"),
+                "granularity": unit.get("granularity"),
+                "app_family": unit.get("app_family"),
+                "quality_signals": unit.get("quality_signals"),
+                "local_ids": unit.get("local_ids"),
+            }
+            for unit in activity["units"]
+        ],
     }
 
 
