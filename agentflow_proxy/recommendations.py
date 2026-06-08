@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 
@@ -172,7 +173,7 @@ def build_codex_turn_optimization_unit(
 ) -> dict[str, Any]:
     model_state, model_field, requested_model, routed_model = _codex_model_state(routing_meta)
     unit = {
-        "source_surface": "codex_turn",
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
         "granularity": "agent_turn",
         "app_family": "codex",
         "requested_model": requested_model,
@@ -548,7 +549,7 @@ def build_codex_turn_outcome_feedback(
     )
     features: dict[str, Any] = {
         "provider": "codex-app",
-        "source_surface": "codex_turn",
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
         "granularity": "agent_turn",
         "app_family": "codex",
         "status": status,

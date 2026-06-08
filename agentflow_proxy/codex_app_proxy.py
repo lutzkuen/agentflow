@@ -22,6 +22,7 @@ from agentflow_proxy.codex_app_policy import (
     CODEX_MODEL_FIELDS,
     CODEX_SAFE_TURN_PARAM_KEYS,
     CODEX_TEXT_INPUT_TYPES,
+    CODEX_APP_SOURCE_SURFACE,
     DEFAULT_CODEX_APP_UPSTREAM,
     codex_app_cache_enabled,
     codex_app_optimize_enabled,
@@ -89,7 +90,7 @@ def _policy_decision(kind: str, status: str, reason: str, *, enabled: bool = COD
         "status": status,
         "reason": reason,
         "policy_source": "local-default",
-        "surface": "codex_app_turn",
+        "surface": CODEX_APP_SOURCE_SURFACE,
         "decision_type": kind,
         "applied": status == "applied",
     }
@@ -174,7 +175,7 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
     routed_model, routing_meta = route_model(route_body)
     routing_meta = dict(routing_meta)
     routing_meta.update({
-        "surface": "codex_app_turn",
+        "surface": CODEX_APP_SOURCE_SURFACE,
         "decision_type": "routing",
         "status": "applied" if routed_model != requested_model else "skipped",
         "applied": routed_model != requested_model,
@@ -192,7 +193,7 @@ def _codex_crunch_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[s
     crunch_meta = dict(crunch_meta)
     if not crunch_meta.get("enabled", True):
         crunch_meta.update({
-            "surface": "codex_app_turn",
+            "surface": CODEX_APP_SOURCE_SURFACE,
             "decision_type": "crunch",
             "status": "skipped",
             "reason": "disabled",
@@ -215,7 +216,7 @@ def _codex_crunch_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[s
         crunch_meta["codex_repeated_scaffolding"] = codex_meta
 
     crunch_meta.update({
-        "surface": "codex_app_turn",
+        "surface": CODEX_APP_SOURCE_SURFACE,
         "decision_type": "crunch",
         "status": "applied" if changed else "skipped",
         "reason": "codex-repeated-scaffolding-crunched" if codex_meta.get("changed") else ("codex-turn-start-crunched" if changed else "no-change"),

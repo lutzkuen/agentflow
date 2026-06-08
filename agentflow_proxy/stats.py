@@ -9,7 +9,13 @@ import ipaddress
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from agentflow_proxy.codex_app_policy import codex_app_bundle_policy_state, codex_app_surface_policy_state
+from agentflow_proxy.codex_app_policy import (
+    CODEX_APP_SOURCE_SURFACE,
+    canonical_source_surface,
+    codex_app_bundle_policy_state,
+    codex_app_surface_policy_state,
+    is_codex_turn_source_surface,
+)
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
@@ -368,7 +374,7 @@ async def stats_policies() -> dict[str, Any]:
     sections = ("routing", "crunch", "cache", "routing_experiments", "codex_app")
     file_backed_sections = ("routing", "crunch", "cache", "routing_experiments")
     state["source_surfaces"] = {
-        "codex_app_turn": codex_app_surface_policy_state(state),
+        CODEX_APP_SOURCE_SURFACE: codex_app_surface_policy_state(state),
     }
     reload_required_sections = [
         section
@@ -410,6 +416,8 @@ async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
 def _source_surface(provider: str, path: str) -> str:
     provider_l = (provider or "").lower()
     path_l = (path or "").lower()
+    if provider_l in {"codex-app", "codex_app"}:
+        return CODEX_APP_SOURCE_SURFACE
     if provider_l == "anthropic":
         return "anthropic_messages"
     if provider_l == "openai":
@@ -503,7 +511,7 @@ def _codex_not_applied_decision(kind: str) -> dict[str, Any]:
         "status": "not-applied",
         "reason": CODEX_APP_TELEMETRY_ONLY_REASON,
         "policy_source": "local-default",
-        "surface": "codex_app_turn",
+        "surface": CODEX_APP_SOURCE_SURFACE,
         "decision_type": kind,
         "applied": False,
     }
@@ -625,13 +633,16 @@ def _error_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False, li
 
 def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
     status_code = _as_int(row.get("status_code"))
+    source_surface = canonical_source_surface(
+        row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
+    )
     if _as_int(row.get("cache_hit")):
         return {
             "status": "hit",
             "reason": "legacy-cache-hit",
             "hit_type": "exact",
             "policy_source": "legacy-inferred",
-            "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
+            "source_surface": source_surface,
         }
     if _as_int(row.get("stream")):
         return {
@@ -639,7 +650,7 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "reason": "legacy-streaming",
             "hit_type": "",
             "policy_source": "legacy-inferred",
-            "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
+            "source_surface": source_surface,
         }
     if status_code >= 400:
         return {
@@ -647,14 +658,14 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "reason": "legacy-upstream-error",
             "hit_type": "",
             "policy_source": "legacy-inferred",
-            "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
+            "source_surface": source_surface,
         }
     return {
         "status": "missing",
         "reason": "legacy-unknown",
         "hit_type": "",
         "policy_source": "legacy-inferred",
-        "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
+        "source_surface": source_surface,
     }
 
 
@@ -662,7 +673,9 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
     cache = _json_obj(row.get("cache_json"))
     if cache:
         policy_source = str(cache.get("policy_source") or "unknown")
-        source_surface = str(cache.get("surface") or row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or "")))
+        source_surface = canonical_source_surface(
+            cache.get("surface") or row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
+        )
         if not cache.get("status") and not cache.get("reason"):
             legacy_hit_type = str(cache.get("hit_type") or "")
             if legacy_hit_type == "skip-streaming":
@@ -1587,7 +1600,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     return {
         "schema": "agentflow.codex_app_effectiveness.v1",
         "generated_at": utc_now(),
-        "source_surface": "codex_app_turn",
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
         "limit": capped_limit,
         "privacy": {
             "raw_prompts_included": False,
@@ -1945,7 +1958,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "schema": "agentflow.optimization_unit.v1",
         "unit_id": f"codex_turn:{r.get('start_event_id')}",
         "created_at": r.get("created_at"),
-        "source_surface": "codex_app_turn",
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
         "granularity": "agent_turn",
         "app_family": "codex",
         "requested_model": requested_model,
@@ -2182,7 +2195,7 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
         bucket["units"] += 1
         if unit["granularity"] == "provider_request":
             bucket["provider_calls"] += 1
-        if unit["source_surface"] == "codex_app_turn":
+        if is_codex_turn_source_surface(unit["source_surface"]):
             bucket["codex_turns"] += 1
         for field in ("input_tokens", "output_tokens", "total_tokens"):
             bucket[field] += _as_int(unit.get(field))
@@ -2471,8 +2484,8 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
         "summary": {
             "units": len(units),
             "provider_request_units": sum(1 for unit in units if unit["granularity"] == "provider_request"),
-            "codex_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_app_turn"),
-            "codex_app_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_app_turn"),
+            "codex_turn_units": sum(1 for unit in units if is_codex_turn_source_surface(unit["source_surface"])),
+            "codex_app_turn_units": sum(1 for unit in units if is_codex_turn_source_surface(unit["source_surface"])),
             "by_source_surface": counts_by("source_surface"),
             "by_granularity": counts_by("granularity"),
             "by_app_family": counts_by("app_family"),
@@ -3337,12 +3350,12 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                cache_json,
                'codex-app://turn/start' as path,
                'codex-app' as provider,
-               'codex_app_turn' as source_surface,
+               ? as source_surface,
                (created_at >= ?) as is_today
         from codex_app_events
         where direction = 'client_to_server'
           and method = 'turn/start'
-    """, (today_start, today_start))
+    """, (today_start, CODEX_APP_SOURCE_SURFACE, today_start))
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
 
@@ -3747,7 +3760,7 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
     return {
         "generated_at": generated_at,
         "schema": "agentflow.weekly_activity.v1",
-        "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", "codex_app_turn"],
+        "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", CODEX_APP_SOURCE_SURFACE],
         "cost_basis": "provider-reported + codex-estimated-from-chars",
         "days": days,
         "totals": totals,
@@ -4045,7 +4058,7 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         bucket = session_bucket(
             key,
             basis=basis,
-            source_surface="codex_app_turn",
+            source_surface=CODEX_APP_SOURCE_SURFACE,
             app_family="codex",
         )
         bucket["calls"] += 1
@@ -4085,7 +4098,7 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         add_plateau_observation(
             key,
             basis=basis,
-            source_surface="codex_app_turn",
+            source_surface=CODEX_APP_SOURCE_SURFACE,
             app_family="codex",
             text_chars=_as_int(r.get("input_text_chars")),
             cost_usd=cost,
@@ -5253,7 +5266,7 @@ async function refreshPolicies(){
         ])
       }
     ];
-    const codexSurface=d.source_surfaces&&d.source_surfaces.codex_app_turn;
+    const codexSurface=d.source_surfaces&&(d.source_surfaces.codex_turn||d.source_surfaces.codex_app_turn);
     if(codexSurface){
       const codexCache=codexSurface.cache||{};
       const codexExact=codexCache.exact_cache||{};

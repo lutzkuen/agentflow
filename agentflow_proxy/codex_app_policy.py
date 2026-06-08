@@ -5,7 +5,13 @@ from typing import Any
 
 
 DEFAULT_CODEX_APP_UPSTREAM = "ws://127.0.0.1:4014"
-CODEX_APP_SOURCE_SURFACE = "codex_app_turn"
+CODEX_TURN_SOURCE_SURFACE = "codex_turn"
+LEGACY_CODEX_APP_SOURCE_SURFACE = "codex_app_turn"
+CODEX_APP_SOURCE_SURFACE = CODEX_TURN_SOURCE_SURFACE
+CODEX_APP_SOURCE_SURFACE_ALIASES = frozenset({
+    CODEX_TURN_SOURCE_SURFACE,
+    LEGACY_CODEX_APP_SOURCE_SURFACE,
+})
 CODEX_APP_POLICY_CONDITION_KEYS = (
     "app_family",
     "workflow_phase",
@@ -67,6 +73,17 @@ CODEX_SAFE_TURN_PARAM_KEYS = {
     "topP",
 }
 CODEX_TEXT_INPUT_TYPES = {"text", "input_text"}
+
+
+def canonical_source_surface(value: Any) -> str:
+    surface = str(value or "").strip()
+    if surface in CODEX_APP_SOURCE_SURFACE_ALIASES:
+        return CODEX_TURN_SOURCE_SURFACE
+    return surface or "unknown"
+
+
+def is_codex_turn_source_surface(value: Any) -> bool:
+    return canonical_source_surface(value) == CODEX_TURN_SOURCE_SURFACE
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

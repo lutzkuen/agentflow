@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
+
 
 QUALITY_SIGNAL_SCHEMA = "agentflow.quality_signals.v1"
 ABANDONED_AFTER_SECONDS = 30 * 60
@@ -200,7 +202,7 @@ def derive_codex_turn_quality_signals(
         signals.append(_signal("jsonrpc-error", "error", "Codex app response included JSON-RPC error metadata"))
 
     return _compact(
-        source_surface="codex_app_turn",
+        source_surface=CODEX_APP_SOURCE_SURFACE,
         status=outcome,
         signals=signals,
         optimized=optimized,

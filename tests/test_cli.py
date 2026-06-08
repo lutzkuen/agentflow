@@ -105,7 +105,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIn("routing", payload["policies"])
         self.assertIn("codex_app", payload["policies"])
         self.assertTrue(payload["policies"]["codex_app"]["review_only"])
-        surface = payload["policies"]["source_surfaces"]["codex_app_turn"]
+        surface = payload["policies"]["source_surfaces"]["codex_turn"]
         self.assertTrue(surface["optimization"]["enabled"])
         self.assertFalse(surface["cache"]["enabled"])
         self.assertFalse(surface["managed_optimizer_required"])

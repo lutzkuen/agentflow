@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from agentflow_proxy import __version__
+from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE, canonical_source_surface
 from agentflow_proxy.store import utc_now
 
 POLICY_BUNDLE_APPLY_SCHEMA = "agentflow.policy_bundle_apply.v1"
@@ -1023,7 +1024,7 @@ def _codex_app_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> di
     return {
         "status": "review-only",
         "policy_source": policy.get("policy_source"),
-        "surface": policy.get("surface", "codex_app_turn"),
+        "surface": canonical_source_surface(policy.get("surface", CODEX_APP_SOURCE_SURFACE)),
         "rule_count": len(rules),
         "applied_to_provider_routing": False,
         "applied_to_codex_app_proxy": False,

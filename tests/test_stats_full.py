@@ -88,7 +88,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("routing", result)
         self.assertIn("crunch", result)
         self.assertIn("cache", result)
-        surface = result["source_surfaces"]["codex_app_turn"]
+        surface = result["source_surfaces"]["codex_turn"]
         self.assertTrue(surface["optimization"]["enabled"])
         self.assertFalse(surface["cache"]["enabled"])
         self.assertFalse(surface["cache"]["exact_cache"]["enabled"])
@@ -117,7 +117,7 @@ class StatsFullTest(unittest.TestCase):
         ):
             result = asyncio.run(stats_views.stats_policies())
 
-        surface = result["source_surfaces"]["codex_app_turn"]
+        surface = result["source_surfaces"]["codex_turn"]
         self.assertFalse(surface["optimization"]["enabled"])
         self.assertTrue(surface["cache"]["enabled"])
         self.assertTrue(surface["cache"]["exact_cache"]["enabled"])
@@ -630,13 +630,13 @@ class StatsFullTest(unittest.TestCase):
             for row in result["today_savings_by_source_surface"]
         }
 
-        self.assertEqual(set(by_surface), {"anthropic_messages", "openai_responses", "codex_app_turn"})
+        self.assertEqual(set(by_surface), {"anthropic_messages", "openai_responses", "codex_turn"})
         self.assertEqual(by_surface["anthropic_messages"]["input_tokens"], 120)
         self.assertEqual(by_surface["openai_responses"]["input_tokens"], 200)
-        self.assertEqual(by_surface["codex_app_turn"]["input_tokens"], 10)
+        self.assertEqual(by_surface["codex_turn"]["input_tokens"], 10)
         self.assertEqual(by_surface["anthropic_messages"]["token_basis"], "provider-reported")
         self.assertEqual(by_surface["openai_responses"]["token_basis"], "provider-reported")
-        self.assertEqual(by_surface["codex_app_turn"]["token_basis"], "estimated-from-chars")
+        self.assertEqual(by_surface["codex_turn"]["token_basis"], "estimated-from-chars")
         self.assertEqual(accounting["input_tokens"], 330)
         self.assertEqual(accounting["output_tokens"], 35)
         self.assertEqual(accounting["total_tokens"], 365)
@@ -644,7 +644,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertGreater(savings[("anthropic_messages", "crunching")], 0)
         self.assertGreater(savings[("anthropic_messages", "cache")], 0)
         self.assertGreater(savings[("openai_responses", "routing")], 0)
-        self.assertNotIn(("codex_app_turn", "routing"), savings)
+        self.assertNotIn(("codex_turn", "routing"), savings)
         json.dumps(result)
 
     def test_codex_effectiveness_report_summarizes_live_like_metadata_without_raw_text(self):
@@ -1375,6 +1375,42 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(today[("skipped", "legacy-streaming")], 1)
         json.dumps(result["today_cache_decision_breakdown"])
 
+    def test_codex_cache_breakdown_merges_legacy_and_canonical_source_surfaces(self):
+        for surface in ("codex_app_turn", "codex_turn"):
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=f"req-{surface}",
+                thread_id="thread-codex-surface",
+                message_chars=100,
+                params_chars=50,
+                input_items=1,
+                input_text_chars=40,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="codex-surface-session",
+                cache_json=stable_json({
+                    "status": "hit",
+                    "reason": "exact-match",
+                    "hit_type": "exact",
+                    "policy_source": "local-default",
+                    "surface": surface,
+                }),
+            )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        cache_rows = {
+            (row["source_surface"], row["status"], row["reason"], row["hit_type"]): row["count"]
+            for row in result["today_cache_decision_breakdown"]
+        }
+
+        self.assertEqual(cache_rows[("codex_turn", "hit", "exact-match", "exact")], 2)
+        self.assertNotIn(("codex_app_turn", "hit", "exact-match", "exact"), cache_rows)
+
     def test_codex_app_cache_hit_counts_decision_and_saved_cost(self):
         cache_meta = {
             "enabled": True,
@@ -1438,7 +1474,7 @@ class StatsFullTest(unittest.TestCase):
             (row["source_surface"], row["status"], row["reason"], row["hit_type"]): row["count"]
             for row in full["today_cache_decision_breakdown"]
         }
-        self.assertEqual(cache_rows[("codex_app_turn", "hit", "exact-match", "exact")], 1)
+        self.assertEqual(cache_rows[("codex_turn", "hit", "exact-match", "exact")], 1)
 
         codex = {unit["unit_id"]: unit for unit in activity["units"]}[f"codex_turn:{start_id}"]
         self.assertEqual(codex["replayability_level"], "local-exact-response")
@@ -1777,7 +1813,7 @@ class StatsFullTest(unittest.TestCase):
 
         self.assertEqual(session["session_id"], "thread-codex-sessions")
         self.assertEqual(session["session_key_basis"], "thread_id")
-        self.assertEqual(session["source_surface"], "codex_app_turn")
+        self.assertEqual(session["source_surface"], "codex_turn")
         self.assertEqual(session["app_family"], "codex")
         self.assertEqual(session["calls"], 3)
         self.assertEqual(session["provider_calls"], 0)
@@ -1796,7 +1832,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(session["codex_errors"], 1)
         self.assertEqual(session["codex_method_counts"], [{"method": "turn/start", "turns": 3}])
         self.assertEqual(plateau["session_id"], "thread-codex-sessions")
-        self.assertEqual(plateau["source_surface"], "codex_app_turn")
+        self.assertEqual(plateau["source_surface"], "codex_turn")
         self.assertEqual(plateau["calls"], 3)
         self.assertEqual(plateau["plateau_pairs"], 1)
         self.assertEqual(plateau["median_text_chars"], 10_200)
@@ -1951,7 +1987,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(provider["local_ids"]["calls_id"], provider_id)
 
         self.assertEqual(codex["schema"], "agentflow.optimization_unit.v1")
-        self.assertEqual(codex["source_surface"], "codex_app_turn")
+        self.assertEqual(codex["source_surface"], "codex_turn")
         self.assertEqual(codex["granularity"], "agent_turn")
         self.assertEqual(codex["app_family"], "codex")
         self.assertEqual(codex["requested_model"], stats_views.CODEX_APP_MODEL)
@@ -1989,7 +2025,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(result["summary"]["codex_turn_units"], 1)
         self.assertEqual(result["summary"]["codex_app_turn_units"], 1)
         self.assertEqual(result["summary"]["by_source_surface"]["anthropic_messages"], 1)
-        self.assertEqual(result["summary"]["by_source_surface"]["codex_app_turn"], 1)
+        self.assertEqual(result["summary"]["by_source_surface"]["codex_turn"], 1)
         json.dumps(result)
 
     def test_activity_stats_use_codex_app_policy_metadata_when_recorded(self):
@@ -2309,7 +2345,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(bucket["hard_floor_usd"], 0.05056, places=6)
         self.assertEqual(
             {row["source_surface"]: row["units"] for row in bucket["source_surfaces"]},
-            {"anthropic_messages": 1, "codex_app_turn": 1, "openai_responses": 1},
+            {"anthropic_messages": 1, "codex_turn": 1, "openai_responses": 1},
         )
         self.assertEqual(bucket["thinking_tokens"], 200)
         self.assertEqual(bucket["large_tool_result_calls"], 1)
