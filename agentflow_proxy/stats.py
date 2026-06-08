@@ -244,6 +244,108 @@ def _error_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False, li
     return breakdown[:limit]
 
 
+def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
+    status_code = _as_int(row.get("status_code"))
+    if _as_int(row.get("cache_hit")):
+        return {
+            "status": "hit",
+            "reason": "legacy-cache-hit",
+            "hit_type": "exact",
+            "policy_source": "legacy-inferred",
+        }
+    if _as_int(row.get("stream")):
+        return {
+            "status": "skipped",
+            "reason": "legacy-streaming",
+            "hit_type": "",
+            "policy_source": "legacy-inferred",
+        }
+    if status_code >= 400:
+        return {
+            "status": "skipped",
+            "reason": "legacy-upstream-error",
+            "hit_type": "",
+            "policy_source": "legacy-inferred",
+        }
+    return {
+        "status": "missing",
+        "reason": "legacy-unknown",
+        "hit_type": "",
+        "policy_source": "legacy-inferred",
+    }
+
+
+def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
+    cache = _json_obj(row.get("cache_json"))
+    if cache:
+        policy_source = str(cache.get("policy_source") or "unknown")
+        if not cache.get("status") and not cache.get("reason"):
+            legacy_hit_type = str(cache.get("hit_type") or "")
+            if legacy_hit_type == "skip-streaming":
+                return {
+                    "status": "skipped",
+                    "reason": "legacy-streaming",
+                    "hit_type": "",
+                    "policy_source": policy_source,
+                }
+            if legacy_hit_type == "miss":
+                return {
+                    "status": "miss",
+                    "reason": "legacy-exact-miss",
+                    "hit_type": "",
+                    "policy_source": policy_source,
+                }
+            if legacy_hit_type == "hit":
+                return {
+                    "status": "hit",
+                    "reason": "legacy-cache-hit",
+                    "hit_type": "exact",
+                    "policy_source": policy_source,
+                }
+            return {
+                "status": "missing",
+                "reason": "legacy-partial-cache-json",
+                "hit_type": legacy_hit_type,
+                "policy_source": policy_source,
+            }
+        return {
+            "status": str(cache.get("status") or "missing"),
+            "reason": str(cache.get("reason") or "unknown"),
+            "hit_type": str(cache.get("hit_type") or ""),
+            "policy_source": policy_source,
+        }
+    return _legacy_cache_decision(row)
+
+
+def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if today_only and not row.get("is_today"):
+            continue
+        decision = _cache_decision_for_breakdown(row)
+        key = (
+            decision["status"],
+            decision["reason"],
+            decision["hit_type"],
+            decision["policy_source"],
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                "status": key[0],
+                "reason": key[1],
+                "hit_type": key[2],
+                "policy_source": key[3],
+                "count": 0,
+            },
+        )
+        bucket["count"] += 1
+
+    breakdown = list(grouped.values())
+    breakdown.sort(key=lambda r: r["count"], reverse=True)
+    return breakdown
+
+
 def _usage_bucket_identity(app_family: str, session_id: Any) -> dict[str, Any]:
     engineer = os.getenv("AGENTFLOW_ENGINEER") or None
     app = os.getenv("AGENTFLOW_APP") or app_family or "unknown"
@@ -1207,33 +1309,13 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         from calls group by coalesce(provider, 'anthropic'), coalesce(category, 'unknown') order by count desc
     """)
 
-    cache_decision_breakdown = q("""
-        select coalesce(json_extract(cache_json, '$.status'), 'missing') as status,
-               coalesce(json_extract(cache_json, '$.reason'), 'unknown') as reason,
-               coalesce(json_extract(cache_json, '$.hit_type'), '') as hit_type,
-               coalesce(json_extract(cache_json, '$.policy_source'), 'unknown') as policy_source,
-               count(*) as count
+    cache_rows = q("""
+        select created_at, stream, cache_hit, status_code, cache_json,
+               (date(created_at) = date('now')) as is_today
         from calls
-        group by coalesce(json_extract(cache_json, '$.status'), 'missing'),
-                 coalesce(json_extract(cache_json, '$.reason'), 'unknown'),
-                 coalesce(json_extract(cache_json, '$.hit_type'), ''),
-                 coalesce(json_extract(cache_json, '$.policy_source'), 'unknown')
-        order by count desc
     """)
-    today_cache_decision_breakdown = q("""
-        select coalesce(json_extract(cache_json, '$.status'), 'missing') as status,
-               coalesce(json_extract(cache_json, '$.reason'), 'unknown') as reason,
-               coalesce(json_extract(cache_json, '$.hit_type'), '') as hit_type,
-               coalesce(json_extract(cache_json, '$.policy_source'), 'unknown') as policy_source,
-               count(*) as count
-        from calls
-        where date(created_at) = date('now')
-        group by coalesce(json_extract(cache_json, '$.status'), 'missing'),
-                 coalesce(json_extract(cache_json, '$.reason'), 'unknown'),
-                 coalesce(json_extract(cache_json, '$.hit_type'), ''),
-                 coalesce(json_extract(cache_json, '$.policy_source'), 'unknown')
-        order by count desc
-    """)
+    cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
+    today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
 
     error_rows = q("""
         select created_at,

@@ -266,7 +266,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
-    def test_today_cache_decision_breakdown_excludes_historical_missing_rows(self):
+    def test_cache_decision_breakdown_infers_legacy_null_cache_rows(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
             created_at="2020-01-01T00:00:00+00:00",
@@ -290,6 +290,93 @@ class StatsFullTest(unittest.TestCase):
             request_json=None,
             response_json=None,
             session_id="session-cache-old",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at="2020-01-01T00:01:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=1,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-cache-hit-old",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at="2020-01-01T00:02:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=0,
+            cache_hit=0,
+            status_code=400,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-cache-error-old",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at="2020-01-01T00:03:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-cache-unknown-old",
             category="chat",
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
@@ -325,10 +412,39 @@ class StatsFullTest(unittest.TestCase):
             retry_count=0,
             provider="anthropic",
         )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=stable_json({"hit_type": "skip-streaming", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-cache-partial",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
 
         result = asyncio.run(stats_views.stats_full(server.store))
         all_time = {
-            (row["status"], row["reason"]): row["count"]
+            (row["status"], row["reason"], row["policy_source"]): row["count"]
             for row in result["cache_decision_breakdown"]
         }
         today = {
@@ -336,9 +452,13 @@ class StatsFullTest(unittest.TestCase):
             for row in result["today_cache_decision_breakdown"]
         }
 
-        self.assertEqual(all_time[("missing", "unknown")], 1)
-        self.assertNotIn(("missing", "unknown"), today)
+        self.assertEqual(all_time[("skipped", "legacy-streaming", "legacy-inferred")], 1)
+        self.assertEqual(all_time[("skipped", "legacy-streaming", "local-default")], 1)
+        self.assertEqual(all_time[("hit", "legacy-cache-hit", "legacy-inferred")], 1)
+        self.assertEqual(all_time[("skipped", "legacy-upstream-error", "legacy-inferred")], 1)
+        self.assertEqual(all_time[("missing", "legacy-unknown", "legacy-inferred")], 1)
         self.assertEqual(today[("skipped", "streaming")], 1)
+        self.assertEqual(today[("skipped", "legacy-streaming")], 1)
         json.dumps(result["today_cache_decision_breakdown"])
 
     def test_error_breakdown_groups_sanitized_error_families(self):
