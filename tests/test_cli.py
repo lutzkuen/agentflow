@@ -173,6 +173,16 @@ class PolicyReloadCliTests(unittest.TestCase):
                         "reason": "codex-turn-start-model-field-absent",
                         "applied": False,
                         "policy_source": "local-default",
+                        "managed_pattern_features": {
+                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "present": True,
+                            "pattern_hash_count": 3,
+                            "hash_basis": "normalized-structure-and-size-buckets",
+                            "text_bucket": "lt_2k_chars",
+                            "token_bucket": "lt_1k_tokens",
+                            "pattern_types": ["repeated_input_section"],
+                            "raw_pattern_strings_included": False,
+                        },
                     }),
                     crunch_json=stable_json({
                         "status": "applied",
@@ -239,6 +249,10 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["turn_start_rows"], 1)
         self.assertEqual(payload["summary"]["model_field_absent"], 1)
         self.assertEqual(payload["summary"]["codex_repeated_scaffolding_saved_chars"], 48)
+        self.assertEqual(payload["summary"]["managed_pattern_fingerprint_rows"], 1)
+        self.assertEqual(payload["managed_pattern_fingerprints"]["pattern_hash_count"], 3)
+        self.assertFalse(payload["managed_pattern_fingerprints"]["raw_pattern_strings_included"])
+        self.assertTrue(payload["recent_samples"][0]["managed_pattern_features"]["present"])
         self.assertEqual(payload["workflow_phase_breakdown"][0]["phase"], "planning")
         self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])

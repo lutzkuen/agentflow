@@ -2640,6 +2640,8 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     managed_feedback_status_counts: dict[str, int] = {}
     managed_feedback_reason_counts: dict[str, int] = {}
     managed_feedback_queue_counts: dict[str, int] = {}
+    managed_pattern_fingerprint_rows = 0
+    managed_pattern_hash_count = 0
     summary_hint_buckets: dict[tuple[str, str], dict[str, Any]] = {}
     if hasattr(store_obj, "managed_outcome_feedback_summary"):
         try:
@@ -2674,6 +2676,10 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 _increment_count(historical_unavailable_decision_counts, decision_key)
         managed = routing.get("managed_recommendation") if isinstance(routing, dict) else None
         feedback = managed.get("outcome_feedback") if isinstance(managed, dict) else None
+        pattern_diagnostics = routing.get("managed_pattern_features") if isinstance(routing, dict) else None
+        if isinstance(pattern_diagnostics, dict) and pattern_diagnostics.get("present"):
+            managed_pattern_fingerprint_rows += 1
+            managed_pattern_hash_count += _as_int(pattern_diagnostics.get("pattern_hash_count"))
         if isinstance(managed, dict):
             _increment_count(managed_status_counts, managed.get("status") or "unknown")
             if isinstance(feedback, dict):
@@ -2828,6 +2834,15 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "managed_recommendation_status": (managed or {}).get("status") if isinstance(managed, dict) else "missing",
                 "managed_feedback_status": (feedback or {}).get("status") if isinstance(feedback, dict) else ("pending" if isinstance(managed, dict) else "missing"),
                 "managed_feedback_reason": (feedback or {}).get("reason") if isinstance(feedback, dict) else None,
+                "managed_pattern_features": {
+                    "present": bool((pattern_diagnostics or {}).get("present")) if isinstance(pattern_diagnostics, dict) else False,
+                    "pattern_hash_count": _as_int((pattern_diagnostics or {}).get("pattern_hash_count")) if isinstance(pattern_diagnostics, dict) else 0,
+                    "hash_basis": (pattern_diagnostics or {}).get("hash_basis") if isinstance(pattern_diagnostics, dict) else None,
+                    "text_bucket": (pattern_diagnostics or {}).get("text_bucket") if isinstance(pattern_diagnostics, dict) else None,
+                    "token_bucket": (pattern_diagnostics or {}).get("token_bucket") if isinstance(pattern_diagnostics, dict) else None,
+                    "pattern_types": (pattern_diagnostics or {}).get("pattern_types") if isinstance(pattern_diagnostics, dict) else [],
+                    "raw_pattern_strings_included": False,
+                },
                 "input_text_chars": _as_int(row.get("input_text_chars")),
                 "saved_chars": saved_chars,
                 "tokens_saved_est": saved_tokens,
@@ -2930,6 +2945,8 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "optimized_avg_latency_ms": _avg_or_none(optimized_latency),
             "pass_through_avg_latency_ms": _avg_or_none(pass_through_latency),
             "managed_recommendation_rows": sum(managed_status_counts.values()),
+            "managed_pattern_fingerprint_rows": managed_pattern_fingerprint_rows,
+            "managed_pattern_hash_count": managed_pattern_hash_count,
             "managed_recommendation_enabled": sum(
                 1
                 for row in turn_rows
@@ -3019,6 +3036,13 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "crunch_pattern_breakdown": _codex_crunch_pattern_breakdown(turn_rows),
         "cache_breakdown": _decision_breakdown(turn_rows, "cache_json"),
         "managed_recommendation_breakdown": _count_breakdown(managed_status_counts),
+        "managed_pattern_fingerprints": {
+            "schema": "agentflow.managed_pattern_fingerprint_diagnostics.v1",
+            "rows_with_fingerprints": managed_pattern_fingerprint_rows,
+            "pattern_hash_count": managed_pattern_hash_count,
+            "raw_pattern_strings_included": False,
+            "basis": "stored routing metadata only",
+        },
         "managed_feedback_breakdown": _count_breakdown(managed_feedback_status_counts),
         "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
         "managed_feedback_queue_breakdown": _count_breakdown(managed_feedback_queue_counts),

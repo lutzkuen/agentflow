@@ -40,6 +40,7 @@ from agentflow_proxy.recommendations import (
     build_codex_turn_optimization_unit,
     build_codex_turn_outcome_feedback,
     fetch_recommendation,
+    pattern_feature_diagnostics,
     queue_codex_outcome_feedback,
 )
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
@@ -1241,6 +1242,7 @@ async def _attach_codex_managed_recommendation(
         request_id=str(request_id) if request_id is not None else None,
         thread_id=thread_id,
     )
+    routing["managed_pattern_features"] = pattern_feature_diagnostics(unit)
     managed = await fetch_recommendation(unit)
     managed.setdefault("applied", False)
     if managed.get("status") == "received":

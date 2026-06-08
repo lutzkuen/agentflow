@@ -96,6 +96,24 @@ class RecommendationTest(unittest.TestCase):
                 keys.update(self._keys_in(item))
         return keys
 
+    def _assert_no_sensitive_strings(self, value):
+        text = str(value)
+        for secret in (
+            "raw provider body",
+            "raw provider response",
+            "raw request body",
+            "raw command text",
+            "raw transcript text",
+            "raw pattern text",
+            "tenant-secret",
+            "api-key-secret",
+            "session-secret",
+            "thread-secret",
+            "request-secret",
+            "arbitrary payload string",
+        ):
+            self.assertNotIn(secret, text)
+
     def test_disabled_path_skips_server_and_falls_back_to_local_policy(self):
         unit = {"requested_model": "claude-sonnet-4-6"}
 
@@ -128,6 +146,8 @@ class RecommendationTest(unittest.TestCase):
             "has_tools": False,
             "category": "chat",
             "policy_source": "local-default",
+            "command": "raw command text",
+            "tenant_id": "tenant-secret",
         }
         unit = recommendations.build_optimization_unit(
             provider="anthropic",
@@ -135,8 +155,8 @@ class RecommendationTest(unittest.TestCase):
             requested_model="claude-sonnet-4-6",
             routed_model="claude-sonnet-4-6",
             routing_meta=routing_meta,
-            crunch_meta={"changed": False},
-            cache_meta={"status": "miss", "reason": "exact-miss"},
+            crunch_meta={"changed": False, "pattern_text": "raw pattern text"},
+            cache_meta={"status": "miss", "reason": "exact-miss", "request_body": "raw request body"},
             category="chat",
             stream=False,
             input_tokens_est=300,
@@ -162,9 +182,34 @@ class RecommendationTest(unittest.TestCase):
             recommendations.FEATURE_SCHEMA_VERSION,
         )
         self.assertEqual(FakeAsyncClient.last_json["candidate_target_model"], "claude-sonnet-4-6")
+        pattern_features = FakeAsyncClient.last_json["input_features"]["pattern_features"]
+        self.assertEqual(FakeAsyncClient.last_json["pattern_features"], pattern_features)
+        self.assertEqual(pattern_features["schema"], "agentflow.pattern_features.v1")
+        self.assertEqual(pattern_features["hash_basis"], "normalized-structure-and-size-buckets")
+        self.assertEqual(pattern_features["text_bucket"], "lt_2k_chars")
+        self.assertEqual(pattern_features["token_bucket"], "lt_1k_tokens")
+        self.assertEqual(pattern_features["local_decision_status"], "routing:skipped|crunch:skipped|cache:miss")
+        self.assertTrue(pattern_features["pattern_hash"].startswith("sha256:"))
+        self.assertEqual(pattern_features["pattern_hash"], pattern_features["normalized_pattern_hash"])
+        self.assertTrue(pattern_features["crunch_pattern_hash"].startswith("sha256:"))
+        self.assertTrue(pattern_features["cache_pattern_hash"].startswith("sha256:"))
+        self.assertEqual(FakeAsyncClient.last_json["input_features"]["pattern_hash"], pattern_features["pattern_hash"])
+        self.assertEqual(
+            FakeAsyncClient.last_json["input_features"]["crunch_pattern_hash"],
+            pattern_features["crunch_pattern_hash"],
+        )
+        self.assertEqual(
+            FakeAsyncClient.last_json["input_features"]["cache_pattern_hash"],
+            pattern_features["cache_pattern_hash"],
+        )
+        diagnostics = recommendations.pattern_feature_diagnostics(FakeAsyncClient.last_json)
+        self.assertTrue(diagnostics["present"])
+        self.assertEqual(diagnostics["pattern_hash_count"], 3)
+        self.assertFalse(diagnostics["raw_pattern_strings_included"])
         self.assertIn("session_id_hash", FakeAsyncClient.last_json["grouping_identifiers"])
         self.assertTrue(FakeAsyncClient.last_json["grouping_identifiers"]["session_id_hash"].startswith("sha256:"))
         self.assertNotIn("session-secret", str(FakeAsyncClient.last_json))
+        self._assert_no_sensitive_strings(FakeAsyncClient.last_json)
         self.assertTrue(FakeAsyncClient.last_json["privacy_summary"]["metadata_only"])
         self.assertFalse(FakeAsyncClient.last_json["privacy_summary"]["raw_body_storage"])
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
@@ -179,6 +224,64 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
         self.assertEqual(routing_meta["final_policy_source"], "managed-recommended")
         self.assertEqual(routing_meta["managed_policy_id"], "policy-1")
+
+    def test_codex_turn_feature_unit_emits_pattern_features_without_raw_payloads(self):
+        unit = recommendations.build_codex_turn_optimization_unit(
+            method="turn/start",
+            request_id_present=True,
+            thread_id_present=True,
+            params_chars=2048,
+            input_items=2,
+            input_text_chars=12000,
+            routing_meta={
+                "status": "skipped",
+                "reason": "summary",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "command": "raw command text",
+                "api_key": "api-key-secret",
+            },
+            crunch_meta={
+                "status": "applied",
+                "changed": True,
+                "saved_chars": 4096,
+                "codex_patterns": [
+                    {
+                        "type": "repeated_input_section",
+                        "count": 3,
+                        "saved_chars_est": 4096,
+                        "hashes": ["raw-content-hash-should-not-define-pattern"],
+                    }
+                ],
+                "transcript": "raw transcript text",
+            },
+            cache_meta={
+                "status": "skipped",
+                "reason": "codex-app-cache-disabled",
+                "eligible": True,
+                "replayability_level": "local-exact-response",
+                "payload": "arbitrary payload string",
+            },
+            request_id="request-secret",
+            thread_id="thread-secret",
+        )
+
+        pattern_features = unit["input_features"]["pattern_features"]
+
+        self.assertEqual(pattern_features["workflow_phase"], "summary")
+        self.assertEqual(pattern_features["text_bucket"], "8k_32k_chars")
+        self.assertEqual(pattern_features["token_bucket"], "1k_4k_tokens")
+        self.assertEqual(pattern_features["pattern_types"], ["repeated_input_section"])
+        self.assertEqual(pattern_features["local_decision_status"], "routing:skipped|crunch:applied|cache:skipped")
+        self.assertTrue(pattern_features["pattern_hash"].startswith("sha256:"))
+        self.assertTrue(pattern_features["crunch_pattern_hash"].startswith("sha256:"))
+        self.assertTrue(pattern_features["cache_pattern_hash"].startswith("sha256:"))
+        self.assertIn("request_id_hash", unit["grouping_identifiers"])
+        self.assertIn("thread_id_hash", unit["grouping_identifiers"])
+        self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(unit)))
+        self._assert_no_sensitive_strings(unit)
+        self.assertNotIn("raw-content-hash-should-not-define-pattern", str(unit))
 
     def test_valid_noop_recommendation_records_received_without_changing_model(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"

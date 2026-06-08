@@ -58,6 +58,7 @@ from agentflow_proxy.recommendations import (
     build_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
+    pattern_feature_diagnostics,
     queue_outcome_feedback,
 )
 from agentflow_proxy.store import stable_json, utc_now
@@ -505,6 +506,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             input_tokens_est=input_tokens,
             session_id=session_id,
         )
+        routing_meta["managed_pattern_features"] = pattern_feature_diagnostics(recommendation_unit)
         recommendation_meta = await fetch_recommendation(recommendation_unit)
         recommendation_meta = apply_recommendation_to_body(
             provider="anthropic",
