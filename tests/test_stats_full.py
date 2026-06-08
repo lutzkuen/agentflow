@@ -779,6 +779,7 @@ class StatsFullTest(unittest.TestCase):
         )
         start_id = str(uuid.uuid4())
         response_id = str(uuid.uuid4())
+        raw_prompt_text = "secret raw prompt must not appear"
         server.store.log_codex_app_event(
             id=start_id,
             created_at=utc_now(),
@@ -789,7 +790,7 @@ class StatsFullTest(unittest.TestCase):
             message_chars=500,
             params_chars=450,
             input_items=2,
-            input_text_chars=120,
+            input_text_chars=len(raw_prompt_text),
             result_chars=None,
             error_code=None,
             error_message=None,
@@ -836,25 +837,45 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(provider["replayability_level"], "features_only")
         self.assertEqual(provider["local_ids"]["calls_id"], provider_id)
 
-        self.assertEqual(codex["source_surface"], "codex_turn")
+        self.assertEqual(codex["schema"], "agentflow.optimization_unit.v1")
+        self.assertEqual(codex["source_surface"], "codex_app_turn")
         self.assertEqual(codex["granularity"], "agent_turn")
         self.assertEqual(codex["app_family"], "codex")
-        self.assertIsNone(codex["requested_model"])
-        self.assertIsNone(codex["target_model"])
-        self.assertEqual(codex["input_features"]["input_text_chars"], 120)
-        self.assertEqual(codex["input_features"]["input_tokens_est"], 30)
+        self.assertEqual(codex["requested_model"], stats_views.CODEX_APP_MODEL)
+        self.assertEqual(codex["target_model"], stats_views.CODEX_APP_MODEL)
+        self.assertEqual(codex["model_basis"], "estimated")
+        self.assertEqual(codex["input_features"]["category"], "codex-app-turn")
+        self.assertEqual(codex["input_features"]["input_text_chars"], len(raw_prompt_text))
+        self.assertEqual(codex["input_features"]["input_tokens_est"], 8)
+        self.assertEqual(codex["input_features"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
+        self.assertEqual(codex["tool_features"]["mutation_safe"], False)
+        self.assertEqual(codex["tool_features"]["mutation_safe_reason"], "codex-app-telemetry-only")
+        self.assertEqual(codex["tool_features"]["tool_or_approval_hints"]["captured"], False)
+        self.assertEqual(codex["risk_features"]["params_shape"]["has_params"], True)
+        self.assertEqual(codex["risk_features"]["params_shape"]["input_items"], 2)
+        self.assertEqual(codex["risk_features"]["raw_prompt_stored"], False)
+        self.assertEqual(codex["mutation_safe"], False)
+        self.assertEqual(codex["optimization_features"]["routing"]["status"], "not-applied")
+        self.assertEqual(codex["optimization_features"]["routing"]["reason"], "codex-app-telemetry-only")
+        self.assertEqual(codex["optimization_features"]["crunch"]["status"], "not-applied")
+        self.assertEqual(codex["optimization_features"]["cache"]["status"], "not-applied")
+        self.assertEqual(codex["optimization_features"]["policy_sources"], ["local-default"])
         self.assertEqual(codex["outcome_features"]["status"], "success")
         self.assertEqual(codex["outcome_features"]["latency_ms"], 3000)
         self.assertEqual(codex["outcome_features"]["output_tokens_est"], 50)
-        self.assertEqual(codex["outcome_features"]["total_tokens_est"], 80)
-        self.assertAlmostEqual(codex["outcome_features"]["cost_est_usd"], 0.000538, places=6)
+        self.assertEqual(codex["outcome_features"]["total_tokens_est"], 58)
+        self.assertAlmostEqual(codex["outcome_features"]["cost_est_usd"], 0.00051, places=6)
+        self.assertAlmostEqual(codex["outcome_features"]["cost_baseline_usd"], 0.00051, places=6)
+        self.assertAlmostEqual(codex["outcome_features"]["hard_floor_usd"], 0.00051, places=6)
         self.assertEqual(codex["outcome_features"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertEqual(codex["replayability_level"], "features_only")
         self.assertEqual(codex["local_ids"]["codex_app_response_event_id"], response_id)
+        self.assertNotIn(raw_prompt_text, json.dumps(codex))
         self.assertEqual(result["summary"]["provider_request_units"], 1)
         self.assertEqual(result["summary"]["codex_turn_units"], 1)
+        self.assertEqual(result["summary"]["codex_app_turn_units"], 1)
         self.assertEqual(result["summary"]["by_source_surface"]["anthropic_messages"], 1)
-        self.assertEqual(result["summary"]["by_source_surface"]["codex_turn"], 1)
+        self.assertEqual(result["summary"]["by_source_surface"]["codex_app_turn"], 1)
         json.dumps(result)
 
     def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
@@ -995,6 +1016,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertTrue(bucket["codex_cost_known"])
         self.assertTrue(bucket["codex_cost_estimated"])
         self.assertFalse(bucket["excludes_unknown_codex_app_cost"])
+        self.assertEqual(bucket["codex_mutation_safe_turns"], 0)
+        self.assertEqual(bucket["codex_telemetry_only_turns"], 1)
         self.assertEqual(bucket["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertAlmostEqual(bucket["codex_cost_est_usd"], 0.0004, places=6)
         self.assertAlmostEqual(bucket["spend_usd"], 0.0504, places=6)

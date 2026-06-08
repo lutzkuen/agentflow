@@ -14,6 +14,7 @@ from agentflow_proxy.store import utc_now
 
 CODEX_APP_MODEL = os.getenv("AGENTFLOW_CODEX_APP_MODEL") or os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex")
 CODEX_APP_COST_BASIS = "provider-reported + codex-estimated-from-chars"
+CODEX_APP_TELEMETRY_ONLY_REASON = "codex-app-telemetry-only"
 TOKEN_CHARS = 4
 
 
@@ -218,6 +219,46 @@ def _codex_turn_estimates(input_text_chars: Any, result_chars: Any) -> dict[str,
         "baseline_cost_est_usd": cost,
         "hard_floor_usd": cost,
         "cost_basis": CODEX_APP_COST_BASIS,
+    }
+
+
+def _codex_not_applied_decision(kind: str) -> dict[str, Any]:
+    return {
+        "status": "not-applied",
+        "reason": CODEX_APP_TELEMETRY_ONLY_REASON,
+        "policy_source": "local-default",
+        "surface": "codex_app_turn",
+        "decision_type": kind,
+        "applied": False,
+    }
+
+
+def _codex_turn_risk_features(row: dict[str, Any]) -> dict[str, Any]:
+    input_items = _as_int(row.get("input_items"))
+    input_text_chars = _as_int(row.get("input_text_chars"))
+    params_chars = _as_int(row.get("params_chars"))
+    method = str(row.get("method") or "turn/start")
+    raw_prompt_logging_enabled = os.getenv("AGENTFLOW_LOG_BODIES", "0") == "1"
+    return {
+        "mutation_safe": False,
+        "mutation_safe_reason": CODEX_APP_TELEMETRY_ONLY_REASON,
+        "method": method,
+        "params_shape": {
+            "has_params": params_chars > 0,
+            "params_chars": params_chars,
+            "has_input": input_items > 0 or input_text_chars > 0,
+            "input_items": input_items,
+            "input_text_chars": input_text_chars,
+        },
+        "tool_or_approval_hints": {
+            "captured": False,
+            "tool_use_present": None,
+            "approval_required": None,
+            "reason": "raw-params-not-stored",
+        },
+        "raw_prompt_logging_enabled": raw_prompt_logging_enabled,
+        "raw_prompt_stored": False,
+        "raw_response_stored": False,
     }
 
 
@@ -467,6 +508,8 @@ def _new_usage_bucket(identity: dict[str, Any]) -> dict[str, Any]:
         "provider_cost_known": False,
         "codex_cost_known": False,
         "excludes_unknown_codex_app_cost": False,
+        "codex_mutation_safe_turns": 0,
+        "codex_telemetry_only_turns": 0,
         "optimized_calls": 0,
         "routed_calls": 0,
         "crunched_calls": 0,
@@ -580,32 +623,49 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     response_event_id = r.get("response_event_id")
     status = "error" if error_code is not None else ("success" if response_event_id else "pending")
     estimates = _codex_turn_estimates(r.get("input_text_chars"), r.get("response_result_chars"))
+    risk = _codex_turn_risk_features(r)
+    routing = _codex_not_applied_decision("routing")
+    crunch = _codex_not_applied_decision("crunch")
+    cache = _codex_not_applied_decision("cache")
     return {
+        "schema": "agentflow.optimization_unit.v1",
         "unit_id": f"codex_turn:{r.get('start_event_id')}",
         "created_at": r.get("created_at"),
-        "source_surface": "codex_turn",
+        "source_surface": "codex_app_turn",
         "granularity": "agent_turn",
         "app_family": "codex",
-        "requested_model": None,
-        "target_model": None,
+        "requested_model": estimates["model"],
+        "target_model": estimates["model"],
         "routed_model": None,
+        "model_basis": "estimated",
         "input_features": {
+            "category": "codex-app-turn",
             "input_text_chars": r.get("input_text_chars") or 0,
             "input_tokens_est": estimates["input_tokens_est"],
+            "total_tokens_est": estimates["total_tokens_est"],
             "input_items": r.get("input_items") or 0,
             "params_chars": r.get("params_chars"),
             "message_chars": r.get("message_chars"),
+            "cost_basis": estimates["cost_basis"],
         },
         "tool_features": {
             "method": "turn/start",
             "thread_id": r.get("thread_id"),
+            "category": "codex-app-turn",
+            "tool_or_approval_hints": risk["tool_or_approval_hints"],
+            "mutation_safe": risk["mutation_safe"],
+            "mutation_safe_reason": risk["mutation_safe_reason"],
         },
         "optimization_features": {
-            "routing": None,
-            "crunch": None,
-            "cache": None,
-            "policy_sources": [],
+            "routing": routing,
+            "crunch": crunch,
+            "cache": cache,
+            "policy_sources": ["local-default"],
+            "mutation_safe": risk["mutation_safe"],
+            "mutation_safe_reason": risk["mutation_safe_reason"],
         },
+        "risk_features": risk,
+        "mutation_safe": risk["mutation_safe"],
         "outcome_features": {
             "status": status,
             "latency_ms": r.get("response_latency_ms"),
@@ -613,6 +673,8 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "output_tokens_est": estimates["output_tokens_est"],
             "total_tokens_est": estimates["total_tokens_est"],
             "cost_est_usd": estimates["cost_est_usd"],
+            "cost_baseline_usd": estimates["baseline_cost_est_usd"],
+            "hard_floor_usd": estimates["hard_floor_usd"],
             "cost_basis": estimates["cost_basis"],
             "error_code": error_code,
             "error_message": r.get("response_error_message"),
@@ -807,7 +869,8 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
         "summary": {
             "units": len(units),
             "provider_request_units": sum(1 for unit in units if unit["granularity"] == "provider_request"),
-            "codex_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_turn"),
+            "codex_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_app_turn"),
+            "codex_app_turn_units": sum(1 for unit in units if unit["source_surface"] == "codex_app_turn"),
             "by_source_surface": counts_by("source_surface"),
             "by_granularity": counts_by("granularity"),
             "by_app_family": counts_by("app_family"),
@@ -940,6 +1003,10 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
                s.request_id,
                s.thread_id,
                s.session_id,
+               s.method,
+               s.message_chars,
+               s.params_chars,
+               s.input_items,
                s.input_text_chars,
                (
                    select r.result_chars from codex_app_events r
@@ -957,6 +1024,23 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
                    order by r.created_at desc
                    limit 1
                ) as response_error_code
+               ,
+               (
+                   select r.error_message from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_message,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms
         from codex_app_events s
         where s.direction = 'client_to_server'
           and s.method = 'turn/start'
@@ -966,23 +1050,32 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
 
     for row in codex_rows:
         r = dict(row)
+        unit = _codex_turn_activity_unit(r)
+        input_features = unit["input_features"]
+        outcome_features = unit["outcome_features"]
         bucket = bucket_for("codex", r.get("session_id"))
-        estimates = _codex_turn_estimates(r.get("input_text_chars"), r.get("response_result_chars"))
         bucket["codex_turns"] += 1
         bucket["turns"] += 1
         bucket["codex_input_text_chars"] += _as_int(r.get("input_text_chars"))
         bucket["codex_result_chars"] += _as_int(r.get("response_result_chars"))
-        bucket["codex_input_tokens_est"] += estimates["input_tokens_est"]
-        bucket["codex_output_tokens_est"] += estimates["output_tokens_est"]
-        bucket["codex_total_tokens_est"] += estimates["total_tokens_est"]
-        bucket["codex_cost_est_usd"] += estimates["cost_est_usd"]
-        bucket["codex_baseline_cost_est_usd"] += estimates["baseline_cost_est_usd"]
-        bucket["codex_hard_floor_usd"] += estimates["hard_floor_usd"]
+        bucket["codex_input_tokens_est"] += _as_int(input_features.get("input_tokens_est"))
+        bucket["codex_output_tokens_est"] += _as_int(outcome_features.get("output_tokens_est"))
+        bucket["codex_total_tokens_est"] += _as_int(outcome_features.get("total_tokens_est"))
+        bucket["codex_cost_est_usd"] += _as_float(outcome_features.get("cost_est_usd"))
+        bucket["codex_baseline_cost_est_usd"] += _as_float(outcome_features.get("cost_baseline_usd"))
+        bucket["codex_hard_floor_usd"] += _as_float(outcome_features.get("hard_floor_usd"))
         bucket["codex_cost_known"] = True
         bucket["codex_cost_estimated"] = True
-        bucket["spend_usd"] += estimates["cost_est_usd"]
-        bucket["captured_savings_usd"] += max(estimates["baseline_cost_est_usd"] - estimates["cost_est_usd"], 0.0)
-        bucket["hard_floor_usd"] = _as_float(bucket["hard_floor_usd"]) + estimates["hard_floor_usd"]
+        bucket["spend_usd"] += _as_float(outcome_features.get("cost_est_usd"))
+        bucket["captured_savings_usd"] += max(
+            _as_float(outcome_features.get("cost_baseline_usd")) - _as_float(outcome_features.get("cost_est_usd")),
+            0.0,
+        )
+        bucket["hard_floor_usd"] = _as_float(bucket["hard_floor_usd"]) + _as_float(outcome_features.get("hard_floor_usd"))
+        if unit.get("mutation_safe"):
+            bucket["codex_mutation_safe_turns"] += 1
+        if unit["optimization_features"]["routing"].get("reason") == CODEX_APP_TELEMETRY_ONLY_REASON:
+            bucket["codex_telemetry_only_turns"] += 1
         if r.get("response_error_code") is not None:
             bucket["errors"] += 1
 
@@ -2234,7 +2327,7 @@ function esc(v){
   return String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 function shortSurface(s){
-  const labels={anthropic_messages:'Claude',openai_chat:'OpenAI chat',openai_responses:'OpenAI',codex_turn:'Codex turn'};
+  const labels={anthropic_messages:'Claude',openai_chat:'OpenAI chat',openai_responses:'OpenAI',codex_app_turn:'Codex turn',codex_turn:'Codex turn'};
   return labels[s]||s||'unknown';
 }
 function activityInput(unit){
