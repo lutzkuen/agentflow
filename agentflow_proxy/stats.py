@@ -12,6 +12,10 @@ from agentflow_proxy.pricing import estimate_blended_input_savings, estimate_cos
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
 
+CODEX_APP_MODEL = os.getenv("AGENTFLOW_CODEX_APP_MODEL") or os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex")
+CODEX_APP_COST_BASIS = "provider-reported + codex-estimated-from-chars"
+TOKEN_CHARS = 4
+
 
 def _json_obj(raw: Any) -> dict[str, Any]:
     if not raw:
@@ -186,6 +190,35 @@ def _as_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def estimate_tokens_from_text_chars(chars: Any) -> int:
+    char_count = max(_as_int(chars), 0)
+    if char_count <= 0:
+        return 0
+    return max(1, int(char_count / TOKEN_CHARS))
+
+
+def _codex_turn_estimates(input_text_chars: Any, result_chars: Any) -> dict[str, Any]:
+    input_tokens = estimate_tokens_from_text_chars(input_text_chars)
+    output_tokens = estimate_tokens_from_text_chars(result_chars)
+    cost = estimate_cost(
+        CODEX_APP_MODEL,
+        input_tokens,
+        output_tokens,
+        provider="openai",
+    )
+    cost = float(cost or 0.0)
+    return {
+        "model": CODEX_APP_MODEL,
+        "input_tokens_est": input_tokens,
+        "output_tokens_est": output_tokens,
+        "total_tokens_est": input_tokens + output_tokens,
+        "cost_est_usd": cost,
+        "baseline_cost_est_usd": cost,
+        "hard_floor_usd": cost,
+        "cost_basis": CODEX_APP_COST_BASIS,
+    }
 
 
 def _sanitize_error_sample(error: Any, limit: int = 180) -> str | None:
@@ -420,6 +453,13 @@ def _new_usage_bucket(identity: dict[str, Any]) -> dict[str, Any]:
         "provider_total_tokens": 0,
         "codex_input_text_chars": 0,
         "codex_result_chars": 0,
+        "codex_input_tokens_est": 0,
+        "codex_output_tokens_est": 0,
+        "codex_total_tokens_est": 0,
+        "codex_cost_est_usd": 0.0,
+        "codex_baseline_cost_est_usd": 0.0,
+        "codex_hard_floor_usd": 0.0,
+        "codex_cost_estimated": False,
         "spend_usd": 0.0,
         "baseline_provider_cost_usd": 0.0,
         "captured_savings_usd": 0.0,
@@ -539,6 +579,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     error_code = r.get("response_error_code")
     response_event_id = r.get("response_event_id")
     status = "error" if error_code is not None else ("success" if response_event_id else "pending")
+    estimates = _codex_turn_estimates(r.get("input_text_chars"), r.get("response_result_chars"))
     return {
         "unit_id": f"codex_turn:{r.get('start_event_id')}",
         "created_at": r.get("created_at"),
@@ -550,6 +591,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "routed_model": None,
         "input_features": {
             "input_text_chars": r.get("input_text_chars") or 0,
+            "input_tokens_est": estimates["input_tokens_est"],
             "input_items": r.get("input_items") or 0,
             "params_chars": r.get("params_chars"),
             "message_chars": r.get("message_chars"),
@@ -568,6 +610,10 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "status": status,
             "latency_ms": r.get("response_latency_ms"),
             "result_chars": r.get("response_result_chars"),
+            "output_tokens_est": estimates["output_tokens_est"],
+            "total_tokens_est": estimates["total_tokens_est"],
+            "cost_est_usd": estimates["cost_est_usd"],
+            "cost_basis": estimates["cost_basis"],
             "error_code": error_code,
             "error_message": r.get("response_error_message"),
         },
@@ -921,11 +967,22 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
     for row in codex_rows:
         r = dict(row)
         bucket = bucket_for("codex", r.get("session_id"))
+        estimates = _codex_turn_estimates(r.get("input_text_chars"), r.get("response_result_chars"))
         bucket["codex_turns"] += 1
         bucket["turns"] += 1
         bucket["codex_input_text_chars"] += _as_int(r.get("input_text_chars"))
         bucket["codex_result_chars"] += _as_int(r.get("response_result_chars"))
-        bucket["excludes_unknown_codex_app_cost"] = True
+        bucket["codex_input_tokens_est"] += estimates["input_tokens_est"]
+        bucket["codex_output_tokens_est"] += estimates["output_tokens_est"]
+        bucket["codex_total_tokens_est"] += estimates["total_tokens_est"]
+        bucket["codex_cost_est_usd"] += estimates["cost_est_usd"]
+        bucket["codex_baseline_cost_est_usd"] += estimates["baseline_cost_est_usd"]
+        bucket["codex_hard_floor_usd"] += estimates["hard_floor_usd"]
+        bucket["codex_cost_known"] = True
+        bucket["codex_cost_estimated"] = True
+        bucket["spend_usd"] += estimates["cost_est_usd"]
+        bucket["captured_savings_usd"] += max(estimates["baseline_cost_est_usd"] - estimates["cost_est_usd"], 0.0)
+        bucket["hard_floor_usd"] = _as_float(bucket["hard_floor_usd"]) + estimates["hard_floor_usd"]
         if r.get("response_error_code") is not None:
             bucket["errors"] += 1
 
@@ -991,17 +1048,22 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         bucket["spend_usd"] = round(float(bucket["spend_usd"]), 6)
         bucket["baseline_provider_cost_usd"] = round(float(bucket["baseline_provider_cost_usd"]), 6)
         bucket["captured_savings_usd"] = round(float(bucket["captured_savings_usd"]), 6)
-        bucket["hard_floor_usd"] = round(float(bucket["hard_floor_usd"]), 6) if bucket["provider_cost_known"] else None
+        bucket["hard_floor_usd"] = round(float(bucket["hard_floor_usd"]), 6) if bucket["provider_cost_known"] or bucket["codex_cost_known"] else None
+        bucket["codex_cost_est_usd"] = round(float(bucket["codex_cost_est_usd"]), 6)
+        bucket["codex_baseline_cost_est_usd"] = round(float(bucket["codex_baseline_cost_est_usd"]), 6)
+        bucket["codex_hard_floor_usd"] = round(float(bucket["codex_hard_floor_usd"]), 6)
         bucket["prompt_cache_read_savings_usd"] = round(float(bucket["prompt_cache_read_savings_usd"]), 6)
         bucket["prompt_cache_creation_cost_usd"] = round(float(bucket["prompt_cache_creation_cost_usd"]), 6)
         bucket["thinking_cost_usd"] = round(float(bucket["thinking_cost_usd"]), 6)
         bucket["optimization_rate"] = round(bucket["optimized_calls"] / bucket["provider_calls"], 4) if bucket["provider_calls"] else None
         bucket["error_rate"] = round(bucket["errors"] / bucket["turns"], 4) if bucket["turns"] else 0.0
         bucket["potential_hint_count"] = len(bucket["remaining_saving_potential_hints"])
-        bucket["cost_basis"] = (
-            "provider-known; codex-telemetry-cost-unknown"
-            if bucket["codex_turns"] else "provider-known"
-        ) if bucket["provider_calls"] else "codex-telemetry-cost-unknown"
+        if bucket["provider_calls"] and bucket["codex_turns"]:
+            bucket["cost_basis"] = CODEX_APP_COST_BASIS
+        elif bucket["provider_calls"]:
+            bucket["cost_basis"] = "provider-reported"
+        else:
+            bucket["cost_basis"] = "codex-estimated-from-chars"
         bucket.pop("_prev_text_chars_by_session", None)
         bucket.pop("_hint_codes", None)
         rows.append(bucket)
@@ -1021,17 +1083,29 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         "scope": "today",
         "grouping": {
             "priority": ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family", "session_id"],
-            "cost_unknown_for": ["codex_app_events"],
+            "cost_unknown_for": [],
             "raw_prompt_logging": False,
+            "codex_cost_basis": CODEX_APP_COST_BASIS,
+            "codex_app_model": CODEX_APP_MODEL,
         },
         "summary": {
             "buckets": len(rows),
             "provider_calls": sum(row["provider_calls"] for row in rows),
             "codex_turns": sum(row["codex_turns"] for row in rows),
-            "known_provider_spend_usd": round(sum(row["spend_usd"] for row in rows), 6),
+            "known_provider_spend_usd": round(
+                sum(row["spend_usd"] - row["codex_cost_est_usd"] for row in rows),
+                6,
+            ),
+            "provider_reported_spend_usd": round(
+                sum(row["spend_usd"] - row["codex_cost_est_usd"] for row in rows),
+                6,
+            ),
+            "codex_estimated_spend_usd": round(sum(row["codex_cost_est_usd"] for row in rows), 6),
+            "calculated_spend_usd": round(sum(row["spend_usd"] for row in rows), 6),
             "captured_savings_usd": round(sum(row["captured_savings_usd"] for row in rows), 6),
             "hard_floor_usd": round(sum(row["hard_floor_usd"] or 0.0 for row in rows), 6),
-            "codex_cost_unknown": any(row["codex_turns"] for row in rows),
+            "codex_cost_unknown": False,
+            "cost_basis": CODEX_APP_COST_BASIS if any(row["codex_turns"] for row in rows) else "provider-reported",
         },
         "buckets": rows,
     }
@@ -1224,6 +1298,38 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     codex_app_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start'") or 0)
     codex_app_today_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start' and date(created_at) = date('now')") or 0)
     codex_app_avg_latency = s("select avg(latency_ms) from codex_app_events where latency_ms is not null") or 0
+    codex_turn_rows = q("""
+        select s.id as start_event_id,
+               s.created_at,
+               s.input_text_chars,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars,
+               (date(s.created_at) = date('now')) as is_today
+        from codex_app_events s
+        where s.direction = 'client_to_server'
+          and s.method = 'turn/start'
+    """)
+    codex_input_tokens_est = 0
+    codex_output_tokens_est = 0
+    codex_cost_est = 0.0
+    today_codex_input_tokens_est = 0
+    today_codex_output_tokens_est = 0
+    today_codex_cost_est = 0.0
+    for row in codex_turn_rows:
+        estimates = _codex_turn_estimates(row.get("input_text_chars"), row.get("response_result_chars"))
+        codex_input_tokens_est += estimates["input_tokens_est"]
+        codex_output_tokens_est += estimates["output_tokens_est"]
+        codex_cost_est += estimates["cost_est_usd"]
+        if row.get("is_today"):
+            today_codex_input_tokens_est += estimates["input_tokens_est"]
+            today_codex_output_tokens_est += estimates["output_tokens_est"]
+            today_codex_cost_est += estimates["cost_est_usd"]
 
     provider_input_tokens = int(s("""
         select sum(
@@ -1267,32 +1373,55 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     total_savings = sum(float(value or 0.0) for value in savings_buckets.values())
     today_observed_baseline = today_cost + today_total_savings
     observed_baseline = total_cost + total_savings
-    today_hard_floor = today_cost
-    hard_floor = total_cost
+    today_calculated_spend = today_cost + today_codex_cost_est
+    calculated_spend = total_cost + codex_cost_est
+    today_observed_baseline_with_codex = today_observed_baseline + today_codex_cost_est
+    observed_baseline_with_codex = observed_baseline + codex_cost_est
+    today_hard_floor = today_calculated_spend
+    hard_floor = calculated_spend
     executive_summary = {
         "schema": "agentflow.executive_summary.v1",
         "tokens_today": {
+            "total_tokens": today_provider_input_tokens + today_provider_output_tokens + today_codex_input_tokens_est + today_codex_output_tokens_est,
             "provider_total_tokens": today_provider_input_tokens + today_provider_output_tokens,
             "provider_input_tokens": today_provider_input_tokens,
             "provider_output_tokens": today_provider_output_tokens,
             "codex_app_turns": codex_app_today_turns,
             "codex_app_input_text_chars": codex_app_today_input_text_chars,
-            "codex_app_cost_known": False,
+            "codex_app_input_tokens_est": today_codex_input_tokens_est,
+            "codex_app_output_tokens_est": today_codex_output_tokens_est,
+            "codex_app_total_tokens_est": today_codex_input_tokens_est + today_codex_output_tokens_est,
+            "codex_app_cost_known": True,
+            "codex_app_cost_estimated": True,
+            "cost_basis": CODEX_APP_COST_BASIS,
         },
         "tokens_total": {
+            "total_tokens": provider_input_tokens + provider_output_tokens + codex_input_tokens_est + codex_output_tokens_est,
             "provider_total_tokens": provider_input_tokens + provider_output_tokens,
             "provider_input_tokens": provider_input_tokens,
             "provider_output_tokens": provider_output_tokens,
             "codex_app_turns": codex_app_turns,
             "codex_app_input_text_chars": codex_app_input_text_chars,
-            "codex_app_cost_known": False,
+            "codex_app_input_tokens_est": codex_input_tokens_est,
+            "codex_app_output_tokens_est": codex_output_tokens_est,
+            "codex_app_total_tokens_est": codex_input_tokens_est + codex_output_tokens_est,
+            "codex_app_cost_known": True,
+            "codex_app_cost_estimated": True,
+            "cost_basis": CODEX_APP_COST_BASIS,
         },
         "spend": {
+            "today_calculated_spend_usd": round(today_calculated_spend, 6),
+            "calculated_spend_usd": round(calculated_spend, 6),
             "today_provider_spend_usd": round(today_cost, 6),
             "total_provider_spend_usd": round(total_cost, 6),
+            "today_codex_app_estimated_spend_usd": round(today_codex_cost_est, 6),
+            "codex_app_estimated_spend_usd": round(codex_cost_est, 6),
             "today_baseline_provider_cost_usd": round(today_observed_baseline, 6),
             "baseline_provider_cost_usd": round(observed_baseline, 6),
+            "today_baseline_calculated_cost_usd": round(today_observed_baseline_with_codex, 6),
+            "baseline_calculated_cost_usd": round(observed_baseline_with_codex, 6),
             "thinking_cost_today_usd": round(today_thinking_cost, 6),
+            "cost_basis": CODEX_APP_COST_BASIS,
         },
         "savings": {
             "today_total_savings_usd": round(today_total_savings, 6),
@@ -1303,8 +1432,12 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "hard_floor": {
             "today_unavoidable_provider_spend_usd": round(today_hard_floor, 6),
             "unavoidable_provider_spend_usd": round(hard_floor, 6),
-            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline - today_total_savings, 6),
-            "excludes_unknown_codex_app_cost": True,
+            "today_unavoidable_calculated_spend_usd": round(today_hard_floor, 6),
+            "unavoidable_calculated_spend_usd": round(hard_floor, 6),
+            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline_with_codex - today_total_savings, 6),
+            "excludes_unknown_codex_app_cost": False,
+            "codex_app_cost_estimated": True,
+            "cost_basis": CODEX_APP_COST_BASIS,
         },
         "health": {
             "errors": errors,
@@ -1426,9 +1559,11 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         provider_breakdown.append({
             "provider": "codex-app",
             "count": codex_app_turns,
-            "cost_usd": None,
+            "cost_usd": round(codex_cost_est, 6),
             "routed_count": 0,
             "events": codex_app_total_events,
+            "tokens_est": codex_input_tokens_est + codex_output_tokens_est,
+            "cost_basis": "codex-estimated-from-chars",
         })
 
     codex_app_methods = q("""
@@ -1500,6 +1635,16 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "codex_app_today_turns": codex_app_today_turns,
             "codex_app_last_event_at": codex_app_last_event_at,
             "codex_app_input_text_chars": codex_app_input_text_chars,
+            "codex_app_input_tokens_est": codex_input_tokens_est,
+            "codex_app_output_tokens_est": codex_output_tokens_est,
+            "codex_app_total_tokens_est": codex_input_tokens_est + codex_output_tokens_est,
+            "codex_app_cost_est_usd": round(codex_cost_est, 6),
+            "today_codex_app_input_tokens_est": today_codex_input_tokens_est,
+            "today_codex_app_output_tokens_est": today_codex_output_tokens_est,
+            "today_codex_app_total_tokens_est": today_codex_input_tokens_est + today_codex_output_tokens_est,
+            "today_codex_app_cost_est_usd": round(today_codex_cost_est, 6),
+            "codex_app_cost_basis": CODEX_APP_COST_BASIS,
+            "codex_app_model": CODEX_APP_MODEL,
             "codex_app_avg_latency_ms": round(codex_app_avg_latency),
             "routing_experiment_samples": routing_experiment_samples,
             "routing_experiment_compared_samples": routing_experiment_compared,
@@ -2120,7 +2265,8 @@ function activityOutcome(unit){
   }
   const cls=o.status==='error'?'err':o.status==='pending'?'miss':'hit';
   const chars=o.result_chars!=null?fmtTok(o.result_chars)+' result chars':'turn-level';
-  return `<span class="badge ${cls}">${esc(o.status||'pending')}</span> <span class="tokens">${chars}</span> <span class="badge miss">cost unknown / turn-level telemetry</span>`;
+  const cost=o.cost_est_usd==null?'cost pending':fmt(o.cost_est_usd,5)+' est';
+  return `<span class="badge ${cls}">${esc(o.status||'pending')}</span> <span class="tokens">${chars}</span> <span class="cost">${cost}</span> <span class="badge miss">Codex estimated from chars</span>`;
 }
 function activityFlags(unit){
   const flags=[];
@@ -2164,14 +2310,15 @@ async function refreshUsage(){
       const errors=(row.errors||0)>0
         ? `<span class="badge err">${row.errors} (${Math.round((row.error_rate||0)*100)}%)</span>`
         : '<span class="badge hit">0</span>';
-      const codexCost=row.excludes_unknown_codex_app_cost?'<span class="badge miss">Codex cost unknown</span>':'';
+      const codexCost=row.codex_cost_estimated?'<span class="badge miss">Codex estimated</span>':'';
+      const totalTokens=(row.provider_total_tokens||0)+(row.codex_total_tokens_est||0);
       return `<tr>
         <td><span class="badge provider">${esc(row.bucket_label)}</span></td>
         <td>${(row.turns||0).toLocaleString()}</td>
         <td>${(row.provider_calls||0).toLocaleString()}</td>
         <td>${(row.codex_turns||0).toLocaleString()}</td>
-        <td class="tokens">${fmtTok(row.provider_total_tokens||0)} provider · ${fmtTok(row.codex_input_text_chars||0)} Codex chars</td>
-        <td class="cost">${row.provider_cost_known?fmt(row.spend_usd||0,5):'—'}</td>
+        <td class="tokens">${fmtTok(totalTokens)} total · ${fmtTok(row.provider_total_tokens||0)} provider · ${fmtTok(row.codex_total_tokens_est||0)} Codex est</td>
+        <td class="cost">${(row.provider_cost_known||row.codex_cost_known)?fmt(row.spend_usd||0,5):'—'}</td>
         <td class="savings">${fmt(row.captured_savings_usd||0,5)}</td>
         <td class="cost">${row.hard_floor_usd==null?'—':fmt(row.hard_floor_usd,5)}</td>
         <td class="tokens">${optimized}</td>
@@ -2247,15 +2394,15 @@ async function refresh(){
     const floor=e.hard_floor||{};
     const health=e.health||{};
 
-    document.getElementById('c-tokens-today').textContent=fmtTok(toks.provider_total_tokens||0);
+    document.getElementById('c-tokens-today').textContent=fmtTok(toks.total_tokens||toks.provider_total_tokens||0);
     document.getElementById('c-tokens-sub').textContent=fmtTok(toks.provider_input_tokens||0)+' input · '+fmtTok(toks.provider_output_tokens||0)+' output provider tokens';
-    document.getElementById('c-tokens-codex').textContent=(toks.codex_app_turns||0).toLocaleString()+' Codex turns · '+fmtTok(toks.codex_app_input_text_chars||0)+' chars, cost unknown';
-    document.getElementById('c-spend').textContent=fmt(spend.today_provider_spend_usd||0,4);
-    document.getElementById('c-spend-sub').textContent=fmt(spend.total_provider_spend_usd||0,4)+' total · '+fmt(spend.thinking_cost_today_usd||0,4)+' thinking today';
+    document.getElementById('c-tokens-codex').textContent=(toks.codex_app_turns||0).toLocaleString()+' Codex turns · '+fmtTok(toks.codex_app_total_tokens_est||0)+' estimated tokens from '+fmtTok(toks.codex_app_input_text_chars||0)+' chars';
+    document.getElementById('c-spend').textContent=fmt(spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
+    document.getElementById('c-spend-sub').textContent=fmt(spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
     document.getElementById('c-savings').textContent=fmt(savings.today_total_savings_usd||0,4);
     document.getElementById('c-savings-sub').textContent='routing '+fmt(buckets.routing_usd||0,4)+' · crunch '+fmt(buckets.crunching_usd||0,4)+' · local cache '+fmt(buckets.exact_local_cache_usd||0,4)+' · provider cache '+fmt(buckets.provider_prompt_cache_discount_usd||0,4);
     document.getElementById('c-floor').textContent=fmt(floor.today_unavoidable_provider_spend_usd||0,4);
-    document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_provider_cost_usd||0,4)+' - feasible savings '+fmt(savings.today_total_savings_usd||0,4)+'; Codex cost unknown';
+    document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_calculated_cost_usd??spend.today_baseline_provider_cost_usd??0,4)+' - feasible savings '+fmt(savings.today_total_savings_usd||0,4)+'; Codex estimated';
     document.getElementById('c-health').textContent=(health.errors||0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
 
