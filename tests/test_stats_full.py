@@ -173,7 +173,131 @@ class StatsFullTest(unittest.TestCase):
             executive["hard_floor"]["today_unavoidable_provider_spend_usd"],
             executive["spend"]["today_baseline_calculated_cost_usd"],
         )
+        self.assertIn("accounting_today", executive)
+        self.assertIn("source_surfaces", executive["accounting_today"])
         json.dumps(executive)
+
+    def test_full_stats_unifies_source_surface_accounting_for_mixed_traffic(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=10,
+            input_tokens_est=110,
+            output_tokens_est=11,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": True, "tokens_saved_est": 40, "policy_source": "local-default"}),
+            routing_json=stable_json({"policy_source": "local-manual"}),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="mixed-session",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=20,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/responses",
+            requested_model="gpt-5",
+            routed_model="gpt-5-mini",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=20,
+            input_tokens_est=210,
+            output_tokens_est=21,
+            actual_input_tokens=200,
+            actual_output_tokens=20,
+            cost_est_usd=0.002,
+            cost_baseline_usd=0.004,
+            crunch_json=stable_json({"changed": False, "policy_source": "local-default"}),
+            routing_json=stable_json({"policy_source": "local-manual", "reason": "test route"}),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="mixed-session",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="openai",
+        )
+        start_id = str(uuid.uuid4())
+        server.store.log_codex_app_event(
+            id=start_id,
+            created_at=utc_now(),
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-mixed",
+            thread_id="thread-mixed",
+            message_chars=80,
+            params_chars=10,
+            input_items=1,
+            input_text_chars=40,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="mixed-session",
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction="server_to_client",
+            method="turn/completed",
+            request_id="req-mixed",
+            thread_id="thread-mixed",
+            message_chars=20,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=20,
+            error_code=None,
+            error_message=None,
+            latency_ms=200,
+            session_id="mixed-session",
+        )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        accounting = result["executive_summary"]["accounting_today"]
+        by_surface = {row["source_surface"]: row for row in accounting["source_surfaces"]}
+        savings = {
+            (row["source_surface"], row["optimization_type"]): row["savings_usd"]
+            for row in result["today_savings_by_source_surface"]
+        }
+
+        self.assertEqual(set(by_surface), {"anthropic_messages", "openai_responses", "codex_app_turn"})
+        self.assertEqual(by_surface["anthropic_messages"]["input_tokens"], 120)
+        self.assertEqual(by_surface["openai_responses"]["input_tokens"], 200)
+        self.assertEqual(by_surface["codex_app_turn"]["input_tokens"], 10)
+        self.assertEqual(by_surface["anthropic_messages"]["token_basis"], "provider-reported")
+        self.assertEqual(by_surface["openai_responses"]["token_basis"], "provider-reported")
+        self.assertEqual(by_surface["codex_app_turn"]["token_basis"], "estimated-from-chars")
+        self.assertEqual(accounting["input_tokens"], 330)
+        self.assertEqual(accounting["output_tokens"], 35)
+        self.assertEqual(accounting["total_tokens"], 365)
+        self.assertEqual(result["executive_summary"]["tokens_today"]["total_tokens"], 365)
+        self.assertGreater(savings[("anthropic_messages", "crunching")], 0)
+        self.assertGreater(savings[("anthropic_messages", "cache")], 0)
+        self.assertGreater(savings[("openai_responses", "routing")], 0)
+        self.assertNotIn(("codex_app_turn", "routing"), savings)
+        json.dumps(result)
 
     def test_old_context_summary_stats_are_attributed_separately(self):
         for cache_hit, cost in ((False, 0.0002), (True, 0.0)):
@@ -1160,6 +1284,10 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(bucket["codex_input_tokens_est"], 80)
         self.assertEqual(bucket["codex_output_tokens_est"], 30)
         self.assertEqual(bucket["codex_total_tokens_est"], 110)
+        self.assertEqual(bucket["input_tokens"], 4_580)
+        self.assertEqual(bucket["output_tokens"], 430)
+        self.assertEqual(bucket["total_tokens"], 5_010)
+        self.assertEqual(bucket["token_basis"], "mixed")
         self.assertTrue(bucket["provider_cost_known"])
         self.assertTrue(bucket["codex_cost_known"])
         self.assertTrue(bucket["codex_cost_estimated"])
@@ -1169,8 +1297,14 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(bucket["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertAlmostEqual(bucket["codex_cost_est_usd"], 0.00056, places=6)
         self.assertAlmostEqual(bucket["spend_usd"], 0.05056, places=6)
+        self.assertAlmostEqual(bucket["baseline_cost_usd"], 0.07556, places=6)
+        self.assertAlmostEqual(bucket["cache_savings_usd"], 0.000563, places=6)
         self.assertAlmostEqual(bucket["captured_savings_usd"], 0.025, places=6)
         self.assertAlmostEqual(bucket["hard_floor_usd"], 0.05056, places=6)
+        self.assertEqual(
+            {row["source_surface"]: row["units"] for row in bucket["source_surfaces"]},
+            {"anthropic_messages": 1, "codex_app_turn": 1, "openai_responses": 1},
+        )
         self.assertEqual(bucket["thinking_tokens"], 200)
         self.assertEqual(bucket["large_tool_result_calls"], 1)
         self.assertGreater(bucket["potential_hint_count"], 0)

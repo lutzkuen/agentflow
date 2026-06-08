@@ -538,6 +538,16 @@ def _new_usage_bucket(identity: dict[str, Any]) -> dict[str, Any]:
         "codex_exact_cache_savings_usd": 0.0,
         "codex_cost_estimated": False,
         "spend_usd": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "baseline_cost_usd": 0.0,
+        "routing_savings_usd": 0.0,
+        "crunch_savings_usd": 0.0,
+        "cache_savings_usd": 0.0,
+        "token_basis": "unknown",
+        "cost_basis": "unknown",
+        "source_surfaces": [],
         "baseline_provider_cost_usd": 0.0,
         "captured_savings_usd": 0.0,
         "hard_floor_usd": None,
@@ -563,8 +573,28 @@ def _new_usage_bucket(identity: dict[str, Any]) -> dict[str, Any]:
         "context_plateau_pairs": 0,
         "_prev_text_chars_by_session": {},
         "_hint_codes": set(),
+        "_token_bases": set(),
+        "_cost_bases": set(),
+        "_source_surface_counts": {},
         "remaining_saving_potential_hints": [],
     }
+
+
+def _add_accounting_to_usage_bucket(bucket: dict[str, Any], unit: dict[str, Any]) -> None:
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        bucket[field] += _as_int(unit.get(field))
+    for field in (
+        "baseline_cost_usd",
+        "routing_savings_usd",
+        "crunch_savings_usd",
+        "cache_savings_usd",
+    ):
+        bucket[field] += _as_float(unit.get(field))
+    bucket["_token_bases"].add(str(unit.get("token_basis") or "unknown"))
+    bucket["_cost_bases"].add(str(unit.get("cost_basis") or "unknown"))
+    source_surface = str(unit.get("source_surface") or "unknown")
+    surface_counts = bucket["_source_surface_counts"]
+    surface_counts[source_surface] = surface_counts.get(source_surface, 0) + 1
 
 
 def _add_usage_hint(bucket: dict[str, Any], code: str, label: str, detail: str) -> None:
@@ -752,6 +782,285 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "thread_id": r.get("thread_id"),
             "session_id": r.get("session_id"),
         },
+    }
+
+
+def _policy_sources_from(*decisions: dict[str, Any]) -> list[str]:
+    return sorted({
+        str(source)
+        for decision in decisions
+        for source in (
+            decision.get("policy_source"),
+            decision.get("final_policy_source"),
+        )
+        if source
+    })
+
+
+def _provider_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    routing = _json_obj(r.get("routing_json"))
+    crunch = _json_obj(r.get("crunch_json"))
+    cache = _json_obj(r.get("cache_json"))
+    provider = str(r.get("provider") or "anthropic").lower()
+    path = str(r.get("path") or "")
+    requested_model = r.get("requested_model")
+    routed_model = r.get("routed_model")
+    target_model = routed_model or requested_model
+    base_input_tokens = _as_int(
+        r.get("actual_input_tokens")
+        if r.get("actual_input_tokens") is not None
+        else r.get("input_tokens_est")
+    )
+    output_tokens = _as_int(
+        r.get("actual_output_tokens")
+        if r.get("actual_output_tokens") is not None
+        else r.get("output_tokens_est")
+    )
+    cache_creation_tokens = _as_int(r.get("cache_creation_input_tokens"))
+    cache_read_tokens = _as_int(r.get("cache_read_input_tokens"))
+    input_tokens = base_input_tokens + cache_creation_tokens + cache_read_tokens
+    cost = _as_float(r.get("cost_est_usd"))
+    baseline = _as_float(r.get("cost_baseline_usd")) or cost
+    routing_savings = 0.0
+    if routed_model and requested_model != routed_model:
+        requested_cost = estimate_cost(
+            str(requested_model or ""),
+            base_input_tokens,
+            output_tokens,
+            provider=provider,
+        ) or 0.0
+        routed_cost = estimate_cost(
+            str(routed_model or ""),
+            base_input_tokens,
+            output_tokens,
+            provider=provider,
+        ) or 0.0
+        routing_savings = max(requested_cost - routed_cost, 0.0)
+
+    crunch_tokens_saved = _as_int(crunch.get("tokens_saved_est"))
+    summary = crunch.get("old_context_summarization") if isinstance(crunch.get("old_context_summarization"), dict) else {}
+    if summary:
+        crunch_tokens_saved += _as_int(summary.get("tokens_saved_est"))
+    crunch_gross = estimate_blended_input_savings(
+        str(target_model or ""),
+        tokens_saved=crunch_tokens_saved,
+        input_tokens=base_input_tokens,
+        cache_read_tokens=cache_read_tokens,
+        provider=provider,
+    ) or 0.0
+    crunch_savings = max(crunch_gross - _as_float(summary.get("summary_cost_est_usd")), 0.0)
+
+    cache_savings = 0.003 if _as_int(r.get("cache_hit")) else 0.0
+    if cache_read_tokens:
+        full_read_cost = estimate_cost(str(target_model or ""), cache_read_tokens, 0, provider=provider) or 0.0
+        cached_read_input_tokens = cache_read_tokens if provider == "openai" else 0
+        cached_read_cost = estimate_cost(
+            str(target_model or ""),
+            cached_read_input_tokens,
+            0,
+            cache_read=cache_read_tokens,
+            provider=provider,
+        ) or 0.0
+        cache_savings += max(full_read_cost - cached_read_cost, 0.0)
+
+    token_basis = "provider-reported"
+    if r.get("actual_input_tokens") is None and r.get("actual_output_tokens") is None:
+        token_basis = "estimated-from-request"
+
+    return {
+        "source_surface": _source_surface(provider, path),
+        "granularity": "provider_request",
+        "app_family": _app_family_for_call(provider, requested_model, path),
+        "session_id": r.get("session_id"),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "token_basis": token_basis,
+        "cost_est_usd": cost,
+        "cost_basis": "provider-reported",
+        "baseline_cost_usd": baseline,
+        "routing_savings_usd": routing_savings,
+        "crunch_savings_usd": crunch_savings,
+        "cache_savings_usd": cache_savings,
+        "hard_floor_usd": cost,
+        "policy_sources": _policy_sources_from(routing, crunch, cache),
+        "is_today": bool(r.get("is_today")),
+    }
+
+
+def _codex_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    unit = _codex_turn_activity_unit(row)
+    input_features = unit["input_features"]
+    outcome_features = unit["outcome_features"]
+    optimization_features = unit["optimization_features"]
+    cost = _as_float(outcome_features.get("cost_est_usd"))
+    baseline = _as_float(outcome_features.get("cost_baseline_usd")) or cost
+    cache_savings = _as_float(outcome_features.get("cache_savings_usd"))
+    remaining_savings = max(baseline - cost - cache_savings, 0.0)
+    routing_savings = remaining_savings if optimization_features["routing"].get("applied") else 0.0
+    crunch_savings = 0.0
+    if not routing_savings and optimization_features["crunch"].get("changed"):
+        crunch_savings = remaining_savings
+    return {
+        "source_surface": unit["source_surface"],
+        "granularity": unit["granularity"],
+        "app_family": unit["app_family"],
+        "session_id": unit["local_ids"].get("session_id"),
+        "input_tokens": _as_int(input_features.get("input_tokens_est")),
+        "output_tokens": _as_int(outcome_features.get("output_tokens_est")),
+        "total_tokens": _as_int(outcome_features.get("total_tokens_est")),
+        "token_basis": "estimated-from-chars",
+        "cost_est_usd": cost,
+        "cost_basis": str(outcome_features.get("cost_basis") or CODEX_APP_COST_BASIS),
+        "baseline_cost_usd": baseline,
+        "routing_savings_usd": routing_savings,
+        "crunch_savings_usd": crunch_savings,
+        "cache_savings_usd": cache_savings,
+        "hard_floor_usd": _as_float(outcome_features.get("hard_floor_usd")),
+        "policy_sources": list(optimization_features.get("policy_sources") or []),
+        "is_today": bool(dict(row).get("is_today")),
+    }
+
+
+def _mixed_label(values: set[str], default: str = "unknown") -> str:
+    clean = sorted(value for value in values if value)
+    if not clean:
+        return default
+    if len(clean) == 1:
+        return clean[0]
+    return "mixed"
+
+
+def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
+    total = {
+        "units": 0,
+        "provider_calls": 0,
+        "codex_turns": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost_est_usd": 0.0,
+        "baseline_cost_usd": 0.0,
+        "routing_savings_usd": 0.0,
+        "crunch_savings_usd": 0.0,
+        "cache_savings_usd": 0.0,
+        "hard_floor_usd": 0.0,
+        "_token_bases": set(),
+        "_cost_bases": set(),
+        "_policy_sources": set(),
+    }
+    by_surface: dict[str, dict[str, Any]] = {}
+    savings_by_surface: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_common(bucket: dict[str, Any], unit: dict[str, Any]) -> None:
+        bucket["units"] += 1
+        if unit["granularity"] == "provider_request":
+            bucket["provider_calls"] += 1
+        if unit["source_surface"] == "codex_app_turn":
+            bucket["codex_turns"] += 1
+        for field in ("input_tokens", "output_tokens", "total_tokens"):
+            bucket[field] += _as_int(unit.get(field))
+        for field in (
+            "cost_est_usd",
+            "baseline_cost_usd",
+            "routing_savings_usd",
+            "crunch_savings_usd",
+            "cache_savings_usd",
+            "hard_floor_usd",
+        ):
+            bucket[field] += _as_float(unit.get(field))
+        bucket["_token_bases"].add(str(unit.get("token_basis") or "unknown"))
+        bucket["_cost_bases"].add(str(unit.get("cost_basis") or "unknown"))
+        for source in unit.get("policy_sources") or []:
+            bucket["_policy_sources"].add(str(source))
+
+    for unit in units:
+        add_common(total, unit)
+        source_surface = str(unit.get("source_surface") or "unknown")
+        bucket = by_surface.setdefault(
+            source_surface,
+            {
+                "source_surface": source_surface,
+                "granularities": set(),
+                "app_families": set(),
+                **{
+                    key: 0 for key in (
+                        "units",
+                        "provider_calls",
+                        "codex_turns",
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens",
+                    )
+                },
+                "cost_est_usd": 0.0,
+                "baseline_cost_usd": 0.0,
+                "routing_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "cache_savings_usd": 0.0,
+                "hard_floor_usd": 0.0,
+                "_token_bases": set(),
+                "_cost_bases": set(),
+                "_policy_sources": set(),
+            },
+        )
+        bucket["granularities"].add(str(unit.get("granularity") or "unknown"))
+        bucket["app_families"].add(str(unit.get("app_family") or "unknown"))
+        add_common(bucket, unit)
+        for optimization_type, field in (
+            ("routing", "routing_savings_usd"),
+            ("crunching", "crunch_savings_usd"),
+            ("cache", "cache_savings_usd"),
+        ):
+            savings = _as_float(unit.get(field))
+            if savings <= 0:
+                continue
+            key = (source_surface, optimization_type)
+            row = savings_by_surface.setdefault(
+                key,
+                {
+                    "source_surface": source_surface,
+                    "optimization_type": optimization_type,
+                    "savings_usd": 0.0,
+                },
+            )
+            row["savings_usd"] += savings
+
+    def finalize(bucket: dict[str, Any]) -> dict[str, Any]:
+        finalized = dict(bucket)
+        finalized["token_basis"] = _mixed_label(finalized.pop("_token_bases"))
+        finalized["cost_basis"] = _mixed_label(finalized.pop("_cost_bases"))
+        finalized["policy_sources"] = sorted(finalized.pop("_policy_sources"))
+        if isinstance(finalized.get("granularities"), set):
+            finalized["granularities"] = sorted(finalized["granularities"])
+        if isinstance(finalized.get("app_families"), set):
+            finalized["app_families"] = sorted(finalized["app_families"])
+        for field in (
+            "cost_est_usd",
+            "baseline_cost_usd",
+            "routing_savings_usd",
+            "crunch_savings_usd",
+            "cache_savings_usd",
+            "hard_floor_usd",
+        ):
+            finalized[field] = round(float(finalized[field]), 6)
+        return finalized
+
+    savings_rows = []
+    for row in savings_by_surface.values():
+        savings_rows.append({
+            **row,
+            "savings_usd": round(float(row["savings_usd"]), 6),
+        })
+    savings_rows.sort(key=lambda row: (row["source_surface"], row["optimization_type"]))
+
+    source_rows = [finalize(bucket) for bucket in by_surface.values()]
+    source_rows.sort(key=lambda row: row["source_surface"])
+    return {
+        **finalize(total),
+        "source_surfaces": source_rows,
+        "savings_by_source_surface": savings_rows,
     }
 
 
@@ -1000,6 +1309,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         category = r.get("category") or routing.get("category") or "unknown"
         text_chars = _as_int(routing.get("text_chars")) or input_tokens * 4
         thinking_tokens = _as_int(r.get("thinking_output_tokens"))
+        _add_accounting_to_usage_bucket(bucket, _provider_accounting_unit({**r, "is_today": True}))
 
         bucket["provider_calls"] += 1
         bucket["turns"] += 1
@@ -1125,6 +1435,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         input_features = unit["input_features"]
         outcome_features = unit["outcome_features"]
         bucket = bucket_for("codex", r.get("session_id"))
+        _add_accounting_to_usage_bucket(bucket, _codex_accounting_unit({**r, "is_today": True}))
         bucket["codex_turns"] += 1
         bucket["turns"] += 1
         bucket["codex_input_text_chars"] += _as_int(r.get("input_text_chars"))
@@ -1227,6 +1538,21 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
             )
 
         bucket["spend_usd"] = round(float(bucket["spend_usd"]), 6)
+        bucket["baseline_cost_usd"] = round(float(bucket["baseline_cost_usd"]), 6)
+        bucket["routing_savings_usd"] = round(float(bucket["routing_savings_usd"]), 6)
+        bucket["crunch_savings_usd"] = round(float(bucket["crunch_savings_usd"]), 6)
+        bucket["cache_savings_usd"] = round(float(bucket["cache_savings_usd"]), 6)
+        bucket["token_basis"] = _mixed_label(bucket["_token_bases"])
+        if bucket["provider_calls"] and bucket["codex_turns"]:
+            bucket["cost_basis"] = CODEX_APP_COST_BASIS
+        elif bucket["provider_calls"]:
+            bucket["cost_basis"] = "provider-reported"
+        else:
+            bucket["cost_basis"] = "codex-estimated-from-chars"
+        bucket["source_surfaces"] = [
+            {"source_surface": source_surface, "units": count}
+            for source_surface, count in sorted(bucket["_source_surface_counts"].items())
+        ]
         bucket["baseline_provider_cost_usd"] = round(float(bucket["baseline_provider_cost_usd"]), 6)
         bucket["captured_savings_usd"] = round(float(bucket["captured_savings_usd"]), 6)
         bucket["hard_floor_usd"] = round(float(bucket["hard_floor_usd"]), 6) if bucket["provider_cost_known"] or bucket["codex_cost_known"] else None
@@ -1240,14 +1566,11 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         bucket["optimization_rate"] = round(bucket["optimized_calls"] / bucket["provider_calls"], 4) if bucket["provider_calls"] else None
         bucket["error_rate"] = round(bucket["errors"] / bucket["turns"], 4) if bucket["turns"] else 0.0
         bucket["potential_hint_count"] = len(bucket["remaining_saving_potential_hints"])
-        if bucket["provider_calls"] and bucket["codex_turns"]:
-            bucket["cost_basis"] = CODEX_APP_COST_BASIS
-        elif bucket["provider_calls"]:
-            bucket["cost_basis"] = "provider-reported"
-        else:
-            bucket["cost_basis"] = "codex-estimated-from-chars"
         bucket.pop("_prev_text_chars_by_session", None)
         bucket.pop("_hint_codes", None)
+        bucket.pop("_token_bases", None)
+        bucket.pop("_cost_bases", None)
+        bucket.pop("_source_surface_counts", None)
         rows.append(bucket)
 
     rows.sort(
@@ -1485,8 +1808,24 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     codex_turn_rows = q("""
         select s.id as start_event_id,
                s.created_at,
+               s.request_id,
+               s.thread_id,
+               s.session_id,
+               s.message_chars,
+               s.params_chars,
+               s.input_items,
                s.input_text_chars,
+               s.routing_json,
+               s.crunch_json,
                s.cache_json,
+               (
+                   select r.id from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_event_id,
                (
                    select r.result_chars from codex_app_events r
                    where r.direction = 'server_to_client'
@@ -1495,6 +1834,30 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                    order by r.created_at desc
                    limit 1
                ) as response_result_chars,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code,
+               (
+                   select r.error_message from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_message,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms,
                (date(s.created_at) = date('now')) as is_today
         from codex_app_events s
         where s.direction = 'client_to_server'
@@ -1552,6 +1915,24 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         from calls
         where date(created_at) = date('now')
     """) or 0)
+    provider_accounting_rows = q("""
+        select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+               requested_model, routed_model, stream, cache_hit, status_code,
+               latency_ms, input_tokens_est, output_tokens_est,
+               actual_input_tokens, actual_output_tokens, cost_est_usd,
+               cost_baseline_usd, crunch_json, routing_json, cache_json, error,
+               request_json, response_json, session_id, category,
+               cache_creation_input_tokens, cache_read_input_tokens, retry_count,
+               thinking_output_tokens,
+               (date(created_at) = date('now')) as is_today
+        from calls
+    """)
+    accounting_units = (
+        [_provider_accounting_unit(row) for row in provider_accounting_rows]
+        + [_codex_accounting_unit(row) for row in codex_turn_rows]
+    )
+    accounting_total = _accounting_rollup(accounting_units)
+    accounting_today = _accounting_rollup([unit for unit in accounting_units if unit.get("is_today")])
     today_crunching_net_savings = today_crunch_savings + (today_summary_savings - today_summary_extra_cost)
     crunching_net_savings = crunch_savings + (summary_savings - summary_extra_cost)
     today_savings_buckets = {
@@ -1582,6 +1963,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     hard_floor = calculated_spend
     executive_summary = {
         "schema": "agentflow.executive_summary.v1",
+        "accounting_today": accounting_today,
+        "accounting_total": accounting_total,
         "tokens_today": {
             "total_tokens": today_provider_input_tokens + today_provider_output_tokens + today_codex_input_tokens_est + today_codex_output_tokens_est,
             "provider_total_tokens": today_provider_input_tokens + today_provider_output_tokens,
@@ -1803,6 +2186,10 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
 
     return {
         "executive_summary": executive_summary,
+        "source_surface_accounting": accounting_total["source_surfaces"],
+        "today_source_surface_accounting": accounting_today["source_surfaces"],
+        "savings_by_source_surface": accounting_total["savings_by_source_surface"],
+        "today_savings_by_source_surface": accounting_today["savings_by_source_surface"],
         "summary": {
             "total_calls": total_calls,
             "today_calls": today_calls,
@@ -2611,21 +2998,30 @@ async function refresh(){
     const d=await r.json();
     const s=d.summary;
     const e=d.executive_summary||{};
+    const acct=e.accounting_today||{};
+    const acctTotal=e.accounting_total||{};
+    const surfaces=acct.source_surfaces||[];
     const toks=e.tokens_today||{};
     const spend=e.spend||{};
     const savings=e.savings||{};
     const buckets=savings.today_buckets||{};
     const floor=e.hard_floor||{};
     const health=e.health||{};
+    const sourceText=surfaces.length
+      ? surfaces.map(row=>shortSurface(row.source_surface)+': '+fmtTok(row.total_tokens||0)+' '+(row.token_basis||'tokens')).join(' · ')
+      : fmtTok(toks.provider_input_tokens||0)+' input · '+fmtTok(toks.provider_output_tokens||0)+' output provider tokens';
+    const basisText=surfaces.length
+      ? surfaces.map(row=>shortSurface(row.source_surface)+' '+(row.cost_basis||'unknown')).join(' · ')
+      : (toks.codex_app_turns||0).toLocaleString()+' Codex turns · '+fmtTok(toks.codex_app_total_tokens_est||0)+' estimated tokens from '+fmtTok(toks.codex_app_input_text_chars||0)+' chars';
 
-    document.getElementById('c-tokens-today').textContent=fmtTok(toks.total_tokens||toks.provider_total_tokens||0);
-    document.getElementById('c-tokens-sub').textContent=fmtTok(toks.provider_input_tokens||0)+' input · '+fmtTok(toks.provider_output_tokens||0)+' output provider tokens';
-    document.getElementById('c-tokens-codex').textContent=(toks.codex_app_turns||0).toLocaleString()+' Codex turns · '+fmtTok(toks.codex_app_total_tokens_est||0)+' estimated tokens from '+fmtTok(toks.codex_app_input_text_chars||0)+' chars';
-    document.getElementById('c-spend').textContent=fmt(spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
-    document.getElementById('c-spend-sub').textContent=fmt(spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
-    document.getElementById('c-savings').textContent=fmt(savings.today_total_savings_usd||0,4);
-    document.getElementById('c-savings-sub').textContent='routing '+fmt(buckets.routing_usd||0,4)+' · crunch '+fmt(buckets.crunching_usd||0,4)+' · local cache '+fmt(buckets.exact_local_cache_usd||0,4)+' · provider cache '+fmt(buckets.provider_prompt_cache_discount_usd||0,4);
-    document.getElementById('c-floor').textContent=fmt(floor.today_unavoidable_provider_spend_usd||0,4);
+    document.getElementById('c-tokens-today').textContent=fmtTok(acct.total_tokens??toks.total_tokens??toks.provider_total_tokens??0);
+    document.getElementById('c-tokens-sub').textContent=sourceText;
+    document.getElementById('c-tokens-codex').textContent=basisText;
+    document.getElementById('c-spend').textContent=fmt(acct.cost_est_usd??spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
+    document.getElementById('c-spend-sub').textContent=fmt(acctTotal.cost_est_usd??spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
+    document.getElementById('c-savings').textContent=fmt((acct.routing_savings_usd||0)+(acct.crunch_savings_usd||0)+(acct.cache_savings_usd||0)||savings.today_total_savings_usd||0,4);
+    document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??buckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??buckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??buckets.exact_local_cache_usd??0,4);
+    document.getElementById('c-floor').textContent=fmt(acct.hard_floor_usd??floor.today_unavoidable_provider_spend_usd??0,4);
     document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_calculated_cost_usd??spend.today_baseline_provider_cost_usd??0,4)+' - feasible savings '+fmt(savings.today_total_savings_usd||0,4)+'; Codex estimated';
     document.getElementById('c-health').textContent=(health.errors||0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
