@@ -35,6 +35,9 @@ def create_dashboard_router(
     default_db: str,
     limiter_status: LimiterStatus,
     limiter_config: dict[str, Any],
+    proxy_host: str | None = None,
+    dashboard_host: str | None = None,
+    dashboard_read_only: bool = True,
     full_stats_ttl_s: float | None = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -118,6 +121,15 @@ def create_dashboard_router(
     async def stats_managed_recommendations(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_managed_recommendations(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/safety")
+    async def stats_safety() -> dict[str, Any]:
+        return await stats_views.stats_safety(
+            default_db=default_db,
+            proxy_host=proxy_host,
+            dashboard_host=dashboard_host,
+            dashboard_read_only=dashboard_read_only,
+        )
+
     @router.get("/agentflow/stats/weekly")
     async def stats_weekly() -> dict[str, Any]:
         return await stats_views.stats_weekly(_store(store_obj))
@@ -140,6 +152,8 @@ def create_dashboard_app(
     upstream: str,
     limiter_status: LimiterStatus,
     limiter_config: dict[str, Any],
+    proxy_host: str | None = None,
+    dashboard_host: str | None = None,
     full_stats_ttl_s: float | None = None,
 ) -> FastAPI:
     app = FastAPI(title="AgentFlow Dashboard", version="0.1.0")
@@ -164,6 +178,9 @@ def create_dashboard_app(
             default_db=default_db,
             limiter_status=limiter_status,
             limiter_config=limiter_config,
+            proxy_host=proxy_host,
+            dashboard_host=dashboard_host,
+            dashboard_read_only=True,
             full_stats_ttl_s=full_stats_ttl_s,
         )
     )

@@ -213,6 +213,7 @@ app.include_router(
         default_db=DEFAULT_DB,
         limiter_status=_tier_backoff_status,
         limiter_config=_dashboard_limiter_config(),
+        proxy_host=DEFAULT_HOST,
     )
 )
 app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindings))

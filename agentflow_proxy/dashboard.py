@@ -12,6 +12,7 @@ from agentflow_proxy.store import Store
 
 DEFAULT_DASHBOARD_HOST = os.getenv("AGENTFLOW_DASHBOARD_HOST", "0.0.0.0")
 DEFAULT_DASHBOARD_PORT = int(os.getenv("AGENTFLOW_DASHBOARD_PORT", "4002"))
+DEFAULT_PROXY_HOST = os.getenv("AGENTFLOW_PROXY_HOST") or os.getenv("AGENTFLOW_HOST")
 DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", os.path.expanduser("~/.agentflow/agentflow.sqlite3"))
 PROVIDER = os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
 ANTHROPIC_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
@@ -43,6 +44,8 @@ def create_app() -> FastAPI:
         upstream=DEFAULT_UPSTREAM,
         limiter_status=limiter.status,
         limiter_config=_limiter_config(),
+        proxy_host=DEFAULT_PROXY_HOST,
+        dashboard_host=DEFAULT_DASHBOARD_HOST,
     )
 
 

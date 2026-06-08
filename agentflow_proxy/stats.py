@@ -5,7 +5,9 @@ import math
 import os
 import sqlite3
 from datetime import date, timedelta
+import ipaddress
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from agentflow_proxy.codex_app_policy import codex_app_surface_policy_state
 from agentflow_proxy.limiter import model_tier
@@ -47,6 +49,233 @@ def _json_obj(raw: Any) -> dict[str, Any]:
 
 def _copy_policy(value: Any) -> Any:
     return json.loads(json.dumps(value))
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _host_is_loopback(host: str | None) -> bool | None:
+    if not host:
+        return None
+    cleaned = str(host).strip().strip("[]").lower()
+    if not cleaned:
+        return None
+    if cleaned == "localhost":
+        return True
+    if cleaned in {"0.0.0.0", "::", "*"}:
+        return False
+    try:
+        return ipaddress.ip_address(cleaned).is_loopback
+    except ValueError:
+        return False
+
+
+def _redact_url(raw_url: str | None) -> str | None:
+    if not raw_url:
+        return None
+    parsed = urlparse(raw_url)
+    host = parsed.hostname or ""
+    netloc = host
+    if parsed.port is not None:
+        netloc = f"{host}:{parsed.port}"
+    redacted_query = urlencode(
+        [(key, "[redacted]") for key, _value in parse_qsl(parsed.query, keep_blank_values=True)]
+    ).replace("%5Bredacted%5D", "[redacted]")
+    return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, redacted_query, parsed.fragment))
+
+
+def _url_host_state(raw_url: str | None) -> dict[str, Any]:
+    if not raw_url:
+        return {
+            "configured": False,
+            "scheme": None,
+            "host": None,
+            "host_loopback": None,
+            "redacted_url": None,
+        }
+    parsed = urlparse(raw_url)
+    host = parsed.hostname
+    return {
+        "configured": True,
+        "scheme": parsed.scheme or None,
+        "host": host,
+        "host_loopback": _host_is_loopback(host),
+        "redacted_url": _redact_url(raw_url),
+    }
+
+
+def _db_path_class(default_db: str | None) -> str:
+    raw = os.getenv("AGENTFLOW_DATABASE_URL") or default_db or ""
+    lowered = raw.lower()
+    if "://" in raw:
+        if lowered.startswith("sqlite://"):
+            return "sqlite-url"
+        return "external-database-url"
+    expanded = os.path.abspath(os.path.expanduser(raw)) if raw else ""
+    home = os.path.abspath(os.path.expanduser("~"))
+    if not expanded:
+        return "unknown"
+    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
+        return "local-agentflow-home"
+    if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
+        return "local-temp"
+    return "local-path"
+
+
+def _policy_events_path_class() -> str:
+    raw = os.getenv("AGENTFLOW_POLICY_EVENTS_LOG", "~/.agentflow/policy_events.jsonl")
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    home = os.path.abspath(os.path.expanduser("~"))
+    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
+        return "local-agentflow-home"
+    if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
+        return "local-temp"
+    return "local-path"
+
+
+async def stats_safety(
+    *,
+    default_db: str,
+    proxy_host: str | None = None,
+    dashboard_host: str | None = None,
+    dashboard_read_only: bool = True,
+) -> dict[str, Any]:
+    recommendation_enabled = _env_bool("AGENTFLOW_RECOMMENDATION_ENABLED", False)
+    recommendation_url = os.getenv("AGENTFLOW_RECOMMENDATION_SERVER_URL", "http://127.0.0.1:4100").rstrip("/")
+    policy_bundle_url = os.getenv("AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL")
+    managed_auth_configured = bool(os.getenv("AGENTFLOW_MANAGED_API_KEY"))
+    log_bodies_enabled = _env_bool("AGENTFLOW_LOG_BODIES", False)
+    policy_events_enabled = _env_bool("AGENTFLOW_POLICY_EVENTS", True)
+    proxy_host_value = proxy_host or os.getenv("AGENTFLOW_PROXY_HOST") or os.getenv("AGENTFLOW_HOST")
+    proxy_loopback = _host_is_loopback(proxy_host_value)
+    dashboard_loopback = _host_is_loopback(dashboard_host) if dashboard_host else None
+    db_class = _db_path_class(default_db)
+    recommendation_state = _url_host_state(recommendation_url if recommendation_enabled or os.getenv("AGENTFLOW_RECOMMENDATION_SERVER_URL") else None)
+    policy_bundle_state = _url_host_state(policy_bundle_url)
+
+    warnings: list[dict[str, Any]] = []
+
+    def warn(code: str, severity: str, message: str) -> None:
+        warnings.append({"code": code, "severity": severity, "message": message})
+
+    if proxy_loopback is False:
+        warn(
+            "proxy-bind-non-loopback",
+            "critical",
+            "Provider proxy host is not loopback; provider credentials and request bodies can be exposed on the network.",
+        )
+    elif proxy_loopback is None:
+        warn(
+            "proxy-bind-unknown",
+            "info",
+            "Provider proxy host was not supplied to this dashboard process.",
+        )
+    if log_bodies_enabled:
+        warn(
+            "body-logging-enabled",
+            "critical",
+            "AGENTFLOW_LOG_BODIES is enabled; raw request and response bodies may be stored locally for debugging.",
+        )
+    if recommendation_enabled and not managed_auth_configured:
+        warn(
+            "managed-recommendation-unauthenticated",
+            "high",
+            "Managed recommendation and outcome feedback are enabled without a configured managed API key.",
+        )
+    if policy_bundle_url and not managed_auth_configured:
+        warn(
+            "managed-policy-fetch-unauthenticated",
+            "medium",
+            "Managed policy bundle URL is configured without a managed API key in the environment.",
+        )
+    if db_class == "external-database-url":
+        warn(
+            "external-database-url-configured",
+            "medium",
+            "AgentFlow is configured with a non-SQLite database URL; verify the database remains inside the intended privacy boundary.",
+        )
+    if not policy_events_enabled:
+        warn(
+            "policy-events-disabled",
+            "medium",
+            "Policy event logging is disabled, so local policy review/apply audit history will not be recorded.",
+        )
+    if not dashboard_read_only:
+        warn(
+            "dashboard-not-read-only",
+            "critical",
+            "Dashboard read-only mode is disabled.",
+        )
+
+    severity_rank = {"critical": 4, "high": 3, "medium": 2, "info": 1}
+    worst = "ok"
+    if warnings:
+        worst = max((row["severity"] for row in warnings), key=lambda value: severity_rank.get(value, 0))
+
+    return {
+        "schema": "agentflow.safety_privacy.v1",
+        "generated_at": utc_now(),
+        "status": "warning" if any(row["severity"] != "info" for row in warnings) else "ok",
+        "highest_severity": worst,
+        "summary": {
+            "warning_count": len([row for row in warnings if row["severity"] != "info"]),
+            "info_count": len([row for row in warnings if row["severity"] == "info"]),
+            "proxy_loopback": proxy_loopback,
+            "body_logging_enabled": log_bodies_enabled,
+            "managed_communication_enabled": bool(recommendation_enabled or policy_bundle_url),
+            "managed_auth_configured": managed_auth_configured,
+            "dashboard_read_only": bool(dashboard_read_only),
+            "db_path_class": db_class,
+            "policy_events_enabled": policy_events_enabled,
+        },
+        "checks": {
+            "provider_proxy": {
+                "host_configured": bool(proxy_host_value),
+                "host": proxy_host_value,
+                "loopback": proxy_loopback,
+            },
+            "dashboard": {
+                "read_only": bool(dashboard_read_only),
+                "host_configured": bool(dashboard_host),
+                "host": dashboard_host,
+                "loopback": dashboard_loopback,
+            },
+            "body_logging": {
+                "enabled": log_bodies_enabled,
+                "raw_request_bodies_included_in_payload": False,
+                "raw_response_bodies_included_in_payload": False,
+            },
+            "managed": {
+                "recommendations_enabled": recommendation_enabled,
+                "recommendation_server": recommendation_state,
+                "policy_bundle_recommendation": policy_bundle_state,
+                "auth_configured": managed_auth_configured,
+                "api_key_value_included": False,
+            },
+            "database": {
+                "path_class": db_class,
+                "raw_path_included": False,
+            },
+            "policy_events": {
+                "enabled": policy_events_enabled,
+                "path_class": _policy_events_path_class(),
+                "raw_path_included": False,
+            },
+        },
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_response_bodies_included": False,
+            "secrets_included": False,
+            "url_credentials_redacted": True,
+            "sensitive_query_values_redacted": True,
+        },
+        "warnings": warnings,
+    }
 
 
 async def stats_policies() -> dict[str, Any]:
@@ -4057,6 +4286,7 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tabs">
+  <button class="tab-btn" onclick="showTab('safety')">Safety</button>
   <button class="tab-btn active" onclick="showTab('activity')">Recent calls</button>
   <button class="tab-btn" onclick="showTab('usage')">Usage by app / engineer</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
@@ -4067,6 +4297,27 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
+</div>
+
+<div class="tab-panel" id="tab-safety">
+<div class="section">
+  <h2>Safety / privacy status</h2>
+  <table data-table-id="safety-summary" data-filter-label="Filter safety status">
+    <thead><tr>
+      <th data-sort-type="text">Check</th><th data-sort-type="text">Status</th><th data-sort-type="text">Details</th>
+    </tr></thead>
+    <tbody id="safety-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Configuration warnings</h2>
+  <table data-table-id="safety-warnings" data-filter-label="Filter safety warnings">
+    <thead><tr>
+      <th data-sort-type="text">Severity</th><th data-sort-type="text">Code</th><th data-sort-type="text">Warning</th>
+    </tr></thead>
+    <tbody id="safety-warnings-tbody"></tbody>
+  </table>
+</div>
 </div>
 
 <div class="tab-panel active" id="tab-activity">
@@ -4544,7 +4795,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions'];
+  const tabs=['safety','activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -4778,6 +5029,78 @@ async function refreshLimiter(){
       <td>${row.local_throttled?'<span class="badge err">local cooldown</span>':'<span class="badge routed">upstream</span>'}</td>
       <td class="model">${row.error||'—'}</td>
     </tr>`).join('')||'<tr><td colspan="8" style="color:#8b949e">No recent rate-limit responses</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+
+function boolBadge(value,goodLabel,badLabel){
+  if(value===true)return`<span class="badge hit">${esc(goodLabel||'yes')}</span>`;
+  if(value===false)return`<span class="badge err">${esc(badLabel||'no')}</span>`;
+  return'<span class="badge miss">unknown</span>';
+}
+function safetySeverityBadge(severity){
+  if(severity==='critical'||severity==='high')return'err';
+  if(severity==='medium')return'routed';
+  if(severity==='info')return'miss';
+  return'provider';
+}
+async function refreshSafety(){
+  try{
+    const r=await fetch('/agentflow/stats/safety');
+    const d=await r.json();
+    const s=d.summary||{};
+    const checks=d.checks||{};
+    const managed=checks.managed||{};
+    const recommendation=managed.recommendation_server||{};
+    const policyBundle=managed.policy_bundle_recommendation||{};
+    const bodyLogging=checks.body_logging||{};
+    const database=checks.database||{};
+    const policyEvents=checks.policy_events||{};
+    const providerProxy=checks.provider_proxy||{};
+    const dashboard=checks.dashboard||{};
+    const rows=[
+      {
+        check:'Provider proxy bind',
+        status:boolBadge(providerProxy.loopback,'loopback','non-loopback'),
+        detail:providerProxy.host_configured?`host ${providerProxy.host||'unknown'}`:'host not supplied'
+      },
+      {
+        check:'Body logging',
+        status:bodyLogging.enabled?'<span class="badge err">enabled</span>':'<span class="badge hit">off</span>',
+        detail:'payload includes no raw request or response bodies'
+      },
+      {
+        check:'Managed communication',
+        status:s.managed_communication_enabled?'<span class="badge routed">configured</span>':'<span class="badge hit">off</span>',
+        detail:`auth ${managed.auth_configured?'configured':'not configured'} · recommendation ${recommendation.configured?recommendation.redacted_url:'off'} · policy bundle ${policyBundle.configured?policyBundle.redacted_url:'off'}`
+      },
+      {
+        check:'Dashboard mode',
+        status:dashboard.read_only?'<span class="badge hit">read-only</span>':'<span class="badge err">mutable</span>',
+        detail:dashboard.host_configured?`dashboard host ${dashboard.host}`:'dashboard host not supplied'
+      },
+      {
+        check:'Database',
+        status:database.path_class==='external-database-url'?'<span class="badge routed">external URL</span>':'<span class="badge hit">local class</span>',
+        detail:`${database.path_class||'unknown'} · raw path omitted`
+      },
+      {
+        check:'Policy event log',
+        status:policyEvents.enabled?'<span class="badge hit">enabled</span>':'<span class="badge routed">disabled</span>',
+        detail:`${policyEvents.path_class||'unknown'} · raw path omitted`
+      }
+    ];
+    document.getElementById('safety-summary-tbody').innerHTML=rows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.check)}</span></td>
+      <td>${row.status}</td>
+      <td class="flags">${esc(row.detail)}</td>
+    </tr>`).join('');
+    const warnings=d.warnings||[];
+    document.getElementById('safety-warnings-tbody').innerHTML=warnings.map(row=>`<tr>
+      <td><span class="badge ${safetySeverityBadge(row.severity)}">${esc(row.severity)}</span></td>
+      <td class="model">${esc(row.code)}</td>
+      <td class="flags">${esc(row.message)}</td>
+    </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No safety or privacy warnings</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -5040,6 +5363,7 @@ async function refreshSessions(){
 }
 
 initDataTables();
+refreshSafety();
 refreshActivity();
 refreshUsage();
 refresh();
@@ -5048,9 +5372,11 @@ refreshCategories();
 refreshCache();
 refreshErrors();
 refreshLimiter();
+refreshSafety();
 refreshPolicies();
 refreshManaged();
 refreshSessions();
+setInterval(refreshSafety,30000);
 setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
 setInterval(refresh,5000);

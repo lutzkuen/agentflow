@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 HAS_RUNTIME_DEPS = all(
@@ -74,6 +75,7 @@ class DashboardImportTests(unittest.TestCase):
             policies = client.get("/agentflow/stats/policies")
             policy_events = client.get("/agentflow/stats/policy-events")
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
+            safety = client.get("/agentflow/stats/safety")
             admin_reload = client.post("/agentflow/admin/reload-policies")
             dashboard = client.get("/agentflow/dashboard")
 
@@ -89,6 +91,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(codex_effectiveness.status_code, 200)
             self.assertEqual(codex_effectiveness.json()["schema"], "agentflow.codex_app_effectiveness.v1")
             self.assertFalse(codex_effectiveness.json()["privacy"]["raw_prompts_included"])
+            self.assertEqual(safety.status_code, 200)
+            self.assertEqual(safety.json()["schema"], "agentflow.safety_privacy.v1")
+            self.assertFalse(safety.json()["privacy"]["raw_prompts_included"])
             policy_json = policies.json()
             self.assertEqual(policy_json["schema"], "agentflow.policy_state.v1")
             self.assertIn("summary", policy_json)
@@ -124,6 +129,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Policy reload summary", dashboard.text)
             self.assertIn("policy-summary-tbody", dashboard.text)
             self.assertIn("Recent policy events", dashboard.text)
+            self.assertIn("Safety / privacy status", dashboard.text)
+            self.assertIn("/agentflow/stats/safety", dashboard.text)
+            self.assertIn("safety-warnings-tbody", dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
@@ -132,6 +140,53 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_safety_stats_warn_and_redact_unsafe_configuration(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        env = {
+            "AGENTFLOW_LOG_BODIES": "1",
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "https://user:supersecret@managed.test/v1/recommendation?api_key=managedsecret&mode=dev",
+            "AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL": "https://managed.test/v1/policy-bundle-recommendation?token=policysecret",
+            "AGENTFLOW_MANAGED_API_KEY": "",
+            "AGENTFLOW_POLICY_EVENTS": "0",
+        }
+        try:
+            with patch.dict(os.environ, env, clear=False):
+                app = create_dashboard_app(
+                    store_obj=lambda: store,
+                    default_db=tmp.name,
+                    upstream="https://anthropic.test",
+                    limiter_status=lambda: [],
+                    limiter_config={},
+                    proxy_host="0.0.0.0",
+                    dashboard_host="0.0.0.0",
+                    full_stats_ttl_s=0,
+                )
+                client = TestClient(app)
+                response = client.get("/agentflow/stats/safety")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            warning_codes = {row["code"] for row in payload["warnings"]}
+            self.assertIn("proxy-bind-non-loopback", warning_codes)
+            self.assertIn("body-logging-enabled", warning_codes)
+            self.assertIn("managed-recommendation-unauthenticated", warning_codes)
+            self.assertIn("managed-policy-fetch-unauthenticated", warning_codes)
+            self.assertIn("policy-events-disabled", warning_codes)
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(payload["checks"]["managed"]["api_key_value_included"])
+            redacted = str(payload)
+            self.assertIn("[redacted]", redacted)
+            self.assertNotIn("supersecret", redacted)
+            self.assertNotIn("managedsecret", redacted)
+            self.assertNotIn("policysecret", redacted)
+            self.assertNotIn("user:supersecret", redacted)
+        finally:
+            store.conn.close()
+            tmp.close()
 
     def test_full_stats_endpoint_coalesces_concurrent_requests(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

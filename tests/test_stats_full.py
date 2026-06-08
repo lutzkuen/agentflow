@@ -2235,7 +2235,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
+        self.assertIn("const tabs=['safety','activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
 
     def test_dashboard_policy_panel_renders_codex_app_surface_state(self):
         html = stats_views.dashboard_html()
