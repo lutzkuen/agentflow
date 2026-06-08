@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -20,7 +21,12 @@ POLICY_BUNDLE_DIFF_SCHEMA = "agentflow.policy_bundle_diff.v1"
 POLICY_BUNDLE_REVIEW_SCHEMA = "agentflow.policy_bundle_review.v1"
 POLICY_BUNDLE_ROLLBACK_SCHEMA = "agentflow.policy_bundle_rollback.v1"
 POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
+POLICY_BUNDLE_PROVENANCE_SCHEMA = "agentflow.policy_bundle_provenance.v1"
+POLICY_BUNDLE_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.policy_bundle_provenance_verification.v1"
 POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
+MANAGED_POLICY_VERIFICATION_SECRET_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"
+MANAGED_POLICY_VERIFICATION_SECRETS_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS"
+MANAGED_POLICY_HMAC_SECRET_ENV = "AGENTFLOW_MANAGED_POLICY_HMAC_SECRET"
 POLICY_SOURCES = {
     "local-default",
     "local-manual",
@@ -84,7 +90,224 @@ def _add_error(errors: list[dict[str, str]], path: str, message: str) -> None:
     errors.append({"path": path, "message": message})
 
 
+def _add_validation_warning(warnings: list[dict[str, str]], path: str, message: str) -> None:
+    warnings.append({"path": path, "message": message})
+
+
 _BOOL_STRINGS = {"0", "1", "false", "true", "no", "yes", "off", "on"}
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _json_roundtrip(value: Any) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True))
+
+
+def _bundle_payload_for_hash(bundle: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_roundtrip(bundle)
+    if isinstance(payload, dict):
+        payload.pop("provenance", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def canonical_policy_bundle_hash(bundle: Any) -> str | None:
+    if not isinstance(bundle, dict):
+        return None
+    payload = _bundle_payload_for_hash(bundle)
+    return f"sha256:{hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()}"
+
+
+def _managed_source(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("managed-")
+
+
+def policy_bundle_is_managed(bundle: Any) -> bool:
+    if not isinstance(bundle, dict):
+        return False
+    recommendation = bundle.get("recommendation")
+    if isinstance(recommendation, dict) and recommendation:
+        return True
+    managed_optimizer = bundle.get("managed_optimizer")
+    if isinstance(managed_optimizer, dict) and _managed_source(managed_optimizer.get("policy_source")):
+        return True
+    policies = bundle.get("policies")
+    if not isinstance(policies, dict):
+        return False
+    for section in REQUIRED_POLICY_SECTIONS:
+        policy = policies.get(section)
+        if isinstance(policy, dict) and _managed_source(policy.get("policy_source")):
+            return True
+    return False
+
+
+def _verification_secrets() -> dict[str, str]:
+    secrets: dict[str, str] = {}
+    raw_mapping = os.getenv(MANAGED_POLICY_VERIFICATION_SECRETS_ENV)
+    if raw_mapping:
+        try:
+            parsed = json.loads(raw_mapping)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key, value in parsed.items():
+                if isinstance(key, str) and isinstance(value, str) and value:
+                    secrets[key] = value
+    single = os.getenv(MANAGED_POLICY_VERIFICATION_SECRET_ENV) or os.getenv(MANAGED_POLICY_HMAC_SECRET_ENV)
+    if single:
+        secrets.setdefault("", single)
+    return secrets
+
+
+def _secret_for_key_id(key_id: Any) -> tuple[str | None, bool]:
+    secrets = _verification_secrets()
+    if not secrets:
+        return None, False
+    if isinstance(key_id, str) and key_id in secrets:
+        return secrets[key_id], True
+    return secrets.get(""), True
+
+
+def _signature_payload(provenance: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_roundtrip(provenance)
+    if isinstance(payload, dict):
+        payload.pop("signature", None)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _hmac_signature(provenance: dict[str, Any], secret: str) -> str:
+    payload = _canonical_json(_signature_payload(provenance)).encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    return f"hmac-sha256:{digest}"
+
+
+def _normalize_signature(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not value:
+        return ""
+    if value.startswith("hmac-sha256:"):
+        return value
+    return f"hmac-sha256:{value}"
+
+
+def attach_policy_bundle_provenance(
+    bundle: dict[str, Any],
+    *,
+    secret: str,
+    issuer: str,
+    server_id: str,
+    key_id: str,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    signed = _json_roundtrip(bundle)
+    signed.pop("provenance", None)
+    provenance = {
+        "schema": POLICY_BUNDLE_PROVENANCE_SCHEMA,
+        "algorithm": "hmac-sha256",
+        "generated_at": generated_at or utc_now(),
+        "issuer": issuer,
+        "server_id": server_id,
+        "key_id": key_id,
+        "bundle_hash": canonical_policy_bundle_hash(signed),
+    }
+    provenance["signature"] = _hmac_signature(provenance, secret)
+    signed["provenance"] = provenance
+    return signed
+
+
+def verify_policy_bundle_provenance(bundle: Any) -> dict[str, Any]:
+    managed_bundle = policy_bundle_is_managed(bundle)
+    provenance = bundle.get("provenance") if isinstance(bundle, dict) else None
+    configured = bool(_verification_secrets())
+    result: dict[str, Any] = {
+        "schema": POLICY_BUNDLE_PROVENANCE_VERIFICATION_SCHEMA,
+        "status": "missing",
+        "ok": True,
+        "managed_bundle": managed_bundle,
+        "verification_configured": configured,
+        "signature_required": bool(managed_bundle and configured),
+        "algorithm": None,
+        "issuer": None,
+        "server_id": None,
+        "key_id": None,
+        "generated_at": None,
+        "bundle_hash": None,
+        "computed_bundle_hash": canonical_policy_bundle_hash(bundle),
+        "signature_present": False,
+        "errors": [],
+        "warnings": [],
+    }
+
+    if not configured:
+        result["status"] = "not-configured"
+        if managed_bundle:
+            result["warnings"].append({
+                "path": "$.provenance",
+                "message": f"managed policy bundle provenance was not verified because {MANAGED_POLICY_VERIFICATION_SECRET_ENV} is not configured",
+            })
+        return result
+
+    if not isinstance(provenance, dict):
+        if managed_bundle:
+            result["status"] = "missing"
+            result["ok"] = False
+            result["errors"].append({
+                "path": "$.provenance",
+                "message": "managed policy bundle is missing provenance required by configured verification",
+            })
+        else:
+            result["warnings"].append({
+                "path": "$.provenance",
+                "message": "local policy bundle is unsigned; provenance is not required for local-default/local-manual bundles",
+            })
+        return result
+
+    for key in ("algorithm", "issuer", "server_id", "key_id", "generated_at", "bundle_hash"):
+        result[key] = provenance.get(key)
+    result["signature_present"] = bool(provenance.get("signature"))
+
+    errors: list[dict[str, str]] = []
+    if provenance.get("schema") != POLICY_BUNDLE_PROVENANCE_SCHEMA:
+        _add_error(errors, "$.provenance.schema", f"expected {POLICY_BUNDLE_PROVENANCE_SCHEMA}")
+    if provenance.get("algorithm") != "hmac-sha256":
+        _add_error(errors, "$.provenance.algorithm", "expected hmac-sha256")
+    for key in ("issuer", "server_id", "key_id"):
+        if not isinstance(provenance.get(key), str) or not str(provenance.get(key)).strip():
+            _add_error(errors, f"$.provenance.{key}", "expected non-empty string")
+    if not _is_iso_datetime(provenance.get("generated_at")):
+        _add_error(errors, "$.provenance.generated_at", "expected ISO-8601 timestamp string")
+
+    expected_hash = canonical_policy_bundle_hash(bundle)
+    if provenance.get("bundle_hash") != expected_hash:
+        _add_error(errors, "$.provenance.bundle_hash", "bundle hash does not match canonical payload")
+
+    signature = _normalize_signature(provenance.get("signature"))
+    if not signature:
+        _add_error(errors, "$.provenance.signature", "expected HMAC signature")
+    secret, has_config = _secret_for_key_id(provenance.get("key_id"))
+    if not has_config:
+        result["status"] = "not-configured"
+        result["warnings"].append({
+            "path": "$.provenance.key_id",
+            "message": "managed policy bundle provenance could not be verified because no verification secret is configured",
+        })
+        return result
+    if secret is None:
+        _add_error(errors, "$.provenance.key_id", "no configured verification secret for key_id")
+    elif signature and not hmac.compare_digest(signature, _hmac_signature(provenance, secret)):
+        _add_error(errors, "$.provenance.signature", "HMAC signature does not match provenance metadata")
+
+    result["errors"] = errors
+    if errors:
+        result["status"] = "invalid"
+        result["ok"] = False
+    else:
+        result["status"] = "verified"
+        result["ok"] = True
+    return result
 
 
 def _is_boolish(value: Any) -> bool:
@@ -450,6 +673,7 @@ def _validate_policy_section_shape(section: str, value: dict[str, Any], errors: 
 def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
+    provenance = verify_policy_bundle_provenance(bundle)
 
     if not isinstance(bundle, dict):
         _add_error(errors, "$", "bundle must be a JSON object")
@@ -459,6 +683,7 @@ def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
             "bundle_schema": None,
             "errors": errors,
             "warnings": warnings,
+            "provenance": provenance,
         }
 
     bundle_schema = bundle.get("schema")
@@ -501,12 +726,24 @@ def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
                 _add_error(errors, f"$.policies.{section}.policy_source", "unknown policy source")
             _validate_policy_section_shape(section, value, errors)
 
+    for error in provenance.get("errors", []):
+        if isinstance(error, dict):
+            _add_error(errors, str(error.get("path") or "$.provenance"), str(error.get("message") or "provenance verification failed"))
+    for warning in provenance.get("warnings", []):
+        if isinstance(warning, dict):
+            _add_validation_warning(
+                warnings,
+                str(warning.get("path") or "$.provenance"),
+                str(warning.get("message") or "policy bundle provenance was not verified"),
+            )
+
     return {
         "schema": POLICY_BUNDLE_VALIDATION_SCHEMA,
         "ok": not errors,
         "bundle_schema": bundle_schema,
         "errors": errors,
         "warnings": warnings,
+        "provenance": provenance,
     }
 
 
@@ -1300,6 +1537,8 @@ def review_policy_bundle(
             "changes": diff.get("changes", []),
         },
     }
+    proposed_validation = diff.get("after_validation") if isinstance(diff.get("after_validation"), dict) else {}
+    result["provenance"] = proposed_validation.get("provenance")
     result["recommendation_health"] = summarize_recommendation_health(proposed)
     policies = proposed.get("policies") if isinstance(proposed, dict) and isinstance(proposed.get("policies"), dict) else {}
     if isinstance(policies.get("codex_app"), dict):
@@ -1384,6 +1623,7 @@ def apply_policy_bundle(
         "skipped_sections": [],
         "files": [],
         "validation": validation,
+        "provenance": validation.get("provenance"),
         "safety_warning_count": len(warnings),
         "safety_warnings": warnings,
         "error": None,

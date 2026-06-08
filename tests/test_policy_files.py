@@ -5,18 +5,31 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
 from agentflow_proxy.policy_bundle import (
+    MANAGED_POLICY_HMAC_SECRET_ENV,
+    MANAGED_POLICY_VERIFICATION_SECRET_ENV,
+    MANAGED_POLICY_VERIFICATION_SECRETS_ENV,
     apply_policy_bundle,
+    attach_policy_bundle_provenance,
     build_policy_bundle,
     compare_policy_bundles,
     review_policy_bundle,
     validate_policy_bundle,
 )
+
+
+def _provenance_env(secret: str | None = None) -> dict[str, str]:
+    return {
+        MANAGED_POLICY_VERIFICATION_SECRET_ENV: secret or "",
+        MANAGED_POLICY_VERIFICATION_SECRETS_ENV: "",
+        MANAGED_POLICY_HMAC_SECRET_ENV: "",
+    }
 
 
 class PolicyFileStatusTest(unittest.TestCase):
@@ -57,6 +70,113 @@ class PolicyFileStatusTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["provenance"]["status"], "not-configured")
+
+    def _managed_policy_bundle(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["recommendation"] = {
+            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "policy_source": "managed-recommended",
+            "candidate_ids": ["candidate-route-chat"],
+            "candidate_count": 1,
+        }
+        bundle["managed_optimizer"] = {
+            "enabled": False,
+            "policy_source": "managed-recommended",
+            "note": "Review-only managed recommendation.",
+        }
+        bundle["policies"]["routing"]["policy_source"] = "managed-recommended"
+        bundle["policies"]["routing"].setdefault("rules", []).append({
+            "conditions": {
+                "model_pattern": "sonnet",
+                "category": "chat",
+                "has_tools": False,
+            },
+            "action": {
+                "route_to": "claude-haiku-4-5-20251001",
+                "reason": "managed candidate for local review",
+            },
+            "managed_recommendation": {
+                "policy_source": "managed-recommended",
+                "candidate_id": "candidate-route-chat",
+                "confidence": 0.82,
+                "sample_count": 24,
+            },
+        })
+        return bundle
+
+    def test_managed_policy_bundle_signed_provenance_verifies_and_reviews(self):
+        secret = "test-managed-policy-secret"
+        current = asyncio.run(build_policy_bundle())
+        signed = attach_policy_bundle_provenance(
+            self._managed_policy_bundle(),
+            secret=secret,
+            issuer="agentflow-server",
+            server_id="managed-dev",
+            key_id="test-key",
+            generated_at="2026-06-08T12:00:00+00:00",
+        )
+
+        with patch.dict(os.environ, _provenance_env(secret), clear=False):
+            validation = validate_policy_bundle(signed)
+            review = review_policy_bundle(current, signed, include_impact=False)
+
+        self.assertTrue(validation["ok"])
+        self.assertEqual(validation["provenance"]["status"], "verified")
+        self.assertTrue(validation["provenance"]["managed_bundle"])
+        self.assertEqual(validation["provenance"]["issuer"], "agentflow-server")
+        self.assertTrue(review["ok"])
+        self.assertEqual(review["provenance"]["status"], "verified")
+
+    def test_managed_policy_bundle_tampered_after_signing_is_rejected_before_apply(self):
+        secret = "test-managed-policy-secret"
+        signed = attach_policy_bundle_provenance(
+            self._managed_policy_bundle(),
+            secret=secret,
+            issuer="agentflow-server",
+            server_id="managed-dev",
+            key_id="test-key",
+            generated_at="2026-06-08T12:00:00+00:00",
+        )
+        signed["policies"]["routing"]["rules"][-1]["action"]["route_to"] = "claude-opus-4-5"
+
+        with TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, _provenance_env(secret), clear=False):
+                result = apply_policy_bundle(signed, config_dir=tmp, dry_run=False, allow_risky=True)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["type"], "validation_failed")
+            self.assertEqual(result["provenance"]["status"], "invalid")
+            self.assertIn("$.provenance.bundle_hash", {error["path"] for error in result["validation"]["errors"]})
+            self.assertFalse(list(Path(tmp).glob("*.yaml")))
+
+    def test_managed_policy_bundle_missing_provenance_is_rejected_when_verification_configured(self):
+        with patch.dict(os.environ, _provenance_env("test-managed-policy-secret"), clear=False):
+            result = validate_policy_bundle(self._managed_policy_bundle())
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["provenance"]["status"], "missing")
+        self.assertIn("$.provenance", {error["path"] for error in result["errors"]})
+
+    def test_managed_policy_bundle_reports_not_configured_without_secret(self):
+        with patch.dict(os.environ, _provenance_env(), clear=False):
+            result = validate_policy_bundle(self._managed_policy_bundle())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provenance"]["status"], "not-configured")
+        self.assertTrue(result["provenance"]["managed_bundle"])
+        self.assertTrue(result["warnings"])
+
+    def test_local_unsigned_policy_bundle_remains_valid_with_verification_secret(self):
+        bundle = asyncio.run(build_policy_bundle())
+
+        with patch.dict(os.environ, _provenance_env("test-managed-policy-secret"), clear=False):
+            result = validate_policy_bundle(bundle)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provenance"]["status"], "missing")
+        self.assertFalse(result["provenance"]["managed_bundle"])
         self.assertEqual(result["errors"], [])
 
     def test_policy_bundle_validation_rejects_missing_policy_section(self):

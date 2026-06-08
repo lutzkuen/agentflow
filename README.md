@@ -173,6 +173,10 @@ Managed fetch/review is disabled unless a recommendation URL is supplied, and au
 managed servers should use `AGENTFLOW_MANAGED_API_KEY` or `--api-key-env` rather than putting
 secrets in command history. The command validates and reviews the bundle only; use
 `agentflow-policy-apply --dry-run` separately before writing local YAML files.
+If `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET` or
+`AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS` is configured, managed policy bundles must
+include matching HMAC provenance before `agentflow-policy-apply` writes local YAML files.
+Unsigned local-default/local-manual bundles remain valid for offline use.
 Managed outcome feedback retries are also disabled unless `AGENTFLOW_RECOMMENDATION_ENABLED=1`.
 Status and flush output is metadata-only; queued feedback payload JSON is not printed.
 

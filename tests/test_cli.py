@@ -37,12 +37,27 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        self._old_provenance_env = {
+            key: os.environ.get(key)
+            for key in (
+                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET",
+                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS",
+                "AGENTFLOW_MANAGED_POLICY_HMAC_SECRET",
+            )
+        }
+        for key in self._old_provenance_env:
+            os.environ[key] = ""
 
     def tearDown(self):
         if self.old_event_log is None:
             os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
         else:
             os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+        for key, value in self._old_provenance_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         self.tmp.cleanup()
 
     def test_default_policy_reload_url_uses_agentflow_port(self):
@@ -666,6 +681,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["validation"]["ok"])
         self.assertTrue(payload["review"]["ok"])
+        self.assertEqual(payload["provenance"]["status"], "not-configured")
+        self.assertEqual(payload["review"]["provenance"]["status"], "not-configured")
         self.assertFalse(payload["applied"])
         self.assertFalse(payload["wrote_local_files"])
         self.assertEqual(payload["recommendation"]["candidate_ids"], ["candidate-route-chat"])
