@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 import agentflow_proxy.router as router_module
+from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
 
@@ -73,6 +74,63 @@ rules:
         self.assertFalse(status["loaded"]["exists"])
         self.assertFalse(status["current"]["exists"])
         self.assertFalse(status["reload_required"])
+
+    def test_reload_policy_modules_applies_changed_routing_file(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      has_tools: false
+    action:
+      route_to: haiku
+      reason: initial reload test
+""",
+                encoding="utf-8",
+            )
+
+            old_env = os.environ.get("AGENTFLOW_ROUTING_RULES")
+            os.environ["AGENTFLOW_ROUTING_RULES"] = str(rules_path)
+            try:
+                first = asyncio.run(reload_policy_modules())
+                self.assertEqual(first["schema"], "agentflow.policy_reload.v1")
+                self.assertFalse(first["policies"]["routing"]["file"]["reload_required"])
+
+                body = {
+                    "model": router_module.SONNET_DEFAULT,
+                    "messages": [{"role": "user", "content": "Say ok."}],
+                }
+                routed, meta = router_module.route_model(body)
+                self.assertEqual(routed, router_module.HAIKU_DEFAULT)
+                self.assertEqual(meta["reason"], "initial reload test")
+
+                rules_path.write_text(
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      has_tools: false
+    action:
+      route_to: haiku
+      reason: changed reload test
+""",
+                    encoding="utf-8",
+                )
+                stale = asyncio.run(stats.stats_policies())
+                self.assertTrue(stale["routing"]["file"]["reload_required"])
+
+                changed = asyncio.run(reload_policy_modules())
+                self.assertFalse(changed["policies"]["routing"]["file"]["reload_required"])
+                _routed, changed_meta = router_module.route_model(body)
+                self.assertEqual(changed_meta["reason"], "changed reload test")
+            finally:
+                if old_env is None:
+                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                else:
+                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_env
+                asyncio.run(reload_policy_modules())
 
 
 if __name__ == "__main__":

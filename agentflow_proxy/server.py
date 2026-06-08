@@ -148,6 +148,7 @@ def _log_recent_session_spending_summary(event: str, hours: int = 24, limit: int
 
 from agentflow_proxy.store import Store, utc_now
 from agentflow_proxy import anthropic_proxy, openai_proxy, provider_handlers
+from agentflow_proxy.admin import create_admin_router
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.dashboard_app import create_dashboard_router
 from agentflow_proxy.pricing import estimate_cost
@@ -197,6 +198,15 @@ def _dashboard_limiter_config() -> dict[str, Any]:
     }
 
 
+def _refresh_policy_module_bindings() -> None:
+    from agentflow_proxy import router
+
+    global HAIKU_DEFAULT, SONNET_DEFAULT, OPUS_DEFAULT
+    HAIKU_DEFAULT = router.HAIKU_DEFAULT
+    SONNET_DEFAULT = router.SONNET_DEFAULT
+    OPUS_DEFAULT = router.OPUS_DEFAULT
+
+
 app.include_router(
     create_dashboard_router(
         store_obj=lambda: store,
@@ -205,6 +215,7 @@ app.include_router(
         limiter_config=_dashboard_limiter_config(),
     )
 )
+app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindings))
 
 
 @app.on_event("startup")

@@ -57,6 +57,7 @@ class DashboardImportTests(unittest.TestCase):
             health = client.get("/health")
             stats = client.get("/agentflow/stats")
             policies = client.get("/agentflow/stats/policies")
+            admin_reload = client.post("/agentflow/admin/reload-policies")
             dashboard = client.get("/agentflow/dashboard")
 
             self.assertEqual(health.status_code, 200)
@@ -87,6 +88,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("rule_path", policy_json["routing_experiments"])
             self.assertIn("file", policy_json["routing_experiments"])
             self.assertIn("reload_required", policy_json["routing_experiments"]["file"])
+            self.assertEqual(admin_reload.status_code, 404)
             self.assertEqual(dashboard.status_code, 200)
             self.assertIn("AgentFlow", dashboard.text)
             self.assertIn("Policies", dashboard.text)
