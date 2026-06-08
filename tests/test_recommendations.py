@@ -3,16 +3,21 @@ import os
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from agentflow_proxy import recommendations
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, body=None, text=""):
+    def __init__(self, status_code=200, body=None, text="", json_error=None):
         self.status_code = status_code
         self._body = body if body is not None else {}
         self.text = text
+        self.json_error = json_error
 
     def json(self):
+        if self.json_error is not None:
+            raise self.json_error
         return self._body
 
 
@@ -22,6 +27,7 @@ class FakeAsyncClient:
     last_url = None
     last_json = None
     last_timeout = None
+    last_headers = None
 
     def __init__(self, timeout):
         self.__class__.last_timeout = timeout
@@ -32,16 +38,18 @@ class FakeAsyncClient:
     async def __aexit__(self, exc_type, exc, tb):
         return None
 
-    async def post(self, url, json):
+    async def post(self, url, json, headers=None):
         self.__class__.last_url = url
         self.__class__.last_json = json
+        self.__class__.last_headers = headers
         if self.__class__.error is not None:
             raise self.__class__.error
         return self.__class__.response
 
-    async def patch(self, url, json):
+    async def patch(self, url, json, headers=None):
         self.__class__.last_url = url
         self.__class__.last_json = json
+        self.__class__.last_headers = headers
         if self.__class__.error is not None:
             raise self.__class__.error
         return self.__class__.response
@@ -52,6 +60,8 @@ class RecommendationTest(unittest.TestCase):
         "AGENTFLOW_RECOMMENDATION_ENABLED",
         "AGENTFLOW_RECOMMENDATION_SERVER_URL",
         "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+        "AGENTFLOW_RECOMMENDATION_FAILURE_MODE",
+        "AGENTFLOW_MANAGED_API_KEY",
     )
 
     def setUp(self):
@@ -63,6 +73,7 @@ class RecommendationTest(unittest.TestCase):
         FakeAsyncClient.last_url = None
         FakeAsyncClient.last_json = None
         FakeAsyncClient.last_timeout = None
+        FakeAsyncClient.last_headers = None
 
     def tearDown(self):
         for key, value in self.saved_env.items():
@@ -93,13 +104,14 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["fallback"], "local-policy")
         self.assertIsNone(FakeAsyncClient.last_url)
 
-    def test_success_path_posts_feature_unit_and_applies_target_model(self):
+    def test_success_path_posts_feature_unit_with_auth_and_applies_target_model(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
         os.environ["AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.25"
+        os.environ["AGENTFLOW_MANAGED_API_KEY"] = "managed-secret"
         FakeAsyncClient.response = FakeResponse(body={
             "target_model": "claude-haiku-4-5-20251001",
-            "replacement_prompt": "raw replacement text should not be stored",
+            "replacement_prompt": None,
             "confidence": 0.82,
             "policy_id": "policy-1",
             "reason": "route cheaper",
@@ -139,20 +151,133 @@ class RecommendationTest(unittest.TestCase):
 
         self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/recommendation")
         self.assertEqual(FakeAsyncClient.last_timeout, 0.25)
+        self.assertEqual(FakeAsyncClient.last_headers["authorization"], "Bearer managed-secret")
         self.assertEqual(FakeAsyncClient.last_json["replayability_level"], "features_only")
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
         self.assertEqual(meta["status"], "received")
+        self.assertTrue(meta["auth_configured"])
+        self.assertFalse(meta["api_key_value_included"])
         self.assertEqual(meta["policy_source"], "managed-recommended")
         self.assertEqual(meta["optimization_unit_id"], 42)
-        self.assertTrue(meta["replacement_prompt_present"])
-        self.assertIn("replacement_prompt_sha256", meta)
-        self.assertNotIn("raw replacement text", str(meta))
+        self.assertFalse(meta["replacement_prompt_present"])
         self.assertTrue(applied["applied"])
         self.assertTrue(applied["changed_model"])
-        self.assertFalse(applied["replacement_prompt_applied"])
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
         self.assertEqual(routing_meta["final_policy_source"], "managed-recommended")
         self.assertEqual(routing_meta["managed_policy_id"], "policy-1")
+
+    def test_valid_noop_recommendation_records_received_without_changing_model(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        FakeAsyncClient.response = FakeResponse(body={
+            "target_model": "claude-sonnet-4-6",
+            "replacement_prompt": None,
+            "confidence": 0.9,
+            "policy_id": "baseline-pass-through",
+            "reason": "local model is already safest",
+            "optimization_unit_id": 123,
+        })
+        routing_meta = {
+            "requested_model": "claude-sonnet-4-6",
+            "routed_model": "claude-sonnet-4-6",
+            "reason": "keep requested model",
+            "policy_source": "local-default",
+        }
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
+        body = {"model": "claude-sonnet-4-6"}
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=meta,
+        )
+
+        self.assertEqual(meta["status"], "received")
+        self.assertTrue(applied["applied"])
+        self.assertFalse(applied["changed_model"])
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+
+    def test_empty_server_url_is_not_configured_and_does_not_call_network(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = ""
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
+
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "server-url-not-configured")
+        self.assertEqual(meta["fallback"], "local-policy")
+        self.assertIsNone(FakeAsyncClient.last_url)
+
+    def test_timeout_records_bounded_fallback_metadata(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.1"
+        FakeAsyncClient.error = httpx.TimeoutException("too slow")
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
+
+        self.assertEqual(FakeAsyncClient.last_timeout, 0.1)
+        self.assertEqual(meta["status"], "error")
+        self.assertEqual(meta["reason"], "timeout")
+        self.assertEqual(meta["fallback"], "local-policy")
+
+    def test_unreachable_records_fallback_metadata(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        FakeAsyncClient.error = httpx.ConnectError("connection refused")
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
+
+        self.assertEqual(meta["status"], "error")
+        self.assertEqual(meta["reason"], "unreachable")
+        self.assertEqual(meta["fallback"], "local-policy")
+
+    def test_invalid_json_and_schema_record_fallback_metadata(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        FakeAsyncClient.response = FakeResponse(json_error=ValueError("not json"))
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            invalid_json = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
+
+        FakeAsyncClient.response = FakeResponse(body={"target_model": "claude-haiku-4-5-20251001"})
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            invalid_schema = asyncio.run(recommendations.fetch_recommendation({"requested_model": "claude-sonnet-4-6"}))
+
+        self.assertEqual(invalid_json["status"], "invalid")
+        self.assertEqual(invalid_json["reason"], "invalid-json")
+        self.assertEqual(invalid_json["fallback"], "local-policy")
+        self.assertEqual(invalid_schema["status"], "invalid")
+        self.assertEqual(invalid_schema["reason"], "invalid-schema")
+        self.assertIn("schema_error", invalid_schema)
+        self.assertEqual(invalid_schema["fallback"], "local-policy")
+
+    def test_unsafe_replacement_prompt_is_not_applied_and_raw_text_is_not_stored(self):
+        routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}
+        body = {"model": "claude-sonnet-4-6"}
+        recommendation_meta = {
+            "status": "received",
+            "target_model": "claude-haiku-4-5-20251001",
+            "confidence": 0.8,
+            "policy_id": "unsafe-prompt",
+            "reason": "replace prompt",
+            "replacement_prompt_present": True,
+            "replacement_prompt_sha256": "hash-only",
+        }
+
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=recommendation_meta,
+        )
+
+        self.assertFalse(applied["applied"])
+        self.assertEqual(applied["apply_reason"], "unsafe-replacement-prompt")
+        self.assertEqual(applied["fallback"], "local-policy")
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+        self.assertNotIn("raw replacement", str(applied))
 
     def test_server_failure_records_metadata_and_keeps_local_model(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
@@ -173,6 +298,26 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["reason"], "request-failed")
         self.assertEqual(meta["fallback"], "local-policy")
         self.assertFalse(applied["applied"])
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+
+    def test_unsupported_target_model_is_not_applied(self):
+        routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}
+        body = {"model": "claude-sonnet-4-6"}
+
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta={
+                "status": "received",
+                "target_model": "claude-mystery-20260608",
+                "policy_id": "bad-policy",
+                "reason": "unknown model",
+            },
+        )
+
+        self.assertFalse(applied["applied"])
+        self.assertEqual(applied["apply_reason"], "unsupported-target-model")
         self.assertEqual(body["model"], "claude-sonnet-4-6")
 
     def test_outcome_feedback_posts_sanitized_metadata_to_unit_endpoint(self):

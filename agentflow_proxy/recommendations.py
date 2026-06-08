@@ -18,6 +18,11 @@ from agentflow_proxy.store import stable_json, utc_now
 
 RECOMMENDATION_PATH = "/v1/recommendation"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
+MANAGED_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
+RECOMMENDATION_SERVER_URL_ENV = "AGENTFLOW_RECOMMENDATION_SERVER_URL"
+RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
+RECOMMENDATION_FAILURE_MODE_ENV = "AGENTFLOW_RECOMMENDATION_FAILURE_MODE"
+DEFAULT_RECOMMENDATION_SERVER_URL = "http://127.0.0.1:4100"
 
 RAW_FEATURE_KEYS = {
     "arguments",
@@ -60,11 +65,42 @@ def recommendations_enabled() -> bool:
 
 
 def recommendation_server_url() -> str:
-    return os.getenv("AGENTFLOW_RECOMMENDATION_SERVER_URL", "http://127.0.0.1:4100").rstrip("/")
+    raw = os.getenv(RECOMMENDATION_SERVER_URL_ENV)
+    if raw is None:
+        raw = DEFAULT_RECOMMENDATION_SERVER_URL
+    return raw.strip().rstrip("/")
+
+
+def recommendation_server_configured() -> bool:
+    return bool(recommendation_server_url())
 
 
 def recommendation_timeout_seconds() -> float:
-    return float(os.getenv("AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS", "1.5"))
+    try:
+        return max(0.05, float(os.getenv(RECOMMENDATION_TIMEOUT_ENV, "1.5")))
+    except ValueError:
+        return 1.5
+
+
+def recommendation_failure_mode() -> str:
+    mode = os.getenv(RECOMMENDATION_FAILURE_MODE_ENV, "fallback-local").strip().lower()
+    return mode if mode in {"fallback-local"} else "fallback-local"
+
+
+def managed_auth_configured() -> bool:
+    return bool(os.getenv(MANAGED_API_KEY_ENV))
+
+
+def _managed_headers() -> dict[str, str]:
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-agentflow-local-fallback": "local-policy",
+    }
+    api_key = os.getenv(MANAGED_API_KEY_ENV)
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def outcome_feedback_queue_max_attempts() -> int:
@@ -240,6 +276,10 @@ def _base_meta() -> dict[str, Any]:
         "enabled": recommendations_enabled(),
         "server_url": recommendation_server_url(),
         "endpoint": RECOMMENDATION_PATH,
+        "timeout_seconds": recommendation_timeout_seconds(),
+        "failure_mode": recommendation_failure_mode(),
+        "auth_configured": managed_auth_configured(),
+        "api_key_value_included": False,
         "policy_source": "local-default",
     }
 
@@ -295,10 +335,23 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
         return disabled_recommendation_meta()
 
     meta = _base_meta()
+    if not recommendation_server_configured():
+        meta.update({
+            "status": "skipped",
+            "reason": "server-url-not-configured",
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
+
     started = time.time()
     try:
         async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
-            response = await client.post(recommendation_server_url() + RECOMMENDATION_PATH, json=unit)
+            response = await client.post(
+                recommendation_server_url() + RECOMMENDATION_PATH,
+                json=unit,
+                headers=_managed_headers(),
+            )
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
         if response.status_code >= 400:
@@ -325,7 +378,8 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
         if recommendation is None:
             meta.update({
                 "status": "invalid",
-                "reason": error or "invalid-response",
+                "reason": "invalid-schema",
+                "schema_error": error or "invalid-response",
                 "fallback": "local-policy",
                 "applied": False,
             })
@@ -334,6 +388,26 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
         meta.update({
             "status": "received",
             "policy_source": "managed-recommended",
+        })
+        return meta
+    except httpx.TimeoutException as exc:
+        meta.update({
+            "latency_ms": int((time.time() - started) * 1000),
+            "status": "error",
+            "reason": "timeout",
+            "error": repr(exc),
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
+    except httpx.NetworkError as exc:
+        meta.update({
+            "latency_ms": int((time.time() - started) * 1000),
+            "status": "error",
+            "reason": "unreachable",
+            "error": repr(exc),
+            "fallback": "local-policy",
+            "applied": False,
         })
         return meta
     except Exception as exc:
@@ -357,6 +431,15 @@ def _provider_compatible(provider: str, target_model: str) -> bool:
     return False
 
 
+def _supported_target_model(provider: str, target_model: str) -> bool:
+    if not _provider_compatible(provider, target_model):
+        return False
+    target_l = target_model.lower()
+    if provider == "anthropic":
+        return any(tier in target_l for tier in ("haiku", "sonnet", "opus"))
+    return bool(target_l)
+
+
 def apply_recommendation_to_body(
     *,
     provider: str,
@@ -377,6 +460,17 @@ def apply_recommendation_to_body(
         return meta
     if not _provider_compatible(provider, target_model):
         meta.update({"applied": False, "apply_reason": "provider-mismatch", "fallback": "local-policy"})
+        return meta
+    if not _supported_target_model(provider, target_model):
+        meta.update({"applied": False, "apply_reason": "unsupported-target-model", "fallback": "local-policy"})
+        return meta
+    if meta.get("replacement_prompt_present"):
+        meta.update({
+            "applied": False,
+            "apply_reason": "unsafe-replacement-prompt",
+            "fallback": "local-policy",
+            "replacement_prompt_applied": False,
+        })
         return meta
     if target_model != current_model and "thinking request" in str(routing_meta.get("reason") or ""):
         meta.update({"applied": False, "apply_reason": "local-thinking-safety-guard", "fallback": "local-policy"})
@@ -629,6 +723,10 @@ def disabled_outcome_feedback_meta() -> dict[str, Any]:
         "enabled": recommendations_enabled(),
         "server_url": recommendation_server_url(),
         "endpoint": OUTCOME_PATH_TEMPLATE,
+        "timeout_seconds": recommendation_timeout_seconds(),
+        "failure_mode": recommendation_failure_mode(),
+        "auth_configured": managed_auth_configured(),
+        "api_key_value_included": False,
         "status": "skipped",
         "reason": "disabled",
     }
@@ -643,17 +741,27 @@ def _outcome_target(recommendation_meta: dict[str, Any]) -> tuple[int | None, st
 
 
 async def _send_outcome_payload(*, endpoint: str, payload: dict[str, Any], unit_id: int) -> dict[str, Any]:
-    url = recommendation_server_url() + endpoint
     meta: dict[str, Any] = {
         "enabled": True,
         "server_url": recommendation_server_url(),
         "endpoint": endpoint,
         "optimization_unit_id": unit_id,
+        "timeout_seconds": recommendation_timeout_seconds(),
+        "failure_mode": recommendation_failure_mode(),
+        "auth_configured": managed_auth_configured(),
+        "api_key_value_included": False,
     }
+    if not recommendation_server_configured():
+        meta.update({
+            "status": "skipped",
+            "reason": "server-url-not-configured",
+        })
+        return meta
+    url = recommendation_server_url() + endpoint
     started = time.time()
     try:
         async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
-            response = await client.patch(url, json=payload)
+            response = await client.patch(url, json=payload, headers=_managed_headers())
         meta["latency_ms"] = int((time.time() - started) * 1000)
         meta["status_code"] = response.status_code
         if response.status_code >= 400:

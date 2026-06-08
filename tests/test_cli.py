@@ -27,8 +27,8 @@ class ManagedFeedbackFlushClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def patch(self, url, json):
-        self.calls.append({"url": url, "json": json, "timeout": self.timeout})
+    async def patch(self, url, json, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
         return httpx.Response(self.status_code, text=self.text)
 
 

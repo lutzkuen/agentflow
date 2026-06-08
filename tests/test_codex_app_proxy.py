@@ -49,8 +49,8 @@ class ManagedCodexClient:
     async def __aexit__(self, exc_type, exc, tb):
         return None
 
-    async def post(self, url, json):
-        self.__class__.calls.append({"method": "post", "url": url, "json": json})
+    async def post(self, url, json, headers=None):
+        self.__class__.calls.append({"method": "post", "url": url, "json": json, "headers": dict(headers or {})})
         return ManagedResponse(body={
             "target_model": "gpt-5-codex",
             "confidence": 0.7,
@@ -59,8 +59,8 @@ class ManagedCodexClient:
             "optimization_unit_id": 77,
         })
 
-    async def patch(self, url, json):
-        self.__class__.calls.append({"method": "patch", "url": url, "json": json})
+    async def patch(self, url, json, headers=None):
+        self.__class__.calls.append({"method": "patch", "url": url, "json": json, "headers": dict(headers or {})})
         if self.__class__.feedback_error is not None:
             raise self.__class__.feedback_error
         return ManagedResponse(status_code=self.__class__.feedback_status_code, body={"ok": True}, text="feedback failed")

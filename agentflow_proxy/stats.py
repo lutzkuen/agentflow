@@ -333,10 +333,19 @@ async def stats_safety(
     dashboard_host: str | None = None,
     dashboard_read_only: bool = True,
 ) -> dict[str, Any]:
-    recommendation_enabled = _env_bool("AGENTFLOW_RECOMMENDATION_ENABLED", False)
-    recommendation_url = os.getenv("AGENTFLOW_RECOMMENDATION_SERVER_URL", "http://127.0.0.1:4100").rstrip("/")
+    from agentflow_proxy.recommendations import (
+        managed_auth_configured,
+        recommendation_failure_mode,
+        recommendation_server_configured,
+        recommendation_server_url,
+        recommendation_timeout_seconds,
+        recommendations_enabled,
+    )
+
+    recommendation_enabled = recommendations_enabled()
+    recommendation_url = recommendation_server_url()
     policy_bundle_url = os.getenv("AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL")
-    managed_auth_configured = bool(os.getenv("AGENTFLOW_MANAGED_API_KEY"))
+    auth_configured = managed_auth_configured()
     log_bodies_enabled = _env_bool("AGENTFLOW_LOG_BODIES", False)
     policy_events_enabled = _env_bool("AGENTFLOW_POLICY_EVENTS", True)
     proxy_host_value = proxy_host or os.getenv("AGENTFLOW_PROXY_HOST") or os.getenv("AGENTFLOW_HOST")
@@ -371,11 +380,17 @@ async def stats_safety(
             "critical",
             "AGENTFLOW_LOG_BODIES is enabled; raw request and response bodies may be stored locally for debugging.",
         )
-    if recommendation_enabled and not managed_auth_configured:
+    if recommendation_enabled and not auth_configured:
         warn(
             "managed-recommendation-unauthenticated",
             "high",
             "Managed recommendation and outcome feedback are enabled without a configured managed API key.",
+        )
+    if recommendation_enabled and not recommendation_server_configured():
+        warn(
+            "managed-recommendation-server-unconfigured",
+            "medium",
+            "Managed recommendations are enabled but no recommendation server URL is configured; local policy will remain authoritative.",
         )
     if _as_int(feedback_summary.get("due")) > 0:
         warn(
@@ -395,7 +410,7 @@ async def stats_safety(
             "high",
             "Managed outcome feedback rows were dropped after reaching the retry limit.",
         )
-    if policy_bundle_url and not managed_auth_configured:
+    if policy_bundle_url and not auth_configured:
         warn(
             "managed-policy-fetch-unauthenticated",
             "medium",
@@ -436,7 +451,7 @@ async def stats_safety(
             "proxy_loopback": proxy_loopback,
             "body_logging_enabled": log_bodies_enabled,
             "managed_communication_enabled": bool(recommendation_enabled or policy_bundle_url),
-            "managed_auth_configured": managed_auth_configured,
+            "managed_auth_configured": auth_configured,
             "managed_feedback_due": _as_int(feedback_summary.get("due")),
             "managed_feedback_retryable_error": _as_int(feedback_summary.get("retryable_error")),
             "managed_feedback_dropped_after_limit": _as_int(feedback_summary.get("dropped_after_limit")),
@@ -463,9 +478,13 @@ async def stats_safety(
             },
             "managed": {
                 "recommendations_enabled": recommendation_enabled,
+                "mode": "managed-recommendation-bridge" if recommendation_enabled else "local-only",
                 "recommendation_server": recommendation_state,
+                "recommendation_server_configured": recommendation_server_configured(),
+                "recommendation_timeout_seconds": recommendation_timeout_seconds(),
+                "recommendation_failure_mode": recommendation_failure_mode(),
                 "policy_bundle_recommendation": policy_bundle_state,
-                "auth_configured": managed_auth_configured,
+                "auth_configured": auth_configured,
                 "api_key_value_included": False,
                 "feedback_queue": feedback_queue,
             },
@@ -1292,7 +1311,14 @@ def _managed_breakdown(grouped: dict[str, int]) -> list[dict[str, Any]]:
 
 
 async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dict[str, Any]:
-    from agentflow_proxy.recommendations import recommendation_server_url, recommendations_enabled
+    from agentflow_proxy.recommendations import (
+        managed_auth_configured,
+        recommendation_failure_mode,
+        recommendation_server_configured,
+        recommendation_server_url,
+        recommendation_timeout_seconds,
+        recommendations_enabled,
+    )
     from agentflow_proxy.policy_events import recent_policy_events
 
     conn = store_obj.conn
@@ -1471,7 +1497,13 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         "limit": capped_limit,
         "current_config": {
             "enabled": recommendations_enabled(),
+            "mode": "managed-recommendation-bridge" if recommendations_enabled() else "local-only",
             "server_url": recommendation_server_url(),
+            "server_configured": recommendation_server_configured(),
+            "timeout_seconds": recommendation_timeout_seconds(),
+            "failure_mode": recommendation_failure_mode(),
+            "auth_configured": managed_auth_configured(),
+            "api_key_value_included": False,
             "offline_state": (
                 "managed recommendations disabled; local policy remains authoritative"
                 if not recommendations_enabled()

@@ -548,6 +548,12 @@ class StatsFullTest(unittest.TestCase):
             self.assertEqual(stats_response.status_code, 200)
             payload = stats_response.json()
             self.assertEqual(payload["schema"], "agentflow.managed_recommendations.v1")
+            self.assertEqual(payload["current_config"]["mode"], "local-only")
+            self.assertFalse(payload["current_config"]["enabled"])
+            self.assertEqual(
+                payload["current_config"]["offline_state"],
+                "managed recommendations disabled; local policy remains authoritative",
+            )
             self.assertEqual(
                 payload["recommendation_health"]["latest_fetch_review"]["rows"][0]["candidate_id"],
                 "candidate-route-chat",

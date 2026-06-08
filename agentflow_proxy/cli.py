@@ -1076,10 +1076,13 @@ def _managed_feedback_config() -> dict[str, Any]:
     return {
         "enabled": recommendations.recommendations_enabled(),
         "server_url": _redact_url(recommendations.recommendation_server_url()),
+        "server_configured": recommendations.recommendation_server_configured(),
         "timeout_seconds": recommendations.recommendation_timeout_seconds(),
+        "failure_mode": recommendations.recommendation_failure_mode(),
         "queue_max_attempts": recommendations.outcome_feedback_queue_max_attempts(),
         "queue_retry_delay_seconds": recommendations.outcome_feedback_queue_retry_delay_seconds(),
-        "auth_configured": bool(os.getenv(MANAGED_POLICY_API_KEY_ENV)),
+        "auth_configured": recommendations.managed_auth_configured(),
+        "api_key_value_included": False,
     }
 
 

@@ -180,6 +180,25 @@ Unsigned local-default/local-manual bundles remain valid for offline use.
 Managed outcome feedback retries are also disabled unless `AGENTFLOW_RECOMMENDATION_ENABLED=1`.
 Status and flush output is metadata-only; queued feedback payload JSON is not printed.
 
+The runtime managed recommendation bridge is also opt-in. With
+`AGENTFLOW_RECOMMENDATION_ENABLED=0`, AgentFlow runs in local-only mode and does not contact
+the managed optimizer. To enable the bridge, set:
+
+```bash
+export AGENTFLOW_RECOMMENDATION_ENABLED=1
+export AGENTFLOW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100
+export AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS=1.5
+export AGENTFLOW_RECOMMENDATION_FAILURE_MODE=fallback-local
+export AGENTFLOW_MANAGED_API_KEY="..."  # when the managed server requires auth
+```
+
+`fallback-local` is the only supported runtime failure mode today. If the server URL is unset,
+unreachable, times out, returns non-2xx, returns invalid JSON/schema, recommends an unsupported
+target model, or includes a replacement prompt, AgentFlow keeps the local routing/crunch/cache
+decision and records the fallback reason in local managed recommendation metadata. Managed API
+keys are sent as bearer tokens only when configured and are not included in dashboard or CLI
+metadata.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -190,6 +209,11 @@ Status and flush output is metadata-only; queued feedback payload JSON is not pr
 | `AGENTFLOW_CACHE_TOOL_CALLS` | `0` | Allow caching tool-call requests; keep off unless you understand the risk |
 | `AGENTFLOW_ROUTING` | `1` | Enable local model routing |
 | `AGENTFLOW_LOG_BODIES` | `0` | Store raw request/response bodies for local debugging |
+| `AGENTFLOW_RECOMMENDATION_ENABLED` | `0` | Opt into runtime managed optimizer recommendations; disabled means local-only with no managed network call |
+| `AGENTFLOW_RECOMMENDATION_SERVER_URL` | `http://127.0.0.1:4100` | Managed optimizer recommendation server URL |
+| `AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS` | `1.5` | Bounded timeout for managed recommendation and feedback calls |
+| `AGENTFLOW_RECOMMENDATION_FAILURE_MODE` | `fallback-local` | Keep local policy authoritative on managed bridge failure |
+| `AGENTFLOW_MANAGED_API_KEY` | unset | Optional bearer token for managed optimizer requests; value is not printed in status metadata |
 | `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Host for `agentflow-dashboard` |
 | `AGENTFLOW_DASHBOARD_PORT` | `4002` | Port for `agentflow-dashboard` |
 | `AGENTFLOW_CODEX_APP_MODEL` | current bundled default | Model used for Codex app-server token/cost estimates |
