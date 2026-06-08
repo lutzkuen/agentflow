@@ -1093,6 +1093,96 @@ class StatsFullTest(unittest.TestCase):
         endpoint_phases = {row["phase"] for row in endpoint_payload["workflow_phase_breakdown"]}
         self.assertEqual(endpoint_phases, set(phases))
 
+    def test_codex_effectiveness_reports_repeated_context_plateau_candidates(self):
+        raw_prompt_text = "raw prompt must not appear in plateau report"
+        sizes = [10_000, 10_100, 9_950, 10_150]
+        saved = [10, 20, 0, 0]
+        for index, input_text_chars in enumerate(sizes):
+            request_id = f"req-plateau-{index}"
+            server.store.log_codex_app_event(
+                id=f"start-plateau-{index}",
+                created_at=f"2026-06-08T12:00:0{index}+00:00",
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id="thread-plateau-candidate",
+                message_chars=input_text_chars + 100,
+                params_chars=input_text_chars + 50,
+                input_items=2,
+                input_text_chars=input_text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="session-plateau-candidate",
+                routing_json=stable_json({
+                    "status": "not-applicable",
+                    "reason": "codex-turn-start-model-field-absent",
+                    "applied": False,
+                    "policy_source": "local-default",
+                }),
+                crunch_json=stable_json({
+                    "status": "applied" if saved[index] else "skipped",
+                    "reason": "codex-repeated-scaffolding-crunched" if saved[index] else "no-change",
+                    "applied": bool(saved[index]),
+                    "changed": bool(saved[index]),
+                    "saved_chars": saved[index],
+                    "tokens_saved_est": saved[index] // 4,
+                }),
+                cache_json=stable_json({
+                    "status": "miss",
+                    "reason": "exact-miss",
+                    "eligible": True,
+                    "policy_source": "local-default",
+                }),
+                event_window_json=stable_json({
+                    "schema": "agentflow.codex_app_event_window.v1",
+                    "event_count": 3,
+                    "method_counts": {"turn/start": 1, "item/agentMessage/delta": 2},
+                    "direction_counts": {"client_to_server": 1, "server_to_client": 2},
+                    "input_text_chars": input_text_chars,
+                    "debug_prompt": raw_prompt_text,
+                }),
+            )
+            server.store.log_codex_app_event(
+                id=f"end-plateau-{index}",
+                created_at=f"2026-06-08T12:00:1{index}+00:00",
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id="thread-plateau-candidate",
+                message_chars=180,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=160,
+                error_code=None,
+                error_message=None,
+                latency_ms=100 + index,
+                session_id="session-plateau-candidate",
+            )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
+        report = result["repeated_context_plateau_candidates"]
+        [candidate] = report["candidates"]
+        encoded = json.dumps(result)
+
+        self.assertEqual(result["summary"]["repeated_context_plateau_candidate_count"], 1)
+        self.assertEqual(candidate["scope_id"], "thread-plateau-candidate")
+        self.assertEqual(candidate["scope_basis"], "thread_id")
+        self.assertEqual(candidate["turns"], 4)
+        self.assertEqual(candidate["plateau_count"], 3)
+        self.assertEqual(candidate["candidate_pairs"], 3)
+        self.assertEqual(candidate["median_input_chars"], 10_050)
+        self.assertEqual(candidate["p90_input_chars"], 10_150)
+        self.assertEqual(candidate["current_saved_chars"], 30)
+        self.assertGreater(candidate["estimated_opportunity_saved_chars"], 0)
+        self.assertGreater(candidate["estimated_opportunity_tokens"], 0)
+        self.assertEqual(report["policy"]["min_input_chars"], 8_000)
+        self.assertFalse(result["privacy"]["raw_params_included"])
+        self.assertNotIn(raw_prompt_text, encoded)
+        self.assertNotIn("debug_prompt", encoded)
+
     def test_codex_effectiveness_uses_persisted_metadata_only_event_window(self):
         secret = "raw prompt must not appear"
         server.store.log_codex_app_event(

@@ -1723,6 +1723,185 @@ def _avg_or_none(values: list[int]) -> int | None:
     return round(sum(values) / len(values))
 
 
+def _median_int(values: list[int]) -> int:
+    if not values:
+        return 0
+    sorted_values = sorted(values)
+    mid = len(sorted_values) // 2
+    if len(sorted_values) % 2:
+        return sorted_values[mid]
+    return int(round((sorted_values[mid - 1] + sorted_values[mid]) / 2))
+
+
+def _percentile_int(values: list[int], percentile: float) -> int:
+    if not values:
+        return 0
+    sorted_values = sorted(values)
+    idx = min(len(sorted_values) - 1, math.ceil((len(sorted_values) - 1) * percentile))
+    return sorted_values[idx]
+
+
+def _codex_plateau_scope(row: dict[str, Any]) -> tuple[str, str]:
+    if row.get("thread_id"):
+        return str(row["thread_id"]), "thread_id"
+    if row.get("session_id"):
+        return str(row["session_id"]), "session_id"
+    if row.get("request_id"):
+        return f"request:{row['request_id']}", "request_id"
+    return "unknown", "unknown"
+
+
+def _codex_meaningful_crunch(row: dict[str, Any], *, min_ratio: float) -> bool:
+    input_chars = _as_int(row.get("input_text_chars"))
+    if input_chars <= 0:
+        return False
+    return (_as_int(row.get("saved_chars")) / input_chars) >= min_ratio
+
+
+def _codex_plateau_candidate_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    min_input_chars = 8_000
+    max_delta_ratio = 0.03
+    min_candidate_pairs = 2
+    meaningful_crunch_ratio = 0.05
+    conservative_opportunity_ratio = 0.10
+
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        scope_id, scope_basis = _codex_plateau_scope(row)
+        groups.setdefault((scope_basis, scope_id), []).append(row)
+
+    candidates: list[dict[str, Any]] = []
+    total_plateau_pairs = 0
+    total_candidate_pairs = 0
+    total_opportunity_chars = 0
+    for (scope_basis, scope_id), scoped_rows in groups.items():
+        ordered = sorted(scoped_rows, key=lambda item: str(item.get("created_at") or ""))
+        input_values = [_as_int(row.get("input_text_chars")) for row in ordered]
+        large_values = [value for value in input_values if value >= min_input_chars]
+        if len(large_values) < min_candidate_pairs + 1:
+            continue
+
+        plateau_pairs = 0
+        candidate_pairs = 0
+        repeated_chars_est = 0
+        candidate_repeated_chars_est = 0
+        method_counts: dict[str, int] = {}
+        phase_counts: dict[str, int] = {}
+        cache_status_counts: dict[str, int] = {}
+        crunch_status_counts: dict[str, int] = {}
+        for row in ordered:
+            _increment_count(phase_counts, row.get("workflow_phase") or "unknown")
+            _increment_count(cache_status_counts, row.get("cache_status") or "missing")
+            _increment_count(crunch_status_counts, row.get("crunch_status") or "missing")
+            event_window = _json_obj(row.get("event_window_json"))
+            window_methods = event_window.get("method_counts") if isinstance(event_window, dict) else None
+            if isinstance(window_methods, dict):
+                for method, count in window_methods.items():
+                    method_counts[str(method or "unknown")] = method_counts.get(str(method or "unknown"), 0) + max(1, _as_int(count))
+            else:
+                _increment_count(method_counts, row.get("method") or "turn/start")
+
+        for previous, current in zip(ordered, ordered[1:]):
+            previous_chars = _as_int(previous.get("input_text_chars"))
+            current_chars = _as_int(current.get("input_text_chars"))
+            if previous_chars < min_input_chars or current_chars < min_input_chars:
+                continue
+            delta_ratio = abs(current_chars - previous_chars) / max(previous_chars, 1)
+            if delta_ratio > max_delta_ratio:
+                continue
+            plateau_pairs += 1
+            repeated_chars = min(previous_chars, current_chars)
+            repeated_chars_est += repeated_chars
+            cache_hit = previous.get("cache_status") == "hit" or current.get("cache_status") == "hit"
+            meaningful_crunch = (
+                _codex_meaningful_crunch(previous, min_ratio=meaningful_crunch_ratio)
+                or _codex_meaningful_crunch(current, min_ratio=meaningful_crunch_ratio)
+            )
+            if not cache_hit and not meaningful_crunch:
+                candidate_pairs += 1
+                candidate_repeated_chars_est += repeated_chars
+
+        total_plateau_pairs += plateau_pairs
+        total_candidate_pairs += candidate_pairs
+        if candidate_pairs < min_candidate_pairs:
+            continue
+
+        current_saved_chars = sum(_as_int(row.get("saved_chars")) for row in ordered)
+        current_saved_tokens = sum(_as_int(row.get("tokens_saved_est")) for row in ordered)
+        opportunity_chars = max(
+            int(candidate_repeated_chars_est * conservative_opportunity_ratio) - current_saved_chars,
+            0,
+        )
+        opportunity_tokens = estimate_tokens_from_text_chars(opportunity_chars)
+        opportunity_cost = estimate_cost(
+            CODEX_APP_MODEL,
+            opportunity_tokens,
+            0,
+            provider="openai",
+            processing_mode=CODEX_APP_PROCESSING_MODE,
+        )
+        total_opportunity_chars += opportunity_chars
+        candidates.append({
+            "candidate_id": f"codex-context-plateau:{scope_basis}:{scope_id[:24]}",
+            "scope_id": scope_id,
+            "sid": scope_id[:8] if scope_id else None,
+            "scope_basis": scope_basis,
+            "turns": len(ordered),
+            "large_turns": len(large_values),
+            "plateau_count": plateau_pairs,
+            "plateau_pairs": plateau_pairs,
+            "candidate_pairs": candidate_pairs,
+            "median_input_chars": _median_int(large_values),
+            "p90_input_chars": _percentile_int(large_values, 0.9),
+            "min_input_chars": min(large_values),
+            "max_input_chars": max(large_values),
+            "current_saved_chars": current_saved_chars,
+            "current_saved_tokens_est": current_saved_tokens,
+            "estimated_repeated_chars": repeated_chars_est,
+            "estimated_candidate_repeated_chars": candidate_repeated_chars_est,
+            "estimated_opportunity_saved_chars": opportunity_chars,
+            "estimated_opportunity_tokens": opportunity_tokens,
+            "estimated_opportunity_usd": round(float(opportunity_cost or 0.0), 6) if opportunity_cost is not None else None,
+            "opportunity_basis": "10pct-of-unoptimized-adjacent-large-plateau-chars-minus-current-saved-chars",
+            "cache_status_counts": _count_breakdown(cache_status_counts),
+            "crunch_status_counts": _count_breakdown(crunch_status_counts),
+            "workflow_phase_counts": _count_breakdown(phase_counts),
+            "method_counts": [
+                {"method": method, "count": count}
+                for method, count in sorted(method_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+            ],
+        })
+
+    candidates.sort(
+        key=lambda item: (
+            item["estimated_opportunity_saved_chars"],
+            item["candidate_pairs"],
+            item["p90_input_chars"],
+        ),
+        reverse=True,
+    )
+    candidates = candidates[:20]
+    return {
+        "policy": {
+            "min_input_chars": min_input_chars,
+            "max_adjacent_delta_ratio": max_delta_ratio,
+            "min_candidate_pairs": min_candidate_pairs,
+            "meaningful_crunch_ratio": meaningful_crunch_ratio,
+            "conservative_opportunity_ratio": conservative_opportunity_ratio,
+            "privacy_basis": "metadata-only input sizes, decision status, event-window method counts, and scope IDs",
+        },
+        "summary": {
+            "scopes_considered": len(groups),
+            "plateau_pairs": total_plateau_pairs,
+            "candidate_pairs": total_candidate_pairs,
+            "candidate_count": len(candidates),
+            "estimated_opportunity_saved_chars": total_opportunity_chars,
+            "estimated_opportunity_tokens": estimate_tokens_from_text_chars(total_opportunity_chars),
+        },
+        "candidates": candidates,
+    }
+
+
 async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     conn = store_obj.conn
     capped_limit = max(1, min(int(limit or 500), 5000))
@@ -1847,6 +2026,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             managed_feedback_queue_counts = {}
 
     recent_samples: list[dict[str, Any]] = []
+    plateau_candidate_rows: list[dict[str, Any]] = []
     for row in turn_rows:
         metadata_state = _codex_decision_metadata_state(row)
         row["decision_metadata_state"] = metadata_state
@@ -2018,8 +2198,24 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "latency_ms": latency or None,
                 "error_code": row.get("response_error_code"),
             })
+        plateau_candidate_rows.append({
+            "created_at": row.get("created_at"),
+            "method": row.get("method") or "turn/start",
+            "request_id": row.get("request_id"),
+            "thread_id": row.get("thread_id"),
+            "session_id": row.get("session_id"),
+            "input_text_chars": _as_int(row.get("input_text_chars")),
+            "saved_chars": saved_chars,
+            "tokens_saved_est": saved_tokens,
+            "workflow_phase": phase,
+            "routing_status": routing.get("status") or "missing",
+            "crunch_status": crunch.get("status") or "missing",
+            "cache_status": cache.get("status") or "missing",
+            "event_window_json": row.get("event_window_json"),
+        })
 
     total = len(turn_rows)
+    plateau_candidate_report = _codex_plateau_candidate_report(plateau_candidate_rows)
     return {
         "schema": "agentflow.codex_app_effectiveness.v1",
         "generated_at": utc_now(),
@@ -2107,6 +2303,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 managed_feedback_queue_counts.get("retryable-error", 0)
                 + managed_feedback_queue_counts.get("dropped-after-limit", 0)
             ),
+            "repeated_context_plateau_candidate_count": plateau_candidate_report["summary"]["candidate_count"],
+            "repeated_context_plateau_pairs": plateau_candidate_report["summary"]["plateau_pairs"],
+            "repeated_context_plateau_opportunity_chars": plateau_candidate_report["summary"]["estimated_opportunity_saved_chars"],
         },
         "decision_metadata_breakdown": _count_breakdown(decision_metadata_counts),
         "current_missing_decision_breakdown": _count_breakdown(current_missing_decision_counts),
@@ -2130,6 +2329,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "managed_feedback_breakdown": _count_breakdown(managed_feedback_status_counts),
         "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
         "managed_feedback_queue_breakdown": _count_breakdown(managed_feedback_queue_counts),
+        "repeated_context_plateau_candidates": plateau_candidate_report,
         "outcome_by_optimization": [
             {
                 "bucket": "optimized",
