@@ -22,6 +22,37 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _configure_sqlite_connection(conn: sqlite3.Connection, path: str) -> None:
+    busy_timeout_ms = max(0, _env_int("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", 5000))
+    conn.execute(f"pragma busy_timeout = {busy_timeout_ms}")
+    if _env_bool("AGENTFLOW_SQLITE_WAL", True) and path not in {"", ":memory:"}:
+        try:
+            conn.execute("pragma journal_mode = WAL")
+            conn.execute("pragma synchronous = NORMAL")
+        except sqlite3.OperationalError:
+            # Some special filesystems or read-only copies cannot switch modes.
+            # Keep the busy timeout so dashboard reads still wait instead of
+            # failing immediately under transient writer locks.
+            pass
+
+
 class CompatRow(dict[str, Any]):
     def __getitem__(self, key: str | int) -> Any:
         if isinstance(key, int):
@@ -146,7 +177,9 @@ class SQLiteStore:
         self.database_url = f"sqlite:///{path}"
         self._lock = threading.RLock()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._raw_conn = sqlite3.connect(path, check_same_thread=False)
+        timeout_s = max(0.0, _env_int("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", 5000) / 1000.0)
+        self._raw_conn = sqlite3.connect(path, check_same_thread=False, timeout=timeout_s)
+        _configure_sqlite_connection(self._raw_conn, path)
         self._raw_conn.row_factory = sqlite3.Row
         self.conn: sqlite3.Connection | SQLiteConnection = self._raw_conn
         self._init()
@@ -277,6 +310,14 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_codex_app_events_response_lookup
             on codex_app_events(direction, request_id, created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_calls_created_at
+            on calls(created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_codex_app_events_created_at
+            on codex_app_events(created_at)
             """)
             self.conn.commit()
 
@@ -590,6 +631,14 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_codex_app_events_response_lookup
             on codex_app_events(direction, request_id, created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_calls_created_at
+            on calls(created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_codex_app_events_created_at
+            on codex_app_events(created_at)
         """)
 
     def set_cache(

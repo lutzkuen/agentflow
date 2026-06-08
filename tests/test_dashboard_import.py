@@ -2,6 +2,7 @@ import sys
 import asyncio
 import importlib.util
 import os
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -169,16 +170,19 @@ class DashboardImportTests(unittest.TestCase):
                         client.get("/agentflow/stats/full"),
                         client.get("/agentflow/stats/full"),
                     )
+                    warm_start = time.perf_counter()
                     cached = await client.get("/agentflow/stats/full")
-                    return responses, cached
+                    warm_seconds = time.perf_counter() - warm_start
+                    return responses, cached, warm_seconds
 
-            responses, cached = asyncio.run(exercise())
+            responses, cached, warm_seconds = asyncio.run(exercise())
 
             self.assertEqual([response.status_code for response in responses], [200, 200, 200])
             self.assertEqual(cached.status_code, 200)
             self.assertEqual(call_count["value"], 1)
             self.assertEqual([response.json()["generated_by"] for response in responses], [1, 1, 1])
             self.assertEqual(cached.json()["generated_by"], 1)
+            self.assertLess(warm_seconds, 0.2)
         finally:
             dashboard_app.stats_views.stats_full = old_stats_full
             store.conn.close()

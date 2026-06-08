@@ -21,6 +21,10 @@ CODEX_APP_TELEMETRY_ONLY_REASON = "codex-app-telemetry-only"
 TOKEN_CHARS = 4
 
 
+def _utc_today_start_iso() -> str:
+    return f"{utc_now()[:10]}T00:00:00+00:00"
+
+
 def _json_obj(raw: Any) -> dict[str, Any]:
     if not raw:
         return {}
@@ -1903,6 +1907,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
 
 async def stats_full(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
+    today_start = _utc_today_start_iso()
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -2080,13 +2085,26 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         today_thinking_cost += estimate_cost(row["model"], 0, row["today_think_tok"] or 0, provider=row["provider"]) or 0
 
     codex_app_total_events = int(s("select count(*) from codex_app_events") or 0)
-    codex_app_today_events = int(s("select count(*) from codex_app_events where date(created_at) = date('now')") or 0)
+    codex_app_today_events = int(s(
+        "select count(*) from codex_app_events where created_at >= ?",
+        (today_start,),
+    ) or 0)
     codex_app_sessions = int(s("select count(distinct session_id) from codex_app_events where session_id is not null") or 0)
     codex_app_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed'") or 0)
-    codex_app_today_turns = int(s("select count(*) from codex_app_events where direction = 'server_to_client' and method = 'turn/completed' and date(created_at) = date('now')") or 0)
+    codex_app_today_turns = int(s("""
+        select count(*) from codex_app_events
+        where direction = 'server_to_client'
+          and method = 'turn/completed'
+          and created_at >= ?
+    """, (today_start,)) or 0)
     codex_app_last_event_at = s("select max(created_at) from codex_app_events")
     codex_app_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start'") or 0)
-    codex_app_today_input_text_chars = int(s("select sum(input_text_chars) from codex_app_events where direction = 'client_to_server' and method = 'turn/start' and date(created_at) = date('now')") or 0)
+    codex_app_today_input_text_chars = int(s("""
+        select sum(input_text_chars) from codex_app_events
+        where direction = 'client_to_server'
+          and method = 'turn/start'
+          and created_at >= ?
+    """, (today_start,)) or 0)
     codex_app_avg_latency = s("select avg(latency_ms) from codex_app_events where latency_ms is not null") or 0
     codex_turn_rows = q("""
         select s.id as start_event_id,
@@ -2141,11 +2159,11 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                    order by r.created_at desc
                    limit 1
                ) as response_latency_ms,
-               (date(s.created_at) = date('now')) as is_today
+               (s.created_at >= ?) as is_today
         from codex_app_events s
         where s.direction = 'client_to_server'
           and s.method = 'turn/start'
-    """)
+    """, (today_start,))
     codex_input_tokens_est = 0
     codex_output_tokens_est = 0
     codex_cost_est = 0.0
@@ -2344,7 +2362,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         select created_at, stream, cache_hit, status_code, cache_json,
                path, coalesce(provider, 'anthropic') as provider,
                null as source_surface,
-               (date(created_at) = date('now')) as is_today
+               (created_at >= ?) as is_today
         from calls
         union all
         select created_at, 0 as stream,
@@ -2354,11 +2372,11 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                'codex-app://turn/start' as path,
                'codex-app' as provider,
                'codex_app_turn' as source_surface,
-               (date(created_at) = date('now')) as is_today
+               (created_at >= ?) as is_today
         from codex_app_events
         where direction = 'client_to_server'
           and method = 'turn/start'
-    """)
+    """, (today_start, today_start))
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
 
