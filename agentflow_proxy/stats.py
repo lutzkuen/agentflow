@@ -222,6 +222,19 @@ def _codex_turn_estimates(input_text_chars: Any, result_chars: Any) -> dict[str,
     }
 
 
+def _codex_estimates_with_cache(input_text_chars: Any, result_chars: Any, cache: dict[str, Any]) -> dict[str, Any]:
+    estimates = _codex_turn_estimates(input_text_chars, result_chars)
+    if cache.get("status") == "hit":
+        baseline = float(estimates["baseline_cost_est_usd"] or estimates["cost_est_usd"] or 0.0)
+        estimates["cost_est_usd"] = 0.0
+        estimates["hard_floor_usd"] = 0.0
+        estimates["baseline_cost_est_usd"] = baseline
+        estimates["cache_savings_usd"] = baseline
+    else:
+        estimates["cache_savings_usd"] = 0.0
+    return estimates
+
+
 def _codex_not_applied_decision(kind: str) -> dict[str, Any]:
     return {
         "status": "not-applied",
@@ -355,6 +368,7 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "reason": "legacy-cache-hit",
             "hit_type": "exact",
             "policy_source": "legacy-inferred",
+            "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
         }
     if _as_int(row.get("stream")):
         return {
@@ -362,6 +376,7 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "reason": "legacy-streaming",
             "hit_type": "",
             "policy_source": "legacy-inferred",
+            "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
         }
     if status_code >= 400:
         return {
@@ -369,12 +384,14 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "reason": "legacy-upstream-error",
             "hit_type": "",
             "policy_source": "legacy-inferred",
+            "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
         }
     return {
         "status": "missing",
         "reason": "legacy-unknown",
         "hit_type": "",
         "policy_source": "legacy-inferred",
+        "source_surface": str(row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))),
     }
 
 
@@ -382,6 +399,7 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
     cache = _json_obj(row.get("cache_json"))
     if cache:
         policy_source = str(cache.get("policy_source") or "unknown")
+        source_surface = str(cache.get("surface") or row.get("source_surface") or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or "")))
         if not cache.get("status") and not cache.get("reason"):
             legacy_hit_type = str(cache.get("hit_type") or "")
             if legacy_hit_type == "skip-streaming":
@@ -390,6 +408,7 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                     "reason": "legacy-streaming",
                     "hit_type": "",
                     "policy_source": policy_source,
+                    "source_surface": source_surface,
                 }
             if legacy_hit_type == "miss":
                 return {
@@ -397,6 +416,7 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                     "reason": "legacy-exact-miss",
                     "hit_type": "",
                     "policy_source": policy_source,
+                    "source_surface": source_surface,
                 }
             if legacy_hit_type == "hit":
                 return {
@@ -404,29 +424,33 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                     "reason": "legacy-cache-hit",
                     "hit_type": "exact",
                     "policy_source": policy_source,
+                    "source_surface": source_surface,
                 }
             return {
                 "status": "missing",
                 "reason": "legacy-partial-cache-json",
                 "hit_type": legacy_hit_type,
                 "policy_source": policy_source,
+                "source_surface": source_surface,
             }
         return {
             "status": str(cache.get("status") or "missing"),
             "reason": str(cache.get("reason") or "unknown"),
             "hit_type": str(cache.get("hit_type") or ""),
             "policy_source": policy_source,
+            "source_surface": source_surface,
         }
     return _legacy_cache_decision(row)
 
 
 def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    grouped: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         if today_only and not row.get("is_today"):
             continue
         decision = _cache_decision_for_breakdown(row)
         key = (
+            decision["source_surface"],
             decision["status"],
             decision["reason"],
             decision["hit_type"],
@@ -435,10 +459,11 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
         bucket = grouped.setdefault(
             key,
             {
-                "status": key[0],
-                "reason": key[1],
-                "hit_type": key[2],
-                "policy_source": key[3],
+                "source_surface": key[0],
+                "status": key[1],
+                "reason": key[2],
+                "hit_type": key[3],
+                "policy_source": key[4],
                 "count": 0,
             },
         )
@@ -500,6 +525,7 @@ def _new_usage_bucket(identity: dict[str, Any]) -> dict[str, Any]:
         "codex_cost_est_usd": 0.0,
         "codex_baseline_cost_est_usd": 0.0,
         "codex_hard_floor_usd": 0.0,
+        "codex_exact_cache_savings_usd": 0.0,
         "codex_cost_estimated": False,
         "spend_usd": 0.0,
         "baseline_provider_cost_usd": 0.0,
@@ -625,7 +651,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     routing = _json_obj(r.get("routing_json")) or _codex_not_applied_decision("routing")
     crunch = _json_obj(r.get("crunch_json")) or _codex_not_applied_decision("crunch")
     cache = _json_obj(r.get("cache_json")) or _codex_not_applied_decision("cache")
-    estimates = _codex_turn_estimates(r.get("input_text_chars"), r.get("response_result_chars"))
+    estimates = _codex_estimates_with_cache(r.get("input_text_chars"), r.get("response_result_chars"), cache)
     requested_model = routing.get("requested_model") or estimates["model"]
     target_model = routing.get("routed_model") or requested_model
     if crunch.get("tokens_before_est") is not None:
@@ -639,6 +665,8 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         )
         if baseline_cost is not None:
             estimates["baseline_cost_est_usd"] = float(baseline_cost)
+            if cache.get("status") == "hit":
+                estimates["cache_savings_usd"] = float(baseline_cost)
     risk = _codex_turn_risk_features(r)
     policy_sources = sorted({
         str(source)
@@ -698,11 +726,12 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "cost_est_usd": estimates["cost_est_usd"],
             "cost_baseline_usd": estimates["baseline_cost_est_usd"],
             "hard_floor_usd": estimates["hard_floor_usd"],
+            "cache_savings_usd": estimates["cache_savings_usd"],
             "cost_basis": estimates["cost_basis"],
             "error_code": error_code,
             "error_message": r.get("response_error_message"),
         },
-        "replayability_level": "features_only",
+        "replayability_level": str(cache.get("replayability_level") or "features_only"),
         "local_ids": {
             "codex_app_start_event_id": r.get("start_event_id"),
             "codex_app_response_event_id": response_event_id,
@@ -1096,10 +1125,21 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         bucket["codex_cost_known"] = True
         bucket["codex_cost_estimated"] = True
         bucket["spend_usd"] += _as_float(outcome_features.get("cost_est_usd"))
-        bucket["captured_savings_usd"] += max(
+        codex_saved = max(
             _as_float(outcome_features.get("cost_baseline_usd")) - _as_float(outcome_features.get("cost_est_usd")),
             0.0,
         )
+        bucket["captured_savings_usd"] += codex_saved
+        cache_decision = unit["optimization_features"]["cache"]
+        if cache_decision.get("status") == "hit":
+            bucket["local_cache_hits"] += 1
+            bucket["codex_exact_cache_savings_usd"] += codex_saved
+        if (
+            unit["optimization_features"]["routing"].get("applied")
+            or unit["optimization_features"]["crunch"].get("changed")
+            or cache_decision.get("status") == "hit"
+        ):
+            bucket["optimized_calls"] += 1
         bucket["hard_floor_usd"] = _as_float(bucket["hard_floor_usd"]) + _as_float(outcome_features.get("hard_floor_usd"))
         if unit.get("mutation_safe"):
             bucket["codex_mutation_safe_turns"] += 1
@@ -1174,6 +1214,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         bucket["codex_cost_est_usd"] = round(float(bucket["codex_cost_est_usd"]), 6)
         bucket["codex_baseline_cost_est_usd"] = round(float(bucket["codex_baseline_cost_est_usd"]), 6)
         bucket["codex_hard_floor_usd"] = round(float(bucket["codex_hard_floor_usd"]), 6)
+        bucket["codex_exact_cache_savings_usd"] = round(float(bucket["codex_exact_cache_savings_usd"]), 6)
         bucket["prompt_cache_read_savings_usd"] = round(float(bucket["prompt_cache_read_savings_usd"]), 6)
         bucket["prompt_cache_creation_cost_usd"] = round(float(bucket["prompt_cache_creation_cost_usd"]), 6)
         bucket["thinking_cost_usd"] = round(float(bucket["thinking_cost_usd"]), 6)
@@ -1223,6 +1264,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
                 6,
             ),
             "codex_estimated_spend_usd": round(sum(row["codex_cost_est_usd"] for row in rows), 6),
+            "codex_exact_cache_savings_usd": round(sum(row["codex_exact_cache_savings_usd"] for row in rows), 6),
             "calculated_spend_usd": round(sum(row["spend_usd"] for row in rows), 6),
             "captured_savings_usd": round(sum(row["captured_savings_usd"] for row in rows), 6),
             "hard_floor_usd": round(sum(row["hard_floor_usd"] or 0.0 for row in rows), 6),
@@ -1424,6 +1466,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         select s.id as start_event_id,
                s.created_at,
                s.input_text_chars,
+               s.cache_json,
                (
                    select r.result_chars from codex_app_events r
                    where r.direction = 'server_to_client'
@@ -1440,18 +1483,23 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     codex_input_tokens_est = 0
     codex_output_tokens_est = 0
     codex_cost_est = 0.0
+    codex_cache_savings = 0.0
     today_codex_input_tokens_est = 0
     today_codex_output_tokens_est = 0
     today_codex_cost_est = 0.0
+    today_codex_cache_savings = 0.0
     for row in codex_turn_rows:
-        estimates = _codex_turn_estimates(row.get("input_text_chars"), row.get("response_result_chars"))
+        cache = _json_obj(row.get("cache_json"))
+        estimates = _codex_estimates_with_cache(row.get("input_text_chars"), row.get("response_result_chars"), cache)
         codex_input_tokens_est += estimates["input_tokens_est"]
         codex_output_tokens_est += estimates["output_tokens_est"]
         codex_cost_est += estimates["cost_est_usd"]
+        codex_cache_savings += estimates["cache_savings_usd"]
         if row.get("is_today"):
             today_codex_input_tokens_est += estimates["input_tokens_est"]
             today_codex_output_tokens_est += estimates["output_tokens_est"]
             today_codex_cost_est += estimates["cost_est_usd"]
+            today_codex_cache_savings += estimates["cache_savings_usd"]
 
     provider_input_tokens = int(s("""
         select sum(
@@ -1482,13 +1530,17 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     today_savings_buckets = {
         "routing_usd": round(today_routing_savings, 6),
         "crunching_usd": round(max(0.0, today_crunching_net_savings), 6),
-        "exact_local_cache_usd": round(today_cache_savings, 6),
+        "exact_local_cache_usd": round(today_cache_savings + today_codex_cache_savings, 6),
+        "provider_exact_local_cache_usd": round(today_cache_savings, 6),
+        "codex_app_exact_local_cache_usd": round(today_codex_cache_savings, 6),
         "provider_prompt_cache_discount_usd": round(today_prompt_cache_savings, 6),
     }
     savings_buckets = {
         "routing_usd": round(routing_savings, 6),
         "crunching_usd": round(max(0.0, crunching_net_savings), 6),
-        "exact_local_cache_usd": round(cache_cost_saved, 6),
+        "exact_local_cache_usd": round(cache_cost_saved + codex_cache_savings, 6),
+        "provider_exact_local_cache_usd": round(cache_cost_saved, 6),
+        "codex_app_exact_local_cache_usd": round(codex_cache_savings, 6),
         "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
     }
     today_total_savings = sum(float(value or 0.0) for value in today_savings_buckets.values())
@@ -1595,8 +1647,22 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
 
     cache_rows = q("""
         select created_at, stream, cache_hit, status_code, cache_json,
+               path, coalesce(provider, 'anthropic') as provider,
+               null as source_surface,
                (date(created_at) = date('now')) as is_today
         from calls
+        union all
+        select created_at, 0 as stream,
+               case when json_extract(cache_json, '$.status') = 'hit' then 1 else 0 end as cache_hit,
+               null as status_code,
+               cache_json,
+               'codex-app://turn/start' as path,
+               'codex-app' as provider,
+               'codex_app_turn' as source_surface,
+               (date(created_at) = date('now')) as is_today
+        from codex_app_events
+        where direction = 'client_to_server'
+          and method = 'turn/start'
     """)
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
@@ -1717,9 +1783,13 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "cache_hit_rate": round(cache_hits / total_calls, 4) if total_calls else 0,
             "routing_savings_usd": round(routing_savings, 6),
             "today_routing_savings_usd": round(today_routing_savings, 6),
-            "cache_savings_usd": round(cache_cost_saved, 6),
-            "today_cache_savings_usd": round(today_cache_savings, 6),
-            "total_savings_usd": round(routing_savings + cache_cost_saved, 6),
+            "cache_savings_usd": round(cache_cost_saved + codex_cache_savings, 6),
+            "today_cache_savings_usd": round(today_cache_savings + today_codex_cache_savings, 6),
+            "provider_cache_savings_usd": round(cache_cost_saved, 6),
+            "today_provider_cache_savings_usd": round(today_cache_savings, 6),
+            "codex_app_cache_savings_usd": round(codex_cache_savings, 6),
+            "today_codex_app_cache_savings_usd": round(today_codex_cache_savings, 6),
+            "total_savings_usd": round(routing_savings + cache_cost_saved + codex_cache_savings, 6),
             "avg_latency_ms": round(avg_latency),
             "routed_count": routed_count,
             "crunched_count": crunched_count,
@@ -1761,10 +1831,12 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "codex_app_output_tokens_est": codex_output_tokens_est,
             "codex_app_total_tokens_est": codex_input_tokens_est + codex_output_tokens_est,
             "codex_app_cost_est_usd": round(codex_cost_est, 6),
+            "codex_app_cache_savings_usd": round(codex_cache_savings, 6),
             "today_codex_app_input_tokens_est": today_codex_input_tokens_est,
             "today_codex_app_output_tokens_est": today_codex_output_tokens_est,
             "today_codex_app_total_tokens_est": today_codex_input_tokens_est + today_codex_output_tokens_est,
             "today_codex_app_cost_est_usd": round(today_codex_cost_est, 6),
+            "today_codex_app_cache_savings_usd": round(today_codex_cache_savings, 6),
             "codex_app_cost_basis": CODEX_APP_COST_BASIS,
             "codex_app_model": CODEX_APP_MODEL,
             "codex_app_avg_latency_ms": round(codex_app_avg_latency),
@@ -2206,7 +2278,7 @@ def dashboard_html() -> str:
   <h2>Cache decisions today</h2>
   <table>
     <thead><tr>
-      <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
+      <th>Surface</th><th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
     </tr></thead>
     <tbody id="cache-today-tbody"></tbody>
   </table>
@@ -2215,7 +2287,7 @@ def dashboard_html() -> str:
   <h2>Cache decisions all time</h2>
   <table>
     <thead><tr>
-      <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
+      <th>Surface</th><th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
     </tr></thead>
     <tbody id="cache-tbody"></tbody>
   </table>
@@ -2558,12 +2630,13 @@ async function refreshCache(){
     const r=await fetch('/agentflow/stats/full');
     const d=await r.json();
     const renderRows=(rows)=>rows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
       <td><span class="badge ${row.status==='hit'?'hit':row.status==='miss'?'miss':'stream'}">${row.status}</span></td>
       <td class="model">${row.reason||'unknown'}</td>
       <td class="tokens">${row.hit_type||'—'}</td>
       <td><span class="badge provider">${row.policy_source||'unknown'}</span></td>
       <td>${(row.count||0).toLocaleString()}</td>
-    </tr>`).join('')||'<tr><td colspan="5" style="color:#8b949e">No cache decision data yet</td></tr>';
+    </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No cache decision data yet</td></tr>';
     document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
     document.getElementById('cache-tbody').innerHTML=renderRows(d.cache_decision_breakdown||[]);
   }catch(e){}

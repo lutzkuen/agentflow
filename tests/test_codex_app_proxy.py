@@ -1,9 +1,11 @@
 import io
 import json
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from agentflow_proxy import codex_app_proxy
+from agentflow_proxy.store import Store
 
 
 class FailingStore:
@@ -71,6 +73,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(forwarded, raw)
         self.assertEqual(metadata["routing"]["status"], "not-applied")
         self.assertEqual(metadata["routing"]["reason"], "action-like-params")
+        self.assertEqual(metadata["cache"]["status"], "skipped")
+        self.assertEqual(metadata["cache"]["reason"], "action-like-params")
 
     def test_safe_turn_start_crunches_large_text_without_persisting_raw_prompt(self):
         secret = "secret raw prompt must not be persisted "
@@ -147,6 +151,96 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(forwarded_obj["params"]["model"], "claude-sonnet-4-6")
         self.assertEqual(metadata["routing"]["status"], "skipped")
         self.assertIn("thinking request", metadata["routing"]["reason"])
+
+    def test_safe_codex_turn_exact_cache_hit_when_enabled(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-cache-1",
+                "method": "turn/start",
+                "params": {
+                    "input": [{"type": "text", "text": "repeatable deterministic prompt"}],
+                    "temperature": 0,
+                },
+            }
+            response = {
+                "jsonrpc": "2.0",
+                "id": "turn-cache-1",
+                "result": {"message": "cached answer"},
+            }
+
+            with patch.object(codex_app_proxy, "store", test_store), patch.object(codex_app_proxy, "CODEX_APP_CACHE", True):
+                forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                self.assertEqual(metadata["cache"]["status"], "miss")
+                self.assertTrue(metadata["cache"]["eligible"])
+                pending = {
+                    "turn-cache-1": {
+                        "cache_key": metadata["cache"]["_agentflow_cache_key"],
+                        "request_chars": len(forwarded),
+                        "file_deps": [],
+                    }
+                }
+                codex_app_proxy._maybe_store_codex_cache_response(json.dumps(response), pending_cache=pending)
+
+                second = dict(message)
+                second["id"] = "turn-cache-2"
+                forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(second))
+
+            self.assertEqual(metadata["cache"]["status"], "hit")
+            self.assertEqual(metadata["cache"]["hit_type"], "exact")
+            replay = json.loads(metadata["cache"]["_agentflow_replay_frame"])
+            self.assertEqual(replay["id"], "turn-cache-2")
+            self.assertEqual(replay["result"]["message"], "cached answer")
+            self.assertEqual(json.loads(forwarded)["id"], "turn-cache-2")
+            test_store.conn.close()
+
+    def test_file_dependency_change_invalidates_codex_cache_entry(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp, tempfile.TemporaryDirectory() as root:
+            test_store = Store(tmp.name)
+            path = f"{root}/notes.txt"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("before")
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-file-1",
+                "method": "turn/start",
+                "params": {
+                    "input": [{"type": "text", "text": f"summarize {path}"}],
+                    "temperature": 0,
+                },
+            }
+            response = {
+                "jsonrpc": "2.0",
+                "id": "turn-file-1",
+                "result": {"message": "before summary"},
+            }
+
+            with (
+                patch.object(codex_app_proxy, "store", test_store),
+                patch.object(codex_app_proxy, "CODEX_APP_CACHE", True),
+                patch("agentflow_proxy.cache.CACHE_FILE_WATCH_ROOT", root),
+            ):
+                forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                pending = {
+                    "turn-file-1": {
+                        "cache_key": metadata["cache"]["_agentflow_cache_key"],
+                        "request_chars": len(forwarded),
+                        "file_deps": codex_app_proxy.cache_file_dependency_snapshots(message["params"]),
+                    }
+                }
+                codex_app_proxy._maybe_store_codex_cache_response(json.dumps(response), pending_cache=pending)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("after")
+
+                second = dict(message)
+                second["id"] = "turn-file-2"
+                _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(second))
+
+            self.assertEqual(metadata["cache"]["status"], "miss")
+            self.assertEqual(metadata["cache"]["reason"], "file-dependency-changed")
+            self.assertNotIn("_agentflow_replay_frame", metadata["cache"])
+            test_store.conn.close()
 
 
 if __name__ == "__main__":

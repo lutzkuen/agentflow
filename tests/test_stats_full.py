@@ -471,6 +471,86 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(today[("skipped", "legacy-streaming")], 1)
         json.dumps(result["today_cache_decision_breakdown"])
 
+    def test_codex_app_cache_hit_counts_decision_and_saved_cost(self):
+        cache_meta = {
+            "enabled": True,
+            "status": "hit",
+            "reason": "exact-match",
+            "hit_type": "exact",
+            "eligible": True,
+            "policy_source": "local-default",
+            "surface": "codex_app_turn",
+            "replayability_level": "local-exact-response",
+        }
+        start_id = str(uuid.uuid4())
+        server.store.log_codex_app_event(
+            id=start_id,
+            created_at=utc_now(),
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-codex-cache",
+            thread_id="thread-cache",
+            message_chars=600,
+            params_chars=500,
+            input_items=1,
+            input_text_chars=400,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-cache-session",
+            cache_json=stable_json(cache_meta),
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction="server_to_client",
+            method=None,
+            request_id="req-codex-cache",
+            thread_id="thread-cache",
+            message_chars=100,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=80,
+            error_code=None,
+            error_message=None,
+            latency_ms=5,
+            session_id="codex-cache-session",
+        )
+
+        full = asyncio.run(stats_views.stats_full(server.store))
+        activity = asyncio.run(stats_views.stats_activity(server.store))
+        usage = asyncio.run(stats_views.stats_usage_by_owner(server.store))
+
+        self.assertEqual(full["summary"]["today_codex_app_cost_est_usd"], 0.0)
+        self.assertGreater(full["summary"]["today_codex_app_cache_savings_usd"], 0.0)
+        self.assertAlmostEqual(
+            full["executive_summary"]["savings"]["today_buckets"]["codex_app_exact_local_cache_usd"],
+            full["summary"]["today_codex_app_cache_savings_usd"],
+            places=6,
+        )
+        cache_rows = {
+            (row["source_surface"], row["status"], row["reason"], row["hit_type"]): row["count"]
+            for row in full["today_cache_decision_breakdown"]
+        }
+        self.assertEqual(cache_rows[("codex_app_turn", "hit", "exact-match", "exact")], 1)
+
+        codex = {unit["unit_id"]: unit for unit in activity["units"]}[f"codex_turn:{start_id}"]
+        self.assertEqual(codex["replayability_level"], "local-exact-response")
+        self.assertEqual(codex["optimization_features"]["cache"]["eligible"], True)
+        self.assertEqual(codex["outcome_features"]["cost_est_usd"], 0.0)
+        self.assertGreater(codex["outcome_features"]["cache_savings_usd"], 0.0)
+
+        [bucket] = usage["buckets"]
+        self.assertEqual(bucket["local_cache_hits"], 1)
+        self.assertGreater(bucket["codex_exact_cache_savings_usd"], 0.0)
+        self.assertAlmostEqual(bucket["spend_usd"], 0.0, places=6)
+        self.assertGreater(bucket["captured_savings_usd"], 0.0)
+        json.dumps(full)
+        json.dumps(activity)
+        json.dumps(usage)
+
     def test_error_breakdown_groups_sanitized_error_families(self):
         legacy_id = str(uuid.uuid4())
         server.store.log_call(

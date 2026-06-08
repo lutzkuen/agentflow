@@ -15,6 +15,7 @@ import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from agentflow_proxy.cache import cache_file_dependency_snapshots, cache_key_for
 from agentflow_proxy.crunch import crunch_body
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
@@ -28,6 +29,7 @@ DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", "ws://127.0.0.1:401
 LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
 DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
 CODEX_APP_OPTIMIZE = os.getenv("AGENTFLOW_CODEX_APP_OPTIMIZE", "1") != "0"
+CODEX_APP_CACHE = os.getenv("AGENTFLOW_CODEX_APP_CACHE", "0") == "1"
 
 store = Store(DEFAULT_DB)
 if getattr(store, "backend", None) == "sqlite":
@@ -60,6 +62,23 @@ _CODEX_ACTION_VALUE_HINTS = {
     "tool_use",
 }
 _CODEX_MODEL_FIELDS = ("model", "modelId", "model_id")
+_CODEX_SAFE_TURN_PARAM_KEYS = {
+    "input",
+    "instructions",
+    "max_tokens",
+    "maxTokens",
+    "model",
+    "modelId",
+    "model_id",
+    "temperature",
+    "threadId",
+    "thread_id",
+    "top_p",
+    "topP",
+}
+_CODEX_TEXT_INPUT_TYPES = {"text", "input_text"}
+_INTERNAL_REPLAY_FRAME_KEY = "_agentflow_replay_frame"
+_INTERNAL_CACHE_KEY = "_agentflow_cache_key"
 
 
 def _input_text_chars(value: Any) -> int:
@@ -101,11 +120,49 @@ def _policy_decision(kind: str, status: str, reason: str, *, enabled: bool = COD
     }
 
 
+def _codex_cache_decision(
+    status: str,
+    reason: str,
+    *,
+    enabled: bool = CODEX_APP_CACHE,
+    eligible: bool = False,
+    hit_type: str | None = None,
+    cache_key: str | None = None,
+    replayability_level: str = "features_only",
+    file_dependencies: list[dict[str, Any]] | None = None,
+    invalidation_reason: str | None = None,
+) -> dict[str, Any]:
+    meta = _policy_decision("cache", status, reason, enabled=enabled)
+    meta.update({
+        "eligible": bool(eligible),
+        "hit_type": hit_type or "",
+        "exact_enabled": bool(CODEX_APP_CACHE),
+        "replayability_level": replayability_level,
+    })
+    if cache_key:
+        meta["cache_key"] = cache_key
+    if file_dependencies:
+        meta["file_dependency_count"] = len(file_dependencies)
+        meta["file_dependencies"] = [
+            {"path": dep.get("path"), "exists": bool(dep.get("exists"))}
+            for dep in file_dependencies
+            if dep.get("path")
+        ]
+    if invalidation_reason:
+        meta["invalidation_reason"] = invalidation_reason
+    return meta
+
+
 def _not_applied_metadata(reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) -> dict[str, dict[str, Any]]:
     return {
         "routing": _policy_decision("routing", "not-applied", reason, enabled=enabled),
         "crunch": _policy_decision("crunch", "not-applied", reason, enabled=enabled),
-        "cache": _policy_decision("cache", "not-applied", reason, enabled=enabled),
+        "cache": _codex_cache_decision(
+            "skipped",
+            reason,
+            enabled=CODEX_APP_CACHE and enabled,
+            eligible=False,
+        ),
     }
 
 
@@ -169,6 +226,115 @@ def _codex_crunch_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[s
     return crunched, crunch_meta
 
 
+def _is_text_only_input(value: Any) -> bool:
+    if isinstance(value, str):
+        return True
+    if isinstance(value, list):
+        if not value:
+            return False
+        return all(_is_text_only_input(item) for item in value)
+    if isinstance(value, dict):
+        block_type = str(value.get("type") or "text").strip().lower()
+        if block_type not in _CODEX_TEXT_INPUT_TYPES:
+            return False
+        text_value = value.get("text", value.get("input_text", value.get("value")))
+        return isinstance(text_value, str)
+    return False
+
+
+def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
+    if "temperature" in params:
+        try:
+            if float(params["temperature"]) != 0.0:
+                return False, "non-deterministic-temperature"
+        except (TypeError, ValueError):
+            return False, "invalid-temperature"
+    for key in ("top_p", "topP"):
+        if key in params:
+            try:
+                if float(params[key]) != 1.0:
+                    return False, "non-deterministic-top-p"
+            except (TypeError, ValueError):
+                return False, "invalid-top-p"
+    return True, None
+
+
+def _codex_cache_eligibility(params: dict[str, Any]) -> tuple[bool, str]:
+    unknown_keys = sorted(str(key) for key in params if str(key) not in _CODEX_SAFE_TURN_PARAM_KEYS)
+    if unknown_keys:
+        return False, "unknown-param-shape"
+    if _contains_action_hint(params):
+        return False, "action-like-params"
+    if not _is_text_only_input(params.get("input")):
+        return False, "non-text-input"
+    deterministic, reason = _deterministic_sampling(params)
+    if not deterministic:
+        return False, reason or "non-deterministic-sampling"
+    return True, "safe-text-only-turn-start"
+
+
+def _codex_cache_key_for_message(msg: dict[str, Any]) -> str:
+    key_msg = copy.deepcopy(msg)
+    key_msg.pop("id", None)
+    return cache_key_for(
+        key_msg,
+        "codex-app://turn/start",
+        provider="codex-app",
+        upstream=DEFAULT_UPSTREAM,
+        namespace=os.getenv("AGENTFLOW_CODEX_APP_CACHE_NAMESPACE", os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default")),
+    )
+
+
+def _is_safe_codex_response_obj(value: Any, request_id: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if request_id is not None and str(value.get("id")) != str(request_id):
+        return False
+    if "error" in value:
+        return False
+    if value.get("method") is not None:
+        return False
+    if "result" not in value:
+        return False
+    return not _contains_action_hint(value.get("result"))
+
+
+def _codex_cache_payload(response_obj: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "agentflow_cache_type": "codex-app-jsonrpc-response",
+        "version": 1,
+        "response": response_obj,
+    }
+
+
+def _codex_cached_response(payload: Any, request_id: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("agentflow_cache_type") != "codex-app-jsonrpc-response":
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    replay = copy.deepcopy(response)
+    if request_id is not None:
+        replay["id"] = request_id
+    if not _is_safe_codex_response_obj(replay, request_id):
+        return None
+    return json.dumps(replay, separators=(",", ":"), ensure_ascii=False)
+
+
+def _public_metadata(metadata: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]] | None:
+    if metadata is None:
+        return None
+    public: dict[str, dict[str, Any]] = {}
+    for key, value in metadata.items():
+        if isinstance(value, dict):
+            public[key] = {k: v for k, v in value.items() if not str(k).startswith("_agentflow_")}
+        else:
+            public[key] = value
+    return public
+
+
 def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, dict[str, Any]] | None]:
     if isinstance(raw, bytes):
         return raw, _not_applied_metadata("binary-frame")
@@ -197,10 +363,62 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
 
     crunched_params, crunch_meta = _codex_crunch_params(params)
     routed_params, routing_meta = _codex_route_params(crunched_params)
-    cache_meta = _policy_decision("cache", "not-applied", "codex-app-cache-not-implemented")
 
     optimized = copy.deepcopy(msg)
     optimized["params"] = routed_params
+    eligible, eligible_reason = _codex_cache_eligibility(routed_params)
+    if not CODEX_APP_CACHE:
+        cache_meta = _codex_cache_decision(
+            "skipped",
+            "codex-app-cache-disabled",
+            enabled=False,
+            eligible=eligible,
+            replayability_level="local-exact-response" if eligible else "features_only",
+        )
+    elif not eligible:
+        cache_meta = _codex_cache_decision("skipped", eligible_reason, enabled=True, eligible=False)
+    else:
+        cache_key = _codex_cache_key_for_message(optimized)
+        file_deps = cache_file_dependency_snapshots(routed_params)
+        cached, invalidation_reason = store.get_cache_with_reason(cache_key)
+        if cached is not None:
+            replay_frame = _codex_cached_response(cached, msg.get("id"))
+            if replay_frame is not None:
+                cache_meta = _codex_cache_decision(
+                    "hit",
+                    "exact-match",
+                    enabled=True,
+                    eligible=True,
+                    hit_type="exact",
+                    cache_key=cache_key,
+                    replayability_level="local-exact-response",
+                    file_dependencies=file_deps,
+                )
+                cache_meta[_INTERNAL_REPLAY_FRAME_KEY] = replay_frame
+            else:
+                store.delete_cache(cache_key)
+                cache_meta = _codex_cache_decision(
+                    "miss",
+                    "unsafe-cached-envelope",
+                    enabled=True,
+                    eligible=True,
+                    cache_key=cache_key,
+                    replayability_level="local-exact-response",
+                    file_dependencies=file_deps,
+                )
+                cache_meta[_INTERNAL_CACHE_KEY] = cache_key
+        else:
+            cache_meta = _codex_cache_decision(
+                "miss",
+                invalidation_reason or "exact-miss",
+                enabled=True,
+                eligible=True,
+                cache_key=cache_key,
+                replayability_level="local-exact-response",
+                file_dependencies=file_deps,
+                invalidation_reason=invalidation_reason,
+            )
+            cache_meta[_INTERNAL_CACHE_KEY] = cache_key
     if optimized == msg:
         return raw, {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
     return json.dumps(optimized, separators=(",", ":"), ensure_ascii=False), {
@@ -227,6 +445,7 @@ def _record_message(
 ) -> None:
     if not LOG_EVENTS:
         return
+    optimization_metadata = _public_metadata(optimization_metadata)
     message_chars = len(raw)
     if isinstance(raw, bytes):
         try:
@@ -312,6 +531,41 @@ def _record_message(
     )
 
 
+def _maybe_store_codex_cache_response(
+    raw: str | bytes,
+    *,
+    pending_cache: dict[str, dict[str, Any]],
+) -> None:
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+    else:
+        text = raw
+    try:
+        msg = json.loads(text)
+    except Exception:
+        return
+    if not isinstance(msg, dict):
+        return
+    request_id = _request_id(msg)
+    if request_id is None:
+        return
+    pending = pending_cache.pop(request_id, None)
+    if not pending:
+        return
+    if not _is_safe_codex_response_obj(msg, request_id):
+        return
+    store.set_cache(
+        pending["cache_key"],
+        "codex-app",
+        int(pending.get("request_chars") or 0),
+        _codex_cache_payload(msg),
+        file_deps=pending.get("file_deps") or [],
+    )
+
+
 def _upstream_url(path: str, query: str) -> str:
     base = DEFAULT_UPSTREAM.rstrip("/")
     if path and path != "/":
@@ -332,6 +586,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     await websocket.accept()
     upstream_url = _upstream_url("/" + path if path else "", str(websocket.query_params))
     request_started: dict[str, float] = {}
+    pending_cache: dict[str, dict[str, Any]] = {}
 
     try:
         async with websockets.connect(upstream_url) as upstream:
@@ -343,6 +598,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         return
                     if msg.get("text") is not None:
                         forwarded, optimization_metadata = _optimize_client_message(msg["text"])
+                        cache_meta = (optimization_metadata or {}).get("cache") or {}
                         _record_message(
                             forwarded,
                             direction="client_to_server",
@@ -350,6 +606,30 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
                         )
+                        replay_frame = cache_meta.get(_INTERNAL_REPLAY_FRAME_KEY)
+                        if isinstance(replay_frame, str):
+                            _record_message(
+                                replay_frame,
+                                direction="server_to_client",
+                                session_id=session_id,
+                                request_started=request_started,
+                            )
+                            await websocket.send_text(replay_frame)
+                            continue
+                        cache_key = cache_meta.get(_INTERNAL_CACHE_KEY)
+                        if isinstance(cache_key, str) and cache_meta.get("status") == "miss":
+                            try:
+                                cached_msg = json.loads(forwarded) if isinstance(forwarded, str) else None
+                            except Exception:
+                                cached_msg = None
+                            request_id = _request_id(cached_msg) if isinstance(cached_msg, dict) else None
+                            params = cached_msg.get("params") if isinstance(cached_msg, dict) else None
+                            if request_id is not None:
+                                pending_cache[request_id] = {
+                                    "cache_key": cache_key,
+                                    "request_chars": len(forwarded),
+                                    "file_deps": cache_file_dependency_snapshots(params if isinstance(params, dict) else cached_msg),
+                                }
                         await upstream.send(forwarded)
                     elif msg.get("bytes") is not None:
                         forwarded, optimization_metadata = _optimize_client_message(msg["bytes"])
@@ -364,6 +644,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
 
             async def upstream_to_client() -> None:
                 async for msg in upstream:
+                    _maybe_store_codex_cache_response(msg, pending_cache=pending_cache)
                     _record_message(msg, direction="server_to_client", session_id=session_id, request_started=request_started)
                     if isinstance(msg, bytes):
                         await websocket.send_bytes(msg)
