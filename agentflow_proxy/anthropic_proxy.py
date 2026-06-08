@@ -50,6 +50,7 @@ from agentflow_proxy.errors import (
 from agentflow_proxy.routing_experiments import (
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
     compare_response_outputs,
+    routing_experiment_feedback_features,
     routing_experiment_decision,
 )
 from agentflow_proxy.recommendations import (
@@ -95,6 +96,14 @@ async def _record_managed_outcome_feedback(
     managed = routing_meta.get("managed_recommendation")
     if not isinstance(managed, dict) or not managed.get("enabled"):
         return
+    experiment_meta = routing_meta.get("routing_experiment")
+    if isinstance(experiment_meta, dict) and experiment_meta.get("sampled"):
+        experiment_meta["managed_feedback"] = {
+            "enabled": True,
+            "status": "pending",
+            "reason": "outcome-feedback-pending",
+            "optimization_unit_id": managed.get("optimization_unit_id"),
+        }
     outcome = build_outcome_feedback(
         provider="anthropic",
         path=path,
@@ -120,6 +129,19 @@ async def _record_managed_outcome_feedback(
         error=error,
     )
     managed["outcome_feedback"] = await send_outcome_feedback(managed, outcome)
+    if isinstance(experiment_meta, dict) and experiment_meta.get("sampled"):
+        feedback_meta = managed["outcome_feedback"]
+        experiment_meta["managed_feedback"] = {
+            "enabled": bool(feedback_meta.get("enabled")),
+            "status": feedback_meta.get("status"),
+            "reason": feedback_meta.get("reason"),
+            "optimization_unit_id": feedback_meta.get("optimization_unit_id") or managed.get("optimization_unit_id"),
+            "status_code": feedback_meta.get("status_code"),
+            "latency_ms": feedback_meta.get("latency_ms"),
+        }
+        experiment_id = experiment_meta.get("experiment_id")
+        if isinstance(experiment_id, str) and experiment_id:
+            context.store.update_routing_experiment_json(experiment_id, stable_json(experiment_meta))
     context.store.update_call_routing_json(call_id, stable_json(routing_meta))
 
 
@@ -296,6 +318,43 @@ async def _run_anthropic_routing_experiment(
         )
 
     comparison = compare_response_outputs(primary_response_body, shadow_response_body)
+    feedback_features = routing_experiment_feedback_features(
+        experiment_id=experiment_id,
+        experiment_meta=experiment_meta,
+        routing_meta=routing_meta,
+        comparison=comparison,
+        primary_model=primary_model,
+        shadow_model=shadow_model,
+        primary_status_code=primary_status_code,
+        shadow_status_code=shadow_status_code,
+        primary_latency_ms=primary_latency_ms,
+        shadow_latency_ms=shadow_latency_ms,
+        primary_cost_est_usd=primary_cost_est_usd,
+        shadow_cost_est_usd=shadow_cost,
+        error=error,
+    )
+    experiment_meta.update(
+        {
+            "experiment_id": experiment_id,
+            "status": feedback_features["status"],
+            "primary_model": primary_model,
+            "shadow_model": shadow_model,
+            "primary_status_code": primary_status_code,
+            "shadow_status_code": shadow_status_code,
+            "primary_output_chars": comparison["primary_output_chars"],
+            "shadow_output_chars": comparison["shadow_output_chars"],
+            "primary_output_sha256": comparison["primary_output_sha256"],
+            "shadow_output_sha256": comparison["shadow_output_sha256"],
+            "output_similarity": comparison["output_similarity"],
+            "passed_threshold": comparison["passed_threshold"],
+            "optimization_feedback": feedback_features,
+            "managed_feedback": {
+                "enabled": False,
+                "status": "not-exported",
+                "reason": "managed-feedback-not-attempted",
+            },
+        }
+    )
     store_bodies = context.log_bodies or ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES
     context.store.log_routing_experiment(
         id=experiment_id,

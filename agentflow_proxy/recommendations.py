@@ -395,6 +395,11 @@ def build_outcome_feedback(
             "target_model_normalized": managed.get("target_model_normalized"),
         },
     }
+    experiment = routing_meta.get("routing_experiment") if isinstance(routing_meta, dict) else None
+    if isinstance(experiment, dict):
+        feedback_features = experiment.get("optimization_feedback")
+        if isinstance(feedback_features, dict):
+            features["routing_experiment"] = feedback_features
     features.update(_compact_error(error, status_code))
     return _sanitize_features(features)
 

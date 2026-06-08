@@ -188,3 +188,76 @@ def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_res
         "output_similarity": round(float(similarity), 6),
         "passed_threshold": float(similarity) >= ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD,
     }
+
+
+def _text_chars_bucket(text_chars: Any) -> str:
+    try:
+        chars = int(text_chars or 0)
+    except (TypeError, ValueError):
+        chars = 0
+    if chars < 2000:
+        return "lt-2k"
+    if chars < 8000:
+        return "2k-8k"
+    if chars < 30000:
+        return "8k-30k"
+    return "gte-30k"
+
+
+def routing_experiment_feedback_features(
+    *,
+    experiment_id: str,
+    experiment_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    comparison: dict[str, Any],
+    primary_model: str,
+    shadow_model: str,
+    primary_status_code: int | None,
+    shadow_status_code: int | None,
+    primary_latency_ms: int | None,
+    shadow_latency_ms: int | None,
+    primary_cost_est_usd: float | None,
+    shadow_cost_est_usd: float | None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    category = str(routing_meta.get("category") or experiment_meta.get("category") or "unknown")
+    requested_model = str(routing_meta.get("requested_model") or experiment_meta.get("requested_model") or "")
+    routed_model = str(routing_meta.get("routed_model") or experiment_meta.get("routed_model") or "")
+    compared = (
+        primary_status_code is not None
+        and primary_status_code < 400
+        and shadow_status_code is not None
+        and shadow_status_code < 400
+        and comparison.get("output_similarity") is not None
+    )
+    status = "compared" if compared else "shadow-unavailable"
+    if error:
+        status = "shadow-error"
+    return {
+        "schema": "agentflow.routing_experiment_feedback.v1",
+        "experiment_id": experiment_id,
+        "sampled": bool(experiment_meta.get("sampled")),
+        "status": status,
+        "requested_model": requested_model,
+        "routed_model": routed_model,
+        "primary_model": primary_model,
+        "shadow_model": shadow_model,
+        "category": category,
+        "candidate_bucket": f"{category}:{requested_model}->{routed_model}",
+        "text_chars_bucket": _text_chars_bucket(experiment_meta.get("text_chars") or routing_meta.get("text_chars")),
+        "routing_reason": routing_meta.get("reason"),
+        "primary_status_code": primary_status_code,
+        "shadow_status_code": shadow_status_code,
+        "primary_latency_ms": primary_latency_ms,
+        "shadow_latency_ms": shadow_latency_ms,
+        "primary_cost_est_usd": primary_cost_est_usd,
+        "shadow_cost_est_usd": shadow_cost_est_usd,
+        "primary_output_chars": comparison.get("primary_output_chars"),
+        "shadow_output_chars": comparison.get("shadow_output_chars"),
+        "primary_output_sha256": comparison.get("primary_output_sha256"),
+        "shadow_output_sha256": comparison.get("shadow_output_sha256"),
+        "output_similarity": comparison.get("output_similarity"),
+        "similarity_threshold": experiment_meta.get("similarity_threshold"),
+        "passed_threshold": bool(comparison.get("passed_threshold")),
+        "error_present": bool(error),
+    }

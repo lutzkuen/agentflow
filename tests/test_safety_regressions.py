@@ -16,6 +16,7 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
+    from agentflow_proxy import routing_experiments
     from agentflow_proxy import openai_proxy, server
     from agentflow_proxy.limiter import TierBackoffActive
     from agentflow_proxy.store import Store
@@ -305,6 +306,58 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         feedback_meta = routing["managed_recommendation"]["outcome_feedback"]
         self.assertEqual(feedback_meta["status"], "sent")
         self.assertEqual(feedback_meta["optimization_unit_id"], 42)
+
+    def test_anthropic_routing_experiment_exports_metadata_only_feedback(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "primary raw output secret"}],
+            "usage": {"input_tokens": 8, "output_tokens": 4},
+        }
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "short prompt secret"}],
+        }
+
+        patches = [
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD", 0.86),
+            patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {"categories": [], "min_text_chars": 0, "max_text_chars": 30000}),
+        ]
+        with (
+            self._managed_feedback_env(),
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
+        ):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["recommendation", "upstream", "upstream", "feedback"])
+        feedback = ManagedFeedbackAsyncClient.calls[-1]["json"]
+        experiment = feedback["routing_experiment"]
+        self.assertEqual(experiment["schema"], "agentflow.routing_experiment_feedback.v1")
+        self.assertEqual(experiment["primary_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(experiment["shadow_model"], "claude-sonnet-4-6")
+        self.assertEqual(experiment["output_similarity"], 1.0)
+        self.assertIn("primary_output_sha256", experiment)
+        self.assertNotIn("primary raw output secret", str(feedback))
+        self.assertNotIn("short prompt secret", str(feedback))
+
+        [call_row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        routing = json.loads(call_row["routing_json"])
+        self.assertEqual(routing["routing_experiment"]["managed_feedback"]["status"], "sent")
+        [experiment_row] = server.store.conn.execute("select experiment_json from routing_experiments").fetchall()
+        experiment_json = json.loads(experiment_row["experiment_json"])
+        self.assertEqual(experiment_json["managed_feedback"]["status"], "sent")
+        self.assertEqual(experiment_json["optimization_feedback"]["output_similarity"], 1.0)
 
     def test_anthropic_provider_failure_still_returns_and_sends_feedback(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

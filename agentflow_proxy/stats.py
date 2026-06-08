@@ -2686,6 +2686,16 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
           and shadow_status_code < 400
           and output_similarity is not null
     """)
+    routing_experiment_feedback_status_counts: dict[str, int] = {}
+    for row in q("select experiment_json from routing_experiments where experiment_json is not null"):
+        try:
+            experiment = json.loads(row["experiment_json"])
+        except Exception:
+            status = "invalid-json"
+        else:
+            feedback = experiment.get("managed_feedback") if isinstance(experiment, dict) else None
+            status = str((feedback or {}).get("status") or "not-exported") if isinstance(feedback, dict) else "not-exported"
+        routing_experiment_feedback_status_counts[status] = routing_experiment_feedback_status_counts.get(status, 0) + 1
 
     provider_breakdown = q("""
         select coalesce(provider, 'anthropic') as provider, count(*) as count,
@@ -2801,6 +2811,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                 round(float(routing_experiment_avg_similarity), 6)
                 if routing_experiment_avg_similarity is not None else None
             ),
+            "routing_experiment_feedback_status_counts": routing_experiment_feedback_status_counts,
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,

@@ -1259,6 +1259,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(result["summary"]["routing_experiment_samples"], 2)
         self.assertEqual(result["summary"]["routing_experiment_compared_samples"], 2)
         self.assertAlmostEqual(result["summary"]["routing_experiment_avg_similarity"], 0.8, places=6)
+        self.assertEqual(result["summary"]["routing_experiment_feedback_status_counts"], {"not-exported": 2})
         self.assertEqual(row["samples"], 2)
         self.assertEqual(row["compared_samples"], 2)
         self.assertAlmostEqual(row["avg_similarity"], 0.8, places=6)

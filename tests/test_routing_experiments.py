@@ -104,6 +104,48 @@ similarity_threshold: 0.9
         self.assertEqual(result["output_similarity"], 1.0)
         self.assertTrue(result["passed_threshold"])
 
+    def test_feedback_features_are_metadata_only(self):
+        comparison = {
+            "primary_output_chars": 17,
+            "shadow_output_chars": 19,
+            "primary_output_sha256": "primary-hash",
+            "shadow_output_sha256": "shadow-hash",
+            "output_similarity": 0.91,
+            "passed_threshold": True,
+        }
+
+        result = experiments.routing_experiment_feedback_features(
+            experiment_id="exp-1",
+            experiment_meta={
+                "sampled": True,
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "similarity_threshold": 0.86,
+                "text_chars": 7000,
+            },
+            routing_meta={
+                "category": "tool-result",
+                "reason": "tool-result processing turn routed to Haiku",
+            },
+            comparison=comparison,
+            primary_model="claude-haiku-4-5-20251001",
+            shadow_model="claude-sonnet-4-6",
+            primary_status_code=200,
+            shadow_status_code=200,
+            primary_latency_ms=50,
+            shadow_latency_ms=90,
+            primary_cost_est_usd=0.001,
+            shadow_cost_est_usd=0.004,
+        )
+
+        self.assertEqual(result["schema"], "agentflow.routing_experiment_feedback.v1")
+        self.assertEqual(result["status"], "compared")
+        self.assertEqual(result["candidate_bucket"], "tool-result:claude-sonnet-4-6->claude-haiku-4-5-20251001")
+        self.assertEqual(result["text_chars_bucket"], "2k-8k")
+        self.assertEqual(result["output_similarity"], 0.91)
+        self.assertEqual(result["primary_output_sha256"], "primary-hash")
+        self.assertNotIn("text", result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -210,6 +210,21 @@ class RecommendationTest(unittest.TestCase):
                     "target_model": "claude-haiku-4-5-20251001",
                     "applied": True,
                 },
+                "routing_experiment": {
+                    "optimization_feedback": {
+                        "schema": "agentflow.routing_experiment_feedback.v1",
+                        "experiment_id": "exp-1",
+                        "sampled": True,
+                        "primary_model": "claude-haiku-4-5-20251001",
+                        "shadow_model": "claude-sonnet-4-6",
+                        "output_similarity": 0.95,
+                        "primary_output_sha256": "primary-hash",
+                        "shadow_output_sha256": "shadow-hash",
+                        "primary_output_chars": 12,
+                        "shadow_output_chars": 13,
+                        "raw_response": "must be stripped",
+                    }
+                },
                 "messages": ["must be stripped"],
             },
             category="chat",
@@ -225,6 +240,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.last_json["status_code"], 200)
         self.assertEqual(FakeAsyncClient.last_json["routing_decision"]["reason"], "small request")
         self.assertEqual(FakeAsyncClient.last_json["managed_recommendation"]["optimization_unit_id"], 42)
+        self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["output_similarity"], 0.95)
+        self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["primary_output_sha256"], "primary-hash")
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
         self.assertNotIn("session-secret", str(FakeAsyncClient.last_json))
         self.assertNotIn("must not leave", str(FakeAsyncClient.last_json))
