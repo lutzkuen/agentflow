@@ -177,6 +177,134 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("source_surfaces", executive["accounting_today"])
         json.dumps(executive)
 
+    def test_weekly_stats_include_codex_turns_and_zero_daily_rows(self):
+        days = stats_views._utc_day_window(7)
+        provider_day = days[-3]
+        empty_day = days[-2]
+        today = days[-1]
+
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=f"{provider_day}T12:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=100,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="provider-session",
+            category="chat",
+            cache_creation_input_tokens=20,
+            cache_read_input_tokens=30,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="anthropic",
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=f"{today}T09:00:00+00:00",
+            direction="client_to_server",
+            method="turn/start",
+            request_id="weekly-codex",
+            thread_id="thread-weekly",
+            message_chars=500,
+            params_chars=20,
+            input_items=1,
+            input_text_chars=400,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-weekly",
+            cache_json=stable_json({"status": "miss", "reason": "codex-app-cache-disabled"}),
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=f"{today}T09:00:02+00:00",
+            direction="server_to_client",
+            method="turn/completed",
+            request_id="weekly-codex",
+            thread_id="thread-weekly",
+            message_chars=80,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=80,
+            error_code=None,
+            error_message=None,
+            latency_ms=2000,
+            session_id="codex-weekly",
+        )
+
+        result = asyncio.run(stats_views.stats_weekly(server.store))
+
+        self.assertEqual(result["schema"], "agentflow.weekly_activity.v1")
+        self.assertIn("generated_at", result)
+        self.assertEqual([row["day"] for row in result["days"]], days)
+        self.assertEqual(len(result["days"]), 7)
+
+        by_day = {row["day"]: row for row in result["days"]}
+        provider_row = by_day[provider_day]
+        self.assertEqual(provider_row["provider_calls"], 1)
+        self.assertEqual(provider_row["codex_turns"], 0)
+        self.assertEqual(provider_row["total_calls"], 1)
+        self.assertEqual(provider_row["provider_tokens"], 160)
+        self.assertAlmostEqual(provider_row["cost_est_usd"], 0.001, places=6)
+        self.assertAlmostEqual(provider_row["savings_usd"], 0.002, places=6)
+
+        zero_row = by_day[empty_day]
+        self.assertEqual(zero_row["total_units"], 0)
+        self.assertEqual(zero_row["provider_calls"], 0)
+        self.assertEqual(zero_row["codex_turns"], 0)
+        self.assertEqual(zero_row["total_tokens"], 0)
+        self.assertEqual(zero_row["cost_est_usd"], 0.0)
+
+        today_row = by_day[today]
+        expected_codex = stats_views._codex_estimates_with_cache(400, 80, {"status": "miss"})
+        self.assertEqual(today_row["provider_calls"], 0)
+        self.assertEqual(today_row["codex_turns"], 1)
+        self.assertEqual(today_row["total_calls"], 1)
+        self.assertEqual(today_row["successful_calls"], 1)
+        self.assertEqual(today_row["codex_tokens_est"], expected_codex["total_tokens_est"])
+        self.assertEqual(today_row["total_tokens"], expected_codex["total_tokens_est"])
+        self.assertAlmostEqual(today_row["codex_cost_est_usd"], expected_codex["cost_est_usd"], places=6)
+        self.assertAlmostEqual(today_row["cost_est_usd"], expected_codex["cost_est_usd"], places=6)
+        self.assertEqual(today_row["avg_latency_ms"], 2000)
+        self.assertEqual(today_row["cost_basis"], "provider-reported + codex-estimated-from-chars")
+
+        totals = result["totals"]
+        self.assertEqual(totals["provider_calls"], 1)
+        self.assertEqual(totals["codex_turns"], 1)
+        self.assertEqual(totals["total_units"], 2)
+        self.assertEqual(totals["total_calls"], 2)
+        self.assertEqual(totals["provider_tokens"], 160)
+        self.assertEqual(totals["codex_tokens_est"], expected_codex["total_tokens_est"])
+        self.assertEqual(totals["total_tokens"], 160 + expected_codex["total_tokens_est"])
+
+    def test_dashboard_weekly_table_exposes_provider_and_codex_columns(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn("<h2>7-day activity statistics</h2>", html)
+        self.assertIn('<th data-sort-type="number">Provider calls</th>', html)
+        self.assertIn('<th data-sort-type="number">Codex turns</th>', html)
+        self.assertIn('<th data-sort-type="number">Tokens</th>', html)
+        self.assertIn('<th data-sort-type="text">Cost basis</th>', html)
+        self.assertIn("row.codex_turns", html)
+        self.assertIn("row.codex_tokens_est", html)
+
     def test_full_stats_unifies_source_surface_accounting_for_mixed_traffic(self):
         server.store.log_call(
             id=str(uuid.uuid4()),

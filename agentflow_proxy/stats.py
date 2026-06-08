@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sqlite3
+from datetime import date, timedelta
 from typing import Any, Optional
 
 from agentflow_proxy.limiter import model_tier
@@ -23,6 +24,12 @@ TOKEN_CHARS = 4
 
 def _utc_today_start_iso() -> str:
     return f"{utc_now()[:10]}T00:00:00+00:00"
+
+
+def _utc_day_window(days: int = 7) -> list[str]:
+    today = date.fromisoformat(utc_now()[:10])
+    first = today - timedelta(days=max(1, days) - 1)
+    return [(first + timedelta(days=i)).isoformat() for i in range(max(1, days))]
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -2581,38 +2588,200 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
 
 async def stats_weekly(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
-    rows = conn.execute("""
+    generated_at = utc_now()
+    day_keys = _utc_day_window(7)
+    first_day = day_keys[0]
+    first_day_start = f"{first_day}T00:00:00+00:00"
+
+    def new_day(day: str) -> dict[str, Any]:
+        return {
+            "day": day,
+            "total_calls": 0,
+            "successful_calls": 0,
+            "errors": 0,
+            "cache_hits": 0,
+            "avg_latency_ms": None,
+            "cost_est_usd": 0.0,
+            "cost_baseline_usd": 0.0,
+            "savings_usd": 0.0,
+            "provider_calls": 0,
+            "codex_turns": 0,
+            "total_units": 0,
+            "provider_tokens": 0,
+            "codex_tokens_est": 0,
+            "total_tokens": 0,
+            "codex_cost_est_usd": 0.0,
+            "cost_basis": "provider-reported + codex-estimated-from-chars",
+            "_latency_sum": 0,
+            "_latency_count": 0,
+        }
+
+    days_by_key = {day: new_day(day) for day in day_keys}
+
+    provider_rows = conn.execute("""
         select
             date(created_at) as day,
-            count(*) as total_calls,
+            count(*) as provider_calls,
             sum(case when status_code = 200 then 1 else 0 end) as successful_calls,
             sum(case when status_code >= 400 then 1 else 0 end) as errors,
             sum(cache_hit) as cache_hits,
-            round(avg(latency_ms)) as avg_latency_ms,
+            sum(case when latency_ms is not null then latency_ms else 0 end) as latency_sum,
+            count(latency_ms) as latency_count,
             round(sum(coalesce(cost_est_usd, 0)), 6) as cost_est_usd,
-            round(sum(coalesce(cost_baseline_usd, 0)), 6) as cost_baseline_usd
+            round(sum(coalesce(cost_baseline_usd, 0)), 6) as cost_baseline_usd,
+            sum(
+                coalesce(actual_input_tokens, input_tokens_est, 0)
+                + coalesce(cache_creation_input_tokens, 0)
+                + coalesce(cache_read_input_tokens, 0)
+                + coalesce(actual_output_tokens, output_tokens_est, 0)
+            ) as provider_tokens
         from calls
-        where date(created_at) >= date('now', '-6 days')
+        where created_at >= ?
         group by date(created_at)
         order by day asc
-    """).fetchall()
+    """, (first_day_start,)).fetchall()
+    for raw in provider_rows:
+        r = dict(raw)
+        day = str(r.get("day") or "")
+        row = days_by_key.get(day)
+        if row is None:
+            continue
+        provider_calls = _as_int(r.get("provider_calls"))
+        row["provider_calls"] += provider_calls
+        row["total_calls"] += provider_calls
+        row["total_units"] += provider_calls
+        row["successful_calls"] += _as_int(r.get("successful_calls"))
+        row["errors"] += _as_int(r.get("errors"))
+        row["cache_hits"] += _as_int(r.get("cache_hits"))
+        row["_latency_sum"] += _as_int(r.get("latency_sum"))
+        row["_latency_count"] += _as_int(r.get("latency_count"))
+        row["cost_est_usd"] += _as_float(r.get("cost_est_usd"))
+        row["cost_baseline_usd"] += _as_float(r.get("cost_baseline_usd"))
+        row["provider_tokens"] += _as_int(r.get("provider_tokens"))
+
+    codex_rows = conn.execute("""
+        select s.id as start_event_id,
+               s.created_at,
+               s.request_id,
+               s.thread_id,
+               s.session_id,
+               s.input_text_chars,
+               s.cache_json,
+               (
+                   select r.id from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_event_id,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms
+        from codex_app_events s
+        where s.direction = 'client_to_server'
+          and s.method = 'turn/start'
+          and s.created_at >= ?
+        order by s.created_at asc
+    """, (first_day_start,)).fetchall()
+    for raw in codex_rows:
+        r = dict(raw)
+        day = str(r.get("created_at") or "")[:10]
+        row = days_by_key.get(day)
+        if row is None:
+            continue
+        cache = _json_obj(r.get("cache_json"))
+        estimates = _codex_estimates_with_cache(
+            r.get("input_text_chars"),
+            r.get("response_result_chars"),
+            cache,
+        )
+        row["codex_turns"] += 1
+        row["total_calls"] += 1
+        row["total_units"] += 1
+        if r.get("response_event_id") is not None and r.get("response_error_code") is None:
+            row["successful_calls"] += 1
+        if r.get("response_error_code") is not None:
+            row["errors"] += 1
+        if cache.get("status") == "hit":
+            row["cache_hits"] += 1
+        latency = r.get("response_latency_ms")
+        if latency is not None:
+            row["_latency_sum"] += _as_int(latency)
+            row["_latency_count"] += 1
+        cost = _as_float(estimates.get("cost_est_usd"))
+        baseline = _as_float(estimates.get("baseline_cost_est_usd"))
+        row["cost_est_usd"] += cost
+        row["cost_baseline_usd"] += baseline
+        row["codex_cost_est_usd"] += cost
+        row["codex_tokens_est"] += _as_int(estimates.get("total_tokens_est"))
+
+    total_latency_sum = 0
+    total_latency_count = 0
     days = []
-    for r in rows:
-        row = dict(r)
-        row["savings_usd"] = round((row["cost_baseline_usd"] or 0) - (row["cost_est_usd"] or 0), 6)
+    for day in day_keys:
+        row = days_by_key[day]
+        row["total_tokens"] = row["provider_tokens"] + row["codex_tokens_est"]
+        if row["_latency_count"]:
+            row["avg_latency_ms"] = round(row["_latency_sum"] / row["_latency_count"])
+        total_latency_sum += _as_int(row.get("_latency_sum"))
+        total_latency_count += _as_int(row.get("_latency_count"))
+        row["cost_est_usd"] = round(row["cost_est_usd"], 6)
+        row["cost_baseline_usd"] = round(row["cost_baseline_usd"], 6)
+        row["codex_cost_est_usd"] = round(row["codex_cost_est_usd"], 6)
+        row["savings_usd"] = round(max(row["cost_baseline_usd"] - row["cost_est_usd"], 0.0), 6)
+        row.pop("_latency_sum", None)
+        row.pop("_latency_count", None)
         days.append(row)
+
     totals = {
         "day": "Total",
         "total_calls": sum(r["total_calls"] for r in days),
         "successful_calls": sum(r["successful_calls"] or 0 for r in days),
         "errors": sum(r["errors"] or 0 for r in days),
         "cache_hits": sum(r["cache_hits"] or 0 for r in days),
-        "avg_latency_ms": round(sum(r["avg_latency_ms"] or 0 for r in days) / len(days)) if days else None,
+        "avg_latency_ms": round(total_latency_sum / total_latency_count) if total_latency_count else None,
         "cost_est_usd": round(sum(r["cost_est_usd"] or 0 for r in days), 6),
         "cost_baseline_usd": round(sum(r["cost_baseline_usd"] or 0 for r in days), 6),
         "savings_usd": round(sum(r["savings_usd"] for r in days), 6),
+        "provider_calls": sum(r["provider_calls"] for r in days),
+        "codex_turns": sum(r["codex_turns"] for r in days),
+        "total_units": sum(r["total_units"] for r in days),
+        "provider_tokens": sum(r["provider_tokens"] for r in days),
+        "codex_tokens_est": sum(r["codex_tokens_est"] for r in days),
+        "total_tokens": sum(r["total_tokens"] for r in days),
+        "codex_cost_est_usd": round(sum(r["codex_cost_est_usd"] or 0 for r in days), 6),
+        "cost_basis": "provider-reported + codex-estimated-from-chars",
     }
-    return {"days": days, "totals": totals}
+    return {
+        "generated_at": generated_at,
+        "schema": "agentflow.weekly_activity.v1",
+        "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", "codex_app_turn"],
+        "cost_basis": "provider-reported + codex-estimated-from-chars",
+        "days": days,
+        "totals": totals,
+    }
 
 
 async def stats_sessions(store_obj: Any) -> dict[str, Any]:
@@ -2980,10 +3149,10 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-weekly">
 <div class="section">
-  <h2>7-day daily statistics</h2>
+  <h2>7-day activity statistics</h2>
   <table data-table-id="weekly" data-filter-label="Filter 7-day stats">
     <thead><tr>
-      <th data-sort-type="timestamp">Date</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Success</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Cache hits</th><th data-sort-type="latency">Avg latency</th><th data-sort-type="money">Cost (actual)</th><th data-sort-type="money">Cost (baseline)</th><th data-sort-type="money">Savings</th>
+      <th data-sort-type="timestamp">Date</th><th data-sort-type="number">Units</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="number">Success</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Cache hits</th><th data-sort-type="number">Tokens</th><th data-sort-type="latency">Avg latency</th><th data-sort-type="money">Spend</th><th data-sort-type="money">Baseline</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Cost basis</th>
     </tr></thead>
     <tbody id="weekly-tbody"></tbody>
   </table>
@@ -3475,14 +3644,18 @@ async function refreshWeekly(){
       const errColor=row.errors?'color:#f85149':'color:#8b949e';
       return `<tr${cls}>
         <td class="ts">${row.day}</td>
-        <td>${(row.total_calls??0).toLocaleString()}</td>
+        <td>${(row.total_units??row.total_calls??0).toLocaleString()}</td>
+        <td>${(row.provider_calls??0).toLocaleString()}</td>
+        <td>${(row.codex_turns??0).toLocaleString()}</td>
         <td style="color:#3fb950">${(row.successful_calls??0).toLocaleString()}</td>
         <td style="${errColor}">${(row.errors??0).toLocaleString()}</td>
         <td>${(row.cache_hits??0).toLocaleString()}</td>
+        <td class="tokens">${fmtTok(row.total_tokens??((row.provider_tokens??0)+(row.codex_tokens_est??0)))} total · ${fmtTok(row.provider_tokens??0)} provider · ${fmtTok(row.codex_tokens_est??0)} Codex est</td>
         <td class="latency">${fmtMs(row.avg_latency_ms)}</td>
         <td class="cost">${fmt(row.cost_est_usd,5)}</td>
         <td class="baseline">${fmt(row.cost_baseline_usd,5)}</td>
         <td class="savings">${fmt(row.savings_usd,5)}</td>
+        <td class="flags"><span class="badge provider">${esc(row.cost_basis||d.cost_basis||'provider-reported')}</span></td>
       </tr>`;
     }).join('');
     applyAllDataTables();
