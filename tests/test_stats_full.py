@@ -1411,6 +1411,181 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(cache_rows[("codex_turn", "hit", "exact-match", "exact")], 2)
         self.assertNotIn(("codex_app_turn", "hit", "exact-match", "exact"), cache_rows)
 
+    def test_cache_replayability_report_groups_repeated_skipped_shapes_and_blockers(self):
+        def log_provider_call(
+            *,
+            cache_json,
+            routing_json,
+            session_id,
+            stream,
+            category,
+            cost,
+            request_json=None,
+        ):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=stream,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=10,
+                output_tokens_est=1,
+                actual_input_tokens=10,
+                actual_output_tokens=1,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json(routing_json),
+                cache_json=stable_json(cache_json),
+                error=None,
+                request_json=request_json,
+                response_json=None,
+                session_id=session_id,
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        streaming_cache = {
+            "status": "skipped",
+            "reason": "streaming",
+            "policy_source": "local-default",
+            "semantic_enabled": False,
+            "tool_cache_enabled": False,
+            "file_watch_enabled": False,
+        }
+        streaming_routing = {"text_chars": 12_000, "category": "chat", "has_tools": False}
+        log_provider_call(
+            cache_json=streaming_cache,
+            routing_json=streaming_routing,
+            session_id="session-stream-a",
+            stream=1,
+            category="chat",
+            cost=0.01,
+            request_json=stable_json({"messages": [{"content": "raw-secret-should-not-leak"}]}),
+        )
+        log_provider_call(
+            cache_json=streaming_cache,
+            routing_json=streaming_routing,
+            session_id="session-stream-a",
+            stream=1,
+            category="chat",
+            cost=0.02,
+        )
+
+        tool_cache = {
+            "status": "skipped",
+            "reason": "tools-disabled",
+            "policy_source": "local-default",
+            "semantic_enabled": False,
+            "tool_cache_enabled": False,
+            "file_watch_enabled": False,
+        }
+        tool_routing = {"text_chars": 24_000, "category": "tool-result", "has_tools": True}
+        log_provider_call(
+            cache_json=tool_cache,
+            routing_json=tool_routing,
+            session_id="session-tool-a",
+            stream=0,
+            category="tool-result",
+            cost=0.03,
+        )
+        log_provider_call(
+            cache_json=tool_cache,
+            routing_json=tool_routing,
+            session_id="session-tool-b",
+            stream=0,
+            category="tool-result",
+            cost=0.04,
+        )
+
+        log_provider_call(
+            cache_json={"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            routing_json={"text_chars": 400, "category": "chat", "has_tools": False},
+            session_id="session-one-off",
+            stream=0,
+            category="chat",
+            cost=0.005,
+        )
+
+        result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
+        groups = {(row["cache_reason"], row["category"]): row for row in result["groups"]}
+
+        self.assertEqual(result["schema"], "agentflow.cache_replayability.v1")
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertEqual(result["summary"]["repeated_shape_groups"], 2)
+        self.assertTrue(result["summary"]["repeated_shape_exists_but_cache_is_unsafe"])
+        self.assertEqual(groups[("streaming", "chat")]["count"], 2)
+        self.assertIn("streaming", groups[("streaming", "chat")]["replayability_blockers"])
+        self.assertEqual(groups[("tools-disabled", "tool-result")]["count"], 2)
+        self.assertEqual(groups[("tools-disabled", "tool-result")]["sessions"], 2)
+        self.assertIn("tool-call-disabled", groups[("tools-disabled", "tool-result")]["replayability_blockers"])
+        self.assertIn("file-dependency-unknown", groups[("tools-disabled", "tool-result")]["replayability_blockers"])
+        self.assertIn("session-context-changed", groups[("tools-disabled", "tool-result")]["replayability_blockers"])
+        self.assertIn("true-one-off-miss", groups[("exact-miss", "chat")]["replayability_blockers"])
+        self.assertNotIn("raw-secret-should-not-leak", json.dumps(result))
+
+        by_blocker = {row["blocker"]: row["calls"] for row in result["blocker_breakdown"]}
+        self.assertEqual(by_blocker["streaming"], 2)
+        self.assertEqual(by_blocker["tool-call-disabled"], 2)
+        self.assertEqual(by_blocker["true-one-off-miss"], 1)
+
+    def test_cache_replayability_endpoint_and_dashboard_are_read_only_metadata(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.01,
+            cost_baseline_usd=0.01,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({"text_chars": 12_000, "category": "chat", "has_tools": False}),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+            error=None,
+            request_json=stable_json({"messages": [{"content": "private request body"}]}),
+            response_json=None,
+            session_id="session-api",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/cache-replayability?limit=5")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["schema"], "agentflow.cache_replayability.v1")
+            self.assertFalse(data["privacy"]["raw_prompts_included"])
+            self.assertNotIn("private request body", json.dumps(data))
+            html = client.get("/agentflow/dashboard").text
+            self.assertIn("Skipped cache replayability", html)
+            self.assertIn("cache-replayability-tbody", html)
+
     def test_codex_effectiveness_counts_direct_derived_absent_and_unknown_model_state(self):
         rows = [
             (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import sqlite3
@@ -748,6 +749,324 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
     breakdown = list(grouped.values())
     breakdown.sort(key=lambda r: r["count"], reverse=True)
     return breakdown
+
+
+def _size_bucket(value: Any) -> str:
+    n = _as_int(value)
+    if n <= 0:
+        return "0"
+    if n < 2_000:
+        return "1_2k"
+    if n < 8_000:
+        return "2k_8k"
+    if n < 32_000:
+        return "8k_32k"
+    if n < 128_000:
+        return "32k_128k"
+    return "128k_plus"
+
+
+def _short_session_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text[:8] if text else None
+
+
+def _cache_replayability_blockers(unit: dict[str, Any]) -> list[str]:
+    cache = unit["cache"]
+    reason = str(unit["cache_reason"] or "")
+    category = str(unit.get("category") or "")
+    blockers: set[str] = set()
+    if unit.get("stream") or "streaming" in reason:
+        blockers.add("streaming")
+    if "tools-disabled" in reason or (unit.get("has_tools") and not bool(cache.get("tool_cache_enabled"))):
+        blockers.add("tool-call-disabled")
+    if (
+        not bool(cache.get("semantic_enabled"))
+        and (
+            unit["cache_status"] == "skipped"
+            or "semantic" in reason
+            or "cache-disabled" in reason
+        )
+    ):
+        blockers.add("semantic-cache-disabled")
+    tool_like = bool(unit.get("has_tools")) or category.startswith("tool")
+    if tool_like and not bool(cache.get("file_watch_enabled")):
+        blockers.add("file-dependency-unknown")
+    if is_codex_turn_source_surface(str(unit.get("source_surface") or "")):
+        blockers.add("turn-level-only")
+    if unit["cache_status"] == "missing":
+        blockers.add("missing-cache-metadata")
+    return sorted(blockers)
+
+
+def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granularity: str) -> dict[str, Any] | None:
+    decision = _cache_decision_for_breakdown({**row, "source_surface": source_surface})
+    status = str(decision.get("status") or "missing")
+    if status == "hit":
+        return None
+    cache = _json_obj(row.get("cache_json"))
+    routing = _json_obj(row.get("routing_json"))
+    text_chars = _as_int(row.get("text_chars") if row.get("text_chars") is not None else routing.get("text_chars"))
+    input_tokens = _as_int(row.get("input_tokens") if row.get("input_tokens") is not None else row.get("input_tokens_est"))
+    if not text_chars and input_tokens:
+        text_chars = input_tokens * TOKEN_CHARS
+    category = str(row.get("category") or routing.get("category") or "unknown")
+    requested_model = str(row.get("requested_model") or "")
+    routed_model = str(row.get("routed_model") or requested_model)
+    replayability_level = str(cache.get("replayability_level") or ("features_only" if granularity == "agent_turn" else "metadata_shape"))
+    unit = {
+        "source_surface": canonical_source_surface(source_surface),
+        "granularity": granularity,
+        "created_at": row.get("created_at"),
+        "session_id": row.get("session_id"),
+        "stream": bool(_as_int(row.get("stream"))),
+        "cache_status": status,
+        "cache_reason": str(decision.get("reason") or "unknown"),
+        "hit_type": str(decision.get("hit_type") or ""),
+        "policy_source": str(decision.get("policy_source") or "unknown"),
+        "category": category,
+        "requested_tier": model_tier(requested_model) if requested_model else "unknown",
+        "target_tier": model_tier(routed_model) if routed_model else "unknown",
+        "has_tools": bool(routing.get("has_tools") or category.startswith("tool")),
+        "eligible": bool(cache.get("eligible")),
+        "replayability_level": replayability_level,
+        "text_size_bucket": _size_bucket(text_chars),
+        "input_items_bucket": _size_bucket(row.get("input_items")),
+        "cost_est_usd": _as_float(row.get("cost_est_usd")),
+        "baseline_cost_usd": _as_float(row.get("cost_baseline_usd")),
+        "input_tokens": input_tokens,
+        "text_chars": text_chars,
+        "cache": cache,
+    }
+    unit["blockers"] = _cache_replayability_blockers(unit)
+    return unit
+
+
+def _cache_replayability_fingerprint_basis(unit: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_surface": unit["source_surface"],
+        "granularity": unit["granularity"],
+        "cache_status": unit["cache_status"],
+        "cache_reason": unit["cache_reason"],
+        "category": unit["category"],
+        "stream": unit["stream"],
+        "has_tools": unit["has_tools"],
+        "requested_tier": unit["requested_tier"],
+        "target_tier": unit["target_tier"],
+        "text_size_bucket": unit["text_size_bucket"],
+        "input_items_bucket": unit["input_items_bucket"],
+        "replayability_level": unit["replayability_level"],
+        "eligible": unit["eligible"],
+    }
+
+
+def _cache_replayability_fingerprint(unit: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    basis = _cache_replayability_fingerprint_basis(unit)
+    raw = json.dumps(basis, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16], basis
+
+
+def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit: int = 25) -> dict[str, Any]:
+    grouped: dict[str, dict[str, Any]] = {}
+    one_off_rows = 0
+    for unit in units:
+        fingerprint, basis = _cache_replayability_fingerprint(unit)
+        bucket = grouped.setdefault(
+            fingerprint,
+            {
+                "shape_fingerprint": fingerprint,
+                "fingerprint_basis": basis,
+                "source_surface": unit["source_surface"],
+                "granularity": unit["granularity"],
+                "cache_status": unit["cache_status"],
+                "cache_reason": unit["cache_reason"],
+                "category": unit["category"],
+                "text_size_bucket": unit["text_size_bucket"],
+                "input_items_bucket": unit["input_items_bucket"],
+                "requested_tier": unit["requested_tier"],
+                "target_tier": unit["target_tier"],
+                "stream": unit["stream"],
+                "has_tools": unit["has_tools"],
+                "eligible": unit["eligible"],
+                "replayability_level": unit["replayability_level"],
+                "policy_source": unit["policy_source"],
+                "count": 0,
+                "sessions": set(),
+                "example_sessions": [],
+                "estimated_cost_usd": 0.0,
+                "baseline_cost_usd": 0.0,
+                "input_tokens": 0,
+                "text_chars": 0,
+                "first_seen_at": unit.get("created_at"),
+                "last_seen_at": unit.get("created_at"),
+                "_blockers": set(unit.get("blockers") or []),
+            },
+        )
+        bucket["count"] += 1
+        session = str(unit.get("session_id") or "")
+        if session:
+            bucket["sessions"].add(session)
+            short = _short_session_id(session)
+            if short and short not in bucket["example_sessions"] and len(bucket["example_sessions"]) < 3:
+                bucket["example_sessions"].append(short)
+        bucket["estimated_cost_usd"] += _as_float(unit.get("cost_est_usd"))
+        bucket["baseline_cost_usd"] += _as_float(unit.get("baseline_cost_usd"))
+        bucket["input_tokens"] += _as_int(unit.get("input_tokens"))
+        bucket["text_chars"] += _as_int(unit.get("text_chars"))
+        for blocker in unit.get("blockers") or []:
+            bucket["_blockers"].add(str(blocker))
+        if str(unit.get("created_at") or "") < str(bucket.get("first_seen_at") or unit.get("created_at") or ""):
+            bucket["first_seen_at"] = unit.get("created_at")
+        if str(unit.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+            bucket["last_seen_at"] = unit.get("created_at")
+
+    groups = []
+    blocker_counts: dict[str, dict[str, Any]] = {}
+    repeated_groups = 0
+    repeated_rows = 0
+    repeated_cost = 0.0
+    unsafe_repeated_rows = 0
+    unsafe_repeated_cost = 0.0
+    for bucket in grouped.values():
+        session_count = len(bucket["sessions"])
+        blockers = set(bucket.pop("_blockers"))
+        if session_count > 1:
+            blockers.add("session-context-changed")
+        if bucket["count"] == 1 and not blockers and bucket["cache_status"] == "miss":
+            blockers.add("true-one-off-miss")
+            one_off_rows += 1
+        elif bucket["count"] == 1:
+            one_off_rows += 1
+        blocker_list = sorted(blockers)
+        repeated = bucket["count"] > 1
+        if repeated:
+            repeated_groups += 1
+            repeated_rows += bucket["count"]
+            repeated_cost += float(bucket["estimated_cost_usd"])
+            if blocker_list:
+                unsafe_repeated_rows += bucket["count"]
+                unsafe_repeated_cost += float(bucket["estimated_cost_usd"])
+        for blocker in blocker_list or ["none"]:
+            row = blocker_counts.setdefault(
+                blocker,
+                {"blocker": blocker, "groups": 0, "calls": 0, "estimated_cost_usd": 0.0},
+            )
+            row["groups"] += 1
+            row["calls"] += bucket["count"]
+            row["estimated_cost_usd"] += float(bucket["estimated_cost_usd"])
+        finalized = {
+            **bucket,
+            "sessions": session_count,
+            "repeated": repeated,
+            "replayability_blockers": blocker_list,
+            "estimated_cost_usd": round(float(bucket["estimated_cost_usd"]), 6),
+            "baseline_cost_usd": round(float(bucket["baseline_cost_usd"]), 6),
+        }
+        groups.append(finalized)
+
+    groups.sort(key=lambda row: (row["count"], row["estimated_cost_usd"], str(row.get("last_seen_at") or "")), reverse=True)
+    blocker_rows = [
+        {
+            **row,
+            "estimated_cost_usd": round(float(row["estimated_cost_usd"]), 6),
+        }
+        for row in blocker_counts.values()
+    ]
+    blocker_rows.sort(key=lambda row: (row["calls"], row["estimated_cost_usd"]), reverse=True)
+    return {
+        "schema": "agentflow.cache_replayability.v1",
+        "generated_at": utc_now(),
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "basis": "metadata-derived shape fingerprints only; request/response bodies are not inspected",
+        },
+        "summary": {
+            "candidate_rows": len(units),
+            "shape_groups": len(groups),
+            "repeated_shape_groups": repeated_groups,
+            "repeated_candidate_rows": repeated_rows,
+            "one_off_candidate_rows": one_off_rows,
+            "repeated_estimated_cost_usd": round(repeated_cost, 6),
+            "unsafe_repeated_rows": unsafe_repeated_rows,
+            "unsafe_repeated_estimated_cost_usd": round(unsafe_repeated_cost, 6),
+            "no_repeated_shape_exists": repeated_groups == 0,
+            "repeated_shape_exists_but_cache_is_unsafe": unsafe_repeated_rows > 0,
+        },
+        "blocker_breakdown": blocker_rows,
+        "groups": groups[: max(1, int(limit or 25))],
+    }
+
+
+async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str, Any]:
+    conn = store_obj.conn
+    provider_rows = [
+        dict(row)
+        for row in conn.execute("""
+            select created_at, path, coalesce(provider, 'anthropic') as provider,
+                   requested_model, routed_model, stream, cache_hit, status_code,
+                   cache_json, routing_json, category, session_id,
+                   input_tokens_est, actual_input_tokens as input_tokens,
+                   cost_est_usd, cost_baseline_usd,
+                   null as input_items,
+                   null as text_chars
+            from calls
+            order by created_at desc
+        """).fetchall()
+    ]
+    units: list[dict[str, Any]] = []
+    for row in provider_rows:
+        surface = _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
+        unit = _cache_replayability_unit(row, source_surface=surface, granularity="provider_request")
+        if unit is not None:
+            units.append(unit)
+
+    codex_rows = [
+        dict(row)
+        for row in conn.execute("""
+            select s.created_at,
+                   s.session_id,
+                   s.routing_json,
+                   s.cache_json,
+                   s.input_items,
+                   s.input_text_chars as text_chars,
+                   s.input_text_chars as input_tokens,
+                   (
+                       select r.result_chars from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_result_chars
+            from codex_app_events s
+            where s.direction = 'client_to_server'
+              and s.method = 'turn/start'
+            order by s.created_at desc
+        """).fetchall()
+    ]
+    for row in codex_rows:
+        estimates = _codex_estimates_with_cache(row.get("text_chars"), row.get("response_result_chars"), _json_obj(row.get("cache_json")))
+        prepared = {
+            **row,
+            "requested_model": CODEX_APP_MODEL,
+            "routed_model": CODEX_APP_MODEL,
+            "stream": 0,
+            "cache_hit": 1 if _json_obj(row.get("cache_json")).get("status") == "hit" else 0,
+            "status_code": None,
+            "category": "codex-app-turn",
+            "input_tokens": estimates.get("input_tokens_est"),
+            "cost_est_usd": estimates.get("cost_est_usd"),
+            "cost_baseline_usd": estimates.get("baseline_cost_est_usd"),
+        }
+        unit = _cache_replayability_unit(prepared, source_surface=CODEX_APP_SOURCE_SURFACE, granularity="agent_turn")
+        if unit is not None:
+            units.append(unit)
+
+    return _cache_replayability_report_from_units(units, limit=limit)
 
 
 def _managed_error_class(meta: dict[str, Any]) -> str | None:
@@ -3375,6 +3694,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     """, (today_start, CODEX_APP_SOURCE_SURFACE, today_start))
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
+    cache_replayability = await stats_cache_replayability(store_obj, limit=20)
 
     error_rows = q("""
         select created_at,
@@ -3577,6 +3897,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
+        "cache_replayability": cache_replayability,
         "error_breakdown": error_breakdown,
         "today_error_breakdown": today_error_breakdown,
         "routing_experiment_summary": routing_experiment_summary,
@@ -4467,6 +4788,15 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-cache">
 <div class="section">
+  <h2>Skipped cache replayability</h2>
+  <table data-table-id="cache-replayability" data-filter-label="Filter cache replayability groups">
+    <thead><tr>
+      <th data-sort-type="text">Shape</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Reason</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Sessions</th><th data-sort-type="money">Cost</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Basis</th>
+    </tr></thead>
+    <tbody id="cache-replayability-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Cache decisions today</h2>
   <table data-table-id="cache-today" data-filter-label="Filter cache decisions today">
     <thead><tr>
@@ -5047,6 +5377,30 @@ async function refreshCategories(){
 async function refreshCache(){
   try{
     const d=await loadFullStats();
+    const replay=d.cache_replayability||{};
+    const replayRows=replay.groups||[];
+    document.getElementById('cache-replayability-tbody').innerHTML=replayRows.map(row=>{
+      const blockers=(row.replayability_blockers||[]).map(b=>`<span class="badge ${b==='true-one-off-miss'?'miss':'routed'}">${esc(b)}</span>`).join(' ')||'<span class="badge hit">none</span>';
+      const basis=row.fingerprint_basis||{};
+      const basisText=[
+        basis.granularity,
+        basis.category,
+        basis.stream?'stream':'non-stream',
+        basis.has_tools?'tools':'no tools',
+        basis.text_size_bucket,
+        basis.replayability_level
+      ].filter(Boolean).join(' · ');
+      return `<tr>
+        <td class="model">${esc(row.shape_fingerprint)}</td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="model">${esc(row.cache_status||'unknown')} / ${esc(row.cache_reason||'unknown')}</td>
+        <td>${(row.count||0).toLocaleString()}</td>
+        <td>${(row.sessions||0).toLocaleString()}</td>
+        <td class="cost">${fmt(row.estimated_cost_usd||0,5)}</td>
+        <td class="flags">${blockers}</td>
+        <td class="flags"><span class="badge provider">${esc(basisText||'metadata shape')}</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="8" style="color:#8b949e">No skipped or missed cache candidates recorded</td></tr>';
     const renderRows=(rows)=>rows.map(row=>`<tr>
       <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
       <td><span class="badge ${row.status==='hit'?'hit':row.status==='miss'?'miss':'stream'}">${row.status}</span></td>
