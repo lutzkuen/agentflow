@@ -778,6 +778,151 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
 
+    def test_codex_effectiveness_classifies_workflow_phases_from_event_sequences(self):
+        def log_turn(
+            name,
+            *,
+            start_at,
+            signal_method=None,
+            phase_thread=None,
+            routing=None,
+            crunch=None,
+            cache=None,
+            input_text_chars=120,
+            result_chars=80,
+            response_error_code=None,
+            latency_ms=100,
+        ):
+            thread_id = phase_thread or f"thread-{name}"
+            request_id = f"req-{name}"
+            server.store.log_codex_app_event(
+                id=f"start-{name}",
+                created_at=f"2026-06-08T10:{start_at:02d}:00+00:00",
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id=thread_id,
+                message_chars=200,
+                params_chars=100,
+                input_items=1 if input_text_chars else 0,
+                input_text_chars=input_text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="codex-phase-session",
+                routing_json=stable_json(routing or {
+                    "status": "not-applicable",
+                    "reason": "codex-turn-start-model-field-absent",
+                    "applied": False,
+                    "policy_source": "local-default",
+                }),
+                crunch_json=stable_json(crunch or {"status": "skipped", "reason": "no-change", "applied": False, "changed": False}),
+                cache_json=stable_json(cache or {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False, "policy_source": "local-default"}),
+            )
+            if signal_method:
+                server.store.log_codex_app_event(
+                    id=f"signal-{name}",
+                    created_at=f"2026-06-08T10:{start_at:02d}:01+00:00",
+                    direction="server_to_client",
+                    method=signal_method,
+                    request_id=None,
+                    thread_id=thread_id,
+                    message_chars=90,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    session_id="codex-phase-session",
+                )
+            server.store.log_codex_app_event(
+                id=f"end-{name}",
+                created_at=f"2026-06-08T10:{start_at:02d}:02+00:00",
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id=thread_id,
+                message_chars=120,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=result_chars,
+                error_code=response_error_code,
+                error_message="phase fixture error" if response_error_code is not None else None,
+                latency_ms=latency_ms,
+                session_id="codex-phase-session",
+            )
+
+        log_turn(
+            "planning",
+            start_at=0,
+            signal_method="turn/plan/updated",
+            routing={"status": "applied", "reason": "fixture-route", "applied": True, "policy_source": "local-default"},
+            input_text_chars=400,
+        )
+        log_turn(
+            "tool",
+            start_at=1,
+            signal_method="item/commandExecution/outputDelta",
+            response_error_code=-32000,
+            latency_ms=300,
+            input_text_chars=240,
+        )
+        log_turn(
+            "verification",
+            start_at=2,
+            signal_method="turn/diff/updated",
+            crunch={"status": "applied", "reason": "fixture-crunch", "applied": True, "changed": True, "saved_chars": 40, "tokens_saved_est": 10},
+            input_text_chars=160,
+        )
+        log_turn(
+            "summary",
+            start_at=3,
+            signal_method="item/agentMessage/delta",
+            cache={"status": "hit", "reason": "exact-match", "eligible": True, "hit_type": "exact", "policy_source": "local-default"},
+            input_text_chars=80,
+        )
+        log_turn("idle", start_at=4, input_text_chars=0, result_chars=10)
+        log_turn("unknown", start_at=5, input_text_chars=140)
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=20))
+        phases = {row["phase"]: row for row in result["workflow_phase_breakdown"]}
+
+        self.assertEqual(result["summary"]["turn_start_rows"], 6)
+        self.assertEqual(result["summary"]["workflow_phase_known"], 5)
+        self.assertEqual(result["summary"]["workflow_phase_unknown"], 1)
+        self.assertEqual(phases["planning"]["routing_applied"], 1)
+        self.assertEqual(phases["tool_execution"]["errors"], 1)
+        self.assertEqual(phases["tool_execution"]["avg_latency_ms"], 300)
+        self.assertEqual(phases["verification"]["crunch_applied"], 1)
+        self.assertEqual(phases["verification"]["saved_chars"], 40)
+        self.assertEqual(phases["summary"]["cache_hits"], 1)
+        self.assertEqual(phases["idle_control"]["turns"], 1)
+        self.assertEqual(phases["unknown"]["phase_reasons"][0]["value"], "insufficient-metadata")
+        self.assertGreater(phases["planning"]["input_tokens_est"], 0)
+        self.assertGreaterEqual(phases["planning"]["cost_est_usd"], 0)
+        sample_phases = {row["workflow_phase"] for row in result["recent_samples"]}
+        self.assertIn("planning", sample_phases)
+        self.assertFalse(result["privacy"]["raw_params_included"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/codex-effectiveness?limit=20")
+        self.assertEqual(response.status_code, 200)
+        endpoint_payload = response.json()
+        endpoint_phases = {row["phase"] for row in endpoint_payload["workflow_phase_breakdown"]}
+        self.assertEqual(endpoint_phases, set(phases))
+
     def test_old_context_summary_stats_are_attributed_separately(self):
         for cache_hit, cost in ((False, 0.0002), (True, 0.0)):
             server.store.log_call(

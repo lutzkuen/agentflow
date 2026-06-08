@@ -104,7 +104,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             try:
                 store.log_codex_app_event(
                     id="start-cli",
-                    created_at=utc_now(),
+                    created_at="2026-06-08T10:00:00+00:00",
                     direction="client_to_server",
                     method="turn/start",
                     request_id="req-cli",
@@ -144,8 +144,25 @@ class PolicyReloadCliTests(unittest.TestCase):
                     cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True}),
                 )
                 store.log_codex_app_event(
+                    id="plan-cli",
+                    created_at="2026-06-08T10:00:01+00:00",
+                    direction="server_to_client",
+                    method="turn/plan/updated",
+                    request_id=None,
+                    thread_id="thread-cli",
+                    message_chars=40,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    session_id="session-cli",
+                )
+                store.log_codex_app_event(
                     id="end-cli",
-                    created_at=utc_now(),
+                    created_at="2026-06-08T10:00:02+00:00",
                     direction="server_to_client",
                     method="turn/completed",
                     request_id="req-cli",
@@ -172,6 +189,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["turn_start_rows"], 1)
         self.assertEqual(payload["summary"]["model_field_absent"], 1)
         self.assertEqual(payload["summary"]["codex_repeated_scaffolding_saved_chars"], 48)
+        self.assertEqual(payload["workflow_phase_breakdown"][0]["phase"], "planning")
         self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])
 

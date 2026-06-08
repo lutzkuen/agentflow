@@ -823,6 +823,170 @@ def _codex_param_shape_category(row: dict[str, Any], routing: dict[str, Any], cr
     return "unknown"
 
 
+def _codex_phase_signal(method: Any) -> str | None:
+    method_l = str(method or "").replace("_", "").replace("-", "").lower()
+    if not method_l:
+        return None
+    if method_l in {"initialize", "threadstart", "threadconfigure"}:
+        return "idle_control"
+    if "commandexecution" in method_l or "toolcall" in method_l or "toolresult" in method_l:
+        return "tool_execution"
+    if "diff" in method_l or "patch" in method_l:
+        return "verification"
+    if "plan" in method_l:
+        return "planning"
+    if "agentmessage" in method_l or "message/delta" in str(method or "").lower():
+        return "summary"
+    return None
+
+
+def _codex_same_scope(event: dict[str, Any], row: dict[str, Any]) -> bool:
+    row_session = str(row.get("session_id") or "")
+    event_session = str(event.get("session_id") or "")
+    row_thread = str(row.get("thread_id") or "")
+    event_thread = str(event.get("thread_id") or "")
+    if row_thread and event_thread:
+        return row_thread == event_thread
+    if row_session and event_session:
+        return row_session == event_session
+    return False
+
+
+def _codex_turn_bounds(turn_rows: list[dict[str, Any]]) -> dict[str, str | None]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in turn_rows:
+        key = (str(row.get("session_id") or ""), str(row.get("thread_id") or ""))
+        grouped.setdefault(key, []).append(row)
+    bounds: dict[str, str | None] = {}
+    for rows in grouped.values():
+        ordered = sorted(rows, key=lambda item: str(item.get("created_at") or ""))
+        for index, row in enumerate(ordered):
+            next_row = ordered[index + 1] if index + 1 < len(ordered) else None
+            bounds[str(row.get("start_event_id"))] = str(next_row.get("created_at")) if next_row else None
+    return bounds
+
+
+def _codex_workflow_phase(
+    row: dict[str, Any],
+    *,
+    events: list[dict[str, Any]],
+    next_start_at: str | None,
+    routing: dict[str, Any],
+    crunch: dict[str, Any],
+    cache: dict[str, Any],
+) -> dict[str, Any]:
+    for decision in (routing, crunch, cache):
+        if isinstance(decision, dict) and decision.get("workflow_phase"):
+            return {
+                "phase": str(decision.get("workflow_phase") or "unknown"),
+                "reason": str(decision.get("workflow_phase_reason") or "decision-metadata"),
+                "source": "decision_metadata",
+                "signals": list(decision.get("workflow_phase_signals") or []),
+            }
+
+    start_at = str(row.get("created_at") or "")
+    scoped: list[dict[str, Any]] = []
+    for event in events:
+        event_at = str(event.get("created_at") or "")
+        if event_at < start_at:
+            continue
+        if next_start_at and event_at >= next_start_at:
+            continue
+        if _codex_same_scope(event, row):
+            scoped.append(event)
+
+    signal_counts: dict[str, int] = {}
+    signal_methods: dict[str, list[str]] = {}
+    for event in scoped:
+        signal = _codex_phase_signal(event.get("method"))
+        if not signal:
+            continue
+        _increment_count(signal_counts, signal)
+        methods = signal_methods.setdefault(signal, [])
+        method = str(event.get("method") or "")
+        if method and method not in methods:
+            methods.append(method)
+
+    priority = ("tool_execution", "verification", "planning", "summary", "idle_control")
+    for phase in priority:
+        if signal_counts.get(phase):
+            return {
+                "phase": phase,
+                "reason": f"event-method-signal:{phase}",
+                "source": "event_sequence",
+                "signals": signal_methods.get(phase, [])[:5],
+            }
+
+    reasons = {
+        str(decision.get("reason") or "")
+        for decision in (routing, crunch, cache)
+        if isinstance(decision, dict)
+    }
+    if "action-like-params" in reasons:
+        return {
+            "phase": "tool_execution",
+            "reason": "decision-reason:action-like-params",
+            "source": "decision_metadata",
+            "signals": ["action-like-params"],
+        }
+    if _as_int(row.get("input_text_chars")) <= 0 and _as_int(row.get("params_chars")) > 0:
+        return {
+            "phase": "idle_control",
+            "reason": "params-without-text-input",
+            "source": "size_metadata",
+            "signals": [],
+        }
+    return {
+        "phase": "unknown",
+        "reason": "insufficient-metadata",
+        "source": "metadata_only_classifier",
+        "signals": [],
+    }
+
+
+def _new_codex_phase_bucket(phase: str) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "turns": 0,
+        "completed": 0,
+        "errors": 0,
+        "pending": 0,
+        "input_text_chars": 0,
+        "result_chars": 0,
+        "input_tokens_est": 0,
+        "output_tokens_est": 0,
+        "total_tokens_est": 0,
+        "cost_est_usd": 0.0,
+        "baseline_cost_est_usd": 0.0,
+        "hard_floor_usd": 0.0,
+        "cost_known_turns": 0,
+        "routing_applied": 0,
+        "crunch_applied": 0,
+        "cache_hits": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "latency_values": [],
+        "reason_counts": {},
+        "signal_methods": {},
+    }
+
+
+def _finalize_codex_phase_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    latency_values = list(bucket.pop("latency_values", []))
+    reason_counts = dict(bucket.pop("reason_counts", {}))
+    signal_methods = dict(bucket.pop("signal_methods", {}))
+    turns = _as_int(bucket.get("turns"))
+    errors = _as_int(bucket.get("errors"))
+    bucket["error_rate"] = round(errors / turns, 4) if turns else 0
+    bucket["avg_latency_ms"] = _avg_or_none(latency_values)
+    bucket["phase_reasons"] = _count_breakdown(reason_counts)
+    bucket["signal_methods"] = [
+        {"method": method, "count": count}
+        for method, count in sorted(signal_methods.items(), key=lambda item: item[1], reverse=True)
+    ]
+    return bucket
+
+
 def _avg_or_none(values: list[int]) -> int | None:
     if not values:
         return None
@@ -869,7 +1033,15 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                      and coalesce(r.session_id, '') = coalesce(s.session_id, '')
                    order by r.created_at desc
                    limit 1
-               ) as response_latency_ms
+               ) as response_latency_ms,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars
         from codex_app_events s
         where s.direction = 'client_to_server'
           and s.method = 'turn/start'
@@ -877,11 +1049,41 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         limit ?
     """, (capped_limit,)).fetchall()
     turn_rows = [dict(row) for row in rows]
+    min_start_at = min((str(row.get("created_at") or "") for row in turn_rows), default="")
+    event_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select created_at, direction, method, request_id, thread_id, session_id
+            from codex_app_events
+            where created_at >= ?
+            order by created_at asc
+            limit 15000
+            """,
+            (min_start_at or "0000-00-00T00:00:00+00:00",),
+        ).fetchall()
+    ] if turn_rows else []
+    events_by_thread: dict[str, list[dict[str, Any]]] = {}
+    events_by_session_without_thread: dict[str, list[dict[str, Any]]] = {}
+    events_by_session: dict[str, list[dict[str, Any]]] = {}
+    for event in event_rows:
+        session_key = str(event.get("session_id") or "")
+        thread_key = str(event.get("thread_id") or "")
+        if session_key:
+            events_by_session.setdefault(session_key, []).append(event)
+            if not thread_key:
+                events_by_session_without_thread.setdefault(session_key, []).append(event)
+        if thread_key:
+            events_by_thread.setdefault(thread_key, []).append(event)
+    turn_bounds = _codex_turn_bounds(turn_rows)
 
     model_field_counts: dict[str, int] = {}
     model_field_names: dict[str, int] = {}
     param_shape_counts: dict[str, int] = {}
     method_counts: dict[str, int] = {}
+    phase_counts: dict[str, int] = {}
+    phase_source_counts: dict[str, int] = {}
+    phase_buckets: dict[str, dict[str, Any]] = {}
     optimized_latency: list[int] = []
     pass_through_latency: list[int] = []
     optimized_errors = 0
@@ -910,6 +1112,27 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         shape = _codex_param_shape_category(row, routing, crunch, cache)
         _increment_count(param_shape_counts, shape)
         _increment_count(method_counts, row.get("method") or "turn/start")
+        session_key = str(row.get("session_id") or "")
+        thread_key = str(row.get("thread_id") or "")
+        if thread_key:
+            phase_events = list(events_by_thread.get(thread_key, []))
+            if session_key:
+                phase_events.extend(events_by_session_without_thread.get(session_key, []))
+        elif session_key:
+            phase_events = events_by_session.get(session_key, [])
+        else:
+            phase_events = event_rows
+        phase_meta = _codex_workflow_phase(
+            row,
+            events=phase_events,
+            next_start_at=turn_bounds.get(str(row.get("start_event_id"))),
+            routing=routing,
+            crunch=crunch,
+            cache=cache,
+        )
+        phase = str(phase_meta.get("phase") or "unknown")
+        _increment_count(phase_counts, phase)
+        _increment_count(phase_source_counts, phase_meta.get("source") or "unknown")
 
         reasons = {
             str(decision.get("reason") or "")
@@ -935,6 +1158,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         has_response = bool(row.get("response_event_id"))
         has_error = row.get("response_error_code") is not None
         latency = _as_int(row.get("response_latency_ms"))
+        result_chars = _as_int(row.get("response_result_chars"))
         if has_error:
             error_count += 1
         elif has_response:
@@ -955,10 +1179,47 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             if latency:
                 pass_through_latency.append(latency)
 
+        estimates = _codex_estimates_with_cache(row.get("input_text_chars"), result_chars, cache)
+        phase_bucket = phase_buckets.setdefault(phase, _new_codex_phase_bucket(phase))
+        phase_bucket["turns"] += 1
+        phase_bucket["input_text_chars"] += _as_int(row.get("input_text_chars"))
+        phase_bucket["result_chars"] += result_chars
+        phase_bucket["input_tokens_est"] += _as_int(estimates.get("input_tokens_est"))
+        phase_bucket["output_tokens_est"] += _as_int(estimates.get("output_tokens_est"))
+        phase_bucket["total_tokens_est"] += _as_int(estimates.get("total_tokens_est"))
+        phase_bucket["cost_est_usd"] += _as_float(estimates.get("cost_est_usd"))
+        phase_bucket["baseline_cost_est_usd"] += _as_float(estimates.get("baseline_cost_est_usd"))
+        phase_bucket["hard_floor_usd"] += _as_float(estimates.get("hard_floor_usd"))
+        if estimates.get("cost_known"):
+            phase_bucket["cost_known_turns"] += 1
+        if routing.get("applied"):
+            phase_bucket["routing_applied"] += 1
+        if crunch.get("applied"):
+            phase_bucket["crunch_applied"] += 1
+        if cache.get("status") == "hit":
+            phase_bucket["cache_hits"] += 1
+        phase_bucket["saved_chars"] += saved_chars
+        phase_bucket["tokens_saved_est"] += saved_tokens
+        if has_error:
+            phase_bucket["errors"] += 1
+        elif has_response:
+            phase_bucket["completed"] += 1
+        else:
+            phase_bucket["pending"] += 1
+        if latency:
+            phase_bucket["latency_values"].append(latency)
+        _increment_count(phase_bucket["reason_counts"], phase_meta.get("reason") or "unknown")
+        for signal_method in phase_meta.get("signals") or []:
+            _increment_count(phase_bucket["signal_methods"], signal_method)
+
         if len(recent_samples) < 20:
             recent_samples.append({
                 "created_at": row.get("created_at"),
                 "method": row.get("method") or "turn/start",
+                "workflow_phase": phase,
+                "workflow_phase_reason": phase_meta.get("reason"),
+                "workflow_phase_source": phase_meta.get("source"),
+                "workflow_phase_signals": phase_meta.get("signals") or [],
                 "model_field": model_state,
                 "param_shape": shape,
                 "routing_status": routing.get("status") or "missing",
@@ -1007,6 +1268,8 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "action_like_skips": action_like_skips,
             "unknown_param_skips": unknown_param_skips,
             "non_text_input_skips": non_text_skips,
+            "workflow_phase_known": total - phase_counts.get("unknown", 0),
+            "workflow_phase_unknown": phase_counts.get("unknown", 0),
             "total_input_text_chars": sum(_as_int(row.get("input_text_chars")) for row in turn_rows),
             "total_saved_chars": total_saved_chars,
             "total_saved_tokens_est": total_saved_tokens,
@@ -1022,6 +1285,12 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "model_field_names": _count_breakdown(model_field_names),
         "method_breakdown": _count_breakdown(method_counts),
         "param_shape_breakdown": _count_breakdown(param_shape_counts),
+        "workflow_phase_breakdown": [
+            _finalize_codex_phase_bucket(bucket)
+            for bucket in sorted(phase_buckets.values(), key=lambda item: item["turns"], reverse=True)
+        ],
+        "workflow_phase_counts": _count_breakdown(phase_counts),
+        "workflow_phase_source_breakdown": _count_breakdown(phase_source_counts),
         "routing_breakdown": _decision_breakdown(turn_rows, "routing_json"),
         "crunch_breakdown": _decision_breakdown(turn_rows, "crunch_json"),
         "crunch_pattern_breakdown": _codex_crunch_pattern_breakdown(turn_rows),
