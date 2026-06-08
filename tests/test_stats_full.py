@@ -1004,6 +1004,75 @@ class StatsFullTest(unittest.TestCase):
         endpoint_phases = {row["phase"] for row in endpoint_payload["workflow_phase_breakdown"]}
         self.assertEqual(endpoint_phases, set(phases))
 
+    def test_codex_effectiveness_uses_persisted_metadata_only_event_window(self):
+        secret = "raw prompt must not appear"
+        server.store.log_codex_app_event(
+            id="start-window",
+            created_at="2026-06-08T10:00:00+00:00",
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-window",
+            thread_id="thread-window",
+            message_chars=240,
+            params_chars=180,
+            input_items=1,
+            input_text_chars=96,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="session-window",
+            routing_json=stable_json({
+                "status": "not-applicable",
+                "reason": "codex-turn-start-model-field-absent",
+                "applied": False,
+                "policy_source": "local-default",
+            }),
+            crunch_json=stable_json({"status": "skipped", "reason": "no-change", "applied": False, "changed": False}),
+            cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False}),
+            event_window_json=stable_json({
+                "schema": "agentflow.codex_app_event_window.v1",
+                "start_event_id": "start-window",
+                "created_at": "2026-06-08T10:00:00+00:00",
+                "session_id": "session-window",
+                "request_id": "req-window",
+                "thread_id": "thread-window",
+                "event_count": 4,
+                "method_counts": {
+                    "turn/start": 1,
+                    "turn/diff/updated": 2,
+                    "turn/completed": 1,
+                },
+                "direction_counts": {"client_to_server": 1, "server_to_client": 3},
+                "first_event_delta_ms": 0,
+                "last_event_delta_ms": 1200,
+                "input_items": 1,
+                "input_text_chars": 96,
+                "start_message_chars": 240,
+                "start_params_chars": 180,
+                "result_chars": 52,
+                "server_message_chars": 300,
+                "error_count": 0,
+                "model_field_state": "absent",
+                "debug_prompt": secret,
+            }),
+        )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=5))
+
+        self.assertEqual(result["summary"]["workflow_phase_known"], 1)
+        self.assertEqual(result["workflow_phase_breakdown"][0]["phase"], "verification")
+        self.assertEqual(result["workflow_phase_source_breakdown"][0]["value"], "event_window")
+        sample = result["recent_samples"][0]
+        self.assertEqual(sample["workflow_phase_source"], "event_window")
+        self.assertEqual(sample["workflow_phase_reason"], "event-window-signal:verification")
+        self.assertEqual(sample["event_window"]["event_count"], 4)
+        self.assertEqual(sample["event_window"]["model_field_state"], "absent")
+        self.assertTrue(sample["event_window"]["request_id_present"])
+        self.assertNotIn("debug_prompt", json.dumps(sample["event_window"]))
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertFalse(result["privacy"]["raw_params_included"])
+
     def test_old_context_summary_stats_are_attributed_separately(self):
         for cache_hit, cost in ((False, 0.0002), (True, 0.0)):
             server.store.log_call(

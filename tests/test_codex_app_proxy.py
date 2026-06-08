@@ -187,6 +187,88 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(json.loads(event["crunch_json"])["status"], "applied")
         self.assertNotIn(secret, json.dumps(event))
 
+    def test_turn_start_event_window_is_persisted_as_metadata_only_summary(self):
+        secret = "do not persist raw command output"
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                active_windows = {}
+                request_started = {}
+                start = {
+                    "jsonrpc": "2.0",
+                    "id": "turn-window",
+                    "method": "turn/start",
+                    "params": {
+                        "threadId": "thread-window",
+                        "model": "gpt-5-codex",
+                        "input": [{"type": "text", "text": "summarize metadata only"}],
+                    },
+                }
+                signal = {
+                    "jsonrpc": "2.0",
+                    "method": "item/commandExecution/outputDelta",
+                    "params": {
+                        "threadId": "thread-window",
+                        "chunk": secret,
+                    },
+                }
+                completed = {
+                    "jsonrpc": "2.0",
+                    "method": "turn/completed",
+                    "params": {"threadId": "thread-window"},
+                }
+
+                with patch.object(codex_app_proxy, "store", test_store):
+                    start_event_id = codex_app_proxy._record_message(
+                        json.dumps(start),
+                        direction="client_to_server",
+                        session_id="session-window",
+                        request_started=request_started,
+                        optimization_metadata={
+                            "routing": {
+                                "status": "skipped",
+                                "reason": "keep requested model",
+                                "model_field": "model",
+                                "applied": False,
+                            },
+                            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+                            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+                        },
+                        active_turn_windows=active_windows,
+                    )
+                    codex_app_proxy._record_message(
+                        json.dumps(signal),
+                        direction="server_to_client",
+                        session_id="session-window",
+                        request_started=request_started,
+                        active_turn_windows=active_windows,
+                    )
+                    codex_app_proxy._record_message(
+                        json.dumps(completed),
+                        direction="server_to_client",
+                        session_id="session-window",
+                        request_started=request_started,
+                        active_turn_windows=active_windows,
+                    )
+
+                row = test_store.conn.execute(
+                    "select event_window_json from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+                window = json.loads(row["event_window_json"])
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(window["schema"], "agentflow.codex_app_event_window.v1")
+        self.assertEqual(window["event_count"], 3)
+        self.assertEqual(window["method_counts"]["turn/start"], 1)
+        self.assertEqual(window["method_counts"]["item/commandExecution/outputDelta"], 1)
+        self.assertEqual(window["method_counts"]["turn/completed"], 1)
+        self.assertEqual(window["direction_counts"]["server_to_client"], 2)
+        self.assertEqual(window["model_field_state"], "present")
+        self.assertGreater(window["server_message_chars"], 0)
+        self.assertNotIn(secret, json.dumps(window))
+
     def test_codex_repeated_scaffolding_crunch_preserves_latest_task_tail(self):
         scaffold = "## Agent context scaffold\n" + ("stable instruction header " * 80)
         log_block = "## Repeated command log\n" + ("same deterministic log line " * 80)

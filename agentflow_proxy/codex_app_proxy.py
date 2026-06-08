@@ -352,6 +352,150 @@ def _jsonrpc_message(raw: str | bytes) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _event_window_key(session_id: str, thread_id: str | None, request_id: str | None) -> str | None:
+    if thread_id:
+        return f"{session_id}\0thread\0{thread_id}"
+    if request_id:
+        return f"{session_id}\0request\0{request_id}"
+    return None
+
+
+def _model_field_state_from_metadata(optimization_metadata: dict[str, dict[str, Any]] | None) -> tuple[str, str | None]:
+    routing = (optimization_metadata or {}).get("routing") or {}
+    field = routing.get("model_field")
+    if field:
+        return "present", str(field)
+    reason = str(routing.get("reason") or "")
+    if reason == "codex-turn-start-model-field-absent":
+        return "absent", None
+    if routing.get("requested_model") or routing.get("routed_model"):
+        return "present_unknown_field", None
+    return "unknown", None
+
+
+def _update_method_count(target: dict[str, int], method: str | None) -> None:
+    key = str(method or "response")
+    target[key] = int(target.get(key) or 0) + 1
+
+
+def _new_event_window(
+    *,
+    start_event_id: str,
+    monotonic_started_at: float,
+    created_at: str,
+    session_id: str,
+    request_id: str | None,
+    thread_id: str | None,
+    method: str | None,
+    message_chars: int,
+    params_chars: int | None,
+    input_items: int | None,
+    input_text_chars: int,
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    model_state, model_field = _model_field_state_from_metadata(optimization_metadata)
+    window = {
+        "schema": "agentflow.codex_app_event_window.v1",
+        "start_event_id": start_event_id,
+        "created_at": created_at,
+        "session_id": session_id,
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "event_count": 1,
+        "method_counts": {},
+        "direction_counts": {"client_to_server": 1},
+        "first_event_delta_ms": 0,
+        "last_event_delta_ms": 0,
+        "input_items": input_items,
+        "input_text_chars": input_text_chars,
+        "start_message_chars": message_chars,
+        "start_params_chars": params_chars,
+        "result_chars": 0,
+        "server_message_chars": 0,
+        "error_count": 0,
+        "model_field_state": model_state,
+        "model_field": model_field,
+        "_monotonic_started_at": monotonic_started_at,
+    }
+    _update_method_count(window["method_counts"], method)
+    return window
+
+
+def _persist_event_window(start_event_id: str, window: dict[str, Any]) -> None:
+    public = {key: value for key, value in window.items() if not key.startswith("_")}
+    try:
+        store.update_codex_app_event_window_json(start_event_id, stable_json(public))
+    except AttributeError:
+        return
+    except Exception as exc:
+        print(f"AgentFlow Codex app event-window metadata update skipped: {exc}", file=sys.stderr)
+
+
+def _record_event_window(
+    active_turn_windows: dict[str, dict[str, Any]] | None,
+    *,
+    event_id: str,
+    created_at: str,
+    direction: str,
+    session_id: str,
+    request_id: str | None,
+    thread_id: str | None,
+    method: str | None,
+    message_chars: int,
+    params_chars: int | None,
+    input_items: int | None,
+    input_text_chars: int,
+    result_chars: int | None,
+    error_code: Any,
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> None:
+    if active_turn_windows is None:
+        return
+    key = _event_window_key(session_id, thread_id, request_id)
+    if not key:
+        return
+    if direction == "client_to_server" and method == "turn/start":
+        window = _new_event_window(
+            start_event_id=event_id,
+            monotonic_started_at=time.time(),
+            created_at=created_at,
+            session_id=session_id,
+            request_id=request_id,
+            thread_id=thread_id,
+            method=method,
+            message_chars=message_chars,
+            params_chars=params_chars,
+            input_items=input_items,
+            input_text_chars=input_text_chars,
+            optimization_metadata=optimization_metadata,
+        )
+        active_turn_windows[key] = window
+        _persist_event_window(event_id, window)
+        return
+
+    window = active_turn_windows.get(key)
+    if not window:
+        return
+    window["event_count"] = int(window.get("event_count") or 0) + 1
+    direction_counts = window.setdefault("direction_counts", {})
+    direction_counts[direction] = int(direction_counts.get(direction) or 0) + 1
+    method_counts = window.setdefault("method_counts", {})
+    _update_method_count(method_counts, method)
+    if direction == "server_to_client":
+        window["server_message_chars"] = int(window.get("server_message_chars") or 0) + int(message_chars or 0)
+    if result_chars is not None:
+        window["result_chars"] = int(window.get("result_chars") or 0) + int(result_chars or 0)
+    if error_code is not None:
+        window["error_count"] = int(window.get("error_count") or 0) + 1
+    started_at = float(window.get("_monotonic_started_at") or time.time())
+    window["last_event_delta_ms"] = max(0, int((time.time() - started_at) * 1000))
+    start_event_id = str(window.get("start_event_id") or "")
+    if start_event_id:
+        _persist_event_window(start_event_id, window)
+    if direction == "server_to_client" and method in {"turn/completed", "thread/closed"}:
+        active_turn_windows.pop(key, None)
+
+
 async def _attach_codex_managed_recommendation(
     raw: str | bytes,
     optimization_metadata: dict[str, dict[str, Any]] | None,
@@ -505,19 +649,21 @@ def _record_message(
     session_id: str,
     request_started: dict[str, float],
     optimization_metadata: dict[str, dict[str, Any]] | None = None,
+    active_turn_windows: dict[str, dict[str, Any]] | None = None,
 ) -> str | None:
     if not LOG_EVENTS:
         return None
     optimization_metadata = _public_metadata(optimization_metadata)
     message_chars = len(raw)
     event_id = str(uuid.uuid4())
+    created_at = utc_now()
     if isinstance(raw, bytes):
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             _log_codex_app_event(
                 id=event_id,
-                created_at=utc_now(),
+                created_at=created_at,
                 direction=direction,
                 message_chars=message_chars,
                 session_id=session_id,
@@ -533,7 +679,7 @@ def _record_message(
     except Exception:
         _log_codex_app_event(
             id=event_id,
-            created_at=utc_now(),
+            created_at=created_at,
             direction=direction,
             message_chars=message_chars,
             session_id=session_id,
@@ -546,7 +692,7 @@ def _record_message(
     if not isinstance(msg, dict):
         _log_codex_app_event(
             id=event_id,
-            created_at=utc_now(),
+            created_at=created_at,
             direction=direction,
             message_chars=message_chars,
             session_id=session_id,
@@ -563,6 +709,7 @@ def _record_message(
     input_value = params.get("input") if isinstance(params, dict) else None
     input_items = len(input_value) if isinstance(input_value, list) else None
     input_text_chars = _input_text_chars(input_value)
+    thread_id = _thread_id(params)
     result = msg.get("result")
     error = msg.get("error")
     latency_ms: Optional[int] = None
@@ -575,11 +722,11 @@ def _record_message(
 
     _log_codex_app_event(
         id=event_id,
-        created_at=utc_now(),
+        created_at=created_at,
         direction=direction,
         method=str(method) if method is not None else None,
         request_id=rid,
-        thread_id=_thread_id(params),
+        thread_id=thread_id,
         message_chars=message_chars,
         params_chars=params_chars,
         input_items=input_items,
@@ -592,6 +739,23 @@ def _record_message(
         routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
         crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
         cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
+    )
+    _record_event_window(
+        active_turn_windows,
+        event_id=event_id,
+        created_at=created_at,
+        direction=direction,
+        session_id=session_id,
+        request_id=rid,
+        thread_id=thread_id,
+        method=str(method) if method is not None else None,
+        message_chars=message_chars,
+        params_chars=params_chars,
+        input_items=input_items,
+        input_text_chars=input_text_chars,
+        result_chars=len(stable_json(result)) if result is not None else None,
+        error_code=error.get("code") if isinstance(error, dict) else None,
+        optimization_metadata=optimization_metadata,
     )
     return event_id
 
@@ -701,6 +865,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     request_started: dict[str, float] = {}
     pending_cache: dict[str, dict[str, Any]] = {}
     pending_managed: dict[str, dict[str, Any]] = {}
+    active_turn_windows: dict[str, dict[str, Any]] = {}
 
     try:
         async with websockets.connect(upstream_url) as upstream:
@@ -720,6 +885,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             session_id=session_id,
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
+                            active_turn_windows=active_turn_windows,
                         )
                         if managed_pending and isinstance(managed_pending.get("request_id"), str):
                             managed_pending["start_event_id"] = start_event_id
@@ -737,6 +903,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                                 direction="server_to_client",
                                 session_id=session_id,
                                 request_started=request_started,
+                                active_turn_windows=active_turn_windows,
                             )
                             await websocket.send_text(replay_frame)
                             continue
@@ -764,6 +931,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             session_id=session_id,
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
+                            active_turn_windows=active_turn_windows,
                         )
                         if managed_pending and isinstance(managed_pending.get("request_id"), str):
                             managed_pending["start_event_id"] = start_event_id
@@ -779,7 +947,13 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         request_started=request_started,
                         pending_managed=pending_managed,
                     )
-                    _record_message(msg, direction="server_to_client", session_id=session_id, request_started=request_started)
+                    _record_message(
+                        msg,
+                        direction="server_to_client",
+                        session_id=session_id,
+                        request_started=request_started,
+                        active_turn_windows=active_turn_windows,
+                    )
                     if isinstance(msg, bytes):
                         await websocket.send_bytes(msg)
                     else:

@@ -303,6 +303,7 @@ class SQLiteStore:
             self._ensure_column("codex_app_events", "routing_json", "text")
             self._ensure_column("codex_app_events", "crunch_json", "text")
             self._ensure_column("codex_app_events", "cache_json", "text")
+            self._ensure_column("codex_app_events", "event_window_json", "text")
             cur.execute("""
             create index if not exists idx_codex_app_events_start_recent
             on codex_app_events(direction, method, created_at)
@@ -464,12 +465,20 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def update_codex_app_event_window_json(self, event_id: str, event_window_json: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                "update codex_app_events set event_window_json = ? where id = ?",
+                (event_window_json, event_id),
+            )
+            self.conn.commit()
+
     def log_codex_app_event(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "direction", "method", "request_id", "thread_id",
             "message_chars", "params_chars", "input_items", "input_text_chars",
             "result_chars", "error_code", "error_message", "latency_ms", "session_id",
-            "routing_json", "crunch_json", "cache_json",
+            "routing_json", "crunch_json", "cache_json", "event_window_json",
         ]
         values = [kwargs.get(c) for c in cols]
         with self._lock:
@@ -633,12 +642,13 @@ class PostgresStore(SQLiteStore):
               session_id text,
               routing_json text,
               crunch_json text,
-              cache_json text
+              cache_json text,
+              event_window_json text
             )
             """,
         ):
             self.conn.execute(sql)
-        for column in ("routing_json", "crunch_json", "cache_json"):
+        for column in ("routing_json", "crunch_json", "cache_json", "event_window_json"):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
         self.conn.execute("""
             create index if not exists idx_codex_app_events_start_recent

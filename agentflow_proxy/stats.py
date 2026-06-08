@@ -845,6 +845,78 @@ def _codex_phase_signal(method: Any) -> str | None:
     return None
 
 
+def _codex_phase_from_signal_counts(
+    signal_counts: dict[str, int],
+    signal_methods: dict[str, list[str]],
+    *,
+    reason_prefix: str,
+    source: str,
+) -> dict[str, Any] | None:
+    priority = ("tool_execution", "verification", "planning", "summary", "idle_control")
+    for phase in priority:
+        if signal_counts.get(phase):
+            return {
+                "phase": phase,
+                "reason": f"{reason_prefix}:{phase}",
+                "source": source,
+                "signals": signal_methods.get(phase, [])[:5],
+            }
+    return None
+
+
+def _codex_signal_counts_from_method_counts(method_counts: Any) -> tuple[dict[str, int], dict[str, list[str]]]:
+    signal_counts: dict[str, int] = {}
+    signal_methods: dict[str, list[str]] = {}
+    if not isinstance(method_counts, dict):
+        return signal_counts, signal_methods
+    for method, count_raw in method_counts.items():
+        signal = _codex_phase_signal(method)
+        if not signal:
+            continue
+        count = _as_int(count_raw)
+        if count <= 0:
+            count = 1
+        signal_counts[signal] = signal_counts.get(signal, 0) + count
+        methods = signal_methods.setdefault(signal, [])
+        method_s = str(method or "")
+        if method_s and method_s not in methods:
+            methods.append(method_s)
+    return signal_counts, signal_methods
+
+
+def _codex_public_event_window(raw: Any) -> dict[str, Any]:
+    window = _json_obj(raw)
+    if not window:
+        return {}
+    public: dict[str, Any] = {
+        "schema": window.get("schema"),
+        "event_count": _as_int(window.get("event_count")),
+        "method_counts": dict(window.get("method_counts") or {}) if isinstance(window.get("method_counts"), dict) else {},
+        "direction_counts": dict(window.get("direction_counts") or {}) if isinstance(window.get("direction_counts"), dict) else {},
+        "first_event_delta_ms": _as_int(window.get("first_event_delta_ms")),
+        "last_event_delta_ms": _as_int(window.get("last_event_delta_ms")),
+        "input_items": window.get("input_items"),
+        "input_text_chars": _as_int(window.get("input_text_chars")),
+        "start_message_chars": _as_int(window.get("start_message_chars")),
+        "start_params_chars": _as_int(window.get("start_params_chars")),
+        "result_chars": _as_int(window.get("result_chars")),
+        "server_message_chars": _as_int(window.get("server_message_chars")),
+        "error_count": _as_int(window.get("error_count")),
+        "model_field_state": window.get("model_field_state") or "unknown",
+        "model_field": window.get("model_field"),
+        "request_id_present": bool(window.get("request_id")),
+        "thread_id_present": bool(window.get("thread_id")),
+        "session_id_present": bool(window.get("session_id")),
+    }
+    signal_counts, signal_methods = _codex_signal_counts_from_method_counts(public["method_counts"])
+    public["phase_signal_counts"] = dict(signal_counts)
+    public["phase_signal_methods"] = {
+        phase: methods[:5]
+        for phase, methods in signal_methods.items()
+    }
+    return public
+
+
 def _codex_same_scope(event: dict[str, Any], row: dict[str, Any]) -> bool:
     row_session = str(row.get("session_id") or "")
     event_session = str(event.get("session_id") or "")
@@ -889,6 +961,18 @@ def _codex_workflow_phase(
                 "signals": list(decision.get("workflow_phase_signals") or []),
             }
 
+    event_window = _json_obj(row.get("event_window_json"))
+    if event_window:
+        signal_counts, signal_methods = _codex_signal_counts_from_method_counts(event_window.get("method_counts"))
+        phase = _codex_phase_from_signal_counts(
+            signal_counts,
+            signal_methods,
+            reason_prefix="event-window-signal",
+            source="event_window",
+        )
+        if phase:
+            return phase
+
     start_at = str(row.get("created_at") or "")
     scoped: list[dict[str, Any]] = []
     for event in events:
@@ -912,15 +996,14 @@ def _codex_workflow_phase(
         if method and method not in methods:
             methods.append(method)
 
-    priority = ("tool_execution", "verification", "planning", "summary", "idle_control")
-    for phase in priority:
-        if signal_counts.get(phase):
-            return {
-                "phase": phase,
-                "reason": f"event-method-signal:{phase}",
-                "source": "event_sequence",
-                "signals": signal_methods.get(phase, [])[:5],
-            }
+    phase = _codex_phase_from_signal_counts(
+        signal_counts,
+        signal_methods,
+        reason_prefix="event-method-signal",
+        source="event_sequence",
+    )
+    if phase:
+        return phase
 
     reasons = {
         str(decision.get("reason") or "")
@@ -1015,6 +1098,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                s.routing_json,
                s.crunch_json,
                s.cache_json,
+               s.event_window_json,
                (
                    select r.id from codex_app_events r
                    where r.direction = 'server_to_client'
@@ -1055,6 +1139,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     """, (capped_limit,)).fetchall()
     turn_rows = [dict(row) for row in rows]
     min_start_at = min((str(row.get("created_at") or "") for row in turn_rows), default="")
+    event_scan_limit = max(15000, min(200000, capped_limit * 1000))
     event_rows = [
         dict(row)
         for row in conn.execute(
@@ -1063,9 +1148,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             from codex_app_events
             where created_at >= ?
             order by created_at asc
-            limit 15000
+            limit ?
             """,
-            (min_start_at or "0000-00-00T00:00:00+00:00",),
+            (min_start_at or "0000-00-00T00:00:00+00:00", event_scan_limit),
         ).fetchall()
     ] if turn_rows else []
     events_by_thread: dict[str, list[dict[str, Any]]] = {}
@@ -1237,6 +1322,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "workflow_phase_reason": phase_meta.get("reason"),
                 "workflow_phase_source": phase_meta.get("source"),
                 "workflow_phase_signals": phase_meta.get("signals") or [],
+                "event_window": _codex_public_event_window(row.get("event_window_json")),
                 "model_field": model_state,
                 "param_shape": shape,
                 "routing_status": routing.get("status") or "missing",
@@ -1272,6 +1358,11 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "raw_params_included": False,
             "raw_responses_included": False,
             "basis": "stored metadata, sizes, hashes, and decision JSON only",
+        },
+        "event_scan": {
+            "events_considered": len(event_rows),
+            "event_scan_limit": event_scan_limit,
+            "truncated": bool(turn_rows) and len(event_rows) >= event_scan_limit,
         },
         "summary": {
             "turn_start_rows": total,
