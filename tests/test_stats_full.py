@@ -266,6 +266,81 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_today_cache_decision_breakdown_excludes_historical_missing_rows(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at="2020-01-01T00:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-cache-old",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-cache-today",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        all_time = {
+            (row["status"], row["reason"]): row["count"]
+            for row in result["cache_decision_breakdown"]
+        }
+        today = {
+            (row["status"], row["reason"]): row["count"]
+            for row in result["today_cache_decision_breakdown"]
+        }
+
+        self.assertEqual(all_time[("missing", "unknown")], 1)
+        self.assertNotIn(("missing", "unknown"), today)
+        self.assertEqual(today[("skipped", "streaming")], 1)
+        json.dumps(result["today_cache_decision_breakdown"])
+
     def test_routing_experiment_stats_produce_confidence_scores(self):
         for similarity, passed in ((0.9, 1), (0.7, 0)):
             server.store.log_routing_experiment(

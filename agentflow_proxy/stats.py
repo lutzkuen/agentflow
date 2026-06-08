@@ -1135,6 +1135,20 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                  coalesce(json_extract(cache_json, '$.policy_source'), 'unknown')
         order by count desc
     """)
+    today_cache_decision_breakdown = q("""
+        select coalesce(json_extract(cache_json, '$.status'), 'missing') as status,
+               coalesce(json_extract(cache_json, '$.reason'), 'unknown') as reason,
+               coalesce(json_extract(cache_json, '$.hit_type'), '') as hit_type,
+               coalesce(json_extract(cache_json, '$.policy_source'), 'unknown') as policy_source,
+               count(*) as count
+        from calls
+        where date(created_at) = date('now')
+        group by coalesce(json_extract(cache_json, '$.status'), 'missing'),
+                 coalesce(json_extract(cache_json, '$.reason'), 'unknown'),
+                 coalesce(json_extract(cache_json, '$.hit_type'), ''),
+                 coalesce(json_extract(cache_json, '$.policy_source'), 'unknown')
+        order by count desc
+    """)
 
     routing_experiment_rows = q("""
         select requested_model,
@@ -1286,6 +1300,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "routing_breakdown": routing_breakdown,
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
+        "today_cache_decision_breakdown": today_cache_decision_breakdown,
         "routing_experiment_summary": routing_experiment_summary,
         "provider_breakdown": provider_breakdown,
         "codex_app_methods": codex_app_methods,
@@ -1706,7 +1721,16 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-cache">
 <div class="section">
-  <h2>Cache decisions</h2>
+  <h2>Cache decisions today</h2>
+  <table>
+    <thead><tr>
+      <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
+    </tr></thead>
+    <tbody id="cache-today-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Cache decisions all time</h2>
   <table>
     <thead><tr>
       <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
@@ -2019,15 +2043,15 @@ async function refreshCache(){
   try{
     const r=await fetch('/agentflow/stats/full');
     const d=await r.json();
-    const tb=document.getElementById('cache-tbody');
-    const rows=d.cache_decision_breakdown||[];
-    tb.innerHTML=rows.map(row=>`<tr>
+    const renderRows=(rows)=>rows.map(row=>`<tr>
       <td><span class="badge ${row.status==='hit'?'hit':row.status==='miss'?'miss':'stream'}">${row.status}</span></td>
       <td class="model">${row.reason||'unknown'}</td>
       <td class="tokens">${row.hit_type||'—'}</td>
       <td><span class="badge provider">${row.policy_source||'unknown'}</span></td>
       <td>${(row.count||0).toLocaleString()}</td>
     </tr>`).join('')||'<tr><td colspan="5" style="color:#8b949e">No cache decision data yet</td></tr>';
+    document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
+    document.getElementById('cache-tbody').innerHTML=renderRows(d.cache_decision_breakdown||[]);
   }catch(e){}
 }
 
