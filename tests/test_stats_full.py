@@ -16,6 +16,7 @@ if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
     from agentflow_proxy import server, stats as stats_views
+    from agentflow_proxy.dashboard_app import create_dashboard_app
     from agentflow_proxy.store import Store, stable_json, utc_now
 
 
@@ -304,6 +305,171 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn('<th data-sort-type="text">Cost basis</th>', html)
         self.assertIn("row.codex_turns", html)
         self.assertIn("row.codex_tokens_est", html)
+
+    def test_managed_recommendation_stats_cover_recent_statuses_and_feedback(self):
+        saved_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
+        saved_url = os.environ.get("AGENTFLOW_RECOMMENDATION_SERVER_URL")
+        os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.local"
+
+        def log_call(created_at, routing_json):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=created_at,
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=10,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.003,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json(routing_json) if routing_json is not None else None,
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="managed-session",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+
+        try:
+            log_call(
+                "2026-06-08T10:00:00+00:00",
+                {
+                    "managed_recommendation": {
+                        "enabled": False,
+                        "server_url": "http://managed.local",
+                        "status": "skipped",
+                        "reason": "disabled",
+                        "fallback": "local-policy",
+                        "applied": False,
+                        "outcome_feedback": {
+                            "enabled": False,
+                            "status": "skipped",
+                            "reason": "disabled",
+                        },
+                    }
+                },
+            )
+            log_call(
+                "2026-06-08T10:01:00+00:00",
+                {
+                    "managed_recommendation": {
+                        "enabled": True,
+                        "server_url": "http://managed.local",
+                        "status": "received",
+                        "reason": "candidate matched",
+                        "policy_source": "managed-recommended",
+                        "policy_id": "candidate-route-chat",
+                        "target_model": "claude-haiku-4-5-20251001",
+                        "applied": True,
+                        "changed_model": True,
+                        "latency_ms": 120,
+                        "outcome_feedback": {
+                            "enabled": True,
+                            "status": "sent",
+                            "reason": "accepted",
+                            "latency_ms": 30,
+                            "optimization_unit_id": 42,
+                        },
+                    }
+                },
+            )
+            log_call(
+                "2026-06-08T10:02:00+00:00",
+                {
+                    "managed_recommendation": {
+                        "enabled": True,
+                        "server_url": "http://managed.local",
+                        "status": "error",
+                        "reason": "server-error",
+                        "fallback": "local-policy",
+                        "applied": False,
+                        "latency_ms": 50,
+                        "error": '{"error":{"type":"managed_server_error","message":"down"}}',
+                        "outcome_feedback": {
+                            "enabled": True,
+                            "status": "error",
+                            "reason": "request-failed",
+                            "latency_ms": 20,
+                            "error": "RuntimeError('feedback unavailable')",
+                        },
+                    }
+                },
+            )
+            log_call("2026-06-08T10:03:00+00:00", None)
+
+            result = asyncio.run(stats_views.stats_managed_recommendations(server.store, limit=20))
+        finally:
+            if saved_enabled is None:
+                os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+            else:
+                os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = saved_enabled
+            if saved_url is None:
+                os.environ.pop("AGENTFLOW_RECOMMENDATION_SERVER_URL", None)
+            else:
+                os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = saved_url
+
+        summary = result["summary"]
+        self.assertEqual(result["schema"], "agentflow.managed_recommendations.v1")
+        self.assertFalse(result["current_config"]["enabled"])
+        self.assertIn("local policy remains authoritative", result["current_config"]["offline_state"])
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertEqual(summary["window_calls"], 4)
+        self.assertEqual(summary["metadata_rows"], 3)
+        self.assertEqual(summary["historical_null_rows"], 1)
+        self.assertEqual(summary["disabled_count"], 1)
+        self.assertEqual(summary["enabled_count"], 2)
+        self.assertEqual(summary["received_count"], 1)
+        self.assertEqual(summary["applied_count"], 1)
+        self.assertEqual(summary["changed_model_count"], 1)
+        self.assertEqual(summary["server_error_count"], 1)
+        self.assertEqual(summary["invalid_count"], 0)
+        self.assertEqual(summary["feedback_sent_count"], 1)
+        self.assertEqual(summary["feedback_skipped_count"], 1)
+        self.assertEqual(summary["feedback_failed_count"], 1)
+        self.assertEqual(summary["feedback_sanitized_count"], 3)
+        self.assertEqual(summary["avg_recommendation_latency_ms"], 85)
+        self.assertEqual(summary["avg_feedback_latency_ms"], 25)
+        self.assertEqual(summary["last_recommendation_error_class"], "server-error")
+        self.assertEqual(summary["last_feedback_error_class"], "request-failed")
+        self.assertEqual({row["value"]: row["count"] for row in result["policy_ids"]}, {"candidate-route-chat": 1})
+        self.assertEqual(result["recent"][0]["recommendation_status"], "missing")
+        self.assertEqual(result["recent"][0]["recommendation_reason"], "historical-null")
+        json.dumps(result)
+
+    def test_managed_recommendation_dashboard_endpoint_and_panel_render_without_server(self):
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        client = TestClient(app)
+
+        stats_response = client.get("/agentflow/stats/managed-recommendations")
+        self.assertEqual(stats_response.status_code, 200)
+        self.assertEqual(stats_response.json()["schema"], "agentflow.managed_recommendations.v1")
+
+        html = client.get("/agentflow/dashboard")
+        self.assertEqual(html.status_code, 200)
+        self.assertIn("Managed recommendation status", html.text)
+        self.assertIn("/agentflow/stats/managed-recommendations", html.text)
+        self.assertIn("managed-summary-tbody", html.text)
 
     def test_full_stats_unifies_source_surface_accounting_for_mixed_traffic(self):
         server.store.log_call(
@@ -1616,7 +1782,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','sessions']", html)
+        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
 
     def test_dashboard_exposes_usage_by_app_engineer_table(self):
         html = stats_views.dashboard_html()

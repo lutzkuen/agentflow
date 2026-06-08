@@ -114,6 +114,10 @@ def create_dashboard_router(
     async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
         return await stats_views.stats_policy_events(limit=limit)
 
+    @router.get("/agentflow/stats/managed-recommendations")
+    async def stats_managed_recommendations(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_managed_recommendations(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/weekly")
     async def stats_weekly() -> dict[str, Any]:
         return await stats_views.stats_weekly(_store(store_obj))

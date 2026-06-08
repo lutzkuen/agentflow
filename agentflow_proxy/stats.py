@@ -495,6 +495,236 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
     return breakdown
 
 
+def _managed_error_class(meta: dict[str, Any]) -> str | None:
+    reason = str(meta.get("reason") or "")
+    if reason:
+        return reason
+    status = str(meta.get("status") or "")
+    if status in {"error", "invalid"}:
+        return status
+    error = _sanitize_error_sample(meta.get("error"), limit=240)
+    if not error:
+        return None
+    head = error.split(":", 1)[0].strip()
+    return head[:80] if head else "error"
+
+
+def _managed_breakdown(grouped: dict[str, int]) -> list[dict[str, Any]]:
+    rows = [{"value": key, "count": value} for key, value in grouped.items()]
+    rows.sort(key=lambda row: row["count"], reverse=True)
+    return rows
+
+
+async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.recommendations import recommendation_server_url, recommendations_enabled
+
+    conn = store_obj.conn
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+                   requested_model, routed_model, status_code, latency_ms,
+                   routing_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    fallback_counts: dict[str, int] = {}
+    feedback_status_counts: dict[str, int] = {}
+    feedback_reason_counts: dict[str, int] = {}
+    policy_counts: dict[str, int] = {}
+    latency_values: list[int] = []
+    feedback_latency_values: list[int] = []
+    recent: list[dict[str, Any]] = []
+
+    metadata_rows = 0
+    historical_null_rows = 0
+    enabled_count = 0
+    disabled_count = 0
+    received_count = 0
+    applied_count = 0
+    changed_model_count = 0
+    server_error_count = 0
+    invalid_count = 0
+    feedback_present_count = 0
+    feedback_sent_count = 0
+    feedback_skipped_count = 0
+    feedback_failed_count = 0
+    feedback_sanitized_count = 0
+    last_recommendation_error_class = None
+    last_feedback_error_class = None
+
+    for row in rows:
+        routing = _json_obj(row.get("routing_json"))
+        managed = routing.get("managed_recommendation")
+        if not isinstance(managed, dict) or not managed:
+            historical_null_rows += 1
+            if len(recent) < 50:
+                recent.append({
+                    "created_at": row.get("created_at"),
+                    "provider": row.get("provider"),
+                    "source_surface": _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or "")),
+                    "requested_model": row.get("requested_model"),
+                    "routed_model": row.get("routed_model"),
+                    "status_code": row.get("status_code"),
+                    "recommendation_status": "missing",
+                    "recommendation_reason": "historical-null",
+                    "recommendation_enabled": None,
+                    "applied": False,
+                    "changed_model": False,
+                    "policy_id": None,
+                    "target_model": None,
+                    "fallback": None,
+                    "latency_ms": None,
+                    "feedback_status": "missing",
+                    "feedback_reason": "historical-null",
+                    "feedback_latency_ms": None,
+                    "feedback_error_class": None,
+                })
+            continue
+
+        metadata_rows += 1
+        status = str(managed.get("status") or "missing")
+        reason = str(managed.get("reason") or "unknown")
+        _increment_count(status_counts, status)
+        _increment_count(reason_counts, reason)
+        if managed.get("enabled") is False:
+            disabled_count += 1
+        elif managed.get("enabled") is True:
+            enabled_count += 1
+        if status == "received":
+            received_count += 1
+        if bool(managed.get("applied")):
+            applied_count += 1
+        if bool(managed.get("changed_model")):
+            changed_model_count += 1
+        if status == "error" or reason == "server-error":
+            server_error_count += 1
+            if last_recommendation_error_class is None:
+                last_recommendation_error_class = _managed_error_class(managed)
+        if status == "invalid":
+            invalid_count += 1
+            if last_recommendation_error_class is None:
+                last_recommendation_error_class = _managed_error_class(managed)
+        fallback = managed.get("fallback")
+        if fallback:
+            _increment_count(fallback_counts, fallback)
+        policy_id = managed.get("policy_id")
+        if policy_id:
+            _increment_count(policy_counts, policy_id)
+        latency_ms = managed.get("latency_ms")
+        if latency_ms is not None:
+            latency_values.append(_as_int(latency_ms))
+
+        feedback = managed.get("outcome_feedback")
+        feedback_status = "missing"
+        feedback_reason = "missing"
+        feedback_error_class = None
+        feedback_latency_ms = None
+        if isinstance(feedback, dict) and feedback:
+            feedback_present_count += 1
+            feedback_sanitized_count += 1
+            feedback_status = str(feedback.get("status") or "missing")
+            feedback_reason = str(feedback.get("reason") or "unknown")
+            _increment_count(feedback_status_counts, feedback_status)
+            _increment_count(feedback_reason_counts, feedback_reason)
+            if feedback_status == "sent":
+                feedback_sent_count += 1
+            elif feedback_status == "skipped":
+                feedback_skipped_count += 1
+            elif feedback_status in {"error", "invalid"}:
+                feedback_failed_count += 1
+                feedback_error_class = _managed_error_class(feedback)
+                if last_feedback_error_class is None:
+                    last_feedback_error_class = feedback_error_class
+            feedback_latency_ms = feedback.get("latency_ms")
+            if feedback_latency_ms is not None:
+                feedback_latency_values.append(_as_int(feedback_latency_ms))
+        else:
+            _increment_count(feedback_status_counts, "missing")
+
+        if len(recent) < 50:
+            recent.append({
+                "created_at": row.get("created_at"),
+                "provider": row.get("provider"),
+                "source_surface": _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or "")),
+                "requested_model": row.get("requested_model"),
+                "routed_model": row.get("routed_model"),
+                "status_code": row.get("status_code"),
+                "recommendation_status": status,
+                "recommendation_reason": reason,
+                "recommendation_enabled": managed.get("enabled"),
+                "applied": bool(managed.get("applied")),
+                "changed_model": bool(managed.get("changed_model")),
+                "policy_id": managed.get("policy_id"),
+                "target_model": managed.get("target_model"),
+                "fallback": fallback,
+                "latency_ms": _as_int(latency_ms) if latency_ms is not None else None,
+                "feedback_status": feedback_status,
+                "feedback_reason": feedback_reason,
+                "feedback_latency_ms": _as_int(feedback_latency_ms) if feedback_latency_ms is not None else None,
+                "feedback_error_class": feedback_error_class,
+            })
+
+    return {
+        "schema": "agentflow.managed_recommendations.v1",
+        "generated_at": utc_now(),
+        "limit": capped_limit,
+        "current_config": {
+            "enabled": recommendations_enabled(),
+            "server_url": recommendation_server_url(),
+            "offline_state": (
+                "managed recommendations disabled; local policy remains authoritative"
+                if not recommendations_enabled()
+                else "managed recommendation bridge enabled"
+            ),
+        },
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "basis": "stored recommendation and outcome-feedback metadata only",
+        },
+        "summary": {
+            "window_calls": len(rows),
+            "metadata_rows": metadata_rows,
+            "historical_null_rows": historical_null_rows,
+            "enabled_count": enabled_count,
+            "disabled_count": disabled_count,
+            "received_count": received_count,
+            "applied_count": applied_count,
+            "changed_model_count": changed_model_count,
+            "server_error_count": server_error_count,
+            "invalid_count": invalid_count,
+            "fallback_count": sum(fallback_counts.values()),
+            "avg_recommendation_latency_ms": _avg_or_none(latency_values),
+            "feedback_present_count": feedback_present_count,
+            "feedback_sent_count": feedback_sent_count,
+            "feedback_skipped_count": feedback_skipped_count,
+            "feedback_failed_count": feedback_failed_count,
+            "feedback_sanitized_count": feedback_sanitized_count,
+            "avg_feedback_latency_ms": _avg_or_none(feedback_latency_values),
+            "last_recommendation_error_class": last_recommendation_error_class,
+            "last_feedback_error_class": last_feedback_error_class,
+            "policy_id_count": len(policy_counts),
+        },
+        "status_breakdown": _managed_breakdown(status_counts),
+        "reason_breakdown": _managed_breakdown(reason_counts),
+        "fallback_breakdown": _managed_breakdown(fallback_counts),
+        "policy_ids": _managed_breakdown(policy_counts),
+        "feedback_status_breakdown": _managed_breakdown(feedback_status_counts),
+        "feedback_reason_breakdown": _managed_breakdown(feedback_reason_counts),
+        "recent": recent,
+    }
+
+
 def _increment_count(grouped: dict[str, int], key: Any) -> None:
     label = str(key or "unknown")
     grouped[label] = grouped.get(label, 0) + 1
@@ -3116,6 +3346,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('errors')">Errors</button>
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
+  <button class="tab-btn" onclick="showTab('managed')">Managed</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
@@ -3269,6 +3500,36 @@ def dashboard_html() -> str:
       <th data-sort-type="time">Time</th><th data-sort-type="text">Action</th><th data-sort-type="text">Status</th><th data-sort-type="text">Source</th><th data-sort-type="text">Details</th>
     </tr></thead>
     <tbody id="policy-events-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-managed">
+<div class="section">
+  <h2>Managed recommendation status</h2>
+  <table data-table-id="managed-summary" data-filter-label="Filter managed summary">
+    <thead><tr>
+      <th data-sort-type="text">Bridge</th><th data-sort-type="number">Window calls</th><th data-sort-type="number">Metadata</th><th data-sort-type="number">Disabled</th><th data-sort-type="number">Received</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Errors</th><th data-sort-type="latency">Avg recommendation</th><th data-sort-type="latency">Avg feedback</th><th data-sort-type="text">Last error</th>
+    </tr></thead>
+    <tbody id="managed-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Managed feedback status</h2>
+  <table data-table-id="managed-feedback" data-filter-label="Filter managed feedback">
+    <thead><tr>
+      <th data-sort-type="number">Sent</th><th data-sort-type="number">Skipped</th><th data-sort-type="number">Failed</th><th data-sort-type="number">Sanitized</th><th data-sort-type="number">Historical null</th><th data-sort-type="text">Feedback reasons</th><th data-sort-type="text">Fallback reasons</th><th data-sort-type="text">Policy IDs</th>
+    </tr></thead>
+    <tbody id="managed-feedback-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Recent managed recommendation rows</h2>
+  <table class="activity-table" data-table-id="managed-recent" data-filter-label="Filter managed recommendation rows">
+    <thead><tr>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Requested</th><th data-sort-type="text">Routed</th><th data-sort-type="text">Recommendation</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Target</th><th data-sort-type="latency">Latency</th><th data-sort-type="text">Feedback</th><th data-sort-type="text">Fallback</th>
+    </tr></thead>
+    <tbody id="managed-recent-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -3564,7 +3825,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','sessions'];
+  const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -3926,6 +4187,68 @@ async function refreshPolicies(){
   }catch(e){}
 }
 
+function compactBreakdown(rows,emptyLabel){
+  rows=rows||[];
+  if(!rows.length)return`<span class="badge miss">${esc(emptyLabel||'none')}</span>`;
+  return rows.slice(0,5).map(row=>`<span class="badge provider">${esc(row.value)} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
+function recBadge(status){
+  if(status==='received'||status==='sent')return'hit';
+  if(status==='error'||status==='invalid')return'err';
+  if(status==='skipped'||status==='missing')return'miss';
+  return'provider';
+}
+function managedLastError(summary){
+  const parts=[];
+  if(summary.last_feedback_error_class)parts.push(`<span class="badge err">feedback ${esc(summary.last_feedback_error_class)}</span>`);
+  if(summary.last_recommendation_error_class)parts.push(`<span class="badge err">recommendation ${esc(summary.last_recommendation_error_class)}</span>`);
+  return parts.join(' ')||'<span class="badge hit">none</span>';
+}
+async function refreshManaged(){
+  try{
+    const r=await fetch('/agentflow/stats/managed-recommendations?limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const cfg=d.current_config||{};
+    document.getElementById('managed-summary-tbody').innerHTML=`<tr>
+      <td class="flags">${cfg.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">offline / local-only</span>'} <span class="badge provider">${esc(cfg.server_url||'—')}</span></td>
+      <td class="tokens">${(s.window_calls||0).toLocaleString()}</td>
+      <td class="tokens">${(s.metadata_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(s.disabled_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.received_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${((s.server_error_count||0)+(s.invalid_count||0)).toLocaleString()}</td>
+      <td class="latency">${fmtMs(s.avg_recommendation_latency_ms)}</td>
+      <td class="latency">${fmtMs(s.avg_feedback_latency_ms)}</td>
+      <td class="flags">${managedLastError(s)}</td>
+    </tr>`;
+    document.getElementById('managed-feedback-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.feedback_sent_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.feedback_skipped_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.feedback_failed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.feedback_sanitized_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.historical_null_rows||0).toLocaleString()}</td>
+      <td class="flags">${compactBreakdown(d.feedback_reason_breakdown,'no feedback')}</td>
+      <td class="flags">${compactBreakdown(d.fallback_breakdown,'none')}</td>
+      <td class="flags">${compactBreakdown(d.policy_ids,'none')}</td>
+    </tr>`;
+    const rows=d.recent||[];
+    document.getElementById('managed-recent-tbody').innerHTML=rows.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
+      <td class="model">${esc(shortModel(row.requested_model))}</td>
+      <td class="model">${esc(shortModel(row.routed_model))}</td>
+      <td class="flags"><span class="badge ${recBadge(row.recommendation_status)}">${esc(row.recommendation_status)}</span> <span class="badge miss">${esc(row.recommendation_reason||'unknown')}</span>${row.applied?' <span class="badge hit">applied</span>':''}${row.changed_model?' <span class="badge routed">changed model</span>':''}</td>
+      <td class="model">${esc(row.policy_id||'—')}</td>
+      <td class="model">${esc(shortModel(row.target_model))}</td>
+      <td class="latency">${fmtMs(row.latency_ms)}</td>
+      <td class="flags"><span class="badge ${recBadge(row.feedback_status)}">${esc(row.feedback_status)}</span> <span class="badge miss">${esc(row.feedback_reason||'unknown')}</span>${row.feedback_error_class?` <span class="badge err">${esc(row.feedback_error_class)}</span>`:''}</td>
+      <td class="model">${esc(row.fallback||'—')}</td>
+    </tr>`).join('')||'<tr><td colspan="10" style="color:#8b949e">No managed recommendation rows yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+
 async function refreshSessions(){
   try{
     const r=await fetch('/agentflow/stats/sessions');
@@ -3978,6 +4301,7 @@ refreshCache();
 refreshErrors();
 refreshLimiter();
 refreshPolicies();
+refreshManaged();
 refreshSessions();
 setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
@@ -3988,6 +4312,7 @@ setInterval(refreshCache,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
+setInterval(refreshManaged,30000);
 setInterval(refreshSessions,30000);
 </script>
 </body>
