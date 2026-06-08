@@ -41,14 +41,73 @@ from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.recommendations import (
     apply_recommendation_to_body,
+    build_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
+    send_outcome_feedback,
 )
 from agentflow_proxy.router import categorize_request, extract_text, has_tools, route_openai_model
 from agentflow_proxy.store import stable_json, utc_now
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
+
+
+async def _record_managed_outcome_feedback(
+    *,
+    context: ProviderContext,
+    call_id: str,
+    path: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    input_tokens_est: int | None,
+    output_tokens_est: int | None,
+    actual_input_tokens: int | None,
+    actual_output_tokens: int | None,
+    cache_creation_input_tokens: int | None,
+    cache_read_input_tokens: int | None,
+    thinking_output_tokens: int | None,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    cache_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: str | None,
+    session_id: str | None,
+    error: str | None = None,
+) -> None:
+    managed = routing_meta.get("managed_recommendation")
+    if not isinstance(managed, dict) or not managed.get("enabled"):
+        return
+    outcome = build_outcome_feedback(
+        provider="openai",
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        input_tokens_est=input_tokens_est,
+        output_tokens_est=output_tokens_est,
+        actual_input_tokens=actual_input_tokens,
+        actual_output_tokens=actual_output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        thinking_output_tokens=thinking_output_tokens,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        cache_meta=cache_meta,
+        crunch_meta=crunch_meta,
+        routing_meta=routing_meta,
+        category=category,
+        session_id=session_id,
+        error=error,
+    )
+    managed["outcome_feedback"] = await send_outcome_feedback(managed, outcome)
+    context.store.update_call_routing_json(call_id, stable_json(routing_meta))
 
 
 def provider_disabled_response(context: ProviderContext, expected: str) -> JSONResponse:
@@ -423,6 +482,31 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         retry_count=stream_retry_count,
                         thinking_output_tokens=reasoning_tokens or None,
                     )
+                    await _record_managed_outcome_feedback(
+                        context=context,
+                        call_id=call_id,
+                        path=path,
+                        requested_model=requested_model,
+                        routed_model=str(crunched.get("model")),
+                        status_code=status_code,
+                        latency_ms=latency_ms,
+                        retry_count=stream_retry_count,
+                        input_tokens_est=input_tokens,
+                        output_tokens_est=None,
+                        actual_input_tokens=actual_in,
+                        actual_output_tokens=actual_out,
+                        cache_creation_input_tokens=0,
+                        cache_read_input_tokens=cache_read_in,
+                        thinking_output_tokens=reasoning_tokens or None,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost_baseline,
+                        cache_meta=cache_decision_meta("skipped", "streaming"),
+                        crunch_meta=crunch_meta,
+                        routing_meta=routing_meta,
+                        category=category,
+                        session_id=session_id,
+                        error=error,
+                    )
                     await _check_session_cost_alert(context, session_id)
 
             return StreamingResponse(
@@ -449,6 +533,13 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(cached))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens, provider="openai")
+                hit_cache_meta = cache_decision_meta(
+                    "hit",
+                    "exact-match",
+                    hit_type="exact",
+                    exact_enabled=can_cache,
+                    semantic_enabled=can_semantic_cache,
+                )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path, provider="openai",
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -456,16 +547,34 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta(
-                        "hit",
-                        "exact-match",
-                        hit_type="exact",
-                        exact_enabled=can_cache,
-                        semantic_enabled=can_semantic_cache,
-                    )),
+                    cache_json=stable_json(hit_cache_meta),
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
                     response_json=stable_json(cached) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
+                )
+                await _record_managed_outcome_feedback(
+                    context=context,
+                    call_id=call_id,
+                    path=path,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    latency_ms=latency_ms,
+                    retry_count=0,
+                    input_tokens_est=input_tokens,
+                    output_tokens_est=out_tokens,
+                    actual_input_tokens=None,
+                    actual_output_tokens=None,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    thinking_output_tokens=None,
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=cost_baseline,
+                    cache_meta=hit_cache_meta,
+                    crunch_meta=crunch_meta,
+                    routing_meta=routing_meta,
+                    category=category,
+                    session_id=session_id,
                 )
                 return JSONResponse(cached, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -476,6 +585,13 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(sem_resp))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens, provider="openai")
+                hit_cache_meta = cache_decision_meta(
+                    "hit",
+                    "semantic-match",
+                    hit_type="semantic",
+                    exact_enabled=can_cache,
+                    semantic_enabled=can_semantic_cache,
+                )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path, provider="openai",
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -483,16 +599,34 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta(
-                        "hit",
-                        "semantic-match",
-                        hit_type="semantic",
-                        exact_enabled=can_cache,
-                        semantic_enabled=can_semantic_cache,
-                    )),
+                    cache_json=stable_json(hit_cache_meta),
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
                     response_json=stable_json(sem_resp) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
+                )
+                await _record_managed_outcome_feedback(
+                    context=context,
+                    call_id=call_id,
+                    path=path,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    latency_ms=latency_ms,
+                    retry_count=0,
+                    input_tokens_est=input_tokens,
+                    output_tokens_est=out_tokens,
+                    actual_input_tokens=None,
+                    actual_output_tokens=None,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    thinking_output_tokens=None,
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=cost_baseline,
+                    cache_meta=hit_cache_meta,
+                    crunch_meta=crunch_meta,
+                    routing_meta=routing_meta,
+                    category=category,
+                    session_id=session_id,
                 )
                 return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -531,6 +665,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             latency_ms = int((time.time() - started) * 1000)
             cost = estimate_cost(str(crunched.get("model")), input_tokens, 0, provider="openai")
             cost_baseline = estimate_cost(requested_model, input_tokens, 0, provider="openai")
+            error = upstream_error_text(r.text, status_code)
             context.store.log_call(
                 id=call_id, created_at=utc_now(), path=path, provider="openai",
                 requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -540,11 +675,36 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                 cache_json=stable_json(cache_meta),
-                error=upstream_error_text(r.text, status_code),
+                error=error,
                 request_json=stable_json(crunched) if context.log_bodies else None, response_json=None,
                 session_id=session_id, category=category,
                 cache_creation_input_tokens=0, cache_read_input_tokens=0,
                 retry_count=retry_count,
+            )
+            await _record_managed_outcome_feedback(
+                context=context,
+                call_id=call_id,
+                path=path,
+                requested_model=requested_model,
+                routed_model=str(crunched.get("model")),
+                status_code=status_code,
+                latency_ms=latency_ms,
+                retry_count=retry_count,
+                input_tokens_est=input_tokens,
+                output_tokens_est=None,
+                actual_input_tokens=None,
+                actual_output_tokens=None,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                thinking_output_tokens=None,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost_baseline,
+                cache_meta=cache_meta,
+                crunch_meta=crunch_meta,
+                routing_meta=routing_meta,
+                category=category,
+                session_id=session_id,
+                error=error,
             )
             return Response(
                 r.content,
@@ -571,6 +731,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai")
         cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
         latency_ms = int((time.time() - started) * 1000)
+        error = None if status_code < 400 else upstream_error_text(response_body, status_code)
         context.store.log_call(
             id=call_id, created_at=utc_now(), path=path, provider="openai",
             requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -580,13 +741,38 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             cache_json=stable_json(cache_meta),
-            error=None if status_code < 400 else upstream_error_text(response_body, status_code),
+            error=error,
             request_json=stable_json(crunched) if context.log_bodies else None,
             response_json=stable_json(response_body) if context.log_bodies else None,
             session_id=session_id, category=category,
             cache_creation_input_tokens=0, cache_read_input_tokens=cache_read_in,
             retry_count=retry_count,
             thinking_output_tokens=reasoning_tokens or None,
+        )
+        await _record_managed_outcome_feedback(
+            context=context,
+            call_id=call_id,
+            path=path,
+            requested_model=requested_model,
+            routed_model=str(crunched.get("model")),
+            status_code=status_code,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            input_tokens_est=input_tokens,
+            output_tokens_est=out_tokens,
+            actual_input_tokens=actual_in,
+            actual_output_tokens=actual_out,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=cache_read_in,
+            thinking_output_tokens=reasoning_tokens or None,
+            cost_est_usd=cost,
+            cost_baseline_usd=cost_baseline,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            error=error,
         )
         await _check_session_cost_alert(context, session_id)
         return JSONResponse(
@@ -615,6 +801,31 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             response_json=stable_json(response_body) if context.log_bodies else None,
             session_id=session_id, category=category, retry_count=retry_count,
         )
+        await _record_managed_outcome_feedback(
+            context=context,
+            call_id=call_id,
+            path=path,
+            requested_model=requested_model,
+            routed_model=routed_model_for_log,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            input_tokens_est=locals().get("input_tokens"),
+            output_tokens_est=None,
+            actual_input_tokens=None,
+            actual_output_tokens=None,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=None,
+            cost_baseline_usd=None,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            error=error,
+        )
         return JSONResponse(
             response_body,
             status_code=status_code,
@@ -633,5 +844,30 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             cache_json=stable_json(cache_meta),
             error=error, request_json=stable_json(raw_body) if context.log_bodies else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
+        )
+        await _record_managed_outcome_feedback(
+            context=context,
+            call_id=call_id,
+            path=path,
+            requested_model=requested_model,
+            routed_model=None,
+            status_code=500,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            input_tokens_est=locals().get("input_tokens"),
+            output_tokens_est=None,
+            actual_input_tokens=None,
+            actual_output_tokens=None,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=None,
+            cost_baseline_usd=None,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            error=error,
         )
         return JSONResponse(public_proxy_error_body("openai", exc), status_code=500)

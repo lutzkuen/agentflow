@@ -56,6 +56,61 @@ class CapturingAsyncClient:
         return FakeJsonResponse(CapturingAsyncClient.response_body)
 
 
+class ManagedFeedbackAsyncClient:
+    calls = []
+    provider_body = {}
+    provider_status = 200
+    feedback_error = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, *, headers=None, json=None, **kwargs):
+        if url.endswith("/v1/recommendation"):
+            ManagedFeedbackAsyncClient.calls.append({
+                "kind": "recommendation",
+                "url": url,
+                "headers": dict(headers or {}),
+                "json": json,
+                "kwargs": kwargs,
+            })
+            requested = str((json or {}).get("requested_model") or "")
+            target = "claude-haiku-4-5-20251001" if requested.startswith("claude-") else requested
+            return FakeJsonResponse({
+                "target_model": target,
+                "replacement_prompt": None,
+                "confidence": 0.91,
+                "policy_id": "policy-managed-test",
+                "reason": "test recommendation",
+                "optimization_unit_id": 42,
+            })
+        ManagedFeedbackAsyncClient.calls.append({
+            "kind": "upstream",
+            "url": url,
+            "headers": dict(headers or {}),
+            "json": json,
+            "kwargs": kwargs,
+        })
+        return FakeJsonResponse(ManagedFeedbackAsyncClient.provider_body, ManagedFeedbackAsyncClient.provider_status)
+
+    async def patch(self, url, *, json=None, **kwargs):
+        ManagedFeedbackAsyncClient.calls.append({
+            "kind": "feedback",
+            "url": url,
+            "json": json,
+            "kwargs": kwargs,
+        })
+        if ManagedFeedbackAsyncClient.feedback_error is not None:
+            raise ManagedFeedbackAsyncClient.feedback_error
+        return FakeJsonResponse({"ok": True})
+
+
 class SequencedAsyncClient:
     calls = []
     responses = []
@@ -138,14 +193,31 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.old_openai_upstream = server.OPENAI_UPSTREAM
         self.old_openai_auth_mode = server.OPENAI_AUTH_MODE
         self.old_log_bodies = server.LOG_BODIES
+        self.recommendation_env_keys = (
+            "AGENTFLOW_RECOMMENDATION_ENABLED",
+            "AGENTFLOW_RECOMMENDATION_SERVER_URL",
+            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+        )
+        self.saved_recommendation_env = {key: os.environ.get(key) for key in self.recommendation_env_keys}
+        for key in self.recommendation_env_keys:
+            os.environ.pop(key, None)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.LOG_BODIES = False
         CapturingAsyncClient.calls = []
+        ManagedFeedbackAsyncClient.calls = []
+        ManagedFeedbackAsyncClient.provider_body = {}
+        ManagedFeedbackAsyncClient.provider_status = 200
+        ManagedFeedbackAsyncClient.feedback_error = None
         SequencedAsyncClient.calls = []
         SequencedAsyncClient.responses = []
 
     def tearDown(self):
+        for key, value in self.saved_recommendation_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
@@ -158,6 +230,24 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             openai_upstream=self.old_openai_upstream,
             openai_auth_mode=self.old_openai_auth_mode,
         )
+
+    def _keys_in(self, value):
+        keys = set()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                keys.add(str(key).lower())
+                keys.update(self._keys_in(item))
+        elif isinstance(value, list):
+            for item in value:
+                keys.update(self._keys_in(item))
+        return keys
+
+    def _managed_feedback_env(self):
+        return patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+            "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+        }, clear=False)
 
     def test_log_bodies_defaults_disabled_when_env_is_absent(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as db:
@@ -178,6 +268,122 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(result.stdout.strip(), "0")
+
+    def test_anthropic_managed_recommendation_sends_sanitized_outcome_feedback(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw prompt secret"}],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["recommendation", "upstream", "feedback"])
+        recommendation = ManagedFeedbackAsyncClient.calls[0]["json"]
+        feedback = ManagedFeedbackAsyncClient.calls[2]["json"]
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[2]["url"], "http://managed.test/v1/optimization-units/42/outcome")
+        self.assertEqual(feedback["status_code"], 200)
+        self.assertEqual(feedback["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(feedback["managed_recommendation"]["optimization_unit_id"], 42)
+        self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(recommendation)))
+        self.assertTrue({"messages", "content", "raw_response"}.isdisjoint(self._keys_in(feedback)))
+        self.assertNotIn("raw prompt secret", str(recommendation))
+        self.assertNotIn("raw prompt secret", str(feedback))
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        feedback_meta = routing["managed_recommendation"]["outcome_feedback"]
+        self.assertEqual(feedback_meta["status"], "sent")
+        self.assertEqual(feedback_meta["optimization_unit_id"], 42)
+
+    def test_anthropic_provider_failure_still_returns_and_sends_feedback(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.provider_status = 400
+        ManagedFeedbackAsyncClient.provider_body = {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": "provider rejected request"},
+        }
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "raw failing prompt"}],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["recommendation", "upstream", "feedback"])
+        feedback = ManagedFeedbackAsyncClient.calls[2]["json"]
+        self.assertEqual(feedback["status_code"], 400)
+        self.assertEqual(feedback["error_class"], "invalid_request_error")
+        self.assertIn("provider rejected request", feedback["error_message_prefix"])
+        self.assertNotIn("raw failing prompt", str(feedback))
+
+    def test_anthropic_feedback_failure_is_silent_and_recorded_locally(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        ManagedFeedbackAsyncClient.feedback_error = RuntimeError("feedback down")
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        feedback_meta = json.loads(row["routing_json"])["managed_recommendation"]["outcome_feedback"]
+        self.assertEqual(feedback_meta["status"], "error")
+        self.assertEqual(feedback_meta["reason"], "request-failed")
+        self.assertIn("feedback down", feedback_meta["error"])
+
+    def test_openai_managed_recommendation_sends_outcome_feedback(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test", openai_auth_mode="client")
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "resp_1",
+            "object": "response",
+            "model": "gpt-5-codex",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            "usage": {"input_tokens": 9, "output_tokens": 3},
+        }
+        request_body = {"model": "gpt-5-codex", "input": "raw openai prompt"}
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["recommendation", "upstream", "feedback"])
+        feedback = ManagedFeedbackAsyncClient.calls[2]["json"]
+        self.assertEqual(feedback["provider"], "openai")
+        self.assertEqual(feedback["source_surface"], "openai_responses")
+        self.assertEqual(feedback["actual_input_tokens"], 9)
+        self.assertEqual(feedback["actual_output_tokens"], 3)
+        self.assertNotIn("raw openai prompt", str(feedback))
 
     def test_anthropic_route_forwards_allowlisted_headers_and_does_not_log_bodies(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

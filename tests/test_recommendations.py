@@ -39,6 +39,13 @@ class FakeAsyncClient:
             raise self.__class__.error
         return self.__class__.response
 
+    async def patch(self, url, json):
+        self.__class__.last_url = url
+        self.__class__.last_json = json
+        if self.__class__.error is not None:
+            raise self.__class__.error
+        return self.__class__.response
+
 
 class RecommendationTest(unittest.TestCase):
     ENV_KEYS = (
@@ -96,6 +103,7 @@ class RecommendationTest(unittest.TestCase):
             "confidence": 0.82,
             "policy_id": "policy-1",
             "reason": "route cheaper",
+            "optimization_unit_id": 42,
         })
         routing_meta = {
             "requested_model": "claude-sonnet-4-6",
@@ -135,6 +143,7 @@ class RecommendationTest(unittest.TestCase):
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
         self.assertEqual(meta["status"], "received")
         self.assertEqual(meta["policy_source"], "managed-recommended")
+        self.assertEqual(meta["optimization_unit_id"], 42)
         self.assertTrue(meta["replacement_prompt_present"])
         self.assertIn("replacement_prompt_sha256", meta)
         self.assertNotIn("raw replacement text", str(meta))
@@ -165,6 +174,72 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["fallback"], "local-policy")
         self.assertFalse(applied["applied"])
         self.assertEqual(body["model"], "claude-sonnet-4-6")
+
+    def test_outcome_feedback_posts_sanitized_metadata_to_unit_endpoint(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        recommendation_meta = {"optimization_unit_id": 42}
+        outcome = recommendations.build_outcome_feedback(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            status_code=200,
+            latency_ms=123,
+            retry_count=1,
+            input_tokens_est=20,
+            output_tokens_est=3,
+            actual_input_tokens=18,
+            actual_output_tokens=2,
+            cache_creation_input_tokens=4,
+            cache_read_input_tokens=5,
+            thinking_output_tokens=None,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            cache_meta={"status": "miss", "reason": "exact-miss"},
+            crunch_meta={
+                "saved_chars": 16,
+                "raw_request": "must not leave local machine",
+            },
+            routing_meta={
+                "reason": "small request",
+                "policy_source": "local-manual",
+                "managed_recommendation": {
+                    "optimization_unit_id": 42,
+                    "policy_id": "policy-1",
+                    "target_model": "claude-haiku-4-5-20251001",
+                    "applied": True,
+                },
+                "messages": ["must be stripped"],
+            },
+            category="chat",
+            session_id="session-secret",
+            error='{"error":{"type":"invalid_request_error","message":"bad raw body"}}',
+        )
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.send_outcome_feedback(recommendation_meta, outcome))
+
+        self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/optimization-units/42/outcome")
+        self.assertEqual(meta["status"], "sent")
+        self.assertEqual(FakeAsyncClient.last_json["status_code"], 200)
+        self.assertEqual(FakeAsyncClient.last_json["routing_decision"]["reason"], "small request")
+        self.assertEqual(FakeAsyncClient.last_json["managed_recommendation"]["optimization_unit_id"], 42)
+        self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
+        self.assertNotIn("session-secret", str(FakeAsyncClient.last_json))
+        self.assertNotIn("must not leave", str(FakeAsyncClient.last_json))
+        self.assertNotIn("must be stripped", str(FakeAsyncClient.last_json))
+
+    def test_outcome_feedback_failure_is_non_fatal_metadata(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        FakeAsyncClient.error = RuntimeError("feedback unavailable")
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.send_outcome_feedback({"optimization_unit_id": 7}, {"status_code": 200}))
+
+        self.assertEqual(meta["status"], "error")
+        self.assertEqual(meta["reason"], "request-failed")
+        self.assertIn("feedback unavailable", meta["error"])
 
     def test_provider_mismatch_recommendation_is_not_applied(self):
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}

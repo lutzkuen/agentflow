@@ -296,8 +296,13 @@ The proxy posts normalized optimization-unit metadata to `/v1/recommendation`; i
 send raw prompt bodies by default. Returned `target_model` values may update the final local
 model when they stay inside the active provider family. Returned `replacement_prompt` values
 are recorded only as presence/hash metadata and are not applied by this local bridge yet.
-Recommendation status, policy ID, confidence, failure reason, and fallback metadata are stored
-inside `routing_json.managed_recommendation`.
+After a provider request finishes, recommendations that include an `optimization_unit_id`
+also receive best-effort metadata-only feedback at
+`/v1/optimization-units/{id}/outcome`. Feedback includes status, latency, token counts,
+cost estimates, cache/crunch/routing decision summaries, and compact error prefixes; raw
+requests, responses, messages, content, prompts, and transcripts are stripped before sending.
+Recommendation and feedback status, policy ID, confidence, failure reason, and fallback
+metadata are stored inside `routing_json.managed_recommendation`.
 
 ## Caching behavior
 

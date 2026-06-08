@@ -54,14 +54,73 @@ from agentflow_proxy.routing_experiments import (
 )
 from agentflow_proxy.recommendations import (
     apply_recommendation_to_body,
+    build_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
+    send_outcome_feedback,
 )
 from agentflow_proxy.store import stable_json, utc_now
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
 MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
+
+
+async def _record_managed_outcome_feedback(
+    *,
+    context: ProviderContext,
+    call_id: str,
+    path: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    input_tokens_est: int | None,
+    output_tokens_est: int | None,
+    actual_input_tokens: int | None,
+    actual_output_tokens: int | None,
+    cache_creation_input_tokens: int | None,
+    cache_read_input_tokens: int | None,
+    thinking_output_tokens: int | None,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    cache_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: str | None,
+    session_id: str | None,
+    error: str | None = None,
+) -> None:
+    managed = routing_meta.get("managed_recommendation")
+    if not isinstance(managed, dict) or not managed.get("enabled"):
+        return
+    outcome = build_outcome_feedback(
+        provider="anthropic",
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        input_tokens_est=input_tokens_est,
+        output_tokens_est=output_tokens_est,
+        actual_input_tokens=actual_input_tokens,
+        actual_output_tokens=actual_output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        thinking_output_tokens=thinking_output_tokens,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        cache_meta=cache_meta,
+        crunch_meta=crunch_meta,
+        routing_meta=routing_meta,
+        category=category,
+        session_id=session_id,
+        error=error,
+    )
+    managed["outcome_feedback"] = await send_outcome_feedback(managed, outcome)
+    context.store.update_call_routing_json(call_id, stable_json(routing_meta))
 
 
 async def _check_session_cost_alert(context: ProviderContext, sid: str) -> None:
@@ -432,6 +491,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 else estimate_tokens_from_text(cached_output_text)
                             )
                             cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
+                            hit_cache_meta = cache_decision_meta(
+                                "hit",
+                                "streaming-exact-match",
+                                hit_type="streaming-exact",
+                                exact_enabled=can_stream_cache,
+                                semantic_enabled=False,
+                            )
                             context.store.log_call(
                                 id=call_id, created_at=utc_now(), path=path,
                                 requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -440,18 +506,36 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 actual_input_tokens=None, actual_output_tokens=None,
                                 cost_est_usd=summary_extra_cost, cost_baseline_usd=cost_baseline,
                                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                                cache_json=stable_json(cache_decision_meta(
-                                    "hit",
-                                    "streaming-exact-match",
-                                    hit_type="streaming-exact",
-                                    exact_enabled=can_stream_cache,
-                                    semantic_enabled=False,
-                                )),
+                                cache_json=stable_json(hit_cache_meta),
                                 error=None, request_json=stable_json(crunched) if context.log_bodies else None,
                                 response_json=stable_json(cached) if context.log_bodies else None,
                                 session_id=session_id, category=category,
                                 cache_creation_input_tokens=0, cache_read_input_tokens=0,
                                 retry_count=0,
+                            )
+                            await _record_managed_outcome_feedback(
+                                context=context,
+                                call_id=call_id,
+                                path=path,
+                                requested_model=requested_model,
+                                routed_model=str(crunched.get("model")),
+                                status_code=200,
+                                latency_ms=latency_ms,
+                                retry_count=0,
+                                input_tokens_est=input_tokens,
+                                output_tokens_est=out_tokens,
+                                actual_input_tokens=None,
+                                actual_output_tokens=None,
+                                cache_creation_input_tokens=0,
+                                cache_read_input_tokens=0,
+                                thinking_output_tokens=None,
+                                cost_est_usd=summary_extra_cost,
+                                cost_baseline_usd=cost_baseline,
+                                cache_meta=hit_cache_meta,
+                                crunch_meta=crunch_meta,
+                                routing_meta=routing_meta,
+                                category=category,
+                                session_id=session_id,
                             )
                             await _check_session_cost_alert(context, session_id)
 
@@ -595,6 +679,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             ),
                             file_deps=cache_file_dependency_snapshots(crunched),
                         )
+                    thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
                     context.store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -608,7 +693,32 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                         session_id=session_id, category=category,
                         cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
                         retry_count=stream_retry_count,
-                        thinking_output_tokens=thinking_chars // TOKEN_CHARS if thinking_chars else None,
+                        thinking_output_tokens=thinking_tokens,
+                    )
+                    await _record_managed_outcome_feedback(
+                        context=context,
+                        call_id=call_id,
+                        path=path,
+                        requested_model=requested_model,
+                        routed_model=str(crunched.get("model")),
+                        status_code=status_code,
+                        latency_ms=latency_ms,
+                        retry_count=stream_retry_count,
+                        input_tokens_est=input_tokens,
+                        output_tokens_est=None,
+                        actual_input_tokens=actual_in,
+                        actual_output_tokens=actual_out,
+                        cache_creation_input_tokens=cache_creation_in,
+                        cache_read_input_tokens=cache_read_in,
+                        thinking_output_tokens=thinking_tokens,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost_baseline,
+                        cache_meta=cache_meta,
+                        crunch_meta=crunch_meta,
+                        routing_meta=routing_meta,
+                        category=category,
+                        session_id=session_id,
+                        error=error,
                     )
                     await _check_session_cost_alert(context, session_id)
 
@@ -638,6 +748,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(response_body))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
+                hit_cache_meta = cache_decision_meta(
+                    "hit",
+                    "exact-match",
+                    hit_type="exact",
+                    exact_enabled=can_cache,
+                    semantic_enabled=can_semantic_cache,
+                )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path,
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -645,16 +762,34 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=summary_extra_cost, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta(
-                        "hit",
-                        "exact-match",
-                        hit_type="exact",
-                        exact_enabled=can_cache,
-                        semantic_enabled=can_semantic_cache,
-                    )),
+                    cache_json=stable_json(hit_cache_meta),
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
                     response_json=stable_json(response_body) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
+                )
+                await _record_managed_outcome_feedback(
+                    context=context,
+                    call_id=call_id,
+                    path=path,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    latency_ms=latency_ms,
+                    retry_count=0,
+                    input_tokens_est=input_tokens,
+                    output_tokens_est=out_tokens,
+                    actual_input_tokens=None,
+                    actual_output_tokens=None,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    thinking_output_tokens=None,
+                    cost_est_usd=summary_extra_cost,
+                    cost_baseline_usd=cost_baseline,
+                    cache_meta=hit_cache_meta,
+                    crunch_meta=crunch_meta,
+                    routing_meta=routing_meta,
+                    category=category,
+                    session_id=session_id,
                 )
                 return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -665,6 +800,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(sem_resp))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
+                hit_cache_meta = cache_decision_meta(
+                    "hit",
+                    "semantic-match",
+                    hit_type="semantic",
+                    exact_enabled=can_cache,
+                    semantic_enabled=can_semantic_cache,
+                )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path,
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -672,16 +814,34 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
                     cost_est_usd=summary_extra_cost, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
-                    cache_json=stable_json(cache_decision_meta(
-                        "hit",
-                        "semantic-match",
-                        hit_type="semantic",
-                        exact_enabled=can_cache,
-                        semantic_enabled=can_semantic_cache,
-                    )),
+                    cache_json=stable_json(hit_cache_meta),
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
                     response_json=stable_json(sem_resp) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
+                )
+                await _record_managed_outcome_feedback(
+                    context=context,
+                    call_id=call_id,
+                    path=path,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    latency_ms=latency_ms,
+                    retry_count=0,
+                    input_tokens_est=input_tokens,
+                    output_tokens_est=out_tokens,
+                    actual_input_tokens=None,
+                    actual_output_tokens=None,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    thinking_output_tokens=None,
+                    cost_est_usd=summary_extra_cost,
+                    cost_baseline_usd=cost_baseline,
+                    cache_meta=hit_cache_meta,
+                    crunch_meta=crunch_meta,
+                    routing_meta=routing_meta,
+                    category=category,
+                    session_id=session_id,
                 )
                 return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
@@ -721,6 +881,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             if cost is not None:
                 cost += summary_extra_cost
             cost_baseline = estimate_cost(requested_model, input_tokens, 0)
+            error = upstream_error_text(r.text, status_code)
             context.store.log_call(
                 id=call_id, created_at=utc_now(), path=path,
                 requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -730,11 +891,36 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                 crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                 cache_json=stable_json(cache_meta),
-                error=upstream_error_text(r.text, status_code),
+                error=error,
                 request_json=stable_json(crunched) if context.log_bodies else None, response_json=None,
                 session_id=session_id, category=category,
                 cache_creation_input_tokens=0, cache_read_input_tokens=0,
                 retry_count=retry_count,
+            )
+            await _record_managed_outcome_feedback(
+                context=context,
+                call_id=call_id,
+                path=path,
+                requested_model=requested_model,
+                routed_model=str(crunched.get("model")),
+                status_code=status_code,
+                latency_ms=latency_ms,
+                retry_count=retry_count,
+                input_tokens_est=input_tokens,
+                output_tokens_est=None,
+                actual_input_tokens=None,
+                actual_output_tokens=None,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                thinking_output_tokens=None,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost_baseline,
+                cache_meta=cache_meta,
+                crunch_meta=crunch_meta,
+                routing_meta=routing_meta,
+                category=category,
+                session_id=session_id,
+                error=error,
             )
             return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "text/plain"))
 
@@ -782,6 +968,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 primary_cost_est_usd=cost,
                 input_tokens_est=input_tokens,
             )
+        error = None if status_code < 400 else upstream_error_text(response_body, status_code)
+        thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
         context.store.log_call(
             id=call_id, created_at=utc_now(), path=path,
             requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -791,13 +979,38 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cost_est_usd=cost, cost_baseline_usd=cost_baseline,
             crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
             cache_json=stable_json(cache_meta),
-            error=None if status_code < 400 else upstream_error_text(response_body, status_code),
+            error=error,
             request_json=stable_json(crunched) if context.log_bodies else None,
             response_json=stable_json(response_body) if context.log_bodies else None,
             session_id=session_id, category=category,
             cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
             retry_count=retry_count,
-            thinking_output_tokens=thinking_chars // TOKEN_CHARS if thinking_chars else None,
+            thinking_output_tokens=thinking_tokens,
+        )
+        await _record_managed_outcome_feedback(
+            context=context,
+            call_id=call_id,
+            path=path,
+            requested_model=requested_model,
+            routed_model=str(crunched.get("model")),
+            status_code=status_code,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            input_tokens_est=input_tokens,
+            output_tokens_est=out_tokens,
+            actual_input_tokens=actual_in,
+            actual_output_tokens=actual_out,
+            cache_creation_input_tokens=cache_creation_in,
+            cache_read_input_tokens=cache_read_in,
+            thinking_output_tokens=thinking_tokens,
+            cost_est_usd=cost,
+            cost_baseline_usd=cost_baseline,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            error=error,
         )
         await _check_session_cost_alert(context, session_id)
         return JSONResponse(response_body, status_code=status_code, headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))})
@@ -823,6 +1036,31 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             response_json=stable_json(response_body) if context.log_bodies else None,
             session_id=session_id, category=category, retry_count=retry_count,
         )
+        await _record_managed_outcome_feedback(
+            context=context,
+            call_id=call_id,
+            path=path,
+            requested_model=requested_model,
+            routed_model=routed_model_for_log,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            input_tokens_est=locals().get("input_tokens"),
+            output_tokens_est=None,
+            actual_input_tokens=None,
+            actual_output_tokens=None,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=None,
+            cost_baseline_usd=None,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            error=error,
+        )
         return JSONResponse(
             response_body,
             status_code=status_code,
@@ -841,5 +1079,30 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cache_json=stable_json(cache_meta),
             error=error, request_json=stable_json(raw_body) if context.log_bodies else None, response_json=None,
             session_id=session_id, category=category, retry_count=retry_count,
+        )
+        await _record_managed_outcome_feedback(
+            context=context,
+            call_id=call_id,
+            path=path,
+            requested_model=requested_model,
+            routed_model=None,
+            status_code=500,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+            input_tokens_est=locals().get("input_tokens"),
+            output_tokens_est=None,
+            actual_input_tokens=None,
+            actual_output_tokens=None,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=None,
+            cost_baseline_usd=None,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+            session_id=session_id,
+            error=error,
         )
         return JSONResponse(public_proxy_error_body("anthropic", exc), status_code=500)
