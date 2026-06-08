@@ -36,6 +36,7 @@ from agentflow_proxy.headers import (
     client_json_error_body,
     read_json_object_body,
 )
+from agentflow_proxy.limiter import TierBackoffActive, model_tier, tier_backoff_headers, tier_backoff_payload
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.recommendations import (
@@ -343,46 +344,54 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         reasoning_tokens = max(reasoning_tokens, reason_tok)
 
                 try:
-                    async with httpx.AsyncClient(timeout=context.http_timeout) as client:
-                        while True:
-                            await context.limiter.throttle_forward()
-                            try:
-                                async with client.stream("POST", context.openai_upstream.rstrip("/") + path, headers=headers, json=crunched) as r:
-                                    status_code = r.status_code
-                                    if status_code in (429, 529) and stream_retry_count < 3:
-                                        stream_retry_count += 1
-                                        delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
-                                        print(f"openai_rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
-                                        if stream_retry_count == 1 and crunched.get("model") != resolved_requested_model:
-                                            _rate_limited_model = crunched.get("model")
-                                            crunched["model"] = resolved_requested_model
-                                            routing_meta["fallback_reason"] = "rate_limited"
-                                            print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
-                                        await asyncio.sleep(delay)
-                                        continue
-                                    async for chunk in r.aiter_bytes():
-                                        sse_frame_buf += chunk
-                                        while b"\n\n" in sse_frame_buf:
-                                            frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
-                                            event_bytes = frame + b"\n\n"
+                    async with context.limiter.semaphores[model_tier(crunched["model"])]:
+                        async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                            while True:
+                                await context.limiter.await_backoff(crunched["model"])
+                                await context.limiter.throttle_forward()
+                                try:
+                                    async with client.stream("POST", context.openai_upstream.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                        status_code = r.status_code
+                                        if status_code in (429, 529) and stream_retry_count < 3:
+                                            stream_retry_count += 1
+                                            delay = (2 ** (stream_retry_count - 1)) * (1.0 + random.random() * 0.5)
+                                            print(f"openai_rate_limit: status={status_code} retry={stream_retry_count} delay={delay:.1f}s")
+                                            await context.limiter.record_backoff(crunched["model"], r.headers)
+                                            if stream_retry_count == 1 and crunched.get("model") != resolved_requested_model:
+                                                _rate_limited_model = crunched.get("model")
+                                                crunched["model"] = resolved_requested_model
+                                                routing_meta["fallback_reason"] = "rate_limited"
+                                                print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
+                                            await asyncio.sleep(delay)
+                                            continue
+                                        async for chunk in r.aiter_bytes():
+                                            sse_frame_buf += chunk
+                                            while b"\n\n" in sse_frame_buf:
+                                                frame, sse_frame_buf = sse_frame_buf.split(b"\n\n", 1)
+                                                event_bytes = frame + b"\n\n"
+                                                if status_code >= 400:
+                                                    upstream_error_chunks.append(event_bytes)
+                                                yield event_bytes
+                                                parse_sse_usage(frame)
+                                        if sse_frame_buf:
                                             if status_code >= 400:
-                                                upstream_error_chunks.append(event_bytes)
-                                            yield event_bytes
-                                            parse_sse_usage(frame)
-                                    if sse_frame_buf:
-                                        if status_code >= 400:
-                                            upstream_error_chunks.append(sse_frame_buf)
-                                        yield sse_frame_buf
-                                        parse_sse_usage(sse_frame_buf)
-                                        sse_frame_buf = b""
-                                    break
-                            except httpx.NetworkError as exc:
-                                if stream_net_retries < 2:
-                                    stream_net_retries += 1
-                                    print(f"openai_network_error: {exc!r} retry={stream_net_retries}", flush=True)
-                                    await asyncio.sleep(2.0)
-                                    continue
-                                raise
+                                                upstream_error_chunks.append(sse_frame_buf)
+                                            yield sse_frame_buf
+                                            parse_sse_usage(sse_frame_buf)
+                                            sse_frame_buf = b""
+                                        break
+                                except httpx.NetworkError as exc:
+                                    if stream_net_retries < 2:
+                                        stream_net_retries += 1
+                                        print(f"openai_network_error: {exc!r} retry={stream_net_retries}", flush=True)
+                                        await asyncio.sleep(2.0)
+                                        continue
+                                    raise
+                except TierBackoffActive as exc:
+                    status_code = 429
+                    error = exc.message
+                    payload = tier_backoff_payload(exc)
+                    yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
                 except Exception as exc:
                     logging.exception("agentflow openai streaming proxy error")
                     status_code = 500
@@ -487,30 +496,33 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 )
                 return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
 
-        async with httpx.AsyncClient(timeout=context.http_timeout) as client:
-            while True:
-                await context.limiter.throttle_forward()
-                try:
-                    r = await client.post(context.openai_upstream.rstrip("/") + path, headers=headers, json=crunched)
-                except httpx.NetworkError as exc:
-                    if net_retries < 2:
-                        net_retries += 1
-                        print(f"openai_network_error: {exc!r} retry={net_retries}", flush=True)
-                        await asyncio.sleep(2.0)
+        async with context.limiter.semaphores[model_tier(crunched["model"])]:
+            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                while True:
+                    await context.limiter.await_backoff(crunched["model"])
+                    await context.limiter.throttle_forward()
+                    try:
+                        r = await client.post(context.openai_upstream.rstrip("/") + path, headers=headers, json=crunched)
+                    except httpx.NetworkError as exc:
+                        if net_retries < 2:
+                            net_retries += 1
+                            print(f"openai_network_error: {exc!r} retry={net_retries}", flush=True)
+                            await asyncio.sleep(2.0)
+                            continue
+                        raise
+                    if r.status_code in (429, 529) and retry_count < 3:
+                        retry_count += 1
+                        delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
+                        print(f"openai_rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
+                        await context.limiter.record_backoff(crunched["model"], r.headers)
+                        if retry_count == 1 and crunched.get("model") != resolved_requested_model:
+                            _rate_limited_model = crunched.get("model")
+                            crunched["model"] = resolved_requested_model
+                            routing_meta["fallback_reason"] = "rate_limited"
+                            print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
+                        await asyncio.sleep(delay)
                         continue
-                    raise
-                if r.status_code in (429, 529) and retry_count < 3:
-                    retry_count += 1
-                    delay = (2 ** (retry_count - 1)) * (1.0 + random.random() * 0.5)
-                    print(f"openai_rate_limit: status={r.status_code} retry={retry_count} delay={delay:.1f}s")
-                    if retry_count == 1 and crunched.get("model") != resolved_requested_model:
-                        _rate_limited_model = crunched.get("model")
-                        crunched["model"] = resolved_requested_model
-                        routing_meta["fallback_reason"] = "rate_limited"
-                        print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
-                    await asyncio.sleep(delay)
-                    continue
-                break
+                    break
 
         status_code = r.status_code
         try:
@@ -581,6 +593,32 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             response_body,
             status_code=status_code,
             headers={"x-agentflow-cache": "miss", "x-agentflow-routed-model": str(crunched.get("model"))},
+        )
+    except TierBackoffActive as exc:
+        routed_model_for_log: Optional[str] = None
+        try:
+            routed_model_for_log = str(crunched.get("model"))
+        except Exception:
+            routed_model_for_log = None
+        error = exc.message
+        status_code = 429
+        response_body = tier_backoff_payload(exc)
+        latency_ms = int((time.time() - started) * 1000)
+        context.store.log_call(
+            id=call_id, created_at=utc_now(), path=path, provider="openai",
+            requested_model=requested_model, routed_model=routed_model_for_log, stream=int(stream), cache_hit=0,
+            status_code=status_code, latency_ms=latency_ms,
+            input_tokens_est=None, output_tokens_est=None, cost_est_usd=None, cost_baseline_usd=None,
+            crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
+            cache_json=stable_json(cache_meta),
+            error=error, request_json=stable_json(raw_body) if context.log_bodies else None,
+            response_json=stable_json(response_body) if context.log_bodies else None,
+            session_id=session_id, category=category, retry_count=retry_count,
+        )
+        return JSONResponse(
+            response_body,
+            status_code=status_code,
+            headers=tier_backoff_headers(exc, routed_model_for_log or ""),
         )
     except Exception as exc:
         logging.exception("agentflow openai proxy error")

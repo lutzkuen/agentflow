@@ -16,7 +16,8 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
-    from agentflow_proxy import server
+    from agentflow_proxy import openai_proxy, server
+    from agentflow_proxy.limiter import TierBackoffActive
     from agentflow_proxy.store import Store
 
 
@@ -55,10 +56,83 @@ class CapturingAsyncClient:
         return FakeJsonResponse(CapturingAsyncClient.response_body)
 
 
+class SequencedAsyncClient:
+    calls = []
+    responses = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, *, headers=None, json=None, **kwargs):
+        SequencedAsyncClient.calls.append({
+            "url": url,
+            "headers": dict(headers or {}),
+            "json": json,
+            "kwargs": kwargs,
+        })
+        return SequencedAsyncClient.responses.pop(0)
+
+
+class RecordingSemaphore:
+    def __init__(self, limiter, tier):
+        self.limiter = limiter
+        self.tier = tier
+
+    async def __aenter__(self):
+        self.limiter.entered.append(self.tier)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.limiter.exited.append(self.tier)
+        return False
+
+
+class RecordingLimiter:
+    def __init__(self, *, raise_backoff=False):
+        self.raise_backoff = raise_backoff
+        self.awaited = []
+        self.throttled = 0
+        self.recorded_backoffs = []
+        self.entered = []
+        self.exited = []
+        self.semaphores = {
+            "haiku": RecordingSemaphore(self, "haiku"),
+            "sonnet": RecordingSemaphore(self, "sonnet"),
+            "opus": RecordingSemaphore(self, "opus"),
+        }
+
+    async def await_backoff(self, model):
+        self.awaited.append(model)
+        if self.raise_backoff:
+            raise TierBackoffActive(tier="sonnet", remaining=45.0)
+
+    async def throttle_forward(self):
+        self.throttled += 1
+
+    async def record_backoff(self, model, response_headers, default_seconds=60.0):
+        self.recorded_backoffs.append({
+            "model": model,
+            "retry_after": response_headers.get("retry-after"),
+            "default_seconds": default_seconds,
+        })
+
+
+async def noop_sleep(_delay):
+    return None
+
+
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class SafetyRegressionRouteTests(unittest.TestCase):
     def setUp(self):
         self.old_store = server.store
+        self.old_limiter = server._limiter
+        self.old_tier_backoff_until = server._tier_backoff_until
         self.old_provider = server.PROVIDER
         self.old_anthropic_upstream = server.ANTHROPIC_UPSTREAM
         self.old_openai_upstream = server.OPENAI_UPSTREAM
@@ -68,11 +142,15 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         server.store = Store(self.tmp.name)
         server.LOG_BODIES = False
         CapturingAsyncClient.calls = []
+        SequencedAsyncClient.calls = []
+        SequencedAsyncClient.responses = []
 
     def tearDown(self):
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
+        server._limiter = self.old_limiter
+        server._tier_backoff_until = self.old_tier_backoff_until
         server.LOG_BODIES = self.old_log_bodies
         server.configure_provider(
             self.old_provider,
@@ -143,6 +221,99 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(row["status_code"], 200)
         self.assertIsNone(row["request_json"])
         self.assertIsNone(row["response_json"])
+
+    def test_openai_route_records_tier_backoff_on_retry_after(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test", openai_auth_mode="client")
+        limiter = RecordingLimiter()
+        server._limiter = limiter
+        SequencedAsyncClient.responses = [
+            FakeJsonResponse(
+                {"error": {"message": "rate limited", "type": "rate_limit_error"}},
+                status_code=429,
+                headers={"retry-after": "7", "content-type": "application/json"},
+            ),
+            FakeJsonResponse(
+                {
+                    "id": "resp_1",
+                    "object": "response",
+                    "model": "gpt-5-codex",
+                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                    "usage": {"input_tokens": 8, "output_tokens": 2},
+                }
+            ),
+        ]
+        request_body = {"model": "gpt-5-codex", "input": "retry after test"}
+
+        with patch.object(server.httpx, "AsyncClient", SequencedAsyncClient), patch.object(openai_proxy.asyncio, "sleep", noop_sleep):
+            response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(limiter.entered, ["sonnet"])
+        self.assertEqual(limiter.exited, ["sonnet"])
+        self.assertEqual(limiter.awaited, ["gpt-5-codex", "gpt-5-codex"])
+        self.assertEqual(limiter.throttled, 2)
+        self.assertEqual(limiter.recorded_backoffs, [{
+            "model": "gpt-5-codex",
+            "retry_after": "7",
+            "default_seconds": 60.0,
+        }])
+        self.assertEqual(len(SequencedAsyncClient.calls), 2)
+        [row] = server.store.conn.execute(
+            "select provider, status_code, retry_count from calls"
+        ).fetchall()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["status_code"], 200)
+        self.assertEqual(row["retry_count"], 1)
+
+    def test_openai_route_returns_local_429_during_long_tier_cooldown(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test", openai_auth_mode="client")
+        limiter = RecordingLimiter(raise_backoff=True)
+        server._limiter = limiter
+        request_body = {"model": "gpt-5-codex", "input": "cooldown test"}
+
+        with patch.object(server.httpx, "AsyncClient", SequencedAsyncClient):
+            response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "45")
+        self.assertEqual(response.headers["x-agentflow-routed-model"], "gpt-5-codex")
+        self.assertEqual(response.json()["error"]["type"], "rate_limit_error")
+        self.assertEqual(limiter.entered, ["sonnet"])
+        self.assertEqual(limiter.exited, ["sonnet"])
+        self.assertEqual(limiter.awaited, ["gpt-5-codex"])
+        self.assertEqual(SequencedAsyncClient.calls, [])
+        [row] = server.store.conn.execute(
+            "select provider, status_code, error from calls"
+        ).fetchall()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["status_code"], 429)
+        self.assertIn("temporarily limiting requests for sonnet tier", row["error"])
+
+    def test_openai_stream_returns_local_rate_limit_event_during_long_tier_cooldown(self):
+        server.configure_provider("openai", openai_upstream="https://openai.test", openai_auth_mode="client")
+        limiter = RecordingLimiter(raise_backoff=True)
+        server._limiter = limiter
+        request_body = {"model": "gpt-5-codex", "stream": True, "input": "stream cooldown test"}
+
+        with patch.object(server.httpx, "AsyncClient", SequencedAsyncClient):
+            with TestClient(server.app).stream("POST", "/v1/responses", json=request_body) as response:
+                body = b"".join(response.iter_bytes()).decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: error", body)
+        self.assertIn("rate_limit_error", body)
+        self.assertIn("temporarily limiting requests for sonnet tier", body)
+        self.assertEqual(limiter.entered, ["sonnet"])
+        self.assertEqual(limiter.exited, ["sonnet"])
+        self.assertEqual(limiter.awaited, ["gpt-5-codex"])
+        self.assertEqual(SequencedAsyncClient.calls, [])
+        [row] = server.store.conn.execute(
+            "select provider, status_code, error, stream from calls"
+        ).fetchall()
+        self.assertEqual(row["provider"], "openai")
+        self.assertEqual(row["status_code"], 429)
+        self.assertEqual(row["stream"], 1)
+        self.assertIn("temporarily limiting requests for sonnet tier", row["error"])
 
     def test_openai_route_forwards_allowlisted_headers_and_does_not_log_bodies(self):
         server.configure_provider("openai", openai_upstream="https://openai.test", openai_auth_mode="client")
