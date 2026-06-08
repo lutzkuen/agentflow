@@ -897,6 +897,135 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
 
+    def test_codex_effectiveness_reports_quota_token_usage_without_raw_payloads(self):
+        raw_prompt = "seeded raw prompt must not appear"
+        raw_command = "seeded raw command must not appear"
+        raw_transcript = "seeded raw transcript must not appear"
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction="client_to_server",
+            method="turn/start",
+            request_id="quota-turn",
+            thread_id="thread-quota",
+            message_chars=200,
+            params_chars=100,
+            input_items=1,
+            input_text_chars=4000,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-quota",
+            routing_json=stable_json({"status": "not-applicable", "reason": "codex-turn-start-model-field-absent"}),
+            crunch_json=stable_json({"status": "skipped", "changed": False}),
+            cache_json=stable_json({"status": "skipped", "eligible": False}),
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction="server_to_client",
+            method="turn/completed",
+            request_id="quota-turn",
+            thread_id="thread-quota",
+            message_chars=80,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=400,
+            error_code=None,
+            error_message=None,
+            latency_ms=50,
+            session_id="codex-quota",
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction="server_to_client",
+            method="thread/tokenUsage/updated",
+            request_id=None,
+            thread_id="thread-quota",
+            message_chars=120,
+            params_chars=120,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-quota",
+            metadata_json=stable_json({
+                "schema": "agentflow.codex_app_metadata.v1",
+                "kind": "token_usage",
+                "method": "thread/tokenUsage/updated",
+                "token_usage": {
+                    "input_tokens": 1200,
+                    "cached_input_tokens": 200,
+                    "output_tokens": 125,
+                    "reasoning_output_tokens": 25,
+                    "total_tokens": 1550,
+                    "total_tokens_bucket": "1k_10k",
+                },
+                "debug": raw_prompt,
+            }),
+        )
+        server.store.log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction="server_to_client",
+            method="account/rateLimits/updated",
+            request_id=None,
+            thread_id=None,
+            message_chars=120,
+            params_chars=120,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-quota",
+            metadata_json=stable_json({
+                "schema": "agentflow.codex_app_metadata.v1",
+                "kind": "rate_limits",
+                "method": "account/rateLimits/updated",
+                "rate_limits": {
+                    "plan_type": "pro",
+                    "pressure": "high",
+                    "scopes": [
+                        {
+                            "name": "primary",
+                            "used_percent": 92.5,
+                            "used_percent_bucket": "90_99",
+                            "remaining": 42,
+                            "remaining_bucket": "10_99",
+                            "reset_bucket": "1m_1h",
+                        }
+                    ],
+                },
+                "debug": raw_command,
+                "transcript": raw_transcript,
+            }),
+        )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
+        quota = result["quota_and_token_usage"]
+
+        self.assertEqual(result["summary"]["rate_limit_update_rows"], 1)
+        self.assertEqual(result["summary"]["token_usage_update_rows"], 1)
+        self.assertEqual(quota["latest_rate_limits"]["pressure"], "high")
+        self.assertEqual(quota["latest_rate_limits"]["scopes"][0]["remaining_bucket"], "10_99")
+        self.assertEqual(quota["token_usage_totals"]["total_tokens"], 1550)
+        self.assertEqual(quota["agentflow_estimated_totals"]["total_tokens_est"], 1100)
+        self.assertEqual(quota["reconciliation"]["total_drift_tokens"], 450)
+        self.assertEqual(quota["reconciliation"]["total_drift_bucket"], "100_999")
+        self.assertFalse(quota["privacy"]["raw_prompts_included"])
+        self.assertFalse(quota["privacy"]["raw_commands_included"])
+        rendered = json.dumps(result)
+        self.assertNotIn(raw_prompt, rendered)
+        self.assertNotIn(raw_command, rendered)
+        self.assertNotIn(raw_transcript, rendered)
+
     def test_codex_effectiveness_normalizes_historical_missing_decision_metadata(self):
         fixtures = [
             (
@@ -2964,7 +3093,19 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
+        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
+
+    def test_dashboard_exposes_codex_quota_token_usage_panel(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn(">Codex quota</button>", html)
+        self.assertIn("<h2>Codex quota and token usage</h2>", html)
+        self.assertIn("id=\"codex-quota-tbody\"", html)
+        self.assertIn("id=\"codex-rate-scopes-tbody\"", html)
+        self.assertIn("fetch('/agentflow/stats/codex-effectiveness?limit=500')", html)
+        self.assertIn("quota_and_token_usage", html)
+        self.assertIn("raw commands omitted", html)
+        self.assertIn("raw transcripts omitted", html)
 
     def test_dashboard_policy_panel_renders_codex_app_surface_state(self):
         html = stats_views.dashboard_html()
@@ -3053,6 +3194,8 @@ class StatsFullTest(unittest.TestCase):
             "cache-all",
             "errors-today",
             "errors-all",
+            "codex-quota",
+            "codex-rate-scopes",
             "sessions",
         ):
             self.assertIn(f'data-table-id="{table_id}"', html)

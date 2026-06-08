@@ -304,6 +304,7 @@ class SQLiteStore:
             self._ensure_column("codex_app_events", "crunch_json", "text")
             self._ensure_column("codex_app_events", "cache_json", "text")
             self._ensure_column("codex_app_events", "event_window_json", "text")
+            self._ensure_column("codex_app_events", "metadata_json", "text")
             cur.execute("""
             create table if not exists managed_outcome_feedback_queue (
               id text primary key,
@@ -499,7 +500,7 @@ class SQLiteStore:
             "id", "created_at", "direction", "method", "request_id", "thread_id",
             "message_chars", "params_chars", "input_items", "input_text_chars",
             "result_chars", "error_code", "error_message", "latency_ms", "session_id",
-            "routing_json", "crunch_json", "cache_json", "event_window_json",
+            "routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json",
         ]
         values = [kwargs.get(c) for c in cols]
         with self._lock:
@@ -905,7 +906,8 @@ class PostgresStore(SQLiteStore):
               routing_json text,
               crunch_json text,
               cache_json text,
-              event_window_json text
+              event_window_json text,
+              metadata_json text
             )
             """,
             """
@@ -927,7 +929,7 @@ class PostgresStore(SQLiteStore):
             """,
         ):
             self.conn.execute(sql)
-        for column in ("routing_json", "crunch_json", "cache_json", "event_window_json"):
+        for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
         self.conn.execute("""
             create index if not exists idx_codex_app_events_start_recent

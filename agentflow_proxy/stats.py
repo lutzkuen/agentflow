@@ -1798,6 +1798,92 @@ def _codex_turn_bounds(turn_rows: list[dict[str, Any]]) -> dict[str, str | None]
     return bounds
 
 
+def _token_drift_bucket(value: int) -> str:
+    absolute = abs(int(value or 0))
+    if absolute == 0:
+        return "zero"
+    if absolute < 100:
+        return "lt_100"
+    if absolute < 1000:
+        return "100_999"
+    if absolute < 10000:
+        return "1k_10k"
+    return "10k_plus"
+
+
+def _codex_quota_token_usage_report(
+    event_rows: list[dict[str, Any]],
+    turn_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rate_limit_updates: list[dict[str, Any]] = []
+    token_usage_updates: list[dict[str, Any]] = []
+    token_totals = {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 0,
+    }
+    for event in event_rows:
+        metadata = _json_obj(event.get("metadata_json"))
+        kind = metadata.get("kind")
+        if kind == "rate_limits":
+            rate_limit_updates.append({
+                "created_at": event.get("created_at"),
+                **metadata,
+            })
+        elif kind == "token_usage":
+            usage = metadata.get("token_usage") if isinstance(metadata.get("token_usage"), dict) else {}
+            token_usage_updates.append({
+                "created_at": event.get("created_at"),
+                **metadata,
+            })
+            for key in token_totals:
+                token_totals[key] += _as_int(usage.get(key))
+    latest_rate_limit = rate_limit_updates[-1] if rate_limit_updates else None
+    latest_token_usage = token_usage_updates[-1] if token_usage_updates else None
+    estimated_input = sum(max(0, int(_as_int(row.get("input_text_chars")) / TOKEN_CHARS)) for row in turn_rows)
+    estimated_output = sum(max(0, int(_as_int(row.get("response_result_chars")) / TOKEN_CHARS)) for row in turn_rows)
+    estimated_total = estimated_input + estimated_output
+    usage_total = token_totals["total_tokens"]
+    drift = {
+        "input_tokens": token_totals["input_tokens"] - estimated_input,
+        "output_tokens": token_totals["output_tokens"] - estimated_output,
+        "total_tokens": usage_total - estimated_total,
+    }
+    return {
+        "schema": "agentflow.codex_app_quota_token_usage.v1",
+        "rate_limit_update_count": len(rate_limit_updates),
+        "token_usage_update_count": len(token_usage_updates),
+        "latest_rate_limits": latest_rate_limit.get("rate_limits") if latest_rate_limit else None,
+        "latest_rate_limit_at": latest_rate_limit.get("created_at") if latest_rate_limit else None,
+        "latest_token_usage": latest_token_usage.get("token_usage") if latest_token_usage else None,
+        "latest_token_usage_at": latest_token_usage.get("created_at") if latest_token_usage else None,
+        "token_usage_totals": token_totals,
+        "agentflow_estimated_totals": {
+            "input_tokens_est": estimated_input,
+            "output_tokens_est": estimated_output,
+            "total_tokens_est": estimated_total,
+        },
+        "reconciliation": {
+            "input_drift_tokens": drift["input_tokens"],
+            "output_drift_tokens": drift["output_tokens"],
+            "total_drift_tokens": drift["total_tokens"],
+            "total_drift_bucket": _token_drift_bucket(drift["total_tokens"]),
+            "drift_ratio": round(drift["total_tokens"] / usage_total, 4) if usage_total else None,
+            "basis": "tokenUsage metadata totals minus AgentFlow char-derived turn estimates in this scan window",
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_params_included": False,
+            "raw_prompts_included": False,
+            "raw_commands_included": False,
+            "raw_transcripts_included": False,
+            "arbitrary_payload_strings_included": False,
+        },
+    }
+
+
 def _codex_workflow_phase(
     row: dict[str, Any],
     *,
@@ -2247,6 +2333,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                s.crunch_json,
                s.cache_json,
                s.event_window_json,
+               s.metadata_json,
                (
                    select r.id from codex_app_events r
                    where r.direction = 'server_to_client'
@@ -2288,19 +2375,28 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     turn_rows = [dict(row) for row in rows]
     min_start_at = min((str(row.get("created_at") or "") for row in turn_rows), default="")
     event_scan_limit = max(15000, min(200000, capped_limit * 1000))
-    event_rows = [
-        dict(row)
-        for row in conn.execute(
-            """
-            select created_at, direction, method, request_id, thread_id, session_id
+    if turn_rows:
+        event_sql = """
+            select created_at, direction, method, request_id, thread_id, session_id, metadata_json
             from codex_app_events
             where created_at >= ?
             order by created_at asc
             limit ?
-            """,
-            (min_start_at or "0000-00-00T00:00:00+00:00", event_scan_limit),
-        ).fetchall()
-    ] if turn_rows else []
+            """
+        event_params = (min_start_at or "0000-00-00T00:00:00+00:00", event_scan_limit)
+    else:
+        event_sql = """
+            select *
+            from (
+                select created_at, direction, method, request_id, thread_id, session_id, metadata_json
+                from codex_app_events
+                order by created_at desc
+                limit ?
+            )
+            order by created_at asc
+            """
+        event_params = (event_scan_limit,)
+    event_rows = [dict(row) for row in conn.execute(event_sql, event_params).fetchall()]
     events_by_thread: dict[str, list[dict[str, Any]]] = {}
     events_by_session_without_thread: dict[str, list[dict[str, Any]]] = {}
     events_by_session: dict[str, list[dict[str, Any]]] = {}
@@ -2543,6 +2639,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
 
     total = len(turn_rows)
     plateau_candidate_report = _codex_plateau_candidate_report(plateau_candidate_rows)
+    quota_token_usage = _codex_quota_token_usage_report(event_rows, turn_rows)
     return {
         "schema": "agentflow.codex_app_effectiveness.v1",
         "generated_at": utc_now(),
@@ -2633,6 +2730,10 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "repeated_context_plateau_candidate_count": plateau_candidate_report["summary"]["candidate_count"],
             "repeated_context_plateau_pairs": plateau_candidate_report["summary"]["plateau_pairs"],
             "repeated_context_plateau_opportunity_chars": plateau_candidate_report["summary"]["estimated_opportunity_saved_chars"],
+            "rate_limit_update_rows": quota_token_usage["rate_limit_update_count"],
+            "token_usage_update_rows": quota_token_usage["token_usage_update_count"],
+            "token_usage_total_tokens": quota_token_usage["token_usage_totals"]["total_tokens"],
+            "token_usage_reconciliation_drift_bucket": quota_token_usage["reconciliation"]["total_drift_bucket"],
         },
         "decision_metadata_breakdown": _count_breakdown(decision_metadata_counts),
         "current_missing_decision_breakdown": _count_breakdown(current_missing_decision_counts),
@@ -2656,6 +2757,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "managed_feedback_breakdown": _count_breakdown(managed_feedback_status_counts),
         "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
         "managed_feedback_queue_breakdown": _count_breakdown(managed_feedback_queue_counts),
+        "quota_and_token_usage": quota_token_usage,
         "repeated_context_plateau_candidates": plateau_candidate_report,
         "outcome_by_optimization": [
             {
@@ -5379,6 +5481,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('safety')">Safety</button>
   <button class="tab-btn active" onclick="showTab('activity')">Recent calls</button>
   <button class="tab-btn" onclick="showTab('usage')">Usage by app / engineer</button>
+  <button class="tab-btn" onclick="showTab('codex')">Codex quota</button>
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
@@ -5444,6 +5547,27 @@ def dashboard_html() -> str:
     <tbody id="usage-tbody"></tbody>
   </table>
   </div>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-codex">
+<div class="section">
+  <h2>Codex quota and token usage</h2>
+  <table data-table-id="codex-quota" data-filter-label="Filter Codex quota">
+    <thead><tr>
+      <th data-sort-type="number">Rate updates</th><th data-sort-type="number">Token updates</th><th data-sort-type="text">Plan</th><th data-sort-type="text">Pressure</th><th data-sort-type="number">Reported tokens</th><th data-sort-type="number">Estimated tokens</th><th data-sort-type="number">Drift</th><th data-sort-type="text">Drift bucket</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="codex-quota-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Latest Codex rate-limit scopes</h2>
+  <table data-table-id="codex-rate-scopes" data-filter-label="Filter Codex rate scopes">
+    <thead><tr>
+      <th data-sort-type="text">Scope</th><th data-sort-type="number">Used</th><th data-sort-type="text">Used bucket</th><th data-sort-type="number">Remaining</th><th data-sort-type="text">Remaining bucket</th><th data-sort-type="text">Reset bucket</th>
+    </tr></thead>
+    <tbody id="codex-rate-scopes-tbody"></tbody>
+  </table>
 </div>
 </div>
 
@@ -5921,7 +6045,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions'];
+  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -5958,6 +6082,46 @@ async function refreshUsage(){
         <td class="flags"><span class="badge provider">${esc(row.cost_basis)}</span> ${codexCost}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="12" style="color:#8b949e">No app or engineer usage today</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+
+async function refreshCodexQuota(){
+  try{
+    const r=await fetch('/agentflow/stats/codex-effectiveness?limit=500');
+    const d=await r.json();
+    const q=d.quota_and_token_usage||{};
+    const totals=q.token_usage_totals||{};
+    const est=q.agentflow_estimated_totals||{};
+    const rec=q.reconciliation||{};
+    const latest=q.latest_rate_limits||{};
+    const privacy=q.privacy||{};
+    const scopes=latest.scopes||[];
+    const privacyBadges=[
+      privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>',
+      privacy.raw_params_included?'<span class="badge err">raw params</span>':'<span class="badge hit">raw params omitted</span>',
+      privacy.raw_commands_included?'<span class="badge err">raw commands</span>':'<span class="badge hit">raw commands omitted</span>',
+      privacy.raw_transcripts_included?'<span class="badge err">raw transcripts</span>':'<span class="badge hit">raw transcripts omitted</span>'
+    ].join(' ');
+    document.getElementById('codex-quota-tbody').innerHTML=`<tr>
+      <td class="tokens">${(q.rate_limit_update_count||0).toLocaleString()}</td>
+      <td class="tokens">${(q.token_usage_update_count||0).toLocaleString()}</td>
+      <td><span class="badge provider">${esc(latest.plan_type||'unknown')}</span></td>
+      <td><span class="badge ${latest.pressure==='critical'||latest.pressure==='high'?'err':latest.pressure==='elevated'?'routed':'hit'}">${esc(latest.pressure||'unknown')}</span></td>
+      <td class="tokens">${fmtTok(totals.total_tokens||0)}</td>
+      <td class="tokens">${fmtTok(est.total_tokens_est||0)}</td>
+      <td class="tokens">${(rec.total_drift_tokens||0).toLocaleString()}</td>
+      <td><span class="badge miss">${esc(rec.total_drift_bucket||'unknown')}</span></td>
+      <td class="flags">${privacyBadges}</td>
+    </tr>`;
+    document.getElementById('codex-rate-scopes-tbody').innerHTML=scopes.map(scope=>`<tr>
+      <td><span class="badge provider">${esc(scope.name||'unknown')}</span></td>
+      <td class="tokens">${scope.used_percent==null?'—':scope.used_percent.toFixed(1)+'%'}</td>
+      <td><span class="badge miss">${esc(scope.used_percent_bucket||'—')}</span></td>
+      <td class="tokens">${scope.remaining==null?'—':scope.remaining.toLocaleString()}</td>
+      <td><span class="badge miss">${esc(scope.remaining_bucket||'—')}</span></td>
+      <td><span class="badge miss">${esc(scope.reset_bucket||'—')}</span></td>
+    </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No Codex rate-limit metadata recorded yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -6588,6 +6752,7 @@ initDataTables();
 refreshSafety();
 refreshActivity();
 refreshUsage();
+refreshCodexQuota();
 refresh();
 refreshWeekly();
 refreshCategories();
@@ -6601,6 +6766,7 @@ refreshSessions();
 setInterval(refreshSafety,30000);
 setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
+setInterval(refreshCodexQuota,30000);
 setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);

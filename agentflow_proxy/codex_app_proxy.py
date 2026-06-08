@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -116,6 +117,207 @@ def _as_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _as_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+
+def _known_enum(value: Any, allowed: set[str]) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if not normalized:
+        return None
+    return normalized if normalized in allowed else "other"
+
+
+def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping.get(key)
+    return None
+
+
+def _count_bucket(value: Any) -> str | None:
+    number = _as_float(value)
+    if number is None:
+        return None
+    if number <= 0:
+        return "0"
+    if number < 10:
+        return "1_9"
+    if number < 100:
+        return "10_99"
+    if number < 1000:
+        return "100_999"
+    if number < 10000:
+        return "1k_10k"
+    return "10k_plus"
+
+
+def _percent_bucket(value: Any) -> str | None:
+    number = _as_float(value)
+    if number is None:
+        return None
+    if number < 50:
+        return "lt_50"
+    if number < 75:
+        return "50_75"
+    if number < 90:
+        return "75_90"
+    if number < 100:
+        return "90_99"
+    return "100_plus"
+
+
+def _seconds_bucket(seconds: Any) -> str | None:
+    number = _as_float(seconds)
+    if number is None:
+        return None
+    if number <= 0:
+        return "now"
+    if number < 60:
+        return "lt_1m"
+    if number < 3600:
+        return "1m_1h"
+    if number < 21600:
+        return "1h_6h"
+    if number < 86400:
+        return "6h_24h"
+    return "1d_plus"
+
+
+def _reset_seconds(value: Any) -> float | None:
+    direct = _as_float(value)
+    if direct is not None:
+        return direct
+    if not isinstance(value, str):
+        return None
+    try:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+def _token_usage_metadata(method: str | None, params: Any) -> dict[str, Any] | None:
+    if method != "thread/tokenUsage/updated" or not isinstance(params, dict):
+        return None
+    info = params.get("usage") if isinstance(params.get("usage"), dict) else params
+    mapping = {
+        "input_tokens": ("inputTokens", "input_tokens", "input"),
+        "cached_input_tokens": ("cachedInputTokens", "cached_input_tokens", "cached"),
+        "output_tokens": ("outputTokens", "output_tokens", "output"),
+        "reasoning_output_tokens": ("reasoningOutputTokens", "reasoning_output_tokens", "reasoning"),
+        "total_tokens": ("totalTokens", "total_tokens", "total"),
+    }
+    usage: dict[str, int] = {}
+    for public_key, raw_keys in mapping.items():
+        for raw_key in raw_keys:
+            if raw_key in info:
+                parsed = _as_float(info.get(raw_key))
+                if parsed is not None and parsed >= 0:
+                    usage[public_key] = int(parsed)
+                break
+    if not usage:
+        return None
+    if "total_tokens" not in usage:
+        usage["total_tokens"] = sum(
+            usage.get(key, 0)
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+        )
+    return {
+        "schema": "agentflow.codex_app_metadata.v1",
+        "kind": "token_usage",
+        "method": method,
+        "thread_id_present": bool(_thread_id(params)),
+        "token_usage": {
+            **usage,
+            "total_tokens_bucket": _count_bucket(usage.get("total_tokens")),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_params_included": False,
+            "raw_prompts_included": False,
+            "raw_commands_included": False,
+            "raw_transcripts_included": False,
+            "arbitrary_strings_included": False,
+        },
+    }
+
+
+def _rate_limit_metadata(method: str | None, params: Any) -> dict[str, Any] | None:
+    if method != "account/rateLimits/updated" or not isinstance(params, dict):
+        return None
+    limits = params.get("rateLimits") or params.get("rate_limits") or params.get("limits")
+    if not isinstance(limits, dict):
+        return None
+    allowed_plans = {"free", "plus", "pro", "team", "business", "enterprise", "chatgpt_plus", "chatgpt_pro", "unknown"}
+    plan = _known_enum(_first_present(limits, "planType", "plan_type", "plan"), allowed_plans)
+    scopes: list[dict[str, Any]] = []
+    for name in ("primary", "secondary", "daily", "weekly", "monthly", "hourly"):
+        item = limits.get(name)
+        if not isinstance(item, dict):
+            continue
+        used_percent = _as_float(_first_present(item, "usedPercent", "used_percent"))
+        remaining = _as_float(_first_present(item, "remaining", "remainingRequests", "remaining_requests"))
+        reset_seconds = _reset_seconds(_first_present(
+            item,
+            "resetAfterSeconds",
+            "reset_after_seconds",
+            "resetInSeconds",
+            "reset_in_seconds",
+        ))
+        if reset_seconds is None:
+            reset_seconds = _reset_seconds(_first_present(item, "resetAt", "reset_at"))
+        scope: dict[str, Any] = {
+            "name": name,
+            "used_percent": round(used_percent, 3) if used_percent is not None else None,
+            "used_percent_bucket": _percent_bucket(used_percent),
+            "remaining_bucket": _count_bucket(remaining),
+            "reset_bucket": _seconds_bucket(reset_seconds),
+        }
+        if remaining is not None:
+            scope["remaining"] = int(max(0, remaining))
+        scopes.append({key: value for key, value in scope.items() if value is not None})
+    if not scopes and plan is None:
+        return None
+    max_used = max((_as_float(scope.get("used_percent")) or 0 for scope in scopes), default=0)
+    pressure = "critical" if max_used >= 100 else "high" if max_used >= 90 else "elevated" if max_used >= 75 else "normal"
+    return {
+        "schema": "agentflow.codex_app_metadata.v1",
+        "kind": "rate_limits",
+        "method": method,
+        "rate_limits": {
+            "plan_type": plan,
+            "pressure": pressure,
+            "scopes": scopes,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_params_included": False,
+            "raw_prompts_included": False,
+            "raw_commands_included": False,
+            "raw_transcripts_included": False,
+            "arbitrary_strings_included": False,
+        },
+    }
+
+
+def _codex_app_signal_metadata(method: str | None, params: Any) -> dict[str, Any] | None:
+    return _token_usage_metadata(method, params) or _rate_limit_metadata(method, params)
 
 
 def _thread_id(params: Any) -> Optional[str]:
@@ -1153,6 +1355,7 @@ def _record_message(
 
     params = msg.get("params")
     method = msg.get("method")
+    metadata = _codex_app_signal_metadata(str(method) if method is not None else None, params)
     rid = _request_id(msg)
     params_chars = len(stable_json(params)) if params is not None else None
     input_value = params.get("input") if isinstance(params, dict) else None
@@ -1195,6 +1398,7 @@ def _record_message(
         routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
         crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
         cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
+        metadata_json=stable_json(metadata) if metadata else None,
     )
     _record_event_window(
         active_turn_windows,

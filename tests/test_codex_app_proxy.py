@@ -167,6 +167,68 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertIn("1", request_started)
         self.assertIn("database is locked", stderr.getvalue())
 
+    def test_quota_and_token_usage_metadata_is_allowlisted(self):
+        raw_prompt = "secret raw prompt must not be stored"
+        raw_command = "secret shell command must not be stored"
+        raw_transcript = "secret transcript must not be stored"
+        capture = CapturingStore()
+        token_message = {
+            "jsonrpc": "2.0",
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "thread-private",
+                "prompt": raw_prompt,
+                "transcript": raw_transcript,
+                "usage": {
+                    "inputTokens": 1200,
+                    "cachedInputTokens": 300,
+                    "outputTokens": 80,
+                    "reasoningOutputTokens": 20,
+                },
+            },
+        }
+        quota_message = {
+            "jsonrpc": "2.0",
+            "method": "account/rateLimits/updated",
+            "params": {
+                "command": raw_command,
+                "rateLimits": {
+                    "planType": "pro",
+                    "primary": {"usedPercent": 92.5, "remaining": 42, "resetAfterSeconds": 1800},
+                    "secondary": {"usedPercent": 30.0, "remaining": 1200, "resetAfterSeconds": 7200},
+                },
+            },
+        }
+
+        with patch.object(codex_app_proxy, "store", capture):
+            codex_app_proxy._record_message(
+                json.dumps(token_message),
+                direction="server_to_client",
+                session_id="session-private",
+                request_started={},
+            )
+            codex_app_proxy._record_message(
+                json.dumps(quota_message),
+                direction="server_to_client",
+                session_id="session-private",
+                request_started={},
+            )
+
+        rendered = json.dumps(capture.events)
+        self.assertNotIn(raw_prompt, rendered)
+        self.assertNotIn(raw_command, rendered)
+        self.assertNotIn(raw_transcript, rendered)
+        metadata = [json.loads(event["metadata_json"]) for event in capture.events if event.get("metadata_json")]
+        self.assertEqual({row["kind"] for row in metadata}, {"token_usage", "rate_limits"})
+        token_usage = next(row["token_usage"] for row in metadata if row["kind"] == "token_usage")
+        self.assertEqual(token_usage["input_tokens"], 1200)
+        self.assertEqual(token_usage["total_tokens"], 1600)
+        rate_limits = next(row["rate_limits"] for row in metadata if row["kind"] == "rate_limits")
+        self.assertEqual(rate_limits["plan_type"], "pro")
+        self.assertEqual(rate_limits["pressure"], "high")
+        self.assertEqual(rate_limits["scopes"][0]["remaining_bucket"], "10_99")
+        self.assertEqual(rate_limits["scopes"][0]["reset_bucket"], "1m_1h")
+
     def test_codex_app_session_spend_alert_warns_once_per_threshold_window(self):
         raw_prompt = "secret raw prompt must not be logged"
         raw_result = "secret raw result must not be logged"
