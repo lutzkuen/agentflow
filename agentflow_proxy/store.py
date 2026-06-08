@@ -583,22 +583,35 @@ class SQLiteStore:
             claimed["status"] = "sending"
             return claimed
 
-    def claim_due_managed_outcome_feedback(self, *, limit: int, now: str | None = None) -> list[dict[str, Any]]:
+    def claim_due_managed_outcome_feedback(
+        self,
+        *,
+        limit: int,
+        now: str | None = None,
+        source_surface: str | None = None,
+    ) -> list[dict[str, Any]]:
         now = now or utc_now()
         capped = max(1, min(int(limit or 1), 100))
+        source_clause = "and source_surface = ?" if source_surface else ""
+        params: tuple[Any, ...]
+        if source_surface:
+            params = (now, source_surface, capped)
+        else:
+            params = (now, capped)
         with self._lock:
             rows = self.conn.execute(
-                """
+                f"""
                 select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
                        payload_json, status, attempts, next_attempt_at, last_error,
                        last_status_code, sent_at
                 from managed_outcome_feedback_queue
                 where status in ('queued', 'retryable-error')
                   and next_attempt_at <= ?
+                  {source_clause}
                 order by created_at asc
                 limit ?
                 """,
-                (now, capped),
+                params,
             ).fetchall()
             claimed: list[dict[str, Any]] = []
             for row in rows:
@@ -617,6 +630,36 @@ class SQLiteStore:
                 claimed.append(item)
             self.conn.commit()
             return claimed
+
+    def due_managed_outcome_feedback(
+        self,
+        *,
+        limit: int,
+        now: str | None = None,
+        source_surface: str | None = None,
+    ) -> list[dict[str, Any]]:
+        now = now or utc_now()
+        capped = max(1, min(int(limit or 1), 1000))
+        source_clause = "and source_surface = ?" if source_surface else ""
+        params: tuple[Any, ...]
+        if source_surface:
+            params = (now, source_surface, capped)
+        else:
+            params = (now, capped)
+        rows = self.conn.execute(
+            f"""
+            select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                   status, attempts, next_attempt_at, last_error, last_status_code, sent_at
+            from managed_outcome_feedback_queue
+            where status in ('queued', 'retryable-error')
+              and next_attempt_at <= ?
+              {source_clause}
+            order by created_at asc
+            limit ?
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def mark_managed_outcome_feedback_sent(self, queue_id: str, *, status_code: int | None = None) -> None:
         now = utc_now()
@@ -672,6 +715,38 @@ class SQLiteStore:
                 group by status
                 order by count desc, status asc
                 """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def managed_outcome_feedback_rows(
+        self,
+        *,
+        source_surface: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        if source_surface:
+            rows = self.conn.execute(
+                """
+                select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                       status, attempts, next_attempt_at, last_error, last_status_code, sent_at
+                from managed_outcome_feedback_queue
+                where source_surface = ?
+                order by created_at asc
+                limit ?
+                """,
+                (source_surface, capped),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                       status, attempts, next_attempt_at, last_error, last_status_code, sent_at
+                from managed_outcome_feedback_queue
+                order by created_at asc
+                limit ?
+                """,
+                (capped,),
             ).fetchall()
         return [dict(row) for row in rows]
 

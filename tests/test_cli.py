@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import os
@@ -10,6 +11,25 @@ import httpx
 import yaml
 
 from agentflow_proxy import cli
+
+
+class ManagedFeedbackFlushClient:
+    calls = []
+    status_code = 200
+    text = '{"ok":true}'
+
+    def __init__(self, *, timeout=None):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def patch(self, url, json):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout})
+        return httpx.Response(self.status_code, text=self.text)
 
 
 class PolicyReloadCliTests(unittest.TestCase):
@@ -966,6 +986,185 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(events[0]["details"]["change_count"], 1)
         self.assertEqual(events[1]["action"], "export")
         self.assertIn("routing", events[1]["details"]["policies"])
+
+
+class ManagedFeedbackCliTests(unittest.TestCase):
+    def setUp(self):
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 200
+        ManagedFeedbackFlushClient.text = '{"ok":true}'
+
+    def _enqueue_feedback(self, store, *, status="queued", attempts=0):
+        from agentflow_proxy.store import stable_json
+
+        store.enqueue_managed_outcome_feedback(
+            id=f"queue-{status}-{attempts}",
+            created_at="2026-06-08T10:00:00+00:00",
+            updated_at="2026-06-08T10:00:00+00:00",
+            source_surface="codex_turn",
+            endpoint="/v1/optimization-units/77/outcome",
+            optimization_unit_id=77,
+            payload_json=stable_json({
+                "status": "success",
+                "raw_request": "must stay local",
+                "raw_response": "raw codex response secret",
+                "quality_signals": {"status": "success"},
+            }),
+            status=status,
+            attempts=attempts,
+            next_attempt_at="2026-06-08T10:00:00+00:00",
+        )
+
+    def test_managed_feedback_status_cli_reports_metadata_only_queue_counts(self):
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(store)
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.managed_feedback_status_cli(
+                ["--db", db_path, "--source-surface", "codex_turn"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.managed_feedback_status.v1")
+        self.assertEqual(payload["summary"]["queued"], 1)
+        self.assertEqual(payload["summary"]["due"], 1)
+        self.assertFalse(payload["due_samples"][0]["payload_included"])
+        rendered = stdout.getvalue()
+        self.assertNotIn("must stay local", rendered)
+        self.assertNotIn("raw codex response secret", rendered)
+
+    def test_managed_feedback_flush_dry_run_does_not_claim_or_send(self):
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(store)
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                code = cli.managed_feedback_flush_cli(
+                    ["--db", db_path, "--source-surface", "codex_turn", "--dry-run"],
+                    stdout=stdout,
+                )
+
+            store = Store(db_path)
+            try:
+                row = store.get_managed_outcome_feedback("queue-queued-0")
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls, [])
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["attempts"], 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["flush"]["would_attempt"], 1)
+        self.assertEqual(payload["results"][0]["status"], "would-send")
+        self.assertFalse(payload["results"][0]["payload_included"])
+
+    def test_managed_feedback_flush_sends_sanitized_payload_and_updates_queue(self):
+        from agentflow_proxy import stats as stats_views
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(store)
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(
+                        ["--db", db_path, "--source-surface", "codex_turn", "--limit", "1"],
+                        stdout=stdout,
+                    )
+
+            store = Store(db_path)
+            try:
+                row = store.get_managed_outcome_feedback("queue-queued-0")
+                codex_stats = asyncio.run(stats_views.stats_codex_effectiveness(store, limit=10))
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["status"], "sent")
+        self.assertEqual(row["attempts"], 1)
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["url"], "http://managed.test/v1/optimization-units/77/outcome")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["status"], "success")
+        self.assertNotIn("raw_request", sent_payload)
+        self.assertNotIn("raw_response", sent_payload)
+        rendered = stdout.getvalue()
+        self.assertNotIn("must stay local", rendered)
+        self.assertNotIn("raw codex response secret", rendered)
+        payload = json.loads(rendered)
+        self.assertEqual(payload["flush"]["sent"], 1)
+        self.assertEqual(payload["after"]["sent"], 1)
+        self.assertEqual(codex_stats["summary"]["managed_feedback_queue_sent"], payload["after"]["sent"])
+
+    def test_managed_feedback_flush_records_retryable_error(self):
+        from agentflow_proxy.store import Store
+
+        ManagedFeedbackFlushClient.status_code = 503
+        ManagedFeedbackFlushClient.text = "managed unavailable"
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._enqueue_feedback(store)
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_feedback_flush_cli(["--db", db_path], stdout=stdout)
+
+            store = Store(db_path)
+            try:
+                row = store.get_managed_outcome_feedback("queue-queued-0")
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(row["status"], "retryable-error")
+        self.assertEqual(row["attempts"], 1)
+        self.assertEqual(row["last_status_code"], 503)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["flush"]["retryable_error"], 1)
 
 
 if __name__ == "__main__":

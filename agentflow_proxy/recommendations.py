@@ -776,13 +776,22 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
     return meta
 
 
-async def flush_queued_outcome_feedback(store_obj: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+async def flush_queued_outcome_feedback(
+    store_obj: Any,
+    *,
+    limit: int = 5,
+    source_surface: str | None = None,
+) -> list[dict[str, Any]]:
     if not recommendations_enabled():
         return []
     if not hasattr(store_obj, "claim_due_managed_outcome_feedback"):
         return []
     results: list[dict[str, Any]] = []
-    for row in store_obj.claim_due_managed_outcome_feedback(limit=max(1, limit), now=utc_now()):
+    for row in store_obj.claim_due_managed_outcome_feedback(
+        limit=max(1, limit),
+        now=utc_now(),
+        source_surface=source_surface,
+    ):
         results.append(await _flush_claimed_outcome_feedback(store_obj, row))
     return results
 

@@ -164,12 +164,17 @@ Common policy commands:
 | `agentflow-policy-apply proposed.json --config-dir ~/.agentflow` | Apply reviewed local policy files |
 | `agentflow-policy-rollback --config-dir ~/.agentflow --dry-run --pretty` | Preview rollback to the newest backup |
 | `agentflow-policy-reload` | Reload changed policies in a running local proxy |
+| `agentflow-managed-feedback-status --pretty` | Inspect the local managed outcome feedback queue without printing payloads |
+| `agentflow-managed-feedback-flush --limit 5 --dry-run --pretty` | Preview a bounded retry batch for due managed outcome feedback |
+| `agentflow-managed-feedback-flush --limit 5 --pretty` | Flush due managed outcome feedback when managed recommendations are enabled |
 
 Policy operations can append compact local audit events under `~/.agentflow/policy_events.jsonl`. Set `AGENTFLOW_POLICY_EVENTS=0` to disable that audit log.
 Managed fetch/review is disabled unless a recommendation URL is supplied, and authenticated
 managed servers should use `AGENTFLOW_MANAGED_API_KEY` or `--api-key-env` rather than putting
 secrets in command history. The command validates and reviews the bundle only; use
 `agentflow-policy-apply --dry-run` separately before writing local YAML files.
+Managed outcome feedback retries are also disabled unless `AGENTFLOW_RECOMMENDATION_ENABLED=1`.
+Status and flush output is metadata-only; queued feedback payload JSON is not printed.
 
 ## Configuration
 
