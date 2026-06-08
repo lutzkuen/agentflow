@@ -37,7 +37,7 @@ class StatsFullTest(unittest.TestCase):
     def test_crunch_savings_uses_cache_blended_input_rate(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
-            created_at="2026-06-07T01:00:00+00:00",
+            created_at=utc_now(),
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-sonnet-4-6",
@@ -74,7 +74,7 @@ class StatsFullTest(unittest.TestCase):
     def test_full_stats_include_executive_summary_for_top_dashboard_tiles(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
-            created_at="2026-06-07T01:00:00+00:00",
+            created_at=utc_now(),
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-haiku-4-5-20251001",
@@ -104,7 +104,7 @@ class StatsFullTest(unittest.TestCase):
         )
         server.store.log_codex_app_event(
             id=str(uuid.uuid4()),
-            created_at="2026-06-07T01:01:00+00:00",
+            created_at=utc_now(),
             direction="client_to_server",
             method="turn/start",
             request_id="req-exec",
@@ -121,7 +121,7 @@ class StatsFullTest(unittest.TestCase):
         )
         server.store.log_codex_app_event(
             id=str(uuid.uuid4()),
-            created_at="2026-06-07T01:01:02+00:00",
+            created_at=utc_now(),
             direction="server_to_client",
             method="turn/completed",
             request_id="req-exec",
@@ -313,7 +313,7 @@ class StatsFullTest(unittest.TestCase):
     def test_sessions_include_thinking_token_breakdown(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
-            created_at="2026-06-07T01:00:01+00:00",
+            created_at=utc_now(),
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-sonnet-4-6",
@@ -444,7 +444,7 @@ class StatsFullTest(unittest.TestCase):
         provider_id = str(uuid.uuid4())
         server.store.log_call(
             id=provider_id,
-            created_at="2026-06-07T01:00:00+00:00",
+            created_at=utc_now(),
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-haiku-4-5-20251001",
@@ -482,7 +482,7 @@ class StatsFullTest(unittest.TestCase):
         response_id = str(uuid.uuid4())
         server.store.log_codex_app_event(
             id=start_id,
-            created_at="2026-06-07T01:01:00+00:00",
+            created_at=utc_now(),
             direction="client_to_server",
             method="turn/start",
             request_id="req-1",
@@ -499,7 +499,7 @@ class StatsFullTest(unittest.TestCase):
         )
         server.store.log_codex_app_event(
             id=response_id,
-            created_at="2026-06-07T01:01:03+00:00",
+            created_at=utc_now(),
             direction="server_to_client",
             method="turn/completed",
             request_id="req-1",
