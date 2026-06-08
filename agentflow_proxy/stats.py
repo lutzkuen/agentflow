@@ -1772,6 +1772,13 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     managed_status_counts: dict[str, int] = {}
     managed_feedback_status_counts: dict[str, int] = {}
     managed_feedback_reason_counts: dict[str, int] = {}
+    managed_feedback_queue_counts: dict[str, int] = {}
+    if hasattr(store_obj, "managed_outcome_feedback_summary"):
+        try:
+            for row in store_obj.managed_outcome_feedback_summary(source_surface=CODEX_APP_SOURCE_SURFACE):
+                managed_feedback_queue_counts[str(row.get("status") or "unknown")] = _as_int(row.get("count"))
+        except Exception:
+            managed_feedback_queue_counts = {}
 
     recent_samples: list[dict[str, Any]] = []
     for row in turn_rows:
@@ -1989,9 +1996,25 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 and not bool((_json_obj(row.get("routing_json")).get("managed_recommendation") or {}).get("enabled"))
             ),
             "managed_feedback_sent": managed_feedback_status_counts.get("sent", 0),
-            "managed_feedback_skipped": managed_feedback_status_counts.get("skipped", 0),
-            "managed_feedback_error": managed_feedback_status_counts.get("error", 0),
+            "managed_feedback_skipped": (
+                managed_feedback_status_counts.get("skipped", 0)
+                + managed_feedback_status_counts.get("disabled", 0)
+            ),
+            "managed_feedback_queued": managed_feedback_status_counts.get("queued", 0),
+            "managed_feedback_error": (
+                managed_feedback_status_counts.get("error", 0)
+                + managed_feedback_status_counts.get("retryable-error", 0)
+                + managed_feedback_status_counts.get("dropped-after-limit", 0)
+            ),
+            "managed_feedback_retryable_error": managed_feedback_status_counts.get("retryable-error", 0),
+            "managed_feedback_dropped_after_limit": managed_feedback_status_counts.get("dropped-after-limit", 0),
             "managed_feedback_pending": managed_feedback_status_counts.get("pending", 0),
+            "managed_feedback_queue_sent": managed_feedback_queue_counts.get("sent", 0),
+            "managed_feedback_queue_queued": managed_feedback_queue_counts.get("queued", 0),
+            "managed_feedback_queue_error": (
+                managed_feedback_queue_counts.get("retryable-error", 0)
+                + managed_feedback_queue_counts.get("dropped-after-limit", 0)
+            ),
         },
         "model_field_breakdown": _count_breakdown(model_field_counts),
         "model_field_names": _count_breakdown(model_field_names),
@@ -2010,6 +2033,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "managed_recommendation_breakdown": _count_breakdown(managed_status_counts),
         "managed_feedback_breakdown": _count_breakdown(managed_feedback_status_counts),
         "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
+        "managed_feedback_queue_breakdown": _count_breakdown(managed_feedback_queue_counts),
         "outcome_by_optimization": [
             {
                 "bucket": "optimized",

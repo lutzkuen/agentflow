@@ -305,6 +305,23 @@ class SQLiteStore:
             self._ensure_column("codex_app_events", "cache_json", "text")
             self._ensure_column("codex_app_events", "event_window_json", "text")
             cur.execute("""
+            create table if not exists managed_outcome_feedback_queue (
+              id text primary key,
+              created_at text not null,
+              updated_at text not null,
+              source_surface text not null,
+              endpoint text not null,
+              optimization_unit_id integer not null,
+              payload_json text not null,
+              status text not null,
+              attempts integer not null default 0,
+              next_attempt_at text not null,
+              last_error text,
+              last_status_code integer,
+              sent_at text
+            )
+            """)
+            cur.execute("""
             create index if not exists idx_codex_app_events_start_recent
             on codex_app_events(direction, method, created_at)
             """)
@@ -319,6 +336,10 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_codex_app_events_created_at
             on codex_app_events(created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_managed_outcome_feedback_due
+            on managed_outcome_feedback_queue(status, next_attempt_at, created_at)
             """)
             self.conn.commit()
 
@@ -488,6 +509,172 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def enqueue_managed_outcome_feedback(self, **kwargs: Any) -> None:
+        cols = [
+            "id", "created_at", "updated_at", "source_surface", "endpoint",
+            "optimization_unit_id", "payload_json", "status", "attempts",
+            "next_attempt_at", "last_error", "last_status_code", "sent_at",
+        ]
+        now = utc_now()
+        values = [
+            kwargs.get("id"),
+            kwargs.get("created_at") or now,
+            kwargs.get("updated_at") or now,
+            kwargs.get("source_surface"),
+            kwargs.get("endpoint"),
+            kwargs.get("optimization_unit_id"),
+            kwargs.get("payload_json"),
+            kwargs.get("status") or "queued",
+            kwargs.get("attempts") or 0,
+            kwargs.get("next_attempt_at") or now,
+            kwargs.get("last_error"),
+            kwargs.get("last_status_code"),
+            kwargs.get("sent_at"),
+        ]
+        with self._lock:
+            self.conn.execute(
+                f"insert into managed_outcome_feedback_queue({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+                values,
+            )
+            self.conn.commit()
+
+    def get_managed_outcome_feedback(self, queue_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                   payload_json, status, attempts, next_attempt_at, last_error,
+                   last_status_code, sent_at
+            from managed_outcome_feedback_queue
+            where id = ?
+            """,
+            (queue_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def claim_managed_outcome_feedback(self, queue_id: str, *, now: str | None = None) -> dict[str, Any] | None:
+        now = now or utc_now()
+        with self._lock:
+            row = self.conn.execute(
+                """
+                select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                       payload_json, status, attempts, next_attempt_at, last_error,
+                       last_status_code, sent_at
+                from managed_outcome_feedback_queue
+                where id = ?
+                  and status in ('queued', 'retryable-error')
+                  and next_attempt_at <= ?
+                """,
+                (queue_id, now),
+            ).fetchone()
+            if not row:
+                return None
+            attempts = int(row["attempts"] or 0) + 1
+            self.conn.execute(
+                """
+                update managed_outcome_feedback_queue
+                set status = ?, attempts = ?, updated_at = ?
+                where id = ?
+                """,
+                ("sending", attempts, now, queue_id),
+            )
+            self.conn.commit()
+            claimed = dict(row)
+            claimed["attempts"] = attempts
+            claimed["status"] = "sending"
+            return claimed
+
+    def claim_due_managed_outcome_feedback(self, *, limit: int, now: str | None = None) -> list[dict[str, Any]]:
+        now = now or utc_now()
+        capped = max(1, min(int(limit or 1), 100))
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                       payload_json, status, attempts, next_attempt_at, last_error,
+                       last_status_code, sent_at
+                from managed_outcome_feedback_queue
+                where status in ('queued', 'retryable-error')
+                  and next_attempt_at <= ?
+                order by created_at asc
+                limit ?
+                """,
+                (now, capped),
+            ).fetchall()
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                attempts = int(row["attempts"] or 0) + 1
+                self.conn.execute(
+                    """
+                    update managed_outcome_feedback_queue
+                    set status = ?, attempts = ?, updated_at = ?
+                    where id = ?
+                    """,
+                    ("sending", attempts, now, row["id"]),
+                )
+                item = dict(row)
+                item["attempts"] = attempts
+                item["status"] = "sending"
+                claimed.append(item)
+            self.conn.commit()
+            return claimed
+
+    def mark_managed_outcome_feedback_sent(self, queue_id: str, *, status_code: int | None = None) -> None:
+        now = utc_now()
+        with self._lock:
+            self.conn.execute(
+                """
+                update managed_outcome_feedback_queue
+                set status = ?, updated_at = ?, sent_at = ?, last_error = null, last_status_code = ?
+                where id = ?
+                """,
+                ("sent", now, now, status_code, queue_id),
+            )
+            self.conn.commit()
+
+    def mark_managed_outcome_feedback_retry(
+        self,
+        queue_id: str,
+        *,
+        status: str,
+        error: str | None,
+        status_code: int | None,
+        next_attempt_at: str | None,
+    ) -> None:
+        now = utc_now()
+        with self._lock:
+            self.conn.execute(
+                """
+                update managed_outcome_feedback_queue
+                set status = ?, updated_at = ?, last_error = ?, last_status_code = ?, next_attempt_at = ?
+                where id = ?
+                """,
+                (status, now, error, status_code, next_attempt_at or now, queue_id),
+            )
+            self.conn.commit()
+
+    def managed_outcome_feedback_summary(self, *, source_surface: str | None = None) -> list[dict[str, Any]]:
+        if source_surface:
+            rows = self.conn.execute(
+                """
+                select status, count(*) as count
+                from managed_outcome_feedback_queue
+                where source_surface = ?
+                group by status
+                order by count desc, status asc
+                """,
+                (source_surface,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                select status, count(*) as count
+                from managed_outcome_feedback_queue
+                group by status
+                order by count desc, status asc
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def log_routing_experiment(self, **kwargs: Any) -> None:
         cols = [
             "id", "call_id", "created_at", "requested_model", "routed_model",
@@ -646,6 +833,23 @@ class PostgresStore(SQLiteStore):
               event_window_json text
             )
             """,
+            """
+            create table if not exists managed_outcome_feedback_queue (
+              id text primary key,
+              created_at timestamptz not null,
+              updated_at timestamptz not null,
+              source_surface text not null,
+              endpoint text not null,
+              optimization_unit_id integer not null,
+              payload_json text not null,
+              status text not null,
+              attempts integer not null default 0,
+              next_attempt_at timestamptz not null,
+              last_error text,
+              last_status_code integer,
+              sent_at timestamptz
+            )
+            """,
         ):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json"):
@@ -665,6 +869,10 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_codex_app_events_created_at
             on codex_app_events(created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_managed_outcome_feedback_due
+            on managed_outcome_feedback_queue(status, next_attempt_at, created_at)
         """)
 
     def set_cache(

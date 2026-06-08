@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -11,6 +13,7 @@ import httpx
 from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
+from agentflow_proxy.store import stable_json, utc_now
 
 
 RECOMMENDATION_PATH = "/v1/recommendation"
@@ -62,6 +65,24 @@ def recommendation_server_url() -> str:
 
 def recommendation_timeout_seconds() -> float:
     return float(os.getenv("AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS", "1.5"))
+
+
+def outcome_feedback_queue_max_attempts() -> int:
+    try:
+        return max(1, int(os.getenv("AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS", "3")))
+    except ValueError:
+        return 3
+
+
+def outcome_feedback_queue_retry_delay_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS", "60")))
+    except ValueError:
+        return 60.0
+
+
+def _future_iso(seconds: float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, seconds))).isoformat()
 
 
 def _sanitize_features(value: Any) -> Any:
@@ -613,23 +634,16 @@ def disabled_outcome_feedback_meta() -> dict[str, Any]:
     }
 
 
-async def send_outcome_feedback(recommendation_meta: dict[str, Any], outcome_features: dict[str, Any]) -> dict[str, Any]:
-    if not recommendations_enabled():
-        return disabled_outcome_feedback_meta()
-
+def _outcome_target(recommendation_meta: dict[str, Any]) -> tuple[int | None, str | None]:
     unit_id = recommendation_meta.get("optimization_unit_id")
     if not isinstance(unit_id, int):
-        return {
-            "enabled": True,
-            "server_url": recommendation_server_url(),
-            "endpoint": OUTCOME_PATH_TEMPLATE,
-            "status": "skipped",
-            "reason": "missing-optimization-unit-id",
-        }
-
+        return None, None
     endpoint = OUTCOME_PATH_TEMPLATE.format(unit_id=unit_id)
+    return unit_id, endpoint
+
+
+async def _send_outcome_payload(*, endpoint: str, payload: dict[str, Any], unit_id: int) -> dict[str, Any]:
     url = recommendation_server_url() + endpoint
-    payload = _sanitize_features(outcome_features)
     meta: dict[str, Any] = {
         "enabled": True,
         "server_url": recommendation_server_url(),
@@ -662,3 +676,162 @@ async def send_outcome_feedback(recommendation_meta: dict[str, Any], outcome_fea
             "error": repr(exc),
         })
         return meta
+
+
+async def send_outcome_feedback(recommendation_meta: dict[str, Any], outcome_features: dict[str, Any]) -> dict[str, Any]:
+    if not recommendations_enabled():
+        return disabled_outcome_feedback_meta()
+
+    unit_id, endpoint = _outcome_target(recommendation_meta)
+    if unit_id is None or endpoint is None:
+        return {
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "endpoint": OUTCOME_PATH_TEMPLATE,
+            "status": "skipped",
+            "reason": "missing-optimization-unit-id",
+        }
+
+    payload = _sanitize_features(outcome_features)
+    return await _send_outcome_payload(endpoint=endpoint, payload=payload, unit_id=unit_id)
+
+
+def _queue_error_status(meta: dict[str, Any], attempts: int) -> str:
+    if attempts >= outcome_feedback_queue_max_attempts():
+        return "dropped-after-limit"
+    return "retryable-error"
+
+
+def _queued_meta(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "server_url": recommendation_server_url(),
+        "endpoint": row.get("endpoint"),
+        "optimization_unit_id": row.get("optimization_unit_id"),
+        "queue_id": row.get("id"),
+        "status": row.get("status") or "queued",
+        "reason": row.get("last_error") and "queued-after-error" or "queued",
+        "attempts": row.get("attempts") or 0,
+    }
+
+
+async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -> dict[str, Any]:
+    queue_id = str(row.get("id") or "")
+    endpoint = str(row.get("endpoint") or "")
+    unit_id = row.get("optimization_unit_id")
+    attempts = int(row.get("attempts") or 0)
+    try:
+        payload = json.loads(row.get("payload_json") or "{}")
+    except Exception as exc:
+        status = "dropped-after-limit"
+        error = f"invalid queued payload: {exc!r}"
+        if hasattr(store_obj, "mark_managed_outcome_feedback_retry"):
+            store_obj.mark_managed_outcome_feedback_retry(
+                queue_id,
+                status=status,
+                error=error,
+                status_code=None,
+                next_attempt_at=utc_now(),
+            )
+        return {
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "endpoint": endpoint,
+            "optimization_unit_id": unit_id,
+            "queue_id": queue_id,
+            "status": status,
+            "reason": "invalid-payload",
+            "attempts": attempts,
+            "error": error,
+        }
+
+    meta = await _send_outcome_payload(endpoint=endpoint, payload=_sanitize_features(payload), unit_id=int(unit_id))
+    if meta.get("status") == "sent":
+        if hasattr(store_obj, "mark_managed_outcome_feedback_sent"):
+            store_obj.mark_managed_outcome_feedback_sent(queue_id, status_code=meta.get("status_code"))
+        meta.update({
+            "queue_id": queue_id,
+            "attempts": attempts,
+        })
+        return meta
+
+    status = _queue_error_status(meta, attempts)
+    retry_delay = 0.0 if status == "dropped-after-limit" else outcome_feedback_queue_retry_delay_seconds()
+    reason = "attempt-limit-reached" if status == "dropped-after-limit" else meta.get("reason") or "request-failed"
+    error = meta.get("error")
+    if hasattr(store_obj, "mark_managed_outcome_feedback_retry"):
+        store_obj.mark_managed_outcome_feedback_retry(
+            queue_id,
+            status=status,
+            error=error,
+            status_code=meta.get("status_code"),
+            next_attempt_at=_future_iso(retry_delay),
+        )
+    meta.update({
+        "queue_id": queue_id,
+        "status": status,
+        "reason": reason,
+        "attempts": attempts,
+    })
+    return meta
+
+
+async def flush_queued_outcome_feedback(store_obj: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    if not recommendations_enabled():
+        return []
+    if not hasattr(store_obj, "claim_due_managed_outcome_feedback"):
+        return []
+    results: list[dict[str, Any]] = []
+    for row in store_obj.claim_due_managed_outcome_feedback(limit=max(1, limit), now=utc_now()):
+        results.append(await _flush_claimed_outcome_feedback(store_obj, row))
+    return results
+
+
+async def queue_codex_outcome_feedback(
+    store_obj: Any,
+    recommendation_meta: dict[str, Any],
+    outcome_features: dict[str, Any],
+) -> dict[str, Any]:
+    if not recommendations_enabled():
+        return {
+            **disabled_outcome_feedback_meta(),
+            "status": "disabled",
+        }
+    unit_id, endpoint = _outcome_target(recommendation_meta)
+    if unit_id is None or endpoint is None:
+        return {
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "endpoint": OUTCOME_PATH_TEMPLATE,
+            "status": "skipped",
+            "reason": "missing-optimization-unit-id",
+        }
+    if not hasattr(store_obj, "enqueue_managed_outcome_feedback"):
+        return await send_outcome_feedback(recommendation_meta, outcome_features)
+
+    payload = _sanitize_features(outcome_features)
+    queue_id = str(uuid.uuid4())
+    row = {
+        "id": queue_id,
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "endpoint": endpoint,
+        "optimization_unit_id": unit_id,
+        "payload_json": stable_json(payload),
+        "status": "queued",
+        "attempts": 0,
+        "next_attempt_at": utc_now(),
+    }
+    store_obj.enqueue_managed_outcome_feedback(**row)
+    claimed = (
+        store_obj.claim_managed_outcome_feedback(queue_id, now=utc_now())
+        if hasattr(store_obj, "claim_managed_outcome_feedback")
+        else None
+    )
+    if not claimed:
+        stored = store_obj.get_managed_outcome_feedback(queue_id) if hasattr(store_obj, "get_managed_outcome_feedback") else row
+        return _queued_meta(stored or row)
+
+    meta = await _flush_claimed_outcome_feedback(store_obj, claimed)
+    return meta

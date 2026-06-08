@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from agentflow_proxy import codex_app_proxy
+from agentflow_proxy import recommendations
+from agentflow_proxy import stats as stats_views
 from agentflow_proxy.store import Store
 
 
@@ -35,6 +37,8 @@ class ManagedResponse:
 
 class ManagedCodexClient:
     calls = []
+    feedback_error = None
+    feedback_status_code = 200
 
     def __init__(self, timeout):
         self.timeout = timeout
@@ -57,7 +61,9 @@ class ManagedCodexClient:
 
     async def patch(self, url, json):
         self.__class__.calls.append({"method": "patch", "url": url, "json": json})
-        return ManagedResponse(body={"ok": True})
+        if self.__class__.feedback_error is not None:
+            raise self.__class__.feedback_error
+        return ManagedResponse(status_code=self.__class__.feedback_status_code, body={"ok": True}, text="feedback failed")
 
 
 class CodexAppProxyTelemetryTest(unittest.TestCase):
@@ -65,6 +71,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         "AGENTFLOW_RECOMMENDATION_ENABLED",
         "AGENTFLOW_RECOMMENDATION_SERVER_URL",
         "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+        "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
+        "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
     )
 
     def setUp(self):
@@ -72,6 +80,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         for key in self.ENV_KEYS:
             os.environ.pop(key, None)
         ManagedCodexClient.calls = []
+        ManagedCodexClient.feedback_error = None
+        ManagedCodexClient.feedback_status_code = 200
 
     def tearDown(self):
         for key, value in self.saved_env.items():
@@ -587,11 +597,14 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
                             "select routing_json from codex_app_events where id = ?",
                             (start_event_id,),
                         ).fetchone()
-                        return json.loads(row["routing_json"])
+                        queue = test_store.conn.execute(
+                            "select status, attempts, payload_json from managed_outcome_feedback_queue"
+                        ).fetchone()
+                        return json.loads(row["routing_json"]), dict(queue)
                 finally:
                     test_store.conn.close()
 
-        routing = asyncio.run(run_fixture())
+        routing, queue = asyncio.run(run_fixture())
 
         self.assertEqual([call["method"] for call in ManagedCodexClient.calls], ["post", "patch"])
         self.assertEqual(ManagedCodexClient.calls[0]["url"], "http://managed.test/v1/recommendation")
@@ -617,6 +630,134 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertFalse(managed["applied"])
         self.assertEqual(managed["apply_reason"], "codex-app-managed-recommendation-observed-only")
         self.assertEqual(managed["outcome_feedback"]["status"], "sent")
+        self.assertEqual(queue["status"], "sent")
+        self.assertEqual(queue["attempts"], 1)
+        self.assertTrue(forbidden.isdisjoint(self._keys_in(json.loads(queue["payload_json"]))))
+        self.assertNotIn(secret, queue["payload_json"])
+
+    def test_codex_managed_feedback_failure_queues_sanitized_retryable_outcome_and_stats(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        ManagedCodexClient.feedback_error = RuntimeError("managed feedback down")
+        secret = "raw codex queued secret"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-managed-fail",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-managed-fail",
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": secret}],
+                "raw_request": "must be stripped",
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-managed-fail",
+            "result": {"summary": "ok", "raw_response": "must be stripped"},
+        }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                    with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedCodexClient):
+                        pending = await codex_app_proxy._attach_codex_managed_recommendation(forwarded, metadata)
+                        request_started = {}
+                        pending_managed = {}
+                        with patch.object(codex_app_proxy, "store", test_store):
+                            start_event_id = codex_app_proxy._record_message(
+                                forwarded,
+                                direction="client_to_server",
+                                session_id="session-managed-fail",
+                                request_started=request_started,
+                                optimization_metadata=metadata,
+                            )
+                            pending["start_event_id"] = start_event_id
+                            pending_managed["turn-managed-fail"] = pending
+                            await codex_app_proxy._record_codex_managed_outcome(
+                                json.dumps(response),
+                                session_id="session-managed-fail",
+                                request_started=request_started,
+                                pending_managed=pending_managed,
+                            )
+                    routing_row = test_store.conn.execute(
+                        "select routing_json from codex_app_events where id = ?",
+                        (start_event_id,),
+                    ).fetchone()
+                    queue_row = test_store.conn.execute(
+                        "select status, attempts, payload_json, last_error from managed_outcome_feedback_queue"
+                    ).fetchone()
+                    stats = await stats_views.stats_codex_effectiveness(test_store, limit=10)
+                    return json.loads(routing_row["routing_json"]), dict(queue_row), stats
+                finally:
+                    test_store.conn.close()
+
+        routing, queue, stats = asyncio.run(run_fixture())
+
+        self.assertEqual([call["method"] for call in ManagedCodexClient.calls], ["post", "patch"])
+        managed = routing["managed_recommendation"]
+        self.assertEqual(managed["outcome_feedback"]["status"], "retryable-error")
+        self.assertEqual(managed["outcome_feedback"]["reason"], "request-failed")
+        self.assertEqual(queue["status"], "retryable-error")
+        self.assertEqual(queue["attempts"], 1)
+        self.assertIn("managed feedback down", queue["last_error"])
+        forbidden = {"prompt", "messages", "content", "raw_request", "raw_response", "params", "transcript"}
+        payload = json.loads(queue["payload_json"])
+        self.assertTrue(forbidden.isdisjoint(self._keys_in(payload)))
+        self.assertNotIn(secret, queue["payload_json"])
+        self.assertEqual(stats["summary"]["managed_feedback_error"], 1)
+        self.assertEqual(stats["summary"]["managed_feedback_queue_error"], 1)
+        queue_breakdown = {row["value"]: row["count"] for row in stats["managed_feedback_queue_breakdown"]}
+        self.assertEqual(queue_breakdown["retryable-error"], 1)
+
+    def test_codex_outcome_feedback_disabled_does_not_enqueue(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                meta = asyncio.run(
+                    recommendations.queue_codex_outcome_feedback(
+                        test_store,
+                        {"optimization_unit_id": 77},
+                        {"status": "success", "raw_response": "must be stripped"},
+                    )
+                )
+                rows = test_store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(meta["status"], "disabled")
+        self.assertEqual(rows["c"], 0)
+
+    def test_codex_outcome_feedback_queue_drops_after_attempt_limit(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "1"
+        ManagedCodexClient.feedback_error = RuntimeError("managed feedback still down")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedCodexClient):
+                    meta = asyncio.run(
+                        recommendations.queue_codex_outcome_feedback(
+                            test_store,
+                            {"optimization_unit_id": 77},
+                            {"status": "success", "raw_response": "must be stripped"},
+                        )
+                    )
+                row = test_store.conn.execute(
+                    "select status, attempts, payload_json from managed_outcome_feedback_queue"
+                ).fetchone()
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(meta["status"], "dropped-after-limit")
+        self.assertEqual(meta["reason"], "attempt-limit-reached")
+        self.assertEqual(row["status"], "dropped-after-limit")
+        self.assertEqual(row["attempts"], 1)
+        self.assertNotIn("must be stripped", row["payload_json"])
 
 
 if __name__ == "__main__":

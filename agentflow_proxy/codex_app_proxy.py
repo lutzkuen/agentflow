@@ -33,7 +33,7 @@ from agentflow_proxy.recommendations import (
     build_codex_turn_optimization_unit,
     build_codex_turn_outcome_feedback,
     fetch_recommendation,
-    send_outcome_feedback,
+    queue_codex_outcome_feedback,
 )
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
@@ -891,7 +891,7 @@ async def _record_codex_managed_outcome(
         input_text_chars=pending.get("input_text_chars"),
         session_id=session_id,
     )
-    managed["outcome_feedback"] = await send_outcome_feedback(managed, outcome)
+    managed["outcome_feedback"] = await queue_codex_outcome_feedback(store, managed, outcome)
     pending["routing"]["managed_recommendation"] = managed
     start_event_id = pending.get("start_event_id")
     if isinstance(start_event_id, str):
