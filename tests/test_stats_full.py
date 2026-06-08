@@ -36,6 +36,17 @@ class StatsFullTest(unittest.TestCase):
         server._tier_backoff_until.clear()
         server._tier_backoff_until.update(self.old_tier_backoff_until)
 
+    def _keys_in(self, value):
+        keys = set()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                keys.add(str(key).lower())
+                keys.update(self._keys_in(item))
+        elif isinstance(value, list):
+            for item in value:
+                keys.update(self._keys_in(item))
+        return keys
+
     def test_crunch_savings_uses_cache_blended_input_rate(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
@@ -903,6 +914,200 @@ class StatsFullTest(unittest.TestCase):
         sample = next(row for row in result["recent_samples"] if row["saved_chars"] == 1600)
         self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
+
+    def test_codex_effectiveness_reports_summary_model_hint_canary_buckets_by_phase(self):
+        forbidden_secret = "raw summary prompt must not appear"
+
+        def log_hint_turn(
+            request_id,
+            *,
+            routing,
+            crunch=None,
+            cache=None,
+            input_text_chars=4000,
+            result_chars=400,
+            response_error_code=None,
+            response_latency_ms=100,
+            with_response=True,
+        ):
+            server.store.log_codex_app_event(
+                id=f"start-hint-{request_id}",
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id=f"thread-hint-{request_id}",
+                message_chars=input_text_chars + 100,
+                params_chars=input_text_chars + 50,
+                input_items=1,
+                input_text_chars=input_text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="codex-summary-hint",
+                routing_json=stable_json(routing),
+                crunch_json=stable_json(crunch or {"status": "skipped", "reason": "no-change", "applied": False}),
+                cache_json=stable_json(cache or {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False}),
+            )
+            if with_response:
+                server.store.log_codex_app_event(
+                    id=f"response-hint-{request_id}",
+                    created_at=utc_now(),
+                    direction="server_to_client",
+                    method="turn/completed",
+                    request_id=request_id,
+                    thread_id=f"thread-hint-{request_id}",
+                    message_chars=result_chars + 80,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=result_chars,
+                    error_code=response_error_code,
+                    error_message="safe jsonrpc error" if response_error_code is not None else None,
+                    latency_ms=response_latency_ms,
+                    session_id="codex-summary-hint",
+                )
+
+        log_hint_turn(
+            "applied",
+            routing={
+                "status": "applied",
+                "reason": "safe-summary-model-hint-canary",
+                "applied": True,
+                "canary": "codex-app-summary-model-hint",
+                "canary_enabled": True,
+                "model_field": "model",
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5-codex",
+                "target_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "summary_model_hint": {
+                    "status": "applied",
+                    "eligible": True,
+                    "requested_model": "gpt-5.3-codex",
+                    "target_model": "gpt-5-codex",
+                    "model_field_state": "present",
+                    "workflow_phase": "summary",
+                    "workflow_phase_reason": "summary-text-intent",
+                    "estimated_cost_delta": {
+                        "basis": "input-text-chars-estimated",
+                        "input_tokens_est": 1000,
+                        "delta_usd": 0.0005,
+                        "cost_known": True,
+                    },
+                },
+            },
+            crunch={
+                "status": "applied",
+                "reason": "codex-repeated-scaffolding-crunched",
+                "applied": True,
+                "changed": True,
+                "saved_chars": 320,
+                "tokens_saved_est": 80,
+                "note": forbidden_secret,
+            },
+            cache={"status": "miss", "reason": "exact-miss", "eligible": True, "workflow_phase": "summary"},
+        )
+        log_hint_turn(
+            "eligible",
+            routing={
+                "status": "skipped",
+                "reason": "summary-model-hint-target-matches-requested",
+                "applied": False,
+                "canary": "codex-app-summary-model-hint",
+                "canary_enabled": True,
+                "model_field": "model",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "target_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "summary_model_hint": {
+                    "status": "eligible-skipped",
+                    "eligible": True,
+                    "skip_reason": "summary-model-hint-target-matches-requested",
+                    "requested_model": "gpt-5-codex",
+                    "target_model": "gpt-5-codex",
+                    "model_field_state": "present",
+                    "workflow_phase": "summary",
+                    "estimated_cost_delta": {"delta_usd": 0.0, "cost_known": True},
+                },
+            },
+            cache={"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True, "workflow_phase": "summary"},
+            with_response=False,
+        )
+        log_hint_turn(
+            "unsafe",
+            routing={
+                "status": "skipped",
+                "reason": "action-like-params",
+                "applied": False,
+                "canary": "codex-app-summary-model-hint",
+                "canary_enabled": True,
+                "model_field": "model",
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5.3-codex",
+                "target_model": "gpt-5-codex",
+                "workflow_phase": "tool_execution",
+                "summary_model_hint": {
+                    "status": "unsafe-skipped",
+                    "eligible": False,
+                    "skip_reason": "action-like-params",
+                    "requested_model": "gpt-5.3-codex",
+                    "target_model": "gpt-5-codex",
+                    "model_field_state": "present",
+                    "workflow_phase": "tool_execution",
+                },
+            },
+            cache={"status": "skipped", "reason": "action-like-params", "eligible": False, "workflow_phase": "tool_execution"},
+            response_error_code=-32000,
+            response_latency_ms=250,
+        )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
+        hint = result["summary_model_hint"]
+        by_key = {(row["workflow_phase"], row["status"]): row for row in hint["buckets"]}
+
+        self.assertEqual(hint["summary"]["turns"], 3)
+        self.assertEqual(hint["summary"]["applied"], 1)
+        self.assertEqual(hint["summary"]["eligible_skipped"], 1)
+        self.assertEqual(hint["summary"]["unsafe_skipped"], 1)
+        self.assertEqual(hint["summary"]["pending"], 1)
+        self.assertEqual(hint["summary"]["errors"], 1)
+        self.assertGreater(hint["summary"]["estimated_savings_usd"], 0)
+        self.assertGreater(by_key[("summary", "applied")]["estimated_savings_usd"], 0)
+        self.assertEqual(by_key[("summary", "applied")]["crunch_applied"], 1)
+        self.assertEqual(by_key[("summary", "applied")]["cache_eligible"], 1)
+        self.assertEqual(by_key[("summary", "eligible-skipped")]["pending"], 1)
+        self.assertEqual(by_key[("tool_execution", "unsafe-skipped")]["errors"], 1)
+        self.assertEqual(by_key[("tool_execution", "unsafe-skipped")]["error_rate"], 1.0)
+        self.assertEqual(by_key[("tool_execution", "unsafe-skipped")]["avg_latency_ms"], 250)
+        self.assertEqual(result["summary"]["summary_model_hint_applied"], 1)
+        self.assertEqual(result["summary"]["summary_model_hint_eligible_skipped"], 1)
+        self.assertEqual(result["summary"]["summary_model_hint_unsafe_skipped"], 1)
+        self.assertFalse(hint["privacy"]["raw_params_included"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/codex-effectiveness?limit=10")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["summary_model_hint"]["summary"]["turns"], 3)
+        html = stats_views.dashboard_html()
+        self.assertIn("<h2>Summary model hint canary</h2>", html)
+        self.assertIn("id=\"codex-summary-hint-tbody\"", html)
+        self.assertIn("summary_model_hint", html)
+
+        rendered = json.dumps(result)
+        forbidden = {"prompt", "messages", "content", "raw_request", "raw_response", "params", "transcript", "input"}
+        self.assertTrue(forbidden.isdisjoint(self._keys_in(result)))
+        self.assertNotIn(forbidden_secret, rendered)
 
     def test_codex_effectiveness_reports_quota_token_usage_without_raw_payloads(self):
         raw_prompt = "seeded raw prompt must not appear"

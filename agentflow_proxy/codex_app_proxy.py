@@ -595,6 +595,39 @@ def _model_field(params: dict[str, Any]) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _summary_model_hint_cost_delta(
+    params: dict[str, Any],
+    *,
+    requested_model: str,
+    target_model: str,
+) -> dict[str, Any]:
+    input_tokens = max(0, _input_text_chars(params.get("input")) // TOKEN_CHARS)
+    requested_cost = estimate_cost(
+        requested_model,
+        input_tokens,
+        0,
+        provider="openai",
+        processing_mode=codex_app_processing_mode(),
+    )
+    target_cost = estimate_cost(
+        target_model,
+        input_tokens,
+        0,
+        provider="openai",
+        processing_mode=codex_app_processing_mode(),
+    )
+    return {
+        "basis": "input-text-chars-estimated",
+        "input_tokens_est": input_tokens,
+        "requested_input_cost_est_usd": round(float(requested_cost), 8) if requested_cost is not None else None,
+        "target_input_cost_est_usd": round(float(target_cost), 8) if target_cost is not None else None,
+        "delta_usd": round(float(requested_cost) - float(target_cost), 8)
+        if requested_cost is not None and target_cost is not None
+        else None,
+        "cost_known": requested_cost is not None and target_cost is not None,
+    }
+
+
 def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     model_field, requested_model = _model_field(params)
     if not requested_model:
@@ -606,6 +639,15 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         meta.update({
             "canary": "codex-app-summary-model-hint",
             "canary_enabled": bool(CODEX_APP_SUMMARY_MODEL_HINT),
+            "summary_model_hint": {
+                "status": "unsafe-skipped",
+                "target_model": CODEX_APP_SUMMARY_MODEL_HINT_TARGET if CODEX_APP_SUMMARY_MODEL_HINT else "",
+                "requested_model": None,
+                "model_field_state": "absent",
+                "workflow_phase": "unknown",
+                "eligible": False,
+                "skip_reason": "codex-turn-start-model-field-absent",
+            },
         })
         return params, meta
 
@@ -615,6 +657,15 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         base_meta.update({
             "canary": "codex-app-summary-model-hint",
             "canary_enabled": True,
+            "summary_model_hint": {
+                "status": "unsafe-skipped",
+                "target_model": target_model,
+                "requested_model": requested_model,
+                "model_field_state": "present",
+                "workflow_phase": "unknown",
+                "eligible": False,
+                "skip_reason": "summary-model-hint-not-applied",
+            },
             "model_field": model_field,
             "requested_model": requested_model,
             "routed_model": requested_model,
@@ -622,22 +673,46 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         })
         if not target_model:
             base_meta["reason"] = "summary-model-hint-target-absent"
+            base_meta["summary_model_hint"].update({
+                "status": "eligible-skipped",
+                "skip_reason": "summary-model-hint-target-absent",
+            })
             return params, base_meta
         if _contains_action_hint(params):
             base_meta["reason"] = "action-like-params"
+            base_meta["summary_model_hint"].update({
+                "status": "unsafe-skipped",
+                "skip_reason": "action-like-params",
+            })
             return params, base_meta
         eligible, reason, eligibility_meta = _codex_cache_eligibility(params)
         base_meta.update({
             "workflow_phase": eligibility_meta.get("workflow_phase") or "unknown",
             "workflow_phase_reason": eligibility_meta.get("workflow_phase_reason"),
         })
+        base_meta["summary_model_hint"].update({
+            "workflow_phase": eligibility_meta.get("workflow_phase") or "unknown",
+            "workflow_phase_reason": eligibility_meta.get("workflow_phase_reason"),
+            "eligible": bool(eligible),
+            "skip_reason": reason,
+            "estimated_cost_delta": _summary_model_hint_cost_delta(
+                params,
+                requested_model=requested_model,
+                target_model=target_model,
+            ),
+        })
         if eligibility_meta.get("unknown_keys"):
             base_meta["unknown_keys"] = eligibility_meta["unknown_keys"]
         if not eligible:
             base_meta["reason"] = reason
+            base_meta["summary_model_hint"]["status"] = "unsafe-skipped"
             return params, base_meta
         if target_model == requested_model:
             base_meta["reason"] = "summary-model-hint-target-matches-requested"
+            base_meta["summary_model_hint"].update({
+                "status": "eligible-skipped",
+                "skip_reason": "summary-model-hint-target-matches-requested",
+            })
             return params, base_meta
         routed_params = copy.deepcopy(params)
         routed_params[model_field] = target_model
@@ -655,6 +730,11 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
                 "action_like_params": False,
                 "workflow_phase": "summary",
             },
+        })
+        base_meta["summary_model_hint"].update({
+            "status": "applied",
+            "eligible": True,
+            "skip_reason": None,
         })
         return routed_params, base_meta
 
@@ -1202,7 +1282,10 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
         return raw, _not_applied_metadata("params-not-object")
 
     if _contains_action_hint(params):
-        return raw, _not_applied_metadata("action-like-params")
+        metadata = _not_applied_metadata("action-like-params")
+        if CODEX_APP_SUMMARY_MODEL_HINT:
+            _params, metadata["routing"] = _codex_route_params(params)
+        return raw, metadata
 
     crunched_params, crunch_meta = _codex_crunch_params(params)
     routed_params, routing_meta = _codex_route_params(crunched_params)

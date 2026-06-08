@@ -677,6 +677,13 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(routing["workflow_phase"], "summary")
         self.assertEqual(routing["policy_source"], "local-default")
         self.assertEqual(routing["canary"], "codex-app-summary-model-hint")
+        self.assertEqual(routing["summary_model_hint"]["status"], "applied")
+        self.assertTrue(routing["summary_model_hint"]["eligible"])
+        self.assertEqual(routing["summary_model_hint"]["target_model"], "gpt-5-codex")
+        self.assertEqual(routing["summary_model_hint"]["requested_model"], "gpt-5.3-codex")
+        self.assertEqual(routing["summary_model_hint"]["model_field_state"], "present")
+        self.assertEqual(routing["summary_model_hint"]["workflow_phase"], "summary")
+        self.assertGreaterEqual(routing["summary_model_hint"]["estimated_cost_delta"]["delta_usd"], 0)
 
     def test_local_codex_app_rules_enable_summary_hint_and_cache_without_env_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -787,6 +794,8 @@ exact_cache:
                 self.assertFalse(metadata["routing"]["applied"])
                 self.assertEqual(metadata["routing"]["reason"], reason)
                 self.assertTrue(metadata["routing"]["canary_enabled"])
+                self.assertEqual(metadata["routing"]["summary_model_hint"]["status"], "unsafe-skipped")
+                self.assertEqual(metadata["routing"]["summary_model_hint"]["skip_reason"], reason)
 
         self.assertEqual(metadata["routing"]["canary"], "codex-app-summary-model-hint")
 

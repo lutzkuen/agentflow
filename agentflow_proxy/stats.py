@@ -1592,6 +1592,173 @@ def _decision_breakdown(rows: list[dict[str, Any]], decision_key: str) -> list[d
     return result
 
 
+def _codex_summary_hint_status(routing: dict[str, Any], cache: dict[str, Any]) -> str | None:
+    hint = routing.get("summary_model_hint") if isinstance(routing, dict) else None
+    canary = routing.get("canary") if isinstance(routing, dict) else None
+    if not isinstance(hint, dict) and canary != "codex-app-summary-model-hint":
+        return None
+    if isinstance(hint, dict):
+        status = str(hint.get("status") or "").replace("_", "-").strip().lower()
+        if status in {"applied", "eligible-skipped", "unsafe-skipped"}:
+            return status
+    if routing.get("applied") or routing.get("status") == "applied":
+        return "applied"
+    reason = str(routing.get("reason") or "")
+    if bool(cache.get("eligible")) or reason in {
+        "summary-model-hint-target-matches-requested",
+        "summary-model-hint-target-absent",
+    }:
+        return "eligible-skipped"
+    return "unsafe-skipped"
+
+
+def _codex_summary_hint_estimated_savings(
+    routing: dict[str, Any],
+    *,
+    input_text_chars: Any,
+    result_chars: Any,
+    status: str,
+) -> float:
+    if status != "applied":
+        return 0.0
+    hint = routing.get("summary_model_hint") if isinstance(routing.get("summary_model_hint"), dict) else {}
+    requested_model = str(routing.get("requested_model") or hint.get("requested_model") or "").strip()
+    target_model = str(routing.get("routed_model") or routing.get("target_model") or hint.get("target_model") or "").strip()
+    if not requested_model or not target_model or requested_model == target_model:
+        delta = hint.get("estimated_cost_delta") if isinstance(hint.get("estimated_cost_delta"), dict) else {}
+        return max(_as_float(delta.get("delta_usd")), 0.0)
+    input_tokens = estimate_tokens_from_text_chars(input_text_chars)
+    output_tokens = estimate_tokens_from_text_chars(result_chars)
+    requested_cost = estimate_cost(
+        requested_model,
+        input_tokens,
+        output_tokens,
+        provider="openai",
+        processing_mode=CODEX_APP_PROCESSING_MODE,
+    )
+    target_cost = estimate_cost(
+        target_model,
+        input_tokens,
+        output_tokens,
+        provider="openai",
+        processing_mode=CODEX_APP_PROCESSING_MODE,
+    )
+    if requested_cost is None or target_cost is None:
+        delta = hint.get("estimated_cost_delta") if isinstance(hint.get("estimated_cost_delta"), dict) else {}
+        return max(_as_float(delta.get("delta_usd")), 0.0)
+    return max(float(requested_cost) - float(target_cost), 0.0)
+
+
+def _new_codex_summary_hint_bucket(status: str, phase: str) -> dict[str, Any]:
+    return {
+        "bucket": status,
+        "status": status,
+        "workflow_phase": phase,
+        "turns": 0,
+        "completed": 0,
+        "errors": 0,
+        "pending": 0,
+        "latency_values": [],
+        "estimated_savings_usd": 0.0,
+        "estimated_input_cost_delta_usd": 0.0,
+        "cache_hits": 0,
+        "cache_eligible": 0,
+        "cache_overlap_turns": 0,
+        "crunch_applied": 0,
+        "crunch_overlap_turns": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "requested_model_counts": {},
+        "target_model_counts": {},
+        "skip_reason_counts": {},
+        "cache_status_counts": {},
+        "crunch_status_counts": {},
+    }
+
+
+def _add_codex_summary_hint_bucket(
+    buckets: dict[tuple[str, str], dict[str, Any]],
+    *,
+    phase: str,
+    routing: dict[str, Any],
+    crunch: dict[str, Any],
+    cache: dict[str, Any],
+    input_text_chars: Any,
+    result_chars: Any,
+    saved_chars: int,
+    saved_tokens: int,
+    has_response: bool,
+    has_error: bool,
+    latency: int,
+) -> None:
+    status = _codex_summary_hint_status(routing, cache)
+    if status is None:
+        return
+    hint = routing.get("summary_model_hint") if isinstance(routing.get("summary_model_hint"), dict) else {}
+    hint_phase = str(hint.get("workflow_phase") or routing.get("workflow_phase") or phase or "unknown")
+    key = (status, hint_phase)
+    bucket = buckets.setdefault(key, _new_codex_summary_hint_bucket(status, hint_phase))
+    bucket["turns"] += 1
+    if has_error:
+        bucket["errors"] += 1
+    elif has_response:
+        bucket["completed"] += 1
+    else:
+        bucket["pending"] += 1
+    if latency:
+        bucket["latency_values"].append(latency)
+    savings = _codex_summary_hint_estimated_savings(
+        routing,
+        input_text_chars=input_text_chars,
+        result_chars=result_chars,
+        status=status,
+    )
+    bucket["estimated_savings_usd"] += savings
+    delta = hint.get("estimated_cost_delta") if isinstance(hint.get("estimated_cost_delta"), dict) else {}
+    bucket["estimated_input_cost_delta_usd"] += max(_as_float(delta.get("delta_usd")), 0.0)
+    if cache.get("status") == "hit":
+        bucket["cache_hits"] += 1
+    if cache.get("eligible"):
+        bucket["cache_eligible"] += 1
+    if cache.get("status") in {"hit", "miss"} or cache.get("eligible"):
+        bucket["cache_overlap_turns"] += 1
+    if crunch.get("applied"):
+        bucket["crunch_applied"] += 1
+        bucket["crunch_overlap_turns"] += 1
+    bucket["saved_chars"] += saved_chars
+    bucket["tokens_saved_est"] += saved_tokens
+    requested_model = str(routing.get("requested_model") or hint.get("requested_model") or "unknown")
+    target_model = str(routing.get("target_model") or routing.get("routed_model") or hint.get("target_model") or "unknown")
+    _increment_count(bucket["requested_model_counts"], requested_model)
+    _increment_count(bucket["target_model_counts"], target_model)
+    _increment_count(bucket["skip_reason_counts"], hint.get("skip_reason") or routing.get("reason") or "none")
+    _increment_count(bucket["cache_status_counts"], cache.get("status") or "missing")
+    _increment_count(bucket["crunch_status_counts"], crunch.get("status") or "missing")
+
+
+def _finalize_codex_summary_hint_buckets(
+    grouped: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        latency_values = list(bucket.pop("latency_values", []))
+        turns = _as_int(bucket.get("turns"))
+        errors = _as_int(bucket.get("errors"))
+        bucket["error_rate"] = round(errors / turns, 4) if turns else 0
+        bucket["avg_latency_ms"] = _avg_or_none(latency_values)
+        bucket["estimated_savings_usd"] = round(_as_float(bucket.get("estimated_savings_usd")), 8)
+        bucket["estimated_input_cost_delta_usd"] = round(_as_float(bucket.get("estimated_input_cost_delta_usd")), 8)
+        bucket["requested_models"] = _count_breakdown(dict(bucket.pop("requested_model_counts", {})))
+        bucket["target_models"] = _count_breakdown(dict(bucket.pop("target_model_counts", {})))
+        bucket["skip_reasons"] = _count_breakdown(dict(bucket.pop("skip_reason_counts", {})))
+        bucket["cache_statuses"] = _count_breakdown(dict(bucket.pop("cache_status_counts", {})))
+        bucket["crunch_statuses"] = _count_breakdown(dict(bucket.pop("crunch_status_counts", {})))
+        result.append(bucket)
+    order = {"applied": 0, "eligible-skipped": 1, "unsafe-skipped": 2}
+    result.sort(key=lambda item: (str(item.get("workflow_phase") or ""), order.get(str(item.get("status")), 99)))
+    return result
+
+
 def _codex_crunch_pattern_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -2473,6 +2640,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     managed_feedback_status_counts: dict[str, int] = {}
     managed_feedback_reason_counts: dict[str, int] = {}
     managed_feedback_queue_counts: dict[str, int] = {}
+    summary_hint_buckets: dict[tuple[str, str], dict[str, Any]] = {}
     if hasattr(store_obj, "managed_outcome_feedback_summary"):
         try:
             for row in store_obj.managed_outcome_feedback_summary(source_surface=CODEX_APP_SOURCE_SURFACE):
@@ -2619,6 +2787,20 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         _increment_count(phase_bucket["reason_counts"], phase_meta.get("reason") or "unknown")
         for signal_method in phase_meta.get("signals") or []:
             _increment_count(phase_bucket["signal_methods"], signal_method)
+        _add_codex_summary_hint_bucket(
+            summary_hint_buckets,
+            phase=phase,
+            routing=routing,
+            crunch=crunch,
+            cache=cache,
+            input_text_chars=row.get("input_text_chars"),
+            result_chars=result_chars,
+            saved_chars=saved_chars,
+            saved_tokens=saved_tokens,
+            has_response=has_response,
+            has_error=has_error,
+            latency=latency,
+        )
 
         if len(recent_samples) < 20:
             recent_samples.append({
@@ -2672,6 +2854,11 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     total = len(turn_rows)
     plateau_candidate_report = _codex_plateau_candidate_report(plateau_candidate_rows)
     quota_token_usage = _codex_quota_token_usage_report(event_rows, turn_rows)
+    summary_model_hint_buckets = _finalize_codex_summary_hint_buckets(summary_hint_buckets)
+    summary_model_hint_turns = sum(_as_int(row.get("turns")) for row in summary_model_hint_buckets)
+    summary_model_hint_errors = sum(_as_int(row.get("errors")) for row in summary_model_hint_buckets)
+    summary_model_hint_pending = sum(_as_int(row.get("pending")) for row in summary_model_hint_buckets)
+    summary_model_hint_savings = sum(_as_float(row.get("estimated_savings_usd")) for row in summary_model_hint_buckets)
     return {
         "schema": "agentflow.codex_app_effectiveness.v1",
         "generated_at": utc_now(),
@@ -2712,6 +2899,21 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "crunch_applied": sum(1 for row in turn_rows if _json_obj(row.get("crunch_json_normalized")).get("applied")),
             "cache_hits": sum(1 for row in turn_rows if _json_obj(row.get("cache_json_normalized")).get("status") == "hit"),
             "cache_eligible": sum(1 for row in turn_rows if bool(_json_obj(row.get("cache_json_normalized")).get("eligible"))),
+            "summary_model_hint_rows": summary_model_hint_turns,
+            "summary_model_hint_applied": sum(
+                _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "applied"
+            ),
+            "summary_model_hint_eligible_skipped": sum(
+                _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "eligible-skipped"
+            ),
+            "summary_model_hint_unsafe_skipped": sum(
+                _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "unsafe-skipped"
+            ),
+            "summary_model_hint_pending": summary_model_hint_pending,
+            "summary_model_hint_error_rate": round(summary_model_hint_errors / summary_model_hint_turns, 4)
+            if summary_model_hint_turns
+            else 0,
+            "summary_model_hint_estimated_savings_usd": round(summary_model_hint_savings, 8),
             "action_like_skips": action_like_skips,
             "unknown_param_skips": unknown_param_skips,
             "non_text_input_skips": non_text_skips,
@@ -2779,6 +2981,37 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             _finalize_codex_phase_bucket(bucket)
             for bucket in sorted(phase_buckets.values(), key=lambda item: item["turns"], reverse=True)
         ],
+        "summary_model_hint": {
+            "schema": "agentflow.codex_app_summary_model_hint.v1",
+            "summary": {
+                "turns": summary_model_hint_turns,
+                "applied": sum(
+                    _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "applied"
+                ),
+                "eligible_skipped": sum(
+                    _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "eligible-skipped"
+                ),
+                "unsafe_skipped": sum(
+                    _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "unsafe-skipped"
+                ),
+                "pending": summary_model_hint_pending,
+                "errors": summary_model_hint_errors,
+                "error_rate": round(summary_model_hint_errors / summary_model_hint_turns, 4)
+                if summary_model_hint_turns
+                else 0,
+                "estimated_savings_usd": round(summary_model_hint_savings, 8),
+            },
+            "buckets": summary_model_hint_buckets,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_params_included": False,
+                "raw_responses_included": False,
+                "raw_transcripts_included": False,
+                "basis": "routing, crunch, cache, size, latency, and JSON-RPC outcome metadata",
+            },
+        },
+        "summary_model_hint_buckets": summary_model_hint_buckets,
         "workflow_phase_counts": _count_breakdown(phase_counts),
         "workflow_phase_source_breakdown": _count_breakdown(phase_source_counts),
         "routing_breakdown": _decision_breakdown(turn_rows, "routing_json"),
@@ -5609,6 +5842,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Summary model hint canary</h2>
+  <table data-table-id="codex-summary-hint" data-filter-label="Filter Codex summary hint">
+    <thead><tr>
+      <th data-sort-type="text">Phase</th><th data-sort-type="text">Bucket</th><th data-sort-type="number">Turns</th><th data-sort-type="number">Completed</th><th data-sort-type="number">Pending</th><th data-sort-type="number">Errors</th><th data-sort-type="percent">Error rate</th><th data-sort-type="latency">Avg latency</th><th data-sort-type="money">Estimated savings</th><th data-sort-type="number">Cache eligible</th><th data-sort-type="number">Cache hits</th><th data-sort-type="number">Crunched</th><th data-sort-type="text">Top reason</th><th data-sort-type="text">Models</th>
+    </tr></thead>
+    <tbody id="codex-summary-hint-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Latest Codex rate-limit scopes</h2>
   <table data-table-id="codex-rate-scopes" data-filter-label="Filter Codex rate scopes">
     <thead><tr>
@@ -6162,6 +6404,29 @@ async function refreshCodexQuota(){
       <td><span class="badge miss">${esc(rec.total_drift_bucket||'unknown')}</span></td>
       <td class="flags">${privacyBadges}</td>
     </tr>`;
+    const hintRows=((d.summary_model_hint||{}).buckets)||d.summary_model_hint_buckets||[];
+    document.getElementById('codex-summary-hint-tbody').innerHTML=hintRows.map(row=>{
+      const cls=row.status==='applied'?'hit':row.status==='eligible-skipped'?'miss':'err';
+      const topReason=(row.skip_reasons&&row.skip_reasons[0])?row.skip_reasons[0].value:'—';
+      const requested=(row.requested_models&&row.requested_models[0])?row.requested_models[0].value:'—';
+      const target=(row.target_models&&row.target_models[0])?row.target_models[0].value:'—';
+      return `<tr>
+        <td><span class="badge provider">${esc(row.workflow_phase||'unknown')}</span></td>
+        <td><span class="badge ${cls}">${esc(row.status||row.bucket||'unknown')}</span></td>
+        <td class="tokens">${(row.turns||0).toLocaleString()}</td>
+        <td class="tokens">${(row.completed||0).toLocaleString()}</td>
+        <td class="tokens">${(row.pending||0).toLocaleString()}</td>
+        <td class="tokens">${(row.errors||0).toLocaleString()}</td>
+        <td class="tokens">${Math.round((row.error_rate||0)*100)}%</td>
+        <td class="latency">${fmtMs(row.avg_latency_ms)}</td>
+        <td class="savings">${fmt(row.estimated_savings_usd||0,6)}</td>
+        <td class="tokens">${(row.cache_eligible||0).toLocaleString()}</td>
+        <td class="tokens">${(row.cache_hits||0).toLocaleString()}</td>
+        <td class="tokens">${(row.crunch_applied||0).toLocaleString()}</td>
+        <td class="flags"><span class="badge miss">${esc(topReason)}</span></td>
+        <td class="model">${esc(shortModel(requested))} → ${esc(shortModel(target))}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="14" style="color:#8b949e">No summary model hint canary metadata recorded yet</td></tr>';
     document.getElementById('codex-rate-scopes-tbody').innerHTML=scopes.map(scope=>`<tr>
       <td><span class="badge provider">${esc(scope.name||'unknown')}</span></td>
       <td class="tokens">${scope.used_percent==null?'—':scope.used_percent.toFixed(1)+'%'}</td>
