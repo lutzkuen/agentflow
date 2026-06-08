@@ -159,6 +159,91 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def _sanitize_error_sample(error: Any, limit: int = 180) -> str | None:
+    if not error:
+        return None
+    text = str(error)
+    try:
+        body = json.loads(text)
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        error_body = body.get("error")
+        if isinstance(error_body, dict):
+            text = str(error_body.get("message") or error_body.get("code") or error_body.get("type") or text)
+        elif error_body:
+            text = str(error_body)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "..."
+    return text or None
+
+
+def _error_type(status_code: Any, error: Any) -> str:
+    status = _as_int(status_code)
+    sample = (_sanitize_error_sample(error, limit=500) or "").lower()
+    if sample.startswith("temporarily limiting requests"):
+        return "local_rate_limit"
+    if status in (429, 529) or "rate_limit" in sample or "rate limit" in sample:
+        return "upstream_rate_limit"
+    if "does not support the effort parameter" in sample:
+        return "model_incompatible_param"
+    if "adaptive thinking is not supported" in sample:
+        return "model_incompatible_thinking"
+    if "connecterror" in sample or "temporary failure in name resolution" in sample:
+        return "network_connect_error"
+    if "readtimeout" in sample or "timeout" in sample:
+        return "network_timeout"
+    if status in (401, 403) or "invalid_api_key" in sample or "incorrect api key" in sample:
+        return "auth_error"
+    if status:
+        return f"http_{status}"
+    return "unknown_error"
+
+
+def _error_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False, limit: int = 30) -> list[dict[str, Any]]:
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        if today_only and not row.get("is_today"):
+            continue
+        status_code = _as_int(row.get("status_code"))
+        error_type = _error_type(status_code, row.get("error"))
+        error_sample = _sanitize_error_sample(row.get("error")) or f"HTTP {status_code}"
+        model = str(row.get("model") or "")
+        tier = model_tier(model)
+        key = (
+            row.get("provider") or "anthropic",
+            status_code,
+            tier,
+            row.get("requested_model"),
+            row.get("routed_model"),
+            error_type,
+            error_sample,
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                "provider": key[0],
+                "status_code": status_code,
+                "tier": tier,
+                "requested_model": row.get("requested_model"),
+                "routed_model": row.get("routed_model"),
+                "model": row.get("model"),
+                "error_type": error_type,
+                "error_sample": error_sample,
+                "count": 0,
+                "last_seen_at": row.get("created_at"),
+            },
+        )
+        bucket["count"] += 1
+        if str(row.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+            bucket["last_seen_at"] = row.get("created_at")
+
+    breakdown = list(grouped.values())
+    breakdown.sort(key=lambda r: (r["count"], str(r.get("last_seen_at") or "")), reverse=True)
+    return breakdown[:limit]
+
+
 def _usage_bucket_identity(app_family: str, session_id: Any) -> dict[str, Any]:
     engineer = os.getenv("AGENTFLOW_ENGINEER") or None
     app = os.getenv("AGENTFLOW_APP") or app_family or "unknown"
@@ -1150,6 +1235,22 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         order by count desc
     """)
 
+    error_rows = q("""
+        select created_at,
+               coalesce(provider, 'anthropic') as provider,
+               status_code,
+               requested_model,
+               routed_model,
+               coalesce(routed_model, requested_model) as model,
+               error,
+               (date(created_at) = date('now')) as is_today
+        from calls
+        where status_code >= 400
+        order by created_at desc
+    """)
+    error_breakdown = _error_breakdown(error_rows)
+    today_error_breakdown = _error_breakdown(error_rows, today_only=True)
+
     routing_experiment_rows = q("""
         select requested_model,
                routed_model,
@@ -1301,6 +1402,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
+        "error_breakdown": error_breakdown,
+        "today_error_breakdown": today_error_breakdown,
         "routing_experiment_summary": routing_experiment_summary,
         "provider_breakdown": provider_breakdown,
         "codex_app_methods": codex_app_methods,
@@ -1662,6 +1765,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
+  <button class="tab-btn" onclick="showTab('errors')">Errors</button>
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
@@ -1736,6 +1840,27 @@ def dashboard_html() -> str:
       <th>Status</th><th>Reason</th><th>Hit type</th><th>Policy source</th><th>Calls</th>
     </tr></thead>
     <tbody id="cache-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-errors">
+<div class="section">
+  <h2>Errors today</h2>
+  <table>
+    <thead><tr>
+      <th>Type</th><th>Status</th><th>Provider</th><th>Tier</th><th>Requested</th><th>Routed</th><th>Calls</th><th>Last seen</th><th>Sample</th>
+    </tr></thead>
+    <tbody id="errors-today-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Errors all time</h2>
+  <table>
+    <thead><tr>
+      <th>Type</th><th>Status</th><th>Provider</th><th>Tier</th><th>Requested</th><th>Routed</th><th>Calls</th><th>Last seen</th><th>Sample</th>
+    </tr></thead>
+    <tbody id="errors-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -1899,7 +2024,7 @@ function usageHints(row){
 }
 
 function showTab(name){
-  const tabs=['activity','usage','weekly','categories','cache','limiter','policies','sessions'];
+  const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -2052,6 +2177,26 @@ async function refreshCache(){
     </tr>`).join('')||'<tr><td colspan="5" style="color:#8b949e">No cache decision data yet</td></tr>';
     document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
     document.getElementById('cache-tbody').innerHTML=renderRows(d.cache_decision_breakdown||[]);
+  }catch(e){}
+}
+
+async function refreshErrors(){
+  try{
+    const r=await fetch('/agentflow/stats/full');
+    const d=await r.json();
+    const renderRows=(rows)=>rows.map(row=>`<tr>
+      <td><span class="badge err">${esc(row.error_type||'unknown_error')}</span></td>
+      <td>${row.status_code>=500?`<span class="badge err">${row.status_code}</span>`:`<span class="badge routed">${row.status_code}</span>`}</td>
+      <td><span class="badge provider">${shortProvider(row.provider)}</span></td>
+      <td><span class="badge provider">${esc(row.tier||'unknown')}</span></td>
+      <td class="model">${esc(shortModel(row.requested_model))}</td>
+      <td class="model">${esc(shortModel(row.routed_model))}</td>
+      <td>${(row.count||0).toLocaleString()}</td>
+      <td class="ts">${row.last_seen_at?ago(row.last_seen_at):'—'}</td>
+      <td class="model" title="${esc(row.error_sample||'')}">${esc(row.error_sample||'—')}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No errors recorded</td></tr>';
+    document.getElementById('errors-today-tbody').innerHTML=renderRows(d.today_error_breakdown||[]);
+    document.getElementById('errors-tbody').innerHTML=renderRows(d.error_breakdown||[]);
   }catch(e){}
 }
 
@@ -2253,6 +2398,7 @@ refresh();
 refreshWeekly();
 refreshCategories();
 refreshCache();
+refreshErrors();
 refreshLimiter();
 refreshPolicies();
 refreshSessions();
@@ -2262,6 +2408,7 @@ setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
+setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
 setInterval(refreshSessions,30000);

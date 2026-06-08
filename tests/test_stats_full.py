@@ -341,6 +341,98 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(today[("skipped", "streaming")], 1)
         json.dumps(result["today_cache_decision_breakdown"])
 
+    def test_error_breakdown_groups_sanitized_error_families(self):
+        legacy_id = str(uuid.uuid4())
+        server.store.log_call(
+            id=legacy_id,
+            created_at="2020-01-01T00:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=0,
+            status_code=400,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=stable_json({
+                "error": {
+                    "message": "This model does not support the effort parameter.",
+                    "type": "invalid_request_error",
+                },
+            }),
+            request_json=None,
+            response_json=None,
+            session_id="session-error-old",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.conn.execute("update calls set provider = null where id = ?", (legacy_id,))
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routed_model="gpt-5-codex",
+            stream=0,
+            cache_hit=0,
+            status_code=401,
+            latency_ms=1,
+            input_tokens_est=10,
+            output_tokens_est=1,
+            actual_input_tokens=10,
+            actual_output_tokens=1,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=None,
+            error=stable_json({
+                "error": {
+                    "code": "invalid_api_key",
+                    "message": "Incorrect API key provided: intentionally_invalid.",
+                },
+            }),
+            request_json=None,
+            response_json=None,
+            session_id="session-error-today",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="openai",
+        )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        all_time = {
+            (row["provider"], row["status_code"], row["tier"], row["error_type"]): row
+            for row in result["error_breakdown"]
+        }
+        today = {
+            (row["provider"], row["status_code"], row["error_type"]): row
+            for row in result["today_error_breakdown"]
+        }
+
+        legacy = all_time[("anthropic", 400, "haiku", "model_incompatible_param")]
+        self.assertEqual(legacy["count"], 1)
+        self.assertEqual(legacy["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(legacy["routed_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(legacy["error_sample"], "This model does not support the effort parameter.")
+        self.assertIn(("openai", 401, "auth_error"), today)
+        self.assertNotIn(("anthropic", 400, "model_incompatible_param"), today)
+        json.dumps(result["error_breakdown"])
+        json.dumps(result["today_error_breakdown"])
+
     def test_routing_experiment_stats_produce_confidence_scores(self):
         for similarity, passed in ((0.9, 1), (0.7, 0)):
             server.store.log_routing_experiment(
@@ -790,7 +882,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','limiter','policies','sessions']", html)
+        self.assertIn("const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','sessions']", html)
 
     def test_dashboard_exposes_usage_by_app_engineer_table(self):
         html = stats_views.dashboard_html()
@@ -823,6 +915,19 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("Old-context summaries", html)
         self.assertNotIn("Thinking cost today", html)
         self.assertNotIn("Codex app-server", html)
+
+    def test_dashboard_exposes_error_breakdown_tables(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn(">Errors</button>", html)
+        self.assertIn("<h2>Errors today</h2>", html)
+        self.assertIn("<h2>Errors all time</h2>", html)
+        self.assertIn("id=\"errors-today-tbody\"", html)
+        self.assertIn("id=\"errors-tbody\"", html)
+        self.assertIn("today_error_breakdown", html)
+        self.assertIn("error_breakdown", html)
+        self.assertIn("refreshErrors", html)
+        self.assertIn("<th>Type</th><th>Status</th><th>Provider</th><th>Tier</th>", html)
 
     def test_proxy_dashboard_router_uses_current_store(self):
         response = TestClient(server.app).get("/agentflow/stats")
