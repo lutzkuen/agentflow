@@ -338,6 +338,80 @@ def policy_diff_cli(
     return 0 if result["ok"] else 1
 
 
+def _policy_review_read_error_result(proposed_validation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.policy_bundle_review.v1",
+        "ok": False,
+        "changed": False,
+        "changed_sections": [],
+        "change_count": 0,
+        "safety_warning_count": 0,
+        "safety_warnings": [],
+        "current_validation": None,
+        "proposed_validation": proposed_validation,
+        "diff": {
+            "schema": "agentflow.policy_bundle_diff.v1",
+            "ok": False,
+            "changed": False,
+            "changed_sections": [],
+            "change_count": 0,
+            "changes": [],
+        },
+    }
+
+
+def policy_review_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Review a proposed AgentFlow policy bundle against current local policy")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Proposed policy bundle JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print review JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    proposed, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = _policy_review_read_error_result(read_error)
+    else:
+        from agentflow_proxy.policy_bundle import build_policy_bundle, review_policy_bundle
+
+        current = asyncio.run(build_policy_bundle())
+        result = review_policy_bundle(current, proposed)
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "review",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "changed": result.get("changed"),
+            "changed_sections": result.get("changed_sections", []),
+            "change_count": result.get("change_count", 0),
+            "safety_warning_count": result.get("safety_warning_count", 0),
+            "proposed_error_count": len((result.get("proposed_validation") or {}).get("errors", [])),
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
+    _write_policy_review_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -346,6 +420,13 @@ def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bo
 
 
 def _write_policy_diff_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
+def _write_policy_review_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
@@ -377,3 +458,7 @@ def policy_validate_main() -> None:
 
 def policy_diff_main() -> None:
     raise SystemExit(policy_diff_cli())
+
+
+def policy_review_main() -> None:
+    raise SystemExit(policy_review_cli())

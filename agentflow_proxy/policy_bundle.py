@@ -8,6 +8,7 @@ from agentflow_proxy.store import utc_now
 
 POLICY_BUNDLE_SCHEMA = "agentflow.policy_bundle.v1"
 POLICY_BUNDLE_DIFF_SCHEMA = "agentflow.policy_bundle_diff.v1"
+POLICY_BUNDLE_REVIEW_SCHEMA = "agentflow.policy_bundle_review.v1"
 POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
 POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
 POLICY_SOURCES = {
@@ -182,4 +183,113 @@ def compare_policy_bundles(before: Any, after: Any) -> dict[str, Any]:
         "changes": changes,
         "before_validation": before_validation,
         "after_validation": after_validation,
+    }
+
+
+def _add_warning(warnings: list[dict[str, str]], code: str, path: str, message: str) -> None:
+    warnings.append({
+        "code": code,
+        "path": path,
+        "severity": "warning",
+        "message": message,
+    })
+
+
+def _section_policy(bundle: Any, section: str) -> dict[str, Any]:
+    if not isinstance(bundle, dict):
+        return {}
+    policies = bundle.get("policies")
+    if not isinstance(policies, dict):
+        return {}
+    value = policies.get(section)
+    return value if isinstance(value, dict) else {}
+
+
+def _enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return False
+
+
+def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+
+    if not isinstance(bundle, dict):
+        return warnings
+
+    managed_optimizer = bundle.get("managed_optimizer")
+    if isinstance(managed_optimizer, dict) and managed_optimizer.get("enabled") is not False:
+        _add_warning(
+            warnings,
+            "managed-optimizer-enabled",
+            "$.managed_optimizer.enabled",
+            "managed optimizer communication must remain opt-in and is not part of local offline review",
+        )
+
+    for section in REQUIRED_POLICY_SECTIONS:
+        policy = _section_policy(bundle, section)
+        if policy.get("policy_source") == "managed-enforced":
+            _add_warning(
+                warnings,
+                "managed-enforced-policy-source",
+                f"$.policies.{section}.policy_source",
+                "managed-enforced policy source should not be accepted by the local module without an explicit future import/apply flow",
+            )
+
+    cache = _section_policy(bundle, "cache")
+    exact_cache = cache.get("exact_cache") if isinstance(cache.get("exact_cache"), dict) else {}
+    if _enabled(exact_cache.get("cache_tool_calls")):
+        _add_warning(
+            warnings,
+            "tool-call-cache-enabled",
+            "$.policies.cache.exact_cache.cache_tool_calls",
+            "tool-call caching can return stale filesystem-dependent results unless invalidation is proven safe",
+        )
+    semantic_cache = cache.get("semantic_cache") if isinstance(cache.get("semantic_cache"), dict) else {}
+    if _enabled(semantic_cache.get("enabled")):
+        _add_warning(
+            warnings,
+            "semantic-cache-enabled",
+            "$.policies.cache.semantic_cache.enabled",
+            "semantic cache can produce false-positive response reuse and should stay opt-in with quality checks",
+        )
+
+    crunch = _section_policy(bundle, "crunch")
+    old_context = crunch.get("old_context_summarization") if isinstance(crunch.get("old_context_summarization"), dict) else {}
+    if _enabled(old_context.get("enabled")):
+        _add_warning(
+            warnings,
+            "old-context-summarization-enabled",
+            "$.policies.crunch.old_context_summarization.enabled",
+            "model-assisted summarization changes request context and should be reviewed against quality risk before enabling",
+        )
+
+    return warnings
+
+
+def review_policy_bundle(current: Any, proposed: Any) -> dict[str, Any]:
+    diff = compare_policy_bundles(current, proposed)
+    warnings = policy_bundle_safety_warnings(proposed)
+    return {
+        "schema": POLICY_BUNDLE_REVIEW_SCHEMA,
+        "ok": bool(diff["ok"]),
+        "changed": bool(diff.get("changed", False)) if diff["ok"] else False,
+        "changed_sections": diff.get("changed_sections", []) if diff["ok"] else [],
+        "change_count": int(diff.get("change_count", 0)) if diff["ok"] else 0,
+        "safety_warning_count": len(warnings),
+        "safety_warnings": warnings,
+        "current_validation": diff.get("before_validation"),
+        "proposed_validation": diff.get("after_validation"),
+        "diff": {
+            "schema": diff.get("schema"),
+            "ok": diff.get("ok"),
+            "changed": diff.get("changed"),
+            "changed_sections": diff.get("changed_sections", []),
+            "change_count": diff.get("change_count", 0),
+            "changes": diff.get("changes", []),
+        },
     }

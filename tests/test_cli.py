@@ -190,6 +190,74 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.policy_bundle_diff.v1")
         self.assertIn("invalid JSON", payload["before_validation"]["errors"][0]["message"])
 
+    def test_policy_review_cli_reports_current_to_proposed_changes(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["routing"]["enabled"] = not proposed["policies"]["routing"]["enabled"]
+        stdout = io.StringIO()
+
+        code = cli.policy_review_cli(["-"], stdin=io.StringIO(json.dumps(proposed)), stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle_review.v1")
+        self.assertEqual(payload["changed_sections"], ["routing"])
+        self.assertEqual(payload["change_count"], 1)
+        self.assertEqual(payload["safety_warning_count"], 0)
+
+    def test_policy_review_cli_rejects_invalid_bundle(self):
+        stdout = io.StringIO()
+
+        code = cli.policy_review_cli(["-"], stdin=io.StringIO(json.dumps({"schema": "wrong"})), stdout=stdout)
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle_review.v1")
+        self.assertIn("$.schema", {error["path"] for error in payload["proposed_validation"]["errors"]})
+        self.assertFalse(payload["changed"])
+
+    def test_policy_review_cli_surfaces_risky_policy_warnings(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["cache"]["exact_cache"]["cache_tool_calls"] = True
+        proposed["policies"]["cache"]["semantic_cache"]["enabled"] = True
+        proposed["policies"]["crunch"]["old_context_summarization"]["enabled"] = True
+        proposed["policies"]["routing"]["policy_source"] = "managed-enforced"
+        stdout = io.StringIO()
+
+        code = cli.policy_review_cli(["-"], stdin=io.StringIO(json.dumps(proposed)), stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        warning_codes = {warning["code"] for warning in payload["safety_warnings"]}
+        self.assertIn("tool-call-cache-enabled", warning_codes)
+        self.assertIn("semantic-cache-enabled", warning_codes)
+        self.assertIn("old-context-summarization-enabled", warning_codes)
+        self.assertIn("managed-enforced-policy-source", warning_codes)
+        self.assertEqual(payload["safety_warning_count"], 4)
+
+    def test_policy_review_cli_records_compact_event(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["cache"]["exact_cache"]["cache_tool_calls"] = True
+        stdout = io.StringIO()
+
+        cli.policy_review_cli(["-"], stdin=io.StringIO(json.dumps(proposed)), stdout=stdout)
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        events = recent_policy_events(limit=5)["events"]
+        self.assertEqual(events[0]["action"], "review")
+        self.assertTrue(events[0]["ok"])
+        self.assertEqual(events[0]["details"]["changed_sections"], ["cache"])
+        self.assertEqual(events[0]["details"]["safety_warning_count"], 1)
+
     def test_policy_cli_records_compact_local_events(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
