@@ -25,6 +25,7 @@ from agentflow_proxy.quality import (
     derive_provider_quality_signals,
     summarize_quality_signals,
 )
+from agentflow_proxy.recommendations import pattern_decision_summaries
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
 
@@ -971,6 +972,97 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
     breakdown = list(grouped.values())
     breakdown.sort(key=lambda r: r["count"], reverse=True)
     return breakdown
+
+
+def _pattern_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if today_only and not row.get("is_today"):
+            continue
+        routing = _json_obj(row.get("routing_json"))
+        crunch = _json_obj(row.get("crunch_json"))
+        cache = _json_obj(row.get("cache_json"))
+        provider = str(row.get("provider") or "anthropic")
+        path = str(row.get("path") or "")
+        summaries = pattern_decision_summaries(
+            provider=provider,
+            path=path,
+            requested_model=row.get("requested_model"),
+            routed_model=row.get("routed_model"),
+            status_code=_as_int(row.get("status_code")) if row.get("status_code") is not None else None,
+            cost_est_usd=_as_float(row.get("cost_est_usd")) if row.get("cost_est_usd") is not None else None,
+            cost_baseline_usd=_as_float(row.get("cost_baseline_usd")) if row.get("cost_baseline_usd") is not None else None,
+            cache_meta=cache,
+            crunch_meta=crunch,
+            routing_meta=routing,
+            category=row.get("category") or routing.get("category"),
+        )
+        for summary in summaries:
+            if not isinstance(summary, dict):
+                continue
+            key = (
+                str(summary.get("source_surface") or _source_surface(provider, path)),
+                str(summary.get("app_family") or _app_family_for_call(provider, row.get("requested_model"), path)),
+                str(summary.get("category") or row.get("category") or routing.get("category") or "unknown"),
+                str(summary.get("workflow_phase") or summary.get("category") or "unknown"),
+                str(summary.get("decision_type") or "unknown"),
+                str(summary.get("policy_source") or "unknown"),
+                str(summary.get("rule_id") or "unknown"),
+                str(summary.get("pattern_hash") or ""),
+                str(summary.get("outcome") or "unknown"),
+            )
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "source_surface": key[0],
+                    "app_family": key[1],
+                    "category": key[2],
+                    "workflow_phase": key[3],
+                    "decision_type": key[4],
+                    "policy_source": key[5],
+                    "rule_id": key[6],
+                    "candidate_id": summary.get("candidate_id"),
+                    "pattern_hash": key[7] or None,
+                    "outcome": key[8],
+                    "status": summary.get("status"),
+                    "reason": summary.get("reason"),
+                    "hit_type": summary.get("hit_type"),
+                    "count": 0,
+                    "applied_count": 0,
+                    "error_count": 0,
+                    "saved_chars": 0,
+                    "tokens_saved_est": 0,
+                    "estimated_cost_savings_usd": 0.0,
+                    "raw_payload_included": False,
+                },
+            )
+            bucket["count"] += 1
+            bucket["applied_count"] += _as_int(summary.get("applied_count"))
+            if key[8] == "errored":
+                bucket["error_count"] += 1
+            bucket["saved_chars"] += _as_int(summary.get("saved_chars"))
+            bucket["tokens_saved_est"] += _as_int(summary.get("tokens_saved_est"))
+            bucket["estimated_cost_savings_usd"] += _as_float(summary.get("estimated_cost_savings_usd"))
+            if bucket.get("candidate_id") is None and summary.get("candidate_id") is not None:
+                bucket["candidate_id"] = summary.get("candidate_id")
+            if bucket.get("reason") is None and summary.get("reason") is not None:
+                bucket["reason"] = summary.get("reason")
+
+    result = []
+    for bucket in grouped.values():
+        bucket["estimated_cost_savings_usd"] = round(float(bucket["estimated_cost_savings_usd"]), 8)
+        count = _as_int(bucket.get("count"))
+        bucket["error_rate"] = round(_as_int(bucket.get("error_count")) / count, 4) if count else 0.0
+        result.append(bucket)
+    result.sort(
+        key=lambda r: (
+            _as_float(r.get("estimated_cost_savings_usd")),
+            _as_int(r.get("saved_chars")),
+            _as_int(r.get("count")),
+        ),
+        reverse=True,
+    )
+    return result
 
 
 def _size_bucket(value: Any) -> str:
@@ -4750,6 +4842,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
+    pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows)
+    today_pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows, today_only=True)
 
     error_rows = q("""
         select created_at,
@@ -4953,6 +5047,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
         "cache_replayability": cache_replayability,
+        "pattern_decision_breakdown": pattern_decision_breakdown,
+        "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
         "error_breakdown": error_breakdown,
         "today_error_breakdown": today_error_breakdown,
         "routing_experiment_summary": routing_experiment_summary,
@@ -5921,6 +6017,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Pattern decision outcomes today</h2>
+  <table data-table-id="pattern-decisions-today" data-filter-label="Filter pattern decisions today">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Type</th><th data-sort-type="text">Outcome</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Policy source</th><th data-sort-type="text">Category</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Est savings</th>
+    </tr></thead>
+    <tbody id="pattern-decisions-today-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Pattern decision outcomes all time</h2>
+  <table data-table-id="pattern-decisions-all" data-filter-label="Filter all pattern decisions">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Type</th><th data-sort-type="text">Outcome</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Policy source</th><th data-sort-type="text">Category</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Est savings</th>
+    </tr></thead>
+    <tbody id="pattern-decisions-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Cache decisions today</h2>
   <table data-table-id="cache-today" data-filter-label="Filter cache decisions today">
     <thead><tr>
@@ -6614,6 +6728,21 @@ async function refreshCache(){
       <td><span class="badge provider">${row.policy_source||'unknown'}</span></td>
       <td>${(row.count||0).toLocaleString()}</td>
     </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No cache decision data yet</td></tr>';
+    const renderPatternRows=(rows)=>rows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge provider">${esc(row.decision_type||'unknown')}</span></td>
+      <td><span class="badge ${row.outcome==='applied'?'hit':row.outcome==='errored'?'err':row.outcome==='bypassed'?'stream':'miss'}">${esc(row.outcome||'unknown')}</span></td>
+      <td class="model" title="${esc(row.pattern_hash||'')}">${esc(row.rule_id||'unknown')}</td>
+      <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td>${(row.count||0).toLocaleString()}</td>
+      <td>${(row.error_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.saved_chars||0).toLocaleString()}</td>
+      <td class="tokens">${(row.tokens_saved_est||0).toLocaleString()}</td>
+      <td class="savings">${fmt(row.estimated_cost_savings_usd||0,6)}</td>
+    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No pattern decision outcomes yet</td></tr>';
+    document.getElementById('pattern-decisions-today-tbody').innerHTML=renderPatternRows(d.today_pattern_decision_breakdown||[]);
+    document.getElementById('pattern-decisions-tbody').innerHTML=renderPatternRows(d.pattern_decision_breakdown||[]);
     document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
     document.getElementById('cache-tbody').innerHTML=renderRows(d.cache_decision_breakdown||[]);
     applyAllDataTables();

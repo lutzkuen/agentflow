@@ -461,7 +461,26 @@ class RecommendationTest(unittest.TestCase):
             cache_meta={"status": "miss", "reason": "exact-miss"},
             crunch_meta={
                 "saved_chars": 16,
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "before_chars": 3000,
+                    "after_chars": 2000,
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "reviewed-pattern-rule",
+                            "candidate_id": "candidate-123",
+                            "policy_source": "managed-recommended",
+                            "action": "shorten",
+                            "matched_hashes": ["sha256:" + "a" * 64],
+                            "applied_count": 1,
+                            "saved_chars": 1000,
+                            "skip_reasons": [],
+                        }
+                    ],
+                },
                 "raw_request": "must not leave local machine",
+                "pattern_text": "raw pattern text must stay local",
             },
             routing_meta={
                 "reason": "small request",
@@ -504,10 +523,76 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.last_json["managed_recommendation"]["optimization_unit_id"], 42)
         self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["output_similarity"], 0.95)
         self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["primary_output_sha256"], "primary-hash")
+        pattern_decisions = FakeAsyncClient.last_json["pattern_decisions"]
+        crunch_decision = next(item for item in pattern_decisions if item["decision_type"] == "crunch")
+        cache_decision = next(item for item in pattern_decisions if item["decision_type"] == "cache")
+        self.assertEqual(crunch_decision["rule_id"], "reviewed-pattern-rule")
+        self.assertEqual(crunch_decision["candidate_id"], "candidate-123")
+        self.assertEqual(crunch_decision["pattern_hash"], "sha256:" + "a" * 64)
+        self.assertEqual(crunch_decision["outcome"], "applied")
+        self.assertEqual(crunch_decision["saved_chars"], 1000)
+        self.assertEqual(crunch_decision["tokens_saved_est"], 250)
+        self.assertEqual(cache_decision["status"], "miss")
+        self.assertEqual(cache_decision["outcome"], "skipped")
+        self.assertIn("pattern_hash", cache_decision)
         self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(FakeAsyncClient.last_json)))
         self.assertNotIn("session-secret", str(FakeAsyncClient.last_json))
         self.assertNotIn("must not leave", str(FakeAsyncClient.last_json))
         self.assertNotIn("must be stripped", str(FakeAsyncClient.last_json))
+        self.assertNotIn("raw pattern text", str(FakeAsyncClient.last_json))
+
+    def test_pattern_decision_summaries_cover_bypassed_and_errored_outcomes(self):
+        bypassed = recommendations.pattern_decision_summaries(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=200,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.002,
+            cache_meta={
+                "status": "skipped",
+                "reason": "cache-disabled",
+                "policy_source": "local-default",
+                "exact_enabled": False,
+            },
+            crunch_meta={},
+            routing_meta={"category": "chat"},
+            category="chat",
+        )
+        self.assertEqual(bypassed[0]["decision_type"], "cache")
+        self.assertEqual(bypassed[0]["outcome"], "bypassed")
+
+        errored = recommendations.pattern_decision_summaries(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            status_code=400,
+            cost_est_usd=None,
+            cost_baseline_usd=None,
+            cache_meta={"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            crunch_meta={
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "errored-rule",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": ["sha256:" + "b" * 64],
+                            "applied_count": 1,
+                            "saved_chars": 400,
+                        }
+                    ],
+                }
+            },
+            routing_meta={"category": "tool-result"},
+            category="tool-result",
+        )
+        outcomes = {(item["decision_type"], item["outcome"]) for item in errored}
+        self.assertIn(("crunch", "errored"), outcomes)
+        self.assertIn(("cache", "errored"), outcomes)
 
     def test_outcome_feedback_failure_is_non_fatal_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"

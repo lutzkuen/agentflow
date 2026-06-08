@@ -1734,6 +1734,135 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_pattern_decision_breakdown_reports_outcome_error_and_savings_by_rule(self):
+        applied_hash = "sha256:" + "a" * 64
+        rows = [
+            {
+                "status_code": 200,
+                "cost_est_usd": 0.001,
+                "cost_baseline_usd": 0.004,
+                "crunch": {
+                    "changed": True,
+                    "policy_source": "managed-recommended",
+                    "pattern_rules": {
+                        "configured_count": 1,
+                        "policy_source": "managed-recommended",
+                        "before_chars": 4000,
+                        "after_chars": 2800,
+                        "rules": [
+                            {
+                                "rule_id": "pattern-apply",
+                                "candidate_id": "candidate-apply",
+                                "policy_source": "managed-recommended",
+                                "matched_hashes": [applied_hash],
+                                "applied_count": 1,
+                                "saved_chars": 1200,
+                            }
+                        ],
+                    },
+                },
+                "cache": {"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            },
+            {
+                "status_code": 200,
+                "cost_est_usd": 0.002,
+                "cost_baseline_usd": 0.002,
+                "crunch": {
+                    "changed": False,
+                    "pattern_rules": {
+                        "configured_count": 1,
+                        "policy_source": "managed-recommended",
+                        "rules": [
+                            {
+                                "rule_id": "pattern-skip",
+                                "policy_source": "managed-recommended",
+                                "applied_count": 0,
+                                "saved_chars": 0,
+                                "skip_reasons": [{"reason": "min-repeated-count-not-met", "count": 1}],
+                            }
+                        ],
+                    },
+                },
+                "cache": {"status": "skipped", "reason": "cache-disabled", "policy_source": "local-default"},
+            },
+            {
+                "status_code": 400,
+                "cost_est_usd": 0.0,
+                "cost_baseline_usd": 0.0,
+                "crunch": {
+                    "changed": True,
+                    "pattern_rules": {
+                        "configured_count": 1,
+                        "policy_source": "managed-recommended",
+                        "rules": [
+                            {
+                                "rule_id": "pattern-error",
+                                "policy_source": "managed-recommended",
+                                "matched_hashes": ["sha256:" + "b" * 64],
+                                "applied_count": 1,
+                                "saved_chars": 800,
+                            }
+                        ],
+                    },
+                },
+                "cache": {"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            },
+        ]
+        for row in rows:
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001",
+                stream=0,
+                cache_hit=0,
+                status_code=row["status_code"],
+                latency_ms=1,
+                input_tokens_est=1000,
+                output_tokens_est=10,
+                actual_input_tokens=1000,
+                actual_output_tokens=10,
+                cost_est_usd=row["cost_est_usd"],
+                cost_baseline_usd=row["cost_baseline_usd"],
+                crunch_json=stable_json(row["crunch"]),
+                routing_json=stable_json({"category": "tool-result", "has_tools": True}),
+                cache_json=stable_json(row["cache"]),
+                error="upstream error raw body" if row["status_code"] >= 400 else None,
+                request_json=None,
+                response_json=None,
+                session_id="session-patterns",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        rows_by_rule = {
+            (row["decision_type"], row["rule_id"], row["outcome"]): row
+            for row in result["pattern_decision_breakdown"]
+        }
+
+        applied = rows_by_rule[("crunch", "pattern-apply", "applied")]
+        self.assertEqual(applied["candidate_id"], "candidate-apply")
+        self.assertEqual(applied["pattern_hash"], applied_hash)
+        self.assertEqual(applied["saved_chars"], 1200)
+        self.assertEqual(applied["tokens_saved_est"], 300)
+        self.assertEqual(applied["error_count"], 0)
+        self.assertGreater(applied["estimated_cost_savings_usd"], 0)
+        self.assertEqual(rows_by_rule[("crunch", "pattern-skip", "skipped")]["reason"], "min-repeated-count-not-met")
+        self.assertEqual(rows_by_rule[("crunch", "pattern-error", "errored")]["error_count"], 1)
+        cache_outcomes = {
+            row["outcome"]
+            for row in result["pattern_decision_breakdown"]
+            if row["decision_type"] == "cache"
+        }
+        self.assertTrue({"skipped", "bypassed", "errored"}.issubset(cache_outcomes))
+        self.assertEqual(result["today_pattern_decision_breakdown"], result["pattern_decision_breakdown"])
+        self.assertNotIn("upstream error raw body", json.dumps(result["pattern_decision_breakdown"]))
+
     def test_cache_decision_breakdown_infers_legacy_null_cache_rows(self):
         server.store.log_call(
             id=str(uuid.uuid4()),

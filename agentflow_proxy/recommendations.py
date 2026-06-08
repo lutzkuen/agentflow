@@ -833,6 +833,215 @@ def _compact_error(error: str | None, status_code: int | None) -> dict[str, Any]
     }
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pattern_outcome(status_code: int | None, *, applied: bool, bypassed: bool = False) -> str:
+    if status_code is not None and int(status_code) >= 400:
+        return "errored"
+    if applied:
+        return "applied"
+    if bypassed:
+        return "bypassed"
+    return "skipped"
+
+
+def _pattern_cost_savings(
+    *,
+    provider: str,
+    model: str | None,
+    saved_tokens: int,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+) -> float:
+    if cost_est_usd is not None and cost_baseline_usd is not None:
+        return max(_safe_float(cost_baseline_usd) - _safe_float(cost_est_usd), 0.0)
+    if not model or saved_tokens <= 0:
+        return 0.0
+    return float(estimate_cost(model, saved_tokens, 0, provider=provider) or 0.0)
+
+
+def pattern_decision_summaries(
+    *,
+    provider: str,
+    path: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    cache_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: str | None,
+) -> list[dict[str, Any]]:
+    """Build metadata-only pattern decision summaries for local stats and managed feedback."""
+    source_surface = _source_surface(provider, path)
+    app_family = _app_family(provider, requested_model or "", path)
+    workflow_phase = category or routing_meta.get("category") or "unknown"
+    model = routed_model or requested_model
+    rows: list[dict[str, Any]] = []
+
+    pattern_rules = crunch_meta.get("pattern_rules") if isinstance(crunch_meta, dict) else None
+    if isinstance(pattern_rules, dict) and pattern_rules.get("configured_count"):
+        for rule in pattern_rules.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            saved_chars = _safe_int(rule.get("saved_chars"))
+            saved_tokens = max(0, saved_chars // TOKEN_CHARS)
+            applied = _safe_int(rule.get("applied_count")) > 0
+            base = {
+                "schema": "agentflow.pattern_decision_summary.v1",
+                "decision_type": "crunch",
+                "source_surface": source_surface,
+                "app_family": app_family,
+                "category": category or routing_meta.get("category") or pattern_rules.get("category") or "unknown",
+                "workflow_phase": workflow_phase,
+                "rule_id": rule.get("rule_id"),
+                "candidate_id": rule.get("candidate_id"),
+                "policy_source": rule.get("policy_source") or pattern_rules.get("policy_source") or crunch_meta.get("policy_source"),
+                "status": "applied" if applied else "skipped",
+                "outcome": _pattern_outcome(status_code, applied=applied),
+                "action": rule.get("action"),
+                "applied_count": _safe_int(rule.get("applied_count")),
+                "saved_chars": saved_chars,
+                "tokens_saved_est": saved_tokens,
+                "estimated_cost_savings_usd": round(_pattern_cost_savings(
+                    provider=provider,
+                    model=model,
+                    saved_tokens=saved_tokens,
+                    cost_est_usd=None,
+                    cost_baseline_usd=None,
+                ), 8),
+                "before_chars": pattern_rules.get("before_chars"),
+                "after_chars": pattern_rules.get("after_chars"),
+                "safety_gates": {
+                    "safe_text_only": True,
+                    "tool_or_action_payloads_skipped": any(
+                        isinstance(item, dict) and item.get("reason") == "unsafe-tool-or-action-payload"
+                        for item in rule.get("skip_reasons") or []
+                    ),
+                    "raw_pattern_strings_included": False,
+                },
+            }
+            matched_hashes = [
+                str(item)
+                for item in rule.get("matched_hashes") or []
+                if isinstance(item, str) and item.startswith("sha256:")
+            ]
+            if matched_hashes:
+                base["pattern_hash"] = matched_hashes[0]
+                base["pattern_hashes"] = matched_hashes
+            skip_reasons = []
+            for item in rule.get("skip_reasons") or []:
+                if isinstance(item, dict):
+                    skip_reasons.append({
+                        "reason": item.get("reason"),
+                        "count": _safe_int(item.get("count")),
+                        "pattern_hash": item.get("pattern_hash") if isinstance(item.get("pattern_hash"), str) and str(item.get("pattern_hash")).startswith("sha256:") else None,
+                    })
+            if skip_reasons:
+                base["skip_reasons"] = skip_reasons
+                if not applied:
+                    base["reason"] = str(skip_reasons[0].get("reason") or "skipped")
+            rows.append(base)
+
+        for item in pattern_rules.get("skip_reasons") or []:
+            if not isinstance(item, dict):
+                continue
+            if any(row.get("rule_id") == item.get("rule_id") for row in rows):
+                continue
+            rows.append({
+                "schema": "agentflow.pattern_decision_summary.v1",
+                "decision_type": "crunch",
+                "source_surface": source_surface,
+                "app_family": app_family,
+                "category": category or routing_meta.get("category") or pattern_rules.get("category") or "unknown",
+                "workflow_phase": workflow_phase,
+                "rule_id": item.get("rule_id"),
+                "policy_source": pattern_rules.get("policy_source") or crunch_meta.get("policy_source"),
+                "status": "skipped",
+                "reason": item.get("reason"),
+                "outcome": _pattern_outcome(status_code, applied=False),
+                "applied_count": 0,
+                "saved_chars": 0,
+                "tokens_saved_est": 0,
+                "estimated_cost_savings_usd": 0.0,
+                "safety_gates": {
+                    "safe_text_only": True,
+                    "raw_pattern_strings_included": False,
+                },
+            })
+
+    if isinstance(cache_meta, dict) and cache_meta:
+        cache_status = str(cache_meta.get("status") or "missing")
+        cache_reason = str(cache_meta.get("reason") or "unknown")
+        cache_applied = cache_status == "hit"
+        cache_bypassed = cache_status in {"bypass", "bypassed"} or "bypass" in cache_reason or "disabled" in cache_reason
+        descriptor = {
+            "schema": "agentflow.cache_pattern_decision_basis.v1",
+            "source_surface": source_surface,
+            "app_family": app_family,
+            "category": category or routing_meta.get("category") or "unknown",
+            "workflow_phase": workflow_phase,
+            "requested_model_family": _model_family(requested_model),
+            "routed_model_family": _model_family(routed_model or requested_model),
+            "status": cache_status,
+            "reason": cache_reason,
+            "hit_type": cache_meta.get("hit_type"),
+            "policy_source": cache_meta.get("policy_source"),
+            "eligible": bool(cache_meta.get("eligible")),
+            "replayability_level": cache_meta.get("replayability_level"),
+        }
+        rows.append({
+            "schema": "agentflow.pattern_decision_summary.v1",
+            "decision_type": "cache",
+            "source_surface": source_surface,
+            "app_family": app_family,
+            "category": descriptor["category"],
+            "workflow_phase": workflow_phase,
+            "rule_id": cache_meta.get("rule_id") or cache_meta.get("policy_id") or cache_status,
+            "candidate_id": cache_meta.get("candidate_id"),
+            "pattern_hash": cache_meta.get("pattern_hash") if isinstance(cache_meta.get("pattern_hash"), str) and str(cache_meta.get("pattern_hash")).startswith("sha256:") else _pattern_hash(descriptor),
+            "policy_source": cache_meta.get("policy_source"),
+            "status": cache_status,
+            "reason": cache_reason,
+            "outcome": _pattern_outcome(status_code, applied=cache_applied, bypassed=cache_bypassed),
+            "hit_type": cache_meta.get("hit_type"),
+            "applied_count": 1 if cache_applied else 0,
+            "saved_chars": 0,
+            "tokens_saved_est": 0,
+            "estimated_cost_savings_usd": round(_pattern_cost_savings(
+                provider=provider,
+                model=model,
+                saved_tokens=0,
+                cost_est_usd=cost_est_usd if cache_applied else None,
+                cost_baseline_usd=cost_baseline_usd if cache_applied else None,
+            ), 8),
+            "safety_gates": {
+                "exact_enabled": bool(cache_meta.get("exact_enabled")),
+                "semantic_enabled": bool(cache_meta.get("semantic_enabled")),
+                "tool_cache_enabled": bool(cache_meta.get("tool_cache_enabled")),
+                "file_watch_enabled": bool(cache_meta.get("file_watch_enabled")),
+                "eligible": bool(cache_meta.get("eligible")),
+                "raw_pattern_strings_included": False,
+            },
+        })
+
+    return _sanitize_features(rows)
+
+
 def build_outcome_feedback(
     *,
     provider: str,
@@ -911,6 +1120,19 @@ def build_outcome_feedback(
         },
         "crunch_saved_chars": crunch_meta.get("saved_chars"),
         "crunch_tokens_saved_est": crunch_meta.get("tokens_saved_est"),
+        "pattern_decisions": pattern_decision_summaries(
+            provider=provider,
+            path=path,
+            requested_model=requested_model,
+            routed_model=routed_model,
+            status_code=status_code,
+            cost_est_usd=cost_est_usd,
+            cost_baseline_usd=cost_baseline_usd,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=category,
+        ),
         "category": category or routing_meta.get("category"),
         "session": {
             "present": bool(session_id),
@@ -1020,6 +1242,19 @@ def build_codex_turn_outcome_feedback(
             "saved_chars": crunch_meta.get("saved_chars"),
             "tokens_saved_est": crunch_meta.get("tokens_saved_est"),
         },
+        "pattern_decisions": pattern_decision_summaries(
+            provider="openai",
+            path="codex-app://turn/start",
+            requested_model=routing_meta.get("requested_model") or codex_app_model(),
+            routed_model=routing_meta.get("routed_model") or routing_meta.get("requested_model") or codex_app_model(),
+            status_code=500 if error_code is not None else 200,
+            cost_est_usd=cost_est,
+            cost_baseline_usd=baseline_cost,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=routing_meta.get("category") or "codex_turn",
+        ),
         "session": {
             "present": bool(session_id),
             "id_hash": session_hash,
