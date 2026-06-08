@@ -154,8 +154,12 @@ class StatsFullTest(unittest.TestCase):
         self.assertTrue(executive["tokens_today"]["codex_app_cost_estimated"])
         self.assertEqual(executive["tokens_today"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertAlmostEqual(executive["spend"]["today_provider_spend_usd"], 0.001, places=6)
-        self.assertAlmostEqual(executive["spend"]["today_codex_app_estimated_spend_usd"], 0.000238, places=6)
-        self.assertAlmostEqual(executive["spend"]["today_calculated_spend_usd"], 0.001238, places=6)
+        self.assertEqual(
+            executive["tokens_today"]["codex_app_pricing_basis"]["model"],
+            "gpt-5.3-codex",
+        )
+        self.assertAlmostEqual(executive["spend"]["today_codex_app_estimated_spend_usd"], 0.000333, places=6)
+        self.assertAlmostEqual(executive["spend"]["today_calculated_spend_usd"], 0.001332, places=6)
         self.assertEqual(executive["spend"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertGreater(executive["spend"]["thinking_cost_today_usd"], 0)
         buckets = executive["savings"]["today_buckets"]
@@ -944,9 +948,10 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(codex["outcome_features"]["latency_ms"], 3000)
         self.assertEqual(codex["outcome_features"]["output_tokens_est"], 50)
         self.assertEqual(codex["outcome_features"]["total_tokens_est"], 58)
-        self.assertAlmostEqual(codex["outcome_features"]["cost_est_usd"], 0.00051, places=6)
-        self.assertAlmostEqual(codex["outcome_features"]["cost_baseline_usd"], 0.00051, places=6)
-        self.assertAlmostEqual(codex["outcome_features"]["hard_floor_usd"], 0.00051, places=6)
+        self.assertEqual(codex["outcome_features"]["pricing_basis"]["model"], "gpt-5.3-codex")
+        self.assertAlmostEqual(codex["outcome_features"]["cost_est_usd"], 0.000714, places=6)
+        self.assertAlmostEqual(codex["outcome_features"]["cost_baseline_usd"], 0.000714, places=6)
+        self.assertAlmostEqual(codex["outcome_features"]["hard_floor_usd"], 0.000714, places=6)
         self.assertEqual(codex["outcome_features"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertEqual(codex["replayability_level"], "features_only")
         self.assertEqual(codex["local_ids"]["codex_app_response_event_id"], response_id)
@@ -1138,8 +1143,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertFalse(result["summary"]["codex_cost_unknown"])
         self.assertEqual(result["summary"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertAlmostEqual(result["summary"]["provider_reported_spend_usd"], 0.05, places=6)
-        self.assertAlmostEqual(result["summary"]["codex_estimated_spend_usd"], 0.0004, places=6)
-        self.assertAlmostEqual(result["summary"]["calculated_spend_usd"], 0.0504, places=6)
+        self.assertAlmostEqual(result["summary"]["codex_estimated_spend_usd"], 0.00056, places=6)
+        self.assertAlmostEqual(result["summary"]["calculated_spend_usd"], 0.05056, places=6)
         [bucket] = result["buckets"]
 
         self.assertEqual(bucket["bucket_kind"], "engineer_app")
@@ -1162,10 +1167,10 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(bucket["codex_mutation_safe_turns"], 0)
         self.assertEqual(bucket["codex_telemetry_only_turns"], 1)
         self.assertEqual(bucket["cost_basis"], "provider-reported + codex-estimated-from-chars")
-        self.assertAlmostEqual(bucket["codex_cost_est_usd"], 0.0004, places=6)
-        self.assertAlmostEqual(bucket["spend_usd"], 0.0504, places=6)
+        self.assertAlmostEqual(bucket["codex_cost_est_usd"], 0.00056, places=6)
+        self.assertAlmostEqual(bucket["spend_usd"], 0.05056, places=6)
         self.assertAlmostEqual(bucket["captured_savings_usd"], 0.025, places=6)
-        self.assertAlmostEqual(bucket["hard_floor_usd"], 0.0504, places=6)
+        self.assertAlmostEqual(bucket["hard_floor_usd"], 0.05056, places=6)
         self.assertEqual(bucket["thinking_tokens"], 200)
         self.assertEqual(bucket["large_tool_result_calls"], 1)
         self.assertGreater(bucket["potential_hint_count"], 0)

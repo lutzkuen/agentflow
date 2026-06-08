@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from typing import Optional
+import json
+import os
+from typing import Any, Optional
 
 # Approximate public list prices in USD per million tokens. Update in config/env as needed.
+PRICING_SOURCE_OPENAI = "https://developers.openai.com/api/docs/pricing"
+PRICING_VERSION_OPENAI = "2026-06-08"
+PRICING_SOURCE_ANTHROPIC = "embedded-agentflow-defaults"
+PRICING_VERSION_ANTHROPIC = "2026-06-08"
+DEFAULT_CODEX_APP_MODEL = "gpt-5.3-codex"
+DEFAULT_CODEX_APP_PROCESSING_MODE = "standard"
+
 ANTHROPIC_MODEL_PRICES = {
     "claude-opus-4.5": (5.0, 25.0),
     "claude-opus-4-5": (5.0, 25.0),
@@ -23,6 +32,8 @@ OPENAI_MODEL_PRICES = {
     "gpt-5.5": (5.0, 30.0, 0.50),
     "gpt-5.4-mini": (0.75, 4.50, 0.075),
     "gpt-5.4": (2.50, 15.0, 0.25),
+    "gpt-5.3-codex": (1.75, 14.0, 0.175),
+    "gpt-5.3": (1.75, 14.0, 0.175),
     "gpt-5.2-codex": (1.75, 14.0, 0.175),
     "gpt-5.2": (1.75, 14.0, 0.175),
     "gpt-5.1-codex-max": (1.25, 10.0, 0.125),
@@ -38,6 +49,28 @@ OPENAI_MODEL_PRICES = {
     "gpt-4o": (2.50, 10.0, 1.25),
 }
 
+OPENAI_PRIORITY_MODEL_PRICES = {
+    "gpt-5.5": (12.50, 75.0, 1.25),
+    "gpt-5.4-mini": (1.50, 9.0, 0.150),
+    "gpt-5.4": (5.0, 30.0, 0.50),
+    "gpt-5.3-codex": (3.50, 28.0, 0.350),
+    "gpt-5.3": (3.50, 28.0, 0.350),
+    "gpt-5.2-codex": (3.50, 28.0, 0.350),
+    "gpt-5.2": (3.50, 28.0, 0.350),
+    "gpt-5.1-codex-max": (2.50, 20.0, 0.250),
+    "gpt-5.1-codex": (2.50, 20.0, 0.250),
+    "gpt-5-codex": (2.50, 20.0, 0.250),
+    "gpt-5-mini": (0.45, 3.60, 0.045),
+    "gpt-5-nano": (0.10, 0.80, 0.010),
+    "gpt-5": (2.50, 20.0, 0.250),
+}
+
+OPENAI_MODEL_ALIASES = {
+    "gpt-5.3-codex-latest": "gpt-5.3-codex",
+    "gpt-5.2-codex-latest": "gpt-5.2-codex",
+    "gpt-5-codex-latest": "gpt-5-codex",
+}
+
 MODEL_PRICES = ANTHROPIC_MODEL_PRICES
 
 MODEL_ALIASES = {
@@ -47,6 +80,148 @@ MODEL_ALIASES = {
 }
 
 
+def codex_app_model() -> str:
+    return (
+        os.getenv("AGENTFLOW_CODEX_APP_MODEL")
+        or os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL")
+        or DEFAULT_CODEX_APP_MODEL
+    )
+
+
+def codex_app_processing_mode() -> str:
+    return (
+        os.getenv("AGENTFLOW_CODEX_APP_PROCESSING_MODE")
+        or os.getenv("AGENTFLOW_OPENAI_PROCESSING_MODE")
+        or DEFAULT_CODEX_APP_PROCESSING_MODE
+    ).strip().lower()
+
+
+def _price_tuple_from_value(value: Any) -> Optional[tuple[float, float, float]]:
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return float(value[0]), float(value[1]), float(value[2])
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, dict):
+        input_price = value.get("input", value.get("input_usd_per_million"))
+        output_price = value.get("output", value.get("output_usd_per_million"))
+        cached_price = value.get(
+            "cached_input",
+            value.get("cached_input_usd_per_million", value.get("cache_read")),
+        )
+        try:
+            return float(input_price), float(output_price), float(cached_price)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _openai_price_overrides(processing_mode: str) -> dict[str, tuple[float, float, float]]:
+    raw = os.getenv("AGENTFLOW_OPENAI_MODEL_PRICES_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    overrides: dict[str, tuple[float, float, float]] = {}
+    for model, value in parsed.items():
+        prices = _price_tuple_from_value(value)
+        if prices is None and isinstance(value, dict):
+            mode_value = value.get(processing_mode) or value.get("standard")
+            prices = _price_tuple_from_value(mode_value)
+        if prices is not None:
+            overrides[str(model).lower()] = prices
+    return overrides
+
+
+def _match_prices(
+    model: str,
+    prices_by_model: dict[str, tuple[float, ...]],
+) -> tuple[str | None, tuple[float, ...] | None]:
+    ml = model.lower()
+    for name, val in prices_by_model.items():
+        if name in ml:
+            return name, val
+    return None, None
+
+
+def _openai_prices_for_model(
+    model: str,
+    processing_mode: str = DEFAULT_CODEX_APP_PROCESSING_MODE,
+) -> tuple[str | None, tuple[float, float, float] | None, str]:
+    processing_mode = (processing_mode or DEFAULT_CODEX_APP_PROCESSING_MODE).strip().lower()
+    model = OPENAI_MODEL_ALIASES.get(model.lower(), model)
+    overrides = _openai_price_overrides(processing_mode)
+    matched, prices = _match_prices(model, overrides)
+    if matched and prices:
+        return matched, prices, "env:AGENTFLOW_OPENAI_MODEL_PRICES_JSON"
+
+    table = OPENAI_PRIORITY_MODEL_PRICES if processing_mode == "priority" else OPENAI_MODEL_PRICES
+    matched, prices = _match_prices(model, table)
+    if matched and prices:
+        return matched, prices, PRICING_SOURCE_OPENAI
+    return None, None, PRICING_SOURCE_OPENAI
+
+
+def pricing_basis(
+    model: str,
+    provider: str = "anthropic",
+    processing_mode: str | None = None,
+) -> dict[str, Any]:
+    provider = provider.lower()
+    processing_mode = (processing_mode or DEFAULT_CODEX_APP_PROCESSING_MODE).strip().lower()
+    if provider == "openai":
+        matched_model, prices, source = _openai_prices_for_model(model, processing_mode)
+        in_per_m: float | None = None
+        out_per_m: float | None = None
+        cached_in_per_m: float | None = None
+        if prices:
+            in_per_m, out_per_m, cached_in_per_m = prices
+        return {
+            "schema": "agentflow.pricing_basis.v1",
+            "provider": "openai",
+            "model": model,
+            "matched_model": matched_model,
+            "processing_mode": processing_mode,
+            "input_usd_per_million": in_per_m,
+            "cached_input_usd_per_million": cached_in_per_m,
+            "output_usd_per_million": out_per_m,
+            "currency": "USD",
+            "source": source,
+            "version": PRICING_VERSION_OPENAI,
+            "cost_known": prices is not None,
+            "cost_basis": "provider-reported + codex-estimated-from-chars",
+        }
+
+    matched_model, prices = _match_prices(model, ANTHROPIC_MODEL_PRICES)
+    in_per_m = prices[0] if prices else None
+    out_per_m = prices[1] if prices else None
+    return {
+        "schema": "agentflow.pricing_basis.v1",
+        "provider": "anthropic",
+        "model": model,
+        "matched_model": matched_model,
+        "processing_mode": "standard",
+        "input_usd_per_million": in_per_m,
+        "cached_input_usd_per_million": (in_per_m * 0.10) if in_per_m is not None else None,
+        "cache_creation_input_usd_per_million": (in_per_m * 1.25) if in_per_m is not None else None,
+        "output_usd_per_million": out_per_m,
+        "currency": "USD",
+        "source": PRICING_SOURCE_ANTHROPIC,
+        "version": PRICING_VERSION_ANTHROPIC,
+        "cost_known": prices is not None,
+        "cost_basis": "provider-reported",
+    }
+
+
+def codex_app_pricing_basis() -> dict[str, Any]:
+    return pricing_basis(codex_app_model(), provider="openai", processing_mode=codex_app_processing_mode())
+
+
 def estimate_cost(
     model: str,
     input_tokens: int,
@@ -54,15 +229,14 @@ def estimate_cost(
     cache_creation: int = 0,
     cache_read: int = 0,
     provider: str = "anthropic",
+    processing_mode: str | None = None,
 ) -> Optional[float]:
     provider = provider.lower()
     if provider == "openai":
-        openai_prices = None
-        ml = model.lower()
-        for name, val in OPENAI_MODEL_PRICES.items():
-            if name in ml:
-                openai_prices = val
-                break
+        _matched, openai_prices, _source = _openai_prices_for_model(
+            model,
+            processing_mode or DEFAULT_CODEX_APP_PROCESSING_MODE,
+        )
         if not openai_prices:
             return None
         in_per_m, out_per_m, cached_in_per_m = openai_prices
@@ -74,12 +248,7 @@ def estimate_cost(
             + (output_tokens / 1_000_000) * out_per_m
         )
 
-    prices = None
-    ml = model.lower()
-    for name, val in ANTHROPIC_MODEL_PRICES.items():
-        if name in ml:
-            prices = val
-            break
+    _matched, prices = _match_prices(model, ANTHROPIC_MODEL_PRICES)
     if not prices:
         return None
     in_per_m, out_per_m = prices
@@ -93,17 +262,16 @@ def estimate_cost(
 
 def input_price_per_million(model: str, provider: str = "anthropic", cache_read: bool = False) -> Optional[float]:
     provider = provider.lower()
-    ml = model.lower()
     if provider == "openai":
-        for name, val in OPENAI_MODEL_PRICES.items():
-            if name in ml:
-                return val[2] if cache_read else val[0]
+        _matched, prices, _source = _openai_prices_for_model(model)
+        if prices:
+            return prices[2] if cache_read else prices[0]
         return None
 
-    for name, val in ANTHROPIC_MODEL_PRICES.items():
-        if name in ml:
-            in_per_m = val[0]
-            return in_per_m * 0.10 if cache_read else in_per_m
+    _matched, prices = _match_prices(model, ANTHROPIC_MODEL_PRICES)
+    if prices:
+        in_per_m = prices[0]
+        return in_per_m * 0.10 if cache_read else in_per_m
     return None
 
 

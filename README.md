@@ -372,7 +372,9 @@ export AGENTFLOW_LOG_BODIES=1
 - This is a prototype.
 - Streaming is pass-through and not cached.
 - Cost estimates are rough and based on approximate chars/token.
-- Model prices are embedded and may be stale. Update `MODEL_PRICES` in `server.py`.
+- Model prices are centralized in `agentflow_proxy/pricing.py`. Override future OpenAI
+  prices with `AGENTFLOW_OPENAI_MODEL_PRICES_JSON` and the Codex app telemetry model with
+  `AGENTFLOW_CODEX_APP_MODEL`.
 - Claude Code compatibility depends on the exact version and headers it sends.
 - Aggressive routing can break agent behavior. Start conservative.
 - This server should bind to `127.0.0.1` unless you add real auth.

@@ -8,12 +8,15 @@ from typing import Any, Optional
 
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
-from agentflow_proxy.pricing import estimate_blended_input_savings, estimate_cost
+from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
 
-CODEX_APP_MODEL = os.getenv("AGENTFLOW_CODEX_APP_MODEL") or os.getenv("AGENTFLOW_OPENAI_LARGE_MODEL", "gpt-5-codex")
-CODEX_APP_COST_BASIS = "provider-reported + codex-estimated-from-chars"
+CODEX_APP_PRICING_BASIS = codex_app_pricing_basis()
+CODEX_APP_MODEL = str(CODEX_APP_PRICING_BASIS["model"])
+CODEX_APP_COST_BASIS = str(CODEX_APP_PRICING_BASIS["cost_basis"])
+CODEX_APP_PROCESSING_MODE = str(CODEX_APP_PRICING_BASIS["processing_mode"])
+CODEX_APP_COST_KNOWN = bool(CODEX_APP_PRICING_BASIS["cost_known"])
 CODEX_APP_TELEMETRY_ONLY_REASON = "codex-app-telemetry-only"
 TOKEN_CHARS = 4
 
@@ -208,17 +211,22 @@ def _codex_turn_estimates(input_text_chars: Any, result_chars: Any) -> dict[str,
         input_tokens,
         output_tokens,
         provider="openai",
+        processing_mode=CODEX_APP_PROCESSING_MODE,
     )
-    cost = float(cost or 0.0)
+    cost_known = cost is not None
+    cost_value = float(cost) if cost_known else None
     return {
         "model": CODEX_APP_MODEL,
         "input_tokens_est": input_tokens,
         "output_tokens_est": output_tokens,
         "total_tokens_est": input_tokens + output_tokens,
-        "cost_est_usd": cost,
-        "baseline_cost_est_usd": cost,
-        "hard_floor_usd": cost,
+        "cost_est_usd": cost_value,
+        "baseline_cost_est_usd": cost_value,
+        "hard_floor_usd": cost_value,
         "cost_basis": CODEX_APP_COST_BASIS,
+        "pricing_basis": CODEX_APP_PRICING_BASIS,
+        "cost_known": cost_known,
+        "cost_estimated": cost_known,
     }
 
 
@@ -230,6 +238,8 @@ def _codex_estimates_with_cache(input_text_chars: Any, result_chars: Any, cache:
         estimates["hard_floor_usd"] = 0.0
         estimates["baseline_cost_est_usd"] = baseline
         estimates["cache_savings_usd"] = baseline
+        estimates["cost_known"] = True
+        estimates["cost_estimated"] = True
     else:
         estimates["cache_savings_usd"] = 0.0
     return estimates
@@ -728,6 +738,9 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "hard_floor_usd": estimates["hard_floor_usd"],
             "cache_savings_usd": estimates["cache_savings_usd"],
             "cost_basis": estimates["cost_basis"],
+            "pricing_basis": estimates["pricing_basis"],
+            "cost_known": estimates["cost_known"],
+            "cost_estimated": estimates["cost_estimated"],
             "error_code": error_code,
             "error_message": r.get("response_error_message"),
         },
@@ -1122,8 +1135,14 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         bucket["codex_cost_est_usd"] += _as_float(outcome_features.get("cost_est_usd"))
         bucket["codex_baseline_cost_est_usd"] += _as_float(outcome_features.get("cost_baseline_usd"))
         bucket["codex_hard_floor_usd"] += _as_float(outcome_features.get("hard_floor_usd"))
-        bucket["codex_cost_known"] = True
-        bucket["codex_cost_estimated"] = True
+        turn_cost_known = bool(outcome_features.get("cost_known"))
+        if bucket["codex_turns"] == 1:
+            bucket["codex_cost_known"] = turn_cost_known
+            bucket["codex_cost_estimated"] = turn_cost_known
+        else:
+            bucket["codex_cost_known"] = bool(bucket["codex_cost_known"]) and turn_cost_known
+            bucket["codex_cost_estimated"] = bool(bucket["codex_cost_estimated"]) and turn_cost_known
+        bucket["excludes_unknown_codex_app_cost"] = not bool(bucket["codex_cost_known"])
         bucket["spend_usd"] += _as_float(outcome_features.get("cost_est_usd"))
         codex_saved = max(
             _as_float(outcome_features.get("cost_baseline_usd")) - _as_float(outcome_features.get("cost_est_usd")),
@@ -1250,6 +1269,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
             "raw_prompt_logging": False,
             "codex_cost_basis": CODEX_APP_COST_BASIS,
             "codex_app_model": CODEX_APP_MODEL,
+            "codex_app_pricing_basis": CODEX_APP_PRICING_BASIS,
         },
         "summary": {
             "buckets": len(rows),
@@ -1484,22 +1504,29 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     codex_output_tokens_est = 0
     codex_cost_est = 0.0
     codex_cache_savings = 0.0
+    codex_cost_known = True
     today_codex_input_tokens_est = 0
     today_codex_output_tokens_est = 0
     today_codex_cost_est = 0.0
     today_codex_cache_savings = 0.0
+    today_codex_cost_known = True
     for row in codex_turn_rows:
         cache = _json_obj(row.get("cache_json"))
         estimates = _codex_estimates_with_cache(row.get("input_text_chars"), row.get("response_result_chars"), cache)
         codex_input_tokens_est += estimates["input_tokens_est"]
         codex_output_tokens_est += estimates["output_tokens_est"]
-        codex_cost_est += estimates["cost_est_usd"]
+        codex_cost_est += _as_float(estimates["cost_est_usd"])
         codex_cache_savings += estimates["cache_savings_usd"]
+        codex_cost_known = codex_cost_known and bool(estimates["cost_known"])
         if row.get("is_today"):
             today_codex_input_tokens_est += estimates["input_tokens_est"]
             today_codex_output_tokens_est += estimates["output_tokens_est"]
-            today_codex_cost_est += estimates["cost_est_usd"]
+            today_codex_cost_est += _as_float(estimates["cost_est_usd"])
             today_codex_cache_savings += estimates["cache_savings_usd"]
+            today_codex_cost_known = today_codex_cost_known and bool(estimates["cost_known"])
+    if not codex_turn_rows:
+        codex_cost_known = CODEX_APP_COST_KNOWN
+        today_codex_cost_known = CODEX_APP_COST_KNOWN
 
     provider_input_tokens = int(s("""
         select sum(
@@ -1565,8 +1592,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "codex_app_input_tokens_est": today_codex_input_tokens_est,
             "codex_app_output_tokens_est": today_codex_output_tokens_est,
             "codex_app_total_tokens_est": today_codex_input_tokens_est + today_codex_output_tokens_est,
-            "codex_app_cost_known": True,
-            "codex_app_cost_estimated": True,
+            "codex_app_cost_known": today_codex_cost_known,
+            "codex_app_cost_estimated": today_codex_cost_known,
+            "codex_app_pricing_basis": CODEX_APP_PRICING_BASIS,
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "tokens_total": {
@@ -1579,8 +1607,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "codex_app_input_tokens_est": codex_input_tokens_est,
             "codex_app_output_tokens_est": codex_output_tokens_est,
             "codex_app_total_tokens_est": codex_input_tokens_est + codex_output_tokens_est,
-            "codex_app_cost_known": True,
-            "codex_app_cost_estimated": True,
+            "codex_app_cost_known": codex_cost_known,
+            "codex_app_cost_estimated": codex_cost_known,
+            "codex_app_pricing_basis": CODEX_APP_PRICING_BASIS,
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "spend": {
@@ -1609,8 +1638,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "today_unavoidable_calculated_spend_usd": round(today_hard_floor, 6),
             "unavoidable_calculated_spend_usd": round(hard_floor, 6),
             "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline_with_codex - today_total_savings, 6),
-            "excludes_unknown_codex_app_cost": False,
-            "codex_app_cost_estimated": True,
+            "excludes_unknown_codex_app_cost": not today_codex_cost_known,
+            "codex_app_cost_estimated": today_codex_cost_known,
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "health": {
@@ -1839,6 +1868,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "today_codex_app_cache_savings_usd": round(today_codex_cache_savings, 6),
             "codex_app_cost_basis": CODEX_APP_COST_BASIS,
             "codex_app_model": CODEX_APP_MODEL,
+            "codex_app_pricing_basis": CODEX_APP_PRICING_BASIS,
             "codex_app_avg_latency_ms": round(codex_app_avg_latency),
             "routing_experiment_samples": routing_experiment_samples,
             "routing_experiment_compared_samples": routing_experiment_compared,
