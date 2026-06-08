@@ -878,6 +878,69 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(result["summary"]["by_source_surface"]["codex_app_turn"], 1)
         json.dumps(result)
 
+    def test_activity_stats_use_codex_app_policy_metadata_when_recorded(self):
+        start_id = str(uuid.uuid4())
+        routing_meta = {
+            "enabled": True,
+            "status": "applied",
+            "applied": True,
+            "requested_model": "claude-sonnet-4-6",
+            "routed_model": "claude-haiku-4-5-20251001",
+            "reason": "small non-tool Sonnet request routed to Haiku",
+            "policy_source": "local-manual",
+            "surface": "codex_app_turn",
+        }
+        crunch_meta = {
+            "enabled": True,
+            "status": "applied",
+            "changed": True,
+            "saved_chars": 400,
+            "tokens_before_est": 200,
+            "tokens_saved_est": 100,
+            "policy_source": "local-default",
+            "surface": "codex_app_turn",
+        }
+        cache_meta = {
+            "enabled": True,
+            "status": "not-applied",
+            "reason": "codex-app-cache-not-implemented",
+            "policy_source": "local-default",
+            "surface": "codex_app_turn",
+        }
+        server.store.log_codex_app_event(
+            id=start_id,
+            created_at=utc_now(),
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-policy",
+            thread_id="thread-policy",
+            message_chars=300,
+            params_chars=250,
+            input_items=1,
+            input_text_chars=400,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-policy",
+            routing_json=stable_json(routing_meta),
+            crunch_json=stable_json(crunch_meta),
+            cache_json=stable_json(cache_meta),
+        )
+
+        result = asyncio.run(stats_views.stats_activity(server.store))
+        codex = {unit["unit_id"]: unit for unit in result["units"]}[f"codex_turn:{start_id}"]
+
+        self.assertEqual(codex["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(codex["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(codex["routed_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(codex["optimization_features"]["routing"]["status"], "applied")
+        self.assertEqual(codex["optimization_features"]["crunch"]["saved_chars"], 400)
+        self.assertEqual(codex["optimization_features"]["cache"]["status"], "not-applied")
+        self.assertEqual(codex["optimization_features"]["policy_sources"], ["local-default", "local-manual"])
+        self.assertEqual(codex["replayability_level"], "features_only")
+        json.dumps(result)
+
     def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
         old_engineer = os.environ.get("AGENTFLOW_ENGINEER")
         old_app = os.environ.get("AGENTFLOW_APP")

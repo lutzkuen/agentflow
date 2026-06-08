@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import sys
@@ -14,6 +15,8 @@ import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from agentflow_proxy.crunch import crunch_body
+from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
 
 load_dotenv()
@@ -24,11 +27,39 @@ DEFAULT_PORT = int(os.getenv("AGENTFLOW_CODEX_APP_PROXY_PORT", "4013"))
 DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", "ws://127.0.0.1:4014")
 LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
 DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
+CODEX_APP_OPTIMIZE = os.getenv("AGENTFLOW_CODEX_APP_OPTIMIZE", "1") != "0"
 
 store = Store(DEFAULT_DB)
 if getattr(store, "backend", None) == "sqlite":
     store.conn.execute(f"pragma busy_timeout = {DB_BUSY_TIMEOUT_MS}")
 app = FastAPI(title="AgentFlow Codex App-Server Proxy", version="0.1.0")
+
+_CODEX_ACTION_KEY_HINTS = {
+    "approval",
+    "approvalrequest",
+    "approval_request",
+    "apply_patch",
+    "cmd",
+    "command",
+    "exec",
+    "function_call",
+    "patch",
+    "shell",
+    "tool_call",
+    "tool_calls",
+}
+_CODEX_ACTION_VALUE_HINTS = {
+    "approval_request",
+    "apply_patch",
+    "command",
+    "exec",
+    "function_call",
+    "shell",
+    "tool_call",
+    "tool_result",
+    "tool_use",
+}
+_CODEX_MODEL_FIELDS = ("model", "modelId", "model_id")
 
 
 def _input_text_chars(value: Any) -> int:
@@ -58,6 +89,127 @@ def _request_id(msg: dict[str, Any]) -> Optional[str]:
     return str(value) if value is not None else None
 
 
+def _policy_decision(kind: str, status: str, reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) -> dict[str, Any]:
+    return {
+        "enabled": enabled,
+        "status": status,
+        "reason": reason,
+        "policy_source": "local-default",
+        "surface": "codex_app_turn",
+        "decision_type": kind,
+        "applied": status == "applied",
+    }
+
+
+def _not_applied_metadata(reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) -> dict[str, dict[str, Any]]:
+    return {
+        "routing": _policy_decision("routing", "not-applied", reason, enabled=enabled),
+        "crunch": _policy_decision("crunch", "not-applied", reason, enabled=enabled),
+        "cache": _policy_decision("cache", "not-applied", reason, enabled=enabled),
+    }
+
+
+def _contains_action_hint(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_l = str(key).replace("-", "_").lower()
+            if key_l in _CODEX_ACTION_KEY_HINTS:
+                return True
+            if key_l == "type" and isinstance(nested, str) and nested.strip().lower() in _CODEX_ACTION_VALUE_HINTS:
+                return True
+            if isinstance(nested, (dict, list)) and _contains_action_hint(nested):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_action_hint(item) for item in value)
+    return False
+
+
+def _model_field(params: dict[str, Any]) -> tuple[str | None, str | None]:
+    for field in _CODEX_MODEL_FIELDS:
+        value = params.get(field)
+        if value is not None:
+            return field, str(value)
+    return None, None
+
+
+def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    model_field, requested_model = _model_field(params)
+    if not requested_model:
+        return params, _policy_decision("routing", "not-applicable", "codex-turn-start-model-field-absent")
+
+    route_body = copy.deepcopy(params)
+    route_body["model"] = requested_model
+    routed_model, routing_meta = route_model(route_body)
+    routing_meta = dict(routing_meta)
+    routing_meta.update({
+        "surface": "codex_app_turn",
+        "decision_type": "routing",
+        "status": "applied" if routed_model != requested_model else "skipped",
+        "applied": routed_model != requested_model,
+        "model_field": model_field,
+    })
+    if routed_model != requested_model and model_field is not None:
+        routed_params = copy.deepcopy(params)
+        routed_params[model_field] = routed_model
+        return routed_params, routing_meta
+    return params, routing_meta
+
+
+def _codex_crunch_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    crunched, crunch_meta = crunch_body(params)
+    crunch_meta = dict(crunch_meta)
+    changed = bool(crunch_meta.get("changed"))
+    crunch_meta.update({
+        "surface": "codex_app_turn",
+        "decision_type": "crunch",
+        "status": "applied" if changed else "skipped",
+        "reason": "codex-turn-start-crunched" if changed else "no-change",
+        "applied": changed,
+    })
+    return crunched, crunch_meta
+
+
+def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, dict[str, Any]] | None]:
+    if isinstance(raw, bytes):
+        return raw, _not_applied_metadata("binary-frame")
+
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        return raw, _not_applied_metadata("non-json-frame")
+
+    if not isinstance(msg, dict):
+        return raw, _not_applied_metadata("json-message-not-object")
+
+    method = msg.get("method")
+    if method != "turn/start":
+        return raw, _not_applied_metadata("method-not-eligible")
+
+    if not CODEX_APP_OPTIMIZE:
+        return raw, _not_applied_metadata("codex-app-optimization-disabled", enabled=False)
+
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return raw, _not_applied_metadata("params-not-object")
+
+    if _contains_action_hint(params):
+        return raw, _not_applied_metadata("action-like-params")
+
+    crunched_params, crunch_meta = _codex_crunch_params(params)
+    routed_params, routing_meta = _codex_route_params(crunched_params)
+    cache_meta = _policy_decision("cache", "not-applied", "codex-app-cache-not-implemented")
+
+    optimized = copy.deepcopy(msg)
+    optimized["params"] = routed_params
+    if optimized == msg:
+        return raw, {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+    return json.dumps(optimized, separators=(",", ":"), ensure_ascii=False), {
+        "routing": routing_meta,
+        "crunch": crunch_meta,
+        "cache": cache_meta,
+    }
+
+
 def _log_codex_app_event(**kwargs: Any) -> None:
     try:
         store.log_codex_app_event(**kwargs)
@@ -71,6 +223,7 @@ def _record_message(
     direction: str,
     session_id: str,
     request_started: dict[str, float],
+    optimization_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     if not LOG_EVENTS:
         return
@@ -85,6 +238,9 @@ def _record_message(
                 direction=direction,
                 message_chars=message_chars,
                 session_id=session_id,
+                routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
+                crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
+                cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
             )
             return
     else:
@@ -98,10 +254,23 @@ def _record_message(
             direction=direction,
             message_chars=message_chars,
             session_id=session_id,
+            routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
+            crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
+            cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
         )
         return
 
     if not isinstance(msg, dict):
+        _log_codex_app_event(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            direction=direction,
+            message_chars=message_chars,
+            session_id=session_id,
+            routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
+            crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
+            cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
+        )
         return
 
     params = msg.get("params")
@@ -137,6 +306,9 @@ def _record_message(
         error_message=(error.get("message")[:500] if isinstance(error, dict) and isinstance(error.get("message"), str) else None),
         latency_ms=latency_ms,
         session_id=session_id,
+        routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
+        crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
+        cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
     )
 
 
@@ -170,11 +342,25 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         await upstream.close()
                         return
                     if msg.get("text") is not None:
-                        _record_message(msg["text"], direction="client_to_server", session_id=session_id, request_started=request_started)
-                        await upstream.send(msg["text"])
+                        forwarded, optimization_metadata = _optimize_client_message(msg["text"])
+                        _record_message(
+                            forwarded,
+                            direction="client_to_server",
+                            session_id=session_id,
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                        )
+                        await upstream.send(forwarded)
                     elif msg.get("bytes") is not None:
-                        _record_message(msg["bytes"], direction="client_to_server", session_id=session_id, request_started=request_started)
-                        await upstream.send(msg["bytes"])
+                        forwarded, optimization_metadata = _optimize_client_message(msg["bytes"])
+                        _record_message(
+                            forwarded,
+                            direction="client_to_server",
+                            session_id=session_id,
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                        )
+                        await upstream.send(forwarded)
 
             async def upstream_to_client() -> None:
                 async for msg in upstream:

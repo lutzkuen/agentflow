@@ -622,11 +622,34 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     error_code = r.get("response_error_code")
     response_event_id = r.get("response_event_id")
     status = "error" if error_code is not None else ("success" if response_event_id else "pending")
+    routing = _json_obj(r.get("routing_json")) or _codex_not_applied_decision("routing")
+    crunch = _json_obj(r.get("crunch_json")) or _codex_not_applied_decision("crunch")
+    cache = _json_obj(r.get("cache_json")) or _codex_not_applied_decision("cache")
     estimates = _codex_turn_estimates(r.get("input_text_chars"), r.get("response_result_chars"))
+    requested_model = routing.get("requested_model") or estimates["model"]
+    target_model = routing.get("routed_model") or requested_model
+    if crunch.get("tokens_before_est") is not None:
+        baseline_input_tokens = _as_int(crunch.get("tokens_before_est"))
+        baseline_output_tokens = estimates["output_tokens_est"]
+        baseline_cost = estimate_cost(
+            requested_model,
+            baseline_input_tokens,
+            baseline_output_tokens,
+            provider="openai",
+        )
+        if baseline_cost is not None:
+            estimates["baseline_cost_est_usd"] = float(baseline_cost)
     risk = _codex_turn_risk_features(r)
-    routing = _codex_not_applied_decision("routing")
-    crunch = _codex_not_applied_decision("crunch")
-    cache = _codex_not_applied_decision("cache")
+    policy_sources = sorted({
+        str(source)
+        for source in (
+            routing.get("policy_source"),
+            routing.get("final_policy_source"),
+            crunch.get("policy_source"),
+            cache.get("policy_source"),
+        )
+        if source
+    }) or ["local-default"]
     return {
         "schema": "agentflow.optimization_unit.v1",
         "unit_id": f"codex_turn:{r.get('start_event_id')}",
@@ -634,9 +657,9 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "source_surface": "codex_app_turn",
         "granularity": "agent_turn",
         "app_family": "codex",
-        "requested_model": estimates["model"],
-        "target_model": estimates["model"],
-        "routed_model": None,
+        "requested_model": requested_model,
+        "target_model": target_model,
+        "routed_model": routing.get("routed_model") if routing.get("applied") else None,
         "model_basis": "estimated",
         "input_features": {
             "category": "codex-app-turn",
@@ -660,7 +683,7 @@ def _codex_turn_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
             "routing": routing,
             "crunch": crunch,
             "cache": cache,
-            "policy_sources": ["local-default"],
+            "policy_sources": policy_sources,
             "mutation_safe": risk["mutation_safe"],
             "mutation_safe_reason": risk["mutation_safe_reason"],
         },
@@ -803,6 +826,9 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
                s.params_chars,
                s.input_items,
                s.input_text_chars,
+               s.routing_json,
+               s.crunch_json,
+               s.cache_json,
                (
                    select r.id from codex_app_events r
                    where r.direction = 'server_to_client'
@@ -1008,6 +1034,9 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
                s.params_chars,
                s.input_items,
                s.input_text_chars,
+               s.routing_json,
+               s.crunch_json,
+               s.cache_json,
                (
                    select r.result_chars from codex_app_events r
                    where r.direction = 'server_to_client'

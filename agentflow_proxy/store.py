@@ -267,6 +267,9 @@ class SQLiteStore:
               session_id text
             )
             """)
+            self._ensure_column("codex_app_events", "routing_json", "text")
+            self._ensure_column("codex_app_events", "crunch_json", "text")
+            self._ensure_column("codex_app_events", "cache_json", "text")
             self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -393,6 +396,7 @@ class SQLiteStore:
             "id", "created_at", "direction", "method", "request_id", "thread_id",
             "message_chars", "params_chars", "input_items", "input_text_chars",
             "result_chars", "error_code", "error_message", "latency_ms", "session_id",
+            "routing_json", "crunch_json", "cache_json",
         ]
         values = [kwargs.get(c) for c in cols]
         with self._lock:
@@ -553,11 +557,16 @@ class PostgresStore(SQLiteStore):
               error_code integer,
               error_message text,
               latency_ms integer,
-              session_id text
+              session_id text,
+              routing_json text,
+              crunch_json text,
+              cache_json text
             )
             """,
         ):
             self.conn.execute(sql)
+        for column in ("routing_json", "crunch_json", "cache_json"):
+            self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
 
     def set_cache(
         self,
