@@ -456,6 +456,14 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def update_codex_app_event_routing_json(self, event_id: str, routing_json: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                "update codex_app_events set routing_json = ? where id = ?",
+                (routing_json, event_id),
+            )
+            self.conn.commit()
+
     def log_codex_app_event(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "direction", "method", "request_id", "thread_id",

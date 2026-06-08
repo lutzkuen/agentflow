@@ -1104,12 +1104,24 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     action_like_skips = 0
     unknown_param_skips = 0
     non_text_skips = 0
+    managed_status_counts: dict[str, int] = {}
+    managed_feedback_status_counts: dict[str, int] = {}
+    managed_feedback_reason_counts: dict[str, int] = {}
 
     recent_samples: list[dict[str, Any]] = []
     for row in turn_rows:
         routing = _json_obj(row.get("routing_json"))
         crunch = _json_obj(row.get("crunch_json"))
         cache = _json_obj(row.get("cache_json"))
+        managed = routing.get("managed_recommendation") if isinstance(routing, dict) else None
+        feedback = managed.get("outcome_feedback") if isinstance(managed, dict) else None
+        if isinstance(managed, dict):
+            _increment_count(managed_status_counts, managed.get("status") or "unknown")
+            if isinstance(feedback, dict):
+                _increment_count(managed_feedback_status_counts, feedback.get("status") or "unknown")
+                _increment_count(managed_feedback_reason_counts, feedback.get("reason") or "unknown")
+            else:
+                _increment_count(managed_feedback_status_counts, "pending")
         model_state, model_field = _codex_model_field_state(routing)
         _increment_count(model_field_counts, model_state)
         if model_field:
@@ -1238,6 +1250,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 ],
                 "cache_status": cache.get("status") or "missing",
                 "cache_reason": cache.get("reason") or "unknown",
+                "managed_recommendation_status": (managed or {}).get("status") if isinstance(managed, dict) else "missing",
+                "managed_feedback_status": (feedback or {}).get("status") if isinstance(feedback, dict) else ("pending" if isinstance(managed, dict) else "missing"),
+                "managed_feedback_reason": (feedback or {}).get("reason") if isinstance(feedback, dict) else None,
                 "input_text_chars": _as_int(row.get("input_text_chars")),
                 "saved_chars": saved_chars,
                 "tokens_saved_est": saved_tokens,
@@ -1285,6 +1300,22 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "pass_through_error_rate": round(pass_through_errors / pass_through_count, 4) if pass_through_count else 0,
             "optimized_avg_latency_ms": _avg_or_none(optimized_latency),
             "pass_through_avg_latency_ms": _avg_or_none(pass_through_latency),
+            "managed_recommendation_rows": sum(managed_status_counts.values()),
+            "managed_recommendation_enabled": sum(
+                1
+                for row in turn_rows
+                if bool((_json_obj(row.get("routing_json")).get("managed_recommendation") or {}).get("enabled"))
+            ),
+            "managed_recommendation_disabled": sum(
+                1
+                for row in turn_rows
+                if isinstance(_json_obj(row.get("routing_json")).get("managed_recommendation"), dict)
+                and not bool((_json_obj(row.get("routing_json")).get("managed_recommendation") or {}).get("enabled"))
+            ),
+            "managed_feedback_sent": managed_feedback_status_counts.get("sent", 0),
+            "managed_feedback_skipped": managed_feedback_status_counts.get("skipped", 0),
+            "managed_feedback_error": managed_feedback_status_counts.get("error", 0),
+            "managed_feedback_pending": managed_feedback_status_counts.get("pending", 0),
         },
         "model_field_breakdown": _count_breakdown(model_field_counts),
         "model_field_names": _count_breakdown(model_field_names),
@@ -1300,6 +1331,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "crunch_breakdown": _decision_breakdown(turn_rows, "crunch_json"),
         "crunch_pattern_breakdown": _codex_crunch_pattern_breakdown(turn_rows),
         "cache_breakdown": _decision_breakdown(turn_rows, "cache_json"),
+        "managed_recommendation_breakdown": _count_breakdown(managed_status_counts),
+        "managed_feedback_breakdown": _count_breakdown(managed_feedback_status_counts),
+        "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
         "outcome_by_optimization": [
             {
                 "bucket": "optimized",

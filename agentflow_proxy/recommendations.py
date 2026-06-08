@@ -8,11 +8,14 @@ from typing import Any
 
 import httpx
 
+from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
+
 
 RECOMMENDATION_PATH = "/v1/recommendation"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
 
 RAW_FEATURE_KEYS = {
+    "arguments",
     "body",
     "completion",
     "content",
@@ -21,6 +24,7 @@ RAW_FEATURE_KEYS = {
     "message",
     "messages",
     "output",
+    "params",
     "prompt",
     "raw_prompt",
     "raw_request",
@@ -29,7 +33,15 @@ RAW_FEATURE_KEYS = {
     "response",
     "system",
     "system_prompt",
+    "tool_input",
+    "tool_output",
+    "tool_payload",
+    "tool_payloads",
+    "transcript",
+    "transcripts",
 }
+
+TOKEN_CHARS = 4
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -128,6 +140,74 @@ def build_optimization_unit(
         },
         "outcome_features": {},
         "replayability_level": "features_only",
+    }
+    return _sanitize_features(unit)
+
+
+def _codex_model_state(routing_meta: dict[str, Any]) -> tuple[str, str | None, str | None, str | None]:
+    requested_model = routing_meta.get("requested_model")
+    routed_model = routing_meta.get("routed_model")
+    model_field = routing_meta.get("model_field")
+    if isinstance(requested_model, str) and requested_model:
+        return "present", model_field if isinstance(model_field, str) else None, requested_model, routed_model if isinstance(routed_model, str) else requested_model
+    if routing_meta.get("reason") == "codex-turn-start-model-field-absent":
+        return "absent", None, None, None
+    return "unknown", model_field if isinstance(model_field, str) else None, None, None
+
+
+def build_codex_turn_optimization_unit(
+    *,
+    method: str,
+    request_id_present: bool,
+    thread_id_present: bool,
+    params_chars: int | None,
+    input_items: int | None,
+    input_text_chars: int | None,
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    workflow_phase: str | None = None,
+    workflow_phase_reason: str | None = None,
+) -> dict[str, Any]:
+    model_state, model_field, requested_model, routed_model = _codex_model_state(routing_meta)
+    unit = {
+        "source_surface": "codex_turn",
+        "granularity": "agent_turn",
+        "app_family": "codex",
+        "requested_model": requested_model,
+        "input_features": {
+            "jsonrpc_method": method,
+            "request_id_present": bool(request_id_present),
+            "thread_id_present": bool(thread_id_present),
+            "params_chars": params_chars,
+            "input_items": input_items,
+            "input_text_chars": input_text_chars,
+            "input_tokens_est": max(1, int(input_text_chars / TOKEN_CHARS)) if input_text_chars else 0,
+            "workflow_phase": workflow_phase or routing_meta.get("workflow_phase") or "unknown",
+            "workflow_phase_reason": workflow_phase_reason or routing_meta.get("workflow_phase_reason"),
+            "model_field_state": model_state,
+            "model_field_name": model_field,
+            "local_routed_model": routed_model,
+            "local_routing_reason": routing_meta.get("reason"),
+            "local_routing_policy_source": routing_meta.get("policy_source"),
+            "routing_status": routing_meta.get("status"),
+            "crunch_status": crunch_meta.get("status"),
+            "crunch_changed": bool(crunch_meta.get("changed")),
+            "crunch_saved_chars": crunch_meta.get("saved_chars"),
+            "cache_status": cache_meta.get("status"),
+            "cache_reason": cache_meta.get("reason"),
+            "cache_eligible": bool(cache_meta.get("eligible")),
+            "cache_replayability_level": cache_meta.get("replayability_level"),
+        },
+        "tool_features": {
+            "category": routing_meta.get("category") or "codex_turn",
+            "action_like_skipped": routing_meta.get("reason") == "action-like-params",
+            "unknown_param_shape": cache_meta.get("reason") == "unknown-param-shape",
+            "non_text_input": cache_meta.get("reason") == "non-text-input",
+            "safe_param_policy_source": routing_meta.get("policy_source") or cache_meta.get("policy_source"),
+        },
+        "outcome_features": {},
+        "replayability_level": cache_meta.get("replayability_level") or "features_only",
     }
     return _sanitize_features(unit)
 
@@ -401,6 +481,98 @@ def build_outcome_feedback(
         if isinstance(feedback_features, dict):
             features["routing_experiment"] = feedback_features
     features.update(_compact_error(error, status_code))
+    return _sanitize_features(features)
+
+
+def build_codex_turn_outcome_feedback(
+    *,
+    recommendation_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    result_chars: int | None,
+    error_code: int | None,
+    error_message: str | None,
+    latency_ms: int | None,
+    input_text_chars: int | None,
+    session_id: str | None,
+) -> dict[str, Any]:
+    input_tokens_est = max(1, int(input_text_chars / TOKEN_CHARS)) if input_text_chars else 0
+    output_tokens_est = max(1, int(result_chars / TOKEN_CHARS)) if result_chars else 0
+    model = (
+        routing_meta.get("routed_model")
+        or routing_meta.get("requested_model")
+        or codex_app_model()
+    )
+    cost_est = estimate_cost(
+        str(model),
+        input_tokens_est,
+        output_tokens_est,
+        provider="openai",
+        processing_mode=codex_app_processing_mode(),
+    )
+    baseline_model = routing_meta.get("requested_model") or model
+    baseline_cost = estimate_cost(
+        str(baseline_model),
+        input_tokens_est,
+        output_tokens_est,
+        provider="openai",
+        processing_mode=codex_app_processing_mode(),
+    )
+    session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16] if session_id else None
+    status = "error" if error_code is not None else "success"
+    features: dict[str, Any] = {
+        "provider": "codex-app",
+        "source_surface": "codex_turn",
+        "granularity": "agent_turn",
+        "app_family": "codex",
+        "status": status,
+        "status_code": 500 if error_code is not None else 200,
+        "jsonrpc_error_code": error_code,
+        "latency_ms": latency_ms,
+        "result_chars": result_chars,
+        "input_tokens": input_tokens_est,
+        "output_tokens": output_tokens_est,
+        "input_tokens_est": input_tokens_est,
+        "output_tokens_est": output_tokens_est,
+        "cost_est_usd": cost_est,
+        "cost_baseline_usd": baseline_cost,
+        "cache_decision": {
+            key: cache_meta.get(key)
+            for key in ("status", "reason", "hit_type", "policy_source", "replayability_level")
+            if cache_meta.get(key) is not None
+        },
+        "routing_decision": {
+            "reason": routing_meta.get("reason"),
+            "status": routing_meta.get("status"),
+            "policy_source": routing_meta.get("policy_source"),
+            "model_field": routing_meta.get("model_field"),
+            "requested_model": routing_meta.get("requested_model"),
+            "routed_model": routing_meta.get("routed_model"),
+            "managed_policy_id": routing_meta.get("managed_policy_id"),
+        },
+        "crunch_decision": {
+            "status": crunch_meta.get("status"),
+            "reason": crunch_meta.get("reason"),
+            "policy_source": crunch_meta.get("policy_source"),
+            "saved_chars": crunch_meta.get("saved_chars"),
+            "tokens_saved_est": crunch_meta.get("tokens_saved_est"),
+        },
+        "session": {
+            "present": bool(session_id),
+            "id_hash": session_hash,
+        },
+        "managed_recommendation": {
+            "optimization_unit_id": recommendation_meta.get("optimization_unit_id"),
+            "recommendation_id": recommendation_meta.get("recommendation_id"),
+            "policy_id": recommendation_meta.get("policy_id"),
+            "target_model": recommendation_meta.get("target_model"),
+            "applied": bool(recommendation_meta.get("applied")),
+            "apply_reason": recommendation_meta.get("apply_reason"),
+        },
+    }
+    if error_code is not None:
+        features["error_class"] = "jsonrpc_error"
     return _sanitize_features(features)
 
 

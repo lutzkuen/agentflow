@@ -27,6 +27,12 @@ from agentflow_proxy.codex_app_policy import (
     codex_app_optimize_enabled,
 )
 from agentflow_proxy.crunch import TOKEN_CHARS, crunch_body, crunch_codex_turn_params
+from agentflow_proxy.recommendations import (
+    build_codex_turn_optimization_unit,
+    build_codex_turn_outcome_feedback,
+    fetch_recommendation,
+    send_outcome_feedback,
+)
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -333,6 +339,65 @@ def _public_metadata(metadata: dict[str, dict[str, Any]] | None) -> dict[str, di
     return public
 
 
+def _jsonrpc_message(raw: str | bytes) -> dict[str, Any] | None:
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+async def _attach_codex_managed_recommendation(
+    raw: str | bytes,
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict) or msg.get("method") != "turn/start":
+        return None
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return None
+    metadata = optimization_metadata or _not_applied_metadata("missing-optimization-metadata")
+    routing = metadata.setdefault("routing", _policy_decision("routing", "not-applied", "missing-routing-metadata"))
+    crunch = metadata.setdefault("crunch", _policy_decision("crunch", "not-applied", "missing-crunch-metadata"))
+    cache = metadata.setdefault("cache", _codex_cache_decision("skipped", "missing-cache-metadata", eligible=False))
+    request_id = _request_id(msg)
+    input_value = params.get("input")
+    input_text_chars = _input_text_chars(input_value)
+    input_items = len(input_value) if isinstance(input_value, list) else None
+    unit = build_codex_turn_optimization_unit(
+        method="turn/start",
+        request_id_present=request_id is not None,
+        thread_id_present=_thread_id(params) is not None,
+        params_chars=len(stable_json(params)),
+        input_items=input_items,
+        input_text_chars=input_text_chars if input_text_chars else None,
+        routing_meta=routing,
+        crunch_meta=crunch,
+        cache_meta=cache,
+    )
+    managed = await fetch_recommendation(unit)
+    managed.setdefault("applied", False)
+    if managed.get("status") == "received":
+        managed["applied"] = False
+        managed["apply_reason"] = "codex-app-managed-recommendation-observed-only"
+    managed["source_surface"] = "codex_turn"
+    routing["managed_recommendation"] = managed
+    return {
+        "request_id": request_id,
+        "routing": routing,
+        "crunch": crunch,
+        "cache": cache,
+        "managed": managed,
+        "input_text_chars": input_text_chars if input_text_chars else None,
+    }
+
+
 def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, dict[str, Any]] | None]:
     if isinstance(raw, bytes):
         return raw, _not_applied_metadata("binary-frame")
@@ -440,17 +505,18 @@ def _record_message(
     session_id: str,
     request_started: dict[str, float],
     optimization_metadata: dict[str, dict[str, Any]] | None = None,
-) -> None:
+) -> str | None:
     if not LOG_EVENTS:
-        return
+        return None
     optimization_metadata = _public_metadata(optimization_metadata)
     message_chars = len(raw)
+    event_id = str(uuid.uuid4())
     if isinstance(raw, bytes):
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             _log_codex_app_event(
-                id=str(uuid.uuid4()),
+                id=event_id,
                 created_at=utc_now(),
                 direction=direction,
                 message_chars=message_chars,
@@ -459,14 +525,14 @@ def _record_message(
                 crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
                 cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
             )
-            return
+            return event_id
     else:
         text = raw
     try:
         msg = json.loads(text)
     except Exception:
         _log_codex_app_event(
-            id=str(uuid.uuid4()),
+            id=event_id,
             created_at=utc_now(),
             direction=direction,
             message_chars=message_chars,
@@ -475,11 +541,11 @@ def _record_message(
             crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
             cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
         )
-        return
+        return event_id
 
     if not isinstance(msg, dict):
         _log_codex_app_event(
-            id=str(uuid.uuid4()),
+            id=event_id,
             created_at=utc_now(),
             direction=direction,
             message_chars=message_chars,
@@ -488,7 +554,7 @@ def _record_message(
             crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
             cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
         )
-        return
+        return event_id
 
     params = msg.get("params")
     method = msg.get("method")
@@ -508,7 +574,7 @@ def _record_message(
         request_started[rid] = time.time()
 
     _log_codex_app_event(
-        id=str(uuid.uuid4()),
+        id=event_id,
         created_at=utc_now(),
         direction=direction,
         method=str(method) if method is not None else None,
@@ -527,6 +593,55 @@ def _record_message(
         crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
         cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
     )
+    return event_id
+
+
+async def _record_codex_managed_outcome(
+    raw: str | bytes,
+    *,
+    session_id: str,
+    request_started: dict[str, float],
+    pending_managed: dict[str, dict[str, Any]],
+) -> None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict):
+        return
+    request_id = _request_id(msg)
+    if request_id is None:
+        return
+    pending = pending_managed.pop(request_id, None)
+    if not pending:
+        return
+    result = msg.get("result")
+    error = msg.get("error")
+    latency_ms: int | None = None
+    started = request_started.get(request_id)
+    if started is not None:
+        latency_ms = int((time.time() - started) * 1000)
+    result_chars = len(stable_json(result)) if result is not None else None
+    error_code = error.get("code") if isinstance(error, dict) else None
+    error_message = error.get("message") if isinstance(error, dict) and isinstance(error.get("message"), str) else None
+    managed = pending["managed"]
+    outcome = build_codex_turn_outcome_feedback(
+        recommendation_meta=managed,
+        routing_meta=pending["routing"],
+        crunch_meta=pending["crunch"],
+        cache_meta=pending["cache"],
+        result_chars=result_chars,
+        error_code=error_code,
+        error_message=error_message,
+        latency_ms=latency_ms,
+        input_text_chars=pending.get("input_text_chars"),
+        session_id=session_id,
+    )
+    managed["outcome_feedback"] = await send_outcome_feedback(managed, outcome)
+    pending["routing"]["managed_recommendation"] = managed
+    start_event_id = pending.get("start_event_id")
+    if isinstance(start_event_id, str):
+        try:
+            store.update_codex_app_event_routing_json(start_event_id, stable_json(pending["routing"]))
+        except Exception as exc:
+            print(f"AgentFlow Codex app managed feedback metadata update skipped: {exc}", file=sys.stderr)
 
 
 def _maybe_store_codex_cache_response(
@@ -585,6 +700,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     upstream_url = _upstream_url("/" + path if path else "", str(websocket.query_params))
     request_started: dict[str, float] = {}
     pending_cache: dict[str, dict[str, Any]] = {}
+    pending_managed: dict[str, dict[str, Any]] = {}
 
     try:
         async with websockets.connect(upstream_url) as upstream:
@@ -596,16 +712,26 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         return
                     if msg.get("text") is not None:
                         forwarded, optimization_metadata = _optimize_client_message(msg["text"])
+                        managed_pending = await _attach_codex_managed_recommendation(forwarded, optimization_metadata)
                         cache_meta = (optimization_metadata or {}).get("cache") or {}
-                        _record_message(
+                        start_event_id = _record_message(
                             forwarded,
                             direction="client_to_server",
                             session_id=session_id,
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
                         )
+                        if managed_pending and isinstance(managed_pending.get("request_id"), str):
+                            managed_pending["start_event_id"] = start_event_id
+                            pending_managed[str(managed_pending["request_id"])] = managed_pending
                         replay_frame = cache_meta.get(_INTERNAL_REPLAY_FRAME_KEY)
                         if isinstance(replay_frame, str):
+                            await _record_codex_managed_outcome(
+                                replay_frame,
+                                session_id=session_id,
+                                request_started=request_started,
+                                pending_managed=pending_managed,
+                            )
                             _record_message(
                                 replay_frame,
                                 direction="server_to_client",
@@ -631,18 +757,28 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         await upstream.send(forwarded)
                     elif msg.get("bytes") is not None:
                         forwarded, optimization_metadata = _optimize_client_message(msg["bytes"])
-                        _record_message(
+                        managed_pending = await _attach_codex_managed_recommendation(forwarded, optimization_metadata)
+                        start_event_id = _record_message(
                             forwarded,
                             direction="client_to_server",
                             session_id=session_id,
                             request_started=request_started,
                             optimization_metadata=optimization_metadata,
                         )
+                        if managed_pending and isinstance(managed_pending.get("request_id"), str):
+                            managed_pending["start_event_id"] = start_event_id
+                            pending_managed[str(managed_pending["request_id"])] = managed_pending
                         await upstream.send(forwarded)
 
             async def upstream_to_client() -> None:
                 async for msg in upstream:
                     _maybe_store_codex_cache_response(msg, pending_cache=pending_cache)
+                    await _record_codex_managed_outcome(
+                        msg,
+                        session_id=session_id,
+                        request_started=request_started,
+                        pending_managed=pending_managed,
+                    )
                     _record_message(msg, direction="server_to_client", session_id=session_id, request_started=request_started)
                     if isinstance(msg, bytes):
                         await websocket.send_bytes(msg)

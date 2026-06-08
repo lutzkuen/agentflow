@@ -705,6 +705,12 @@ class StatsFullTest(unittest.TestCase):
                 "reason": "codex-turn-start-model-field-absent",
                 "applied": False,
                 "policy_source": "local-default",
+                "managed_recommendation": {
+                    "enabled": False,
+                    "status": "skipped",
+                    "reason": "disabled",
+                    "outcome_feedback": {"enabled": False, "status": "skipped", "reason": "disabled"},
+                },
             },
             crunch={"status": "skipped", "reason": "no-change", "applied": False, "changed": False},
             cache={"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True, "policy_source": "local-default"},
@@ -720,6 +726,15 @@ class StatsFullTest(unittest.TestCase):
                 "requested_model": "claude-sonnet-4-6",
                 "routed_model": "claude-haiku-4-5-20251001",
                 "policy_source": "local-default",
+                "managed_recommendation": {
+                    "enabled": True,
+                    "status": "received",
+                    "policy_id": "codex-policy-1",
+                    "target_model": "claude-haiku-4-5-20251001",
+                    "applied": False,
+                    "apply_reason": "codex-app-managed-recommendation-observed-only",
+                    "outcome_feedback": {"enabled": True, "status": "sent", "reason": "accepted", "optimization_unit_id": 77},
+                },
             },
             crunch={"status": "skipped", "reason": "no-change", "applied": False, "changed": False},
             cache={"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": True, "policy_source": "local-default"},
@@ -784,6 +799,12 @@ class StatsFullTest(unittest.TestCase):
                 "reason": "codex-turn-start-model-field-absent",
                 "applied": False,
                 "policy_source": "local-default",
+                "managed_recommendation": {
+                    "enabled": True,
+                    "status": "error",
+                    "reason": "server-error",
+                    "outcome_feedback": {"enabled": True, "status": "error", "reason": "request-failed"},
+                },
             },
             crunch={"status": "skipped", "reason": "no-change", "applied": False, "changed": False},
             cache={"status": "hit", "reason": "exact-match", "eligible": True, "hit_type": "exact", "policy_source": "local-default"},
@@ -813,6 +834,12 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(summary["optimized_rows"], 3)
         self.assertEqual(summary["pass_through_rows"], 2)
         self.assertGreater(summary["optimized_error_rate"], 0)
+        self.assertEqual(summary["managed_recommendation_rows"], 3)
+        self.assertEqual(summary["managed_recommendation_enabled"], 2)
+        self.assertEqual(summary["managed_recommendation_disabled"], 1)
+        self.assertEqual(summary["managed_feedback_sent"], 1)
+        self.assertEqual(summary["managed_feedback_skipped"], 1)
+        self.assertEqual(summary["managed_feedback_error"], 1)
 
         model_fields = {row["value"]: row["count"] for row in result["model_field_breakdown"]}
         self.assertEqual(model_fields["present"], 1)
@@ -826,6 +853,8 @@ class StatsFullTest(unittest.TestCase):
         patterns = {row["type"]: row for row in result["crunch_pattern_breakdown"]}
         self.assertEqual(patterns["repeated_input_section"]["count"], 2)
         self.assertEqual(patterns["older_input_head_tail"]["saved_chars_est"], 500)
+        feedback_statuses = {row["value"]: row["count"] for row in result["managed_feedback_breakdown"]}
+        self.assertEqual(feedback_statuses, {"sent": 1, "skipped": 1, "error": 1})
         sample = next(row for row in result["recent_samples"] if row["saved_chars"] == 1600)
         self.assertEqual(set(sample["codex_pattern_types"]), {"repeated_input_section", "older_input_head_tail"})
         self.assertNotIn(secret, json.dumps(result))
