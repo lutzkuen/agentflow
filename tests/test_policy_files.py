@@ -14,6 +14,18 @@ from agentflow_proxy.policy_bundle import build_policy_bundle, compare_policy_bu
 
 
 class PolicyFileStatusTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+
+    def tearDown(self):
+        if self.old_event_log is None:
+            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+        else:
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+        self.tmp.cleanup()
+
     def test_policy_bundle_exports_effective_default_policy_state(self):
         bundle = asyncio.run(build_policy_bundle())
 

@@ -12,6 +12,18 @@ from agentflow_proxy import cli
 
 
 class PolicyReloadCliTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+
+    def tearDown(self):
+        if self.old_event_log is None:
+            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+        else:
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+        self.tmp.cleanup()
+
     def test_default_policy_reload_url_uses_agentflow_port(self):
         with patch.dict(os.environ, {"AGENTFLOW_PORT": "4001"}, clear=False):
             self.assertEqual(
@@ -177,6 +189,32 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["schema"], "agentflow.policy_bundle_diff.v1")
         self.assertIn("invalid JSON", payload["before_validation"]["errors"][0]["message"])
+
+    def test_policy_cli_records_compact_local_events(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        before = json.loads(exported.getvalue())
+        after = json.loads(exported.getvalue())
+        after["policies"]["routing"]["enabled"] = not before["policies"]["routing"]["enabled"]
+
+        with TemporaryDirectory() as tmp:
+            before_path = Path(tmp) / "before.json"
+            after_path = Path(tmp) / "after.json"
+            before_path.write_text(json.dumps(before), encoding="utf-8")
+            after_path.write_text(json.dumps(after), encoding="utf-8")
+            stdout = io.StringIO()
+
+            cli.policy_diff_cli([str(before_path), str(after_path)], stdout=stdout)
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        events = recent_policy_events(limit=5)["events"]
+        self.assertEqual(events[0]["action"], "diff")
+        self.assertTrue(events[0]["ok"])
+        self.assertEqual(events[0]["details"]["changed_sections"], ["routing"])
+        self.assertEqual(events[0]["details"]["change_count"], 1)
+        self.assertEqual(events[1]["action"], "export")
+        self.assertIn("routing", events[1]["details"]["policies"])
 
 
 if __name__ == "__main__":

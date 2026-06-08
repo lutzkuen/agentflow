@@ -1,5 +1,7 @@
 import sys
 import importlib.util
+import os
+from pathlib import Path
 import tempfile
 import unittest
 
@@ -39,8 +41,14 @@ class DashboardImportTests(unittest.TestCase):
 
     def test_dashboard_app_uses_injected_store_and_preserves_routes(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
         store = Store(tmp.name)
         try:
+            from agentflow_proxy.policy_events import log_policy_event
+
+            log_policy_event("validate", ok=False, details={"source": "test", "error_count": 1})
             app = create_dashboard_app(
                 store_obj=lambda: store,
                 default_db=tmp.name,
@@ -57,6 +65,7 @@ class DashboardImportTests(unittest.TestCase):
             health = client.get("/health")
             stats = client.get("/agentflow/stats")
             policies = client.get("/agentflow/stats/policies")
+            policy_events = client.get("/agentflow/stats/policy-events")
             admin_reload = client.post("/agentflow/admin/reload-policies")
             dashboard = client.get("/agentflow/dashboard")
 
@@ -66,6 +75,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(stats.json()["db"], tmp.name)
             self.assertEqual(stats.json()["calls"], 0)
             self.assertEqual(policies.status_code, 200)
+            self.assertEqual(policy_events.status_code, 200)
+            self.assertEqual(policy_events.json()["schema"], "agentflow.policy_events.v1")
+            self.assertEqual(policy_events.json()["events"][0]["action"], "validate")
             policy_json = policies.json()
             self.assertEqual(policy_json["schema"], "agentflow.policy_state.v1")
             self.assertIn("routing", policy_json)
@@ -93,9 +105,16 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("AgentFlow", dashboard.text)
             self.assertIn("Policies", dashboard.text)
             self.assertIn("/agentflow/stats/policies", dashboard.text)
+            self.assertIn("/agentflow/stats/policy-events", dashboard.text)
+            self.assertIn("Recent policy events", dashboard.text)
         finally:
+            if old_event_log is None:
+                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
             store.conn.close()
             tmp.close()
+            event_tmp.cleanup()
 
 
 if __name__ == "__main__":

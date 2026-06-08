@@ -63,6 +63,13 @@ def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, 
     stderr = stderr if stderr is not None else sys.stderr
 
     if not args.allow_non_loopback and not _is_loopback_url(args.url):
+        from agentflow_proxy.policy_events import log_policy_event
+
+        log_policy_event(
+            "reload",
+            ok=False,
+            details={"source": "cli", "url": args.url, "error_type": "unsafe_url", "exit_code": 2},
+        )
         _write_json(
             stderr,
             {
@@ -79,6 +86,13 @@ def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, 
     try:
         response = httpx.post(args.url, timeout=args.timeout)
     except httpx.HTTPError as exc:
+        from agentflow_proxy.policy_events import log_policy_event
+
+        log_policy_event(
+            "reload",
+            ok=False,
+            details={"source": "cli", "url": args.url, "error_type": exc.__class__.__name__, "exit_code": 1},
+        )
         _write_json(
             stderr,
             {
@@ -100,6 +114,18 @@ def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, 
         }
 
     if response.is_success:
+        from agentflow_proxy.policy_events import log_policy_event
+
+        details = {
+            "source": "cli",
+            "url": args.url,
+            "status_code": response.status_code,
+            "exit_code": 0,
+        }
+        if isinstance(payload, dict):
+            details["reloaded_modules"] = payload.get("reloaded_modules", [])
+            details["policies"] = payload.get("policies")
+        log_policy_event("reload", ok=True, details=details)
         _write_json(stdout, payload if isinstance(payload, dict) else {"ok": True, "response": payload})
         return 0
 
@@ -107,6 +133,13 @@ def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, 
     error_payload.setdefault("ok", False)
     error_payload.setdefault("status_code", response.status_code)
     error_payload.setdefault("url", args.url)
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "reload",
+        ok=False,
+        details={"source": "cli", "url": args.url, "status_code": response.status_code, "exit_code": 1},
+    )
     _write_json(stderr, error_payload)
     return 1
 
@@ -123,8 +156,10 @@ def policy_export_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) 
     stdout = stdout if stdout is not None else sys.stdout
 
     from agentflow_proxy.policy_bundle import build_policy_bundle
+    from agentflow_proxy.policy_events import log_policy_event
 
     bundle = asyncio.run(build_policy_bundle())
+    log_policy_event("export", ok=True, details={"source": "cli", "exit_code": 0, "policies": bundle.get("policies")})
     if args.pretty:
         stdout.write(json.dumps(bundle, indent=2, sort_keys=True) + "\n")
     else:
@@ -172,6 +207,13 @@ def policy_validate_cli(
             raw = Path(args.path).read_text(encoding="utf-8")
         except OSError as exc:
             result = _validation_result_error(str(exc), path=args.path)
+            from agentflow_proxy.policy_events import log_policy_event
+
+            log_policy_event(
+                "validate",
+                ok=False,
+                details={"source": "cli", "path": args.path, "error_count": 1, "warning_count": 0, "exit_code": 1},
+            )
             _write_validation_result(stdout, result, pretty=args.pretty)
             return 1
 
@@ -179,12 +221,32 @@ def policy_validate_cli(
         payload = json.loads(raw)
     except ValueError as exc:
         result = _validation_result_error(f"invalid JSON: {exc}", path="$")
+        from agentflow_proxy.policy_events import log_policy_event
+
+        log_policy_event(
+            "validate",
+            ok=False,
+            details={"source": "cli", "path": args.path, "error_count": 1, "warning_count": 0, "exit_code": 1},
+        )
         _write_validation_result(stdout, result, pretty=args.pretty)
         return 1
 
     from agentflow_proxy.policy_bundle import validate_policy_bundle
+    from agentflow_proxy.policy_events import log_policy_event
 
     result = validate_policy_bundle(payload)
+    log_policy_event(
+        "validate",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "bundle_schema": result.get("bundle_schema"),
+            "error_count": len(result.get("errors", [])),
+            "warning_count": len(result.get("warnings", [])),
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
     _write_validation_result(stdout, result, pretty=args.pretty)
     return 0 if result["ok"] else 1
 
@@ -255,6 +317,23 @@ def policy_diff_cli(
 
         result = compare_policy_bundles(before, after)
 
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "diff",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "before": args.before,
+            "after": args.after,
+            "changed": result.get("changed"),
+            "changed_sections": result.get("changed_sections", []),
+            "change_count": result.get("change_count", 0),
+            "before_error_count": len(result.get("before_validation", {}).get("errors", [])),
+            "after_error_count": len(result.get("after_validation", {}).get("errors", [])),
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
     _write_policy_diff_result(stdout, result, pretty=args.pretty)
     return 0 if result["ok"] else 1
 

@@ -124,6 +124,12 @@ The diff command prints `agentflow.policy_bundle_diff.v1` JSON with changed poli
 and JSON paths under routing, crunch, cache, and routing experiments. It validates both
 inputs first and exits non-zero for malformed bundles.
 
+Policy reload/export/validate/diff operations append compact local audit events to
+`~/.agentflow/policy_events.jsonl` by default. The read-only dashboard exposes recent entries
+at `/agentflow/stats/policy-events` and in the Policies tab. Set `AGENTFLOW_POLICY_EVENTS=0`
+to disable the audit log, or `AGENTFLOW_POLICY_EVENTS_LOG=/path/to/events.jsonl` to choose a
+different local file.
+
 ## Point Claude Code / Claude CLI at it
 
 The exact environment variable names can differ by Claude Code version, but the intended setup is:

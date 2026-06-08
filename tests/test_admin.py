@@ -1,4 +1,7 @@
 import importlib.util
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 
@@ -13,6 +16,18 @@ if HAS_RUNTIME_DEPS:
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class AdminRouterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+
+    def tearDown(self):
+        if self.old_event_log is None:
+            os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+        else:
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+        self.tmp.cleanup()
+
     def test_reload_route_is_loopback_only(self):
         app = FastAPI()
         app.include_router(create_admin_router())
@@ -45,6 +60,12 @@ class AdminRouterTests(unittest.TestCase):
         self.assertIn("routing", payload["policies"])
         self.assertIn("crunch", payload["policies"])
         self.assertIn("cache", payload["policies"])
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        events = recent_policy_events(limit=1)["events"]
+        self.assertEqual(events[0]["action"], "reload")
+        self.assertEqual(events[0]["details"]["source"], "admin_api")
 
 
 if __name__ == "__main__":

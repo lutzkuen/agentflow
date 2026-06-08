@@ -7,6 +7,8 @@ from typing import Any, Callable
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from agentflow_proxy.policy_events import log_policy_event
+
 
 POLICY_RELOAD_MODULES = (
     "agentflow_proxy.router",
@@ -45,12 +47,18 @@ async def reload_policy_modules(after_reload: Callable[[], None] | None = None) 
     from agentflow_proxy import stats
 
     policy_state = await stats.stats_policies()
-    return {
+    payload = {
         "ok": True,
         "schema": "agentflow.policy_reload.v1",
         "reloaded_modules": reloaded,
         "policies": policy_state,
     }
+    log_policy_event(
+        "reload",
+        ok=True,
+        details={"source": "admin_api", "reloaded_modules": reloaded, "policies": policy_state},
+    )
+    return payload
 
 
 def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRouter:
@@ -59,6 +67,15 @@ def create_admin_router(after_reload: Callable[[], None] | None = None) -> APIRo
     @router.post("/agentflow/admin/reload-policies", response_model=None)
     async def reload_policies(request: Request) -> Any:
         if not request_is_loopback(request):
+            log_policy_event(
+                "reload",
+                ok=False,
+                details={
+                    "source": "admin_api",
+                    "client_host": request.client.host if request.client else None,
+                    "error_type": "forbidden",
+                },
+            )
             return JSONResponse(
                 {
                     "ok": False,

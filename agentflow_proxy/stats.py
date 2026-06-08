@@ -111,6 +111,12 @@ async def stats_policies() -> dict[str, Any]:
     }
 
 
+async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
+    from agentflow_proxy.policy_events import recent_policy_events
+
+    return recent_policy_events(limit=limit)
+
+
 def _source_surface(provider: str, path: str) -> str:
     provider_l = (provider or "").lower()
     path_l = (path or "").lower()
@@ -1750,6 +1756,15 @@ def dashboard_html() -> str:
     <tbody id="routing-rules-tbody"></tbody>
   </table>
 </div>
+<div class="section">
+  <h2>Recent policy events</h2>
+  <table>
+    <thead><tr>
+      <th>Time</th><th>Action</th><th>Status</th><th>Source</th><th>Details</th>
+    </tr></thead>
+    <tbody id="policy-events-tbody"></tbody>
+  </table>
+</div>
 </div>
 
 <div class="tab-panel" id="tab-sessions">
@@ -2143,6 +2158,27 @@ async function refreshPolicies(){
       <td class="flags">${esc(JSON.stringify(rule.conditions||{}))}</td>
       <td class="flags">${esc(JSON.stringify(rule.action||{}))}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No routing rules loaded</td></tr>';
+
+    const er=await fetch('/agentflow/stats/policy-events?limit=20');
+    const ed=await er.json();
+    const events=ed.events||[];
+    document.getElementById('policy-events-tbody').innerHTML=events.map(event=>{
+      const details=event.details||{};
+      const parts=[];
+      if(details.status_code!=null)parts.push('HTTP '+details.status_code);
+      if(details.exit_code!=null)parts.push('exit '+details.exit_code);
+      if(details.changed_sections&&details.changed_sections.length)parts.push('changed '+details.changed_sections.join(', '));
+      if(details.change_count!=null)parts.push(details.change_count+' changes');
+      if(details.error_count!=null)parts.push(details.error_count+' validation errors');
+      if(details.reloaded_modules)parts.push(details.reloaded_modules.length+' modules');
+      return `<tr>
+        <td class="ts">${ago(event.created_at)}</td>
+        <td><span class="badge provider">${esc(event.action)}</span></td>
+        <td>${event.ok?'<span class="badge hit">ok</span>':'<span class="badge err">failed</span>'}</td>
+        <td><span class="badge stream">${esc(details.source||'unknown')}</span></td>
+        <td class="flags">${parts.map(p=>`<span class="badge miss">${esc(p)}</span>`).join(' ')||'<span class="badge miss">recorded</span>'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="5" style="color:#8b949e">No policy operator events recorded</td></tr>';
   }catch(e){}
 }
 
