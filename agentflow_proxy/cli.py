@@ -189,7 +189,84 @@ def policy_validate_cli(
     return 0 if result["ok"] else 1
 
 
+def _read_policy_json_arg(path: str, *, stdin: Any, stdin_used: bool) -> tuple[Any, dict[str, Any] | None, bool]:
+    if path == "-":
+        if stdin_used:
+            return None, _validation_result_error("stdin can only be used for one policy bundle input"), stdin_used
+        raw = stdin.read()
+        stdin_used = True
+    else:
+        try:
+            raw = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            return None, _validation_result_error(str(exc), path=path), stdin_used
+
+    try:
+        return json.loads(raw), None, stdin_used
+    except ValueError as exc:
+        return None, _validation_result_error(f"invalid JSON: {exc}", path="$"), stdin_used
+
+
+def _policy_diff_error_result(
+    before_validation: dict[str, Any],
+    after_validation: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.policy_bundle_diff.v1",
+        "ok": False,
+        "changed": False,
+        "changed_sections": [],
+        "change_count": 0,
+        "changes": [],
+        "before_validation": before_validation,
+        "after_validation": after_validation,
+    }
+
+
+def policy_diff_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Compare two AgentFlow policy bundle JSON files offline")
+    parser.add_argument("before", help="Earlier policy bundle JSON path, or '-' for stdin.")
+    parser.add_argument("after", help="Later policy bundle JSON path, or '-' for stdin.")
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print diff JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    before, before_error, stdin_used = _read_policy_json_arg(args.before, stdin=stdin, stdin_used=False)
+    after, after_error, _stdin_used = _read_policy_json_arg(args.after, stdin=stdin, stdin_used=stdin_used)
+
+    if before_error or after_error:
+        result = _policy_diff_error_result(
+            before_error or _validation_result_error("not validated because the other input could not be read"),
+            after_error or _validation_result_error("not validated because the other input could not be read"),
+        )
+    else:
+        from agentflow_proxy.policy_bundle import compare_policy_bundles
+
+        result = compare_policy_bundles(before, after)
+
+    _write_policy_diff_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
+def _write_policy_diff_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
@@ -217,3 +294,7 @@ def policy_export_main() -> None:
 
 def policy_validate_main() -> None:
     raise SystemExit(policy_validate_cli())
+
+
+def policy_diff_main() -> None:
+    raise SystemExit(policy_diff_cli())

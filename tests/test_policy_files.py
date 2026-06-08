@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,7 +10,7 @@ import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
-from agentflow_proxy.policy_bundle import build_policy_bundle, validate_policy_bundle
+from agentflow_proxy.policy_bundle import build_policy_bundle, compare_policy_bundles, validate_policy_bundle
 
 
 class PolicyFileStatusTest(unittest.TestCase):
@@ -43,6 +44,44 @@ class PolicyFileStatusTest(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("$.policies.cache", {error["path"] for error in result["errors"]})
+
+    def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
+        bundle = asyncio.run(build_policy_bundle())
+
+        result = compare_policy_bundles(bundle, json.loads(json.dumps(bundle)))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["change_count"], 0)
+        self.assertEqual(result["changed_sections"], [])
+
+    def test_policy_bundle_compare_reports_policy_section_changes(self):
+        before = asyncio.run(build_policy_bundle())
+        after = json.loads(json.dumps(before))
+        after["policies"]["routing"]["rules"][0]["action"]["reason"] = "changed in diff test"
+        after["policies"]["cache"]["semantic_cache"]["threshold"] = 0.99
+
+        result = compare_policy_bundles(before, after)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["change_count"], 2)
+        self.assertEqual(result["changed_sections"], ["cache", "routing"])
+        changes_by_path = {change["path"]: change for change in result["changes"]}
+        self.assertEqual(
+            changes_by_path["$.policies.routing.rules[0].action.reason"]["new"],
+            "changed in diff test",
+        )
+        self.assertEqual(changes_by_path["$.policies.cache.semantic_cache.threshold"]["new"], 0.99)
+
+    def test_policy_bundle_compare_returns_validation_errors_for_bad_input(self):
+        bundle = asyncio.run(build_policy_bundle())
+
+        result = compare_policy_bundles({"schema": "wrong"}, bundle)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["changed"])
+        self.assertIn("$.schema", {error["path"] for error in result["before_validation"]["errors"]})
 
     def test_policy_bundle_exports_manual_policy_source_and_file_status(self):
         with TemporaryDirectory() as tmp:

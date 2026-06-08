@@ -7,6 +7,7 @@ from agentflow_proxy import __version__
 from agentflow_proxy.store import utc_now
 
 POLICY_BUNDLE_SCHEMA = "agentflow.policy_bundle.v1"
+POLICY_BUNDLE_DIFF_SCHEMA = "agentflow.policy_bundle_diff.v1"
 POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
 POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
 POLICY_SOURCES = {
@@ -116,4 +117,69 @@ def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
         "bundle_schema": bundle_schema,
         "errors": errors,
         "warnings": warnings,
+    }
+
+
+_MISSING = object()
+
+
+def _diff_values(path: str, before: Any, after: Any, changes: list[dict[str, Any]]) -> None:
+    if before == after:
+        return
+
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after)):
+            child_path = f"{path}.{key}"
+            _diff_values(child_path, before.get(key, _MISSING), after.get(key, _MISSING), changes)
+        return
+
+    if isinstance(before, list) and isinstance(after, list):
+        for index in range(max(len(before), len(after))):
+            child_path = f"{path}[{index}]"
+            before_value = before[index] if index < len(before) else _MISSING
+            after_value = after[index] if index < len(after) else _MISSING
+            _diff_values(child_path, before_value, after_value, changes)
+        return
+
+    if before is _MISSING:
+        changes.append({"path": path, "change": "added", "old": None, "new": after})
+    elif after is _MISSING:
+        changes.append({"path": path, "change": "removed", "old": before, "new": None})
+    else:
+        changes.append({"path": path, "change": "changed", "old": before, "new": after})
+
+
+def compare_policy_bundles(before: Any, after: Any) -> dict[str, Any]:
+    before_validation = validate_policy_bundle(before)
+    after_validation = validate_policy_bundle(after)
+    ok = bool(before_validation["ok"] and after_validation["ok"])
+    changes: list[dict[str, Any]] = []
+
+    if ok:
+        before_policies = before["policies"]
+        after_policies = after["policies"]
+        for section in REQUIRED_POLICY_SECTIONS:
+            _diff_values(
+                f"$.policies.{section}",
+                before_policies.get(section, {}),
+                after_policies.get(section, {}),
+                changes,
+            )
+
+    changed_sections = sorted(
+        {
+            change["path"].removeprefix("$.policies.").split(".", 1)[0].split("[", 1)[0]
+            for change in changes
+        }
+    )
+
+    return {
+        "schema": POLICY_BUNDLE_DIFF_SCHEMA,
+        "ok": ok,
+        "changed": bool(changes),
+        "changed_sections": changed_sections,
+        "change_count": len(changes),
+        "changes": changes,
+        "before_validation": before_validation,
+        "after_validation": after_validation,
     }

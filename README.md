@@ -114,6 +114,16 @@ agentflow-policy-export | agentflow-policy-validate -
 The validator prints `agentflow.policy_bundle_validation.v1` JSON and exits non-zero for
 malformed JSON or bundles that do not match the local offline export contract.
 
+Compare two exported policy bundles offline before reloading or importing policy changes:
+
+```bash
+agentflow-policy-diff before.json after.json --pretty
+```
+
+The diff command prints `agentflow.policy_bundle_diff.v1` JSON with changed policy sections
+and JSON paths under routing, crunch, cache, and routing experiments. It validates both
+inputs first and exits non-zero for malformed bundles.
+
 ## Point Claude Code / Claude CLI at it
 
 The exact environment variable names can differ by Claude Code version, but the intended setup is:

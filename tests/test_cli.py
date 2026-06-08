@@ -1,6 +1,8 @@
 import io
 import json
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -117,6 +119,64 @@ class PolicyReloadCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertFalse(payload["ok"])
         self.assertIn("$.schema", {error["path"] for error in payload["errors"]})
+
+    def test_policy_diff_cli_reports_file_changes(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        before = json.loads(exported.getvalue())
+        after = json.loads(exported.getvalue())
+        after["policies"]["routing"]["enabled"] = not before["policies"]["routing"]["enabled"]
+
+        with TemporaryDirectory() as tmp:
+            before_path = Path(tmp) / "before.json"
+            after_path = Path(tmp) / "after.json"
+            before_path.write_text(json.dumps(before), encoding="utf-8")
+            after_path.write_text(json.dumps(after), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.policy_diff_cli([str(before_path), str(after_path)], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["changed_sections"], ["routing"])
+        self.assertEqual(payload["changes"][0]["path"], "$.policies.routing.enabled")
+
+    def test_policy_diff_cli_accepts_one_stdin_input(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        before = json.loads(exported.getvalue())
+        after = json.loads(exported.getvalue())
+
+        with TemporaryDirectory() as tmp:
+            after_path = Path(tmp) / "after.json"
+            after_path.write_text(json.dumps(after), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.policy_diff_cli(["-", str(after_path)], stdin=io.StringIO(json.dumps(before)), stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["changed"])
+
+    def test_policy_diff_cli_rejects_invalid_json_with_structured_errors(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+
+        with TemporaryDirectory() as tmp:
+            after_path = Path(tmp) / "after.json"
+            after_path.write_text(exported.getvalue(), encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.policy_diff_cli(["-", str(after_path)], stdin=io.StringIO("{"), stdout=stdout)
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle_diff.v1")
+        self.assertIn("invalid JSON", payload["before_validation"]["errors"][0]["message"])
 
 
 if __name__ == "__main__":
