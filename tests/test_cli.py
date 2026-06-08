@@ -321,6 +321,172 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(events[0]["details"]["changed_sections"], ["cache"])
         self.assertEqual(events[0]["details"]["safety_warning_count"], 1)
 
+    def _managed_policy_bundle(self, *, invalid: bool = False):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        if invalid:
+            return {"schema": "wrong"}
+        bundle = json.loads(exported.getvalue())
+        bundle["recommendation"] = {
+            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "policy_source": "managed-recommended",
+            "candidate_ids": ["candidate-route-chat"],
+            "candidate_count": 1,
+            "routing_rule_count": 1,
+            "omitted_candidate_count": 0,
+            "filters": {"min_samples": 3},
+        }
+        bundle["managed_optimizer"] = {
+            "enabled": False,
+            "policy_source": "managed-recommended",
+            "note": "Review-only managed recommendation.",
+        }
+        bundle["policies"]["routing"]["policy_source"] = "managed-recommended"
+        bundle["policies"]["routing"].setdefault("rules", []).append({
+            "conditions": {
+                "model_pattern": "sonnet",
+                "category": "chat",
+                "has_tools": False,
+            },
+            "action": {
+                "route_to": "claude-haiku-4-5-20251001",
+                "reason": "managed candidate for local review",
+            },
+            "managed_recommendation": {
+                "policy_source": "managed-recommended",
+                "candidate_id": "candidate-route-chat",
+                "confidence": 0.82,
+                "sample_count": 24,
+                "success_count": 23,
+                "error_count": 1,
+                "error_rate": 0.041,
+                "estimated_savings_usd": 1.23,
+                "requested_model": "claude-sonnet-4-6",
+                "recommended_target_model": "claude-haiku-4-5-20251001",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "chat",
+            },
+        })
+        return bundle
+
+    def test_policy_fetch_review_cli_without_config_skips_network(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {cli.POLICY_BUNDLE_RECOMMENDATION_URL_ENV: "", cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
+            with patch("agentflow_proxy.cli.httpx.get") as get:
+                code = cli.policy_fetch_review_cli([], stdout=stdout, stderr=stderr)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "missing_url")
+        self.assertFalse(payload["applied"])
+        self.assertFalse(payload["wrote_local_files"])
+        get.assert_not_called()
+
+    def test_policy_fetch_review_cli_fetches_reviews_and_does_not_write_rules(self):
+        bundle = self._managed_policy_bundle()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": tmp, cli.MANAGED_POLICY_API_KEY_ENV: ""}, clear=False):
+                with patch("agentflow_proxy.cli.httpx.get") as get:
+                    get.return_value = httpx.Response(200, json=bundle)
+                    code = cli.policy_fetch_review_cli(
+                        [
+                            "--url",
+                            "http://managed.test/v1/policy-bundle-recommendation",
+                            "--allow-unauthenticated",
+                            "--min-samples",
+                            "3",
+                            "--limit",
+                            "7",
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "crunch_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["validation"]["ok"])
+        self.assertTrue(payload["review"]["ok"])
+        self.assertFalse(payload["applied"])
+        self.assertFalse(payload["wrote_local_files"])
+        self.assertEqual(payload["recommendation"]["candidate_ids"], ["candidate-route-chat"])
+        self.assertEqual(payload["recommendation"]["candidates"][0]["confidence"], 0.82)
+        self.assertEqual(payload["bundle"]["schema"], "agentflow.policy_bundle.v1")
+        self.assertIn("agentflow-policy-apply", payload["next_manual_command"])
+        call = get.call_args
+        self.assertEqual(call.kwargs["headers"], {})
+        self.assertEqual(call.kwargs["params"]["min_samples"], 3)
+        self.assertEqual(call.kwargs["params"]["limit"], 7)
+
+    def test_policy_fetch_review_cli_rejects_invalid_bundle(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_CONFIG_DIR": tmp}, clear=False):
+                with patch("agentflow_proxy.cli.httpx.get") as get:
+                    get.return_value = httpx.Response(200, json=self._managed_policy_bundle(invalid=True))
+                    code = cli.policy_fetch_review_cli(
+                        [
+                            "--url",
+                            "http://managed.test/v1/policy-bundle-recommendation",
+                            "--allow-unauthenticated",
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+            self.assertEqual(list(Path(tmp).glob("*.yaml")), [])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "validation_failed")
+        self.assertIn("$.schema", {error["path"] for error in payload["validation"]["errors"]})
+        self.assertFalse(payload["wrote_local_files"])
+
+    def test_policy_fetch_review_cli_sends_auth_without_secret_leakage(self):
+        secret = "super-secret-managed-key"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch.dict(os.environ, {cli.MANAGED_POLICY_API_KEY_ENV: secret}, clear=False):
+            with patch("agentflow_proxy.cli.httpx.get") as get:
+                get.return_value = httpx.Response(200, json=self._managed_policy_bundle())
+                code = cli.policy_fetch_review_cli(
+                    [
+                        "--url",
+                        "http://managed.test/v1/policy-bundle-recommendation",
+                        "--tenant",
+                        "tenant-a",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(get.call_args.kwargs["headers"]["authorization"], f"Bearer {secret}")
+        self.assertEqual(get.call_args.kwargs["headers"]["x-agentflow-tenant"], "tenant-a")
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(secret, rendered)
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        event_text = json.dumps(recent_policy_events(limit=5)["events"])
+        self.assertNotIn(secret, event_text)
+        self.assertIn("env:AGENTFLOW_MANAGED_API_KEY", event_text)
+
     def test_policy_apply_cli_dry_run_reports_files_without_writing(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)

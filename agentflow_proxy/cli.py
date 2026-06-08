@@ -7,13 +7,16 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Sequence
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
 
 POLICY_RELOAD_PATH = "/agentflow/admin/reload-policies"
+POLICY_BUNDLE_RECOMMENDATION_URL_ENV = "AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL"
+MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 
 
 def _default_policy_reload_url() -> str:
@@ -37,6 +40,30 @@ def _is_loopback_url(url: str) -> bool:
 
 def _write_json(stream: Any, payload: dict[str, Any]) -> None:
     stream.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _redact_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if not parsed.username and not parsed.password:
+        return url
+    host = parsed.hostname or ""
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return urlunparse((parsed.scheme, host, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+def _redact_secret(value: Any, secret: str | None) -> Any:
+    if not secret:
+        return value
+    if isinstance(value, str):
+        return value.replace(secret, "[redacted]")
+    if isinstance(value, dict):
+        return {key: _redact_secret(item, secret) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_secret(item, secret) for item in value]
+    return value
 
 
 def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
@@ -412,6 +439,365 @@ def policy_review_cli(
     return 0 if result["ok"] else 1
 
 
+def _policy_fetch_review_error_result(
+    *,
+    error_type: str,
+    message: str,
+    url: str | None,
+    auth_configured: bool,
+    reason: str,
+    status_code: int | None = None,
+    body: str | None = None,
+) -> dict[str, Any]:
+    fetch: dict[str, Any] = {
+        "status": "skipped" if status_code is None else "error",
+        "reason": reason,
+        "url": _redact_url(url),
+        "auth_configured": bool(auth_configured),
+        "status_code": status_code,
+    }
+    if body is not None:
+        fetch["body"] = body[:500]
+    return {
+        "schema": "agentflow.policy_bundle_fetch_review.v1",
+        "ok": False,
+        "applied": False,
+        "wrote_local_files": False,
+        "fetch": fetch,
+        "validation": None,
+        "review": None,
+        "recommendation": {},
+        "bundle": None,
+        "next_manual_command": None,
+        "error": {"type": error_type, "message": message},
+    }
+
+
+def _managed_policy_auth(args: argparse.Namespace) -> tuple[dict[str, str], bool, str]:
+    api_key = args.api_key
+    source = "argument" if api_key else ""
+    if not api_key and args.api_key_env:
+        api_key = os.getenv(args.api_key_env)
+        if api_key:
+            source = f"env:{args.api_key_env}"
+
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
+    if args.tenant:
+        headers["x-agentflow-tenant"] = args.tenant
+    if args.account:
+        headers["x-agentflow-account"] = args.account
+    if api_key:
+        return headers, True, source
+    if args.allow_unauthenticated:
+        return headers, False, "unauthenticated-explicit"
+    return headers, False, ""
+
+
+def _managed_policy_query(args: argparse.Namespace) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "min_samples": args.min_samples,
+        "max_error_rate": args.max_error_rate,
+        "limit": args.limit,
+    }
+    for key in ("source_surface", "app_family", "category"):
+        value = getattr(args, key)
+        if value:
+            params[key] = value
+    return params
+
+
+def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
+    if not isinstance(bundle, dict):
+        return {}
+    recommendation = bundle.get("recommendation")
+    if not isinstance(recommendation, dict):
+        recommendation = {}
+    policies = bundle.get("policies")
+    routing = policies.get("routing") if isinstance(policies, dict) and isinstance(policies.get("routing"), dict) else {}
+    routing_recommendation = (
+        routing.get("recommendation")
+        if isinstance(routing, dict) and isinstance(routing.get("recommendation"), dict)
+        else {}
+    )
+    rules = routing.get("rules") if isinstance(routing, dict) and isinstance(routing.get("rules"), list) else []
+    candidates: list[dict[str, Any]] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        managed = rule.get("managed_recommendation")
+        if not isinstance(managed, dict):
+            continue
+        candidates.append({
+            key: managed.get(key)
+            for key in (
+                "candidate_id",
+                "confidence",
+                "sample_count",
+                "success_count",
+                "error_count",
+                "error_rate",
+                "estimated_savings_usd",
+                "baseline_sample_count",
+                "requested_model",
+                "recommended_target_model",
+                "source_surface",
+                "app_family",
+                "category",
+                "text_bucket",
+                "token_bucket",
+            )
+            if key in managed
+        })
+
+    return {
+        "schema": recommendation.get("schema"),
+        "policy_source": recommendation.get("policy_source"),
+        "candidate_ids": recommendation.get("candidate_ids", []),
+        "candidate_count": recommendation.get("candidate_count", len(candidates)),
+        "routing_rule_count": recommendation.get("routing_rule_count", len(candidates)),
+        "omitted_candidate_count": recommendation.get(
+            "omitted_candidate_count",
+            routing_recommendation.get("omitted_candidate_count", 0),
+        ),
+        "filters": recommendation.get("filters", {}),
+        "candidates": candidates,
+    }
+
+
+def _write_policy_fetch_review_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
+def policy_fetch_review_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Fetch a managed AgentFlow policy bundle recommendation and review it without applying it"
+    )
+    parser.add_argument(
+        "--url",
+        default=os.getenv(POLICY_BUNDLE_RECOMMENDATION_URL_ENV),
+        help=f"Full managed policy bundle recommendation URL. May also be set with {POLICY_BUNDLE_RECOMMENDATION_URL_ENV}.",
+    )
+    parser.add_argument(
+        "--api-key",
+        help=f"Managed optimizer API key. Prefer --api-key-env or {MANAGED_POLICY_API_KEY_ENV} for shell history safety.",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=MANAGED_POLICY_API_KEY_ENV,
+        help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
+    )
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help="Fetch without an API key. Intended only for local/dev managed servers.",
+    )
+    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request.")
+    parser.add_argument("--limit", type=int, default=50, help="Maximum candidates to request.")
+    parser.add_argument("--source-surface", help="Optional managed server source_surface filter.")
+    parser.add_argument("--app-family", help="Optional managed server app_family filter.")
+    parser.add_argument("--category", help="Optional managed server category filter.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        help="HTTP timeout in seconds, default: 10.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print fetch/review JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    headers, auth_configured, auth_source = _managed_policy_auth(args)
+    safe_url = _redact_url(args.url)
+    from agentflow_proxy.policy_events import log_policy_event
+
+    if not args.url:
+        result = _policy_fetch_review_error_result(
+            error_type="missing_url",
+            message=f"set --url or {POLICY_BUNDLE_RECOMMENDATION_URL_ENV} to enable managed fetch/review",
+            url=None,
+            auth_configured=auth_configured,
+            reason="missing-url",
+        )
+        log_policy_event(
+            "fetch-review",
+            ok=False,
+            details={"source": "cli", "url": None, "auth_configured": auth_configured, "exit_code": 2},
+        )
+        _write_policy_fetch_review_result(stderr, result, pretty=args.pretty)
+        return 2
+    if not auth_configured and not args.allow_unauthenticated:
+        result = _policy_fetch_review_error_result(
+            error_type="missing_auth",
+            message=f"set --api-key, --api-key-env, {MANAGED_POLICY_API_KEY_ENV}, or --allow-unauthenticated",
+            url=args.url,
+            auth_configured=False,
+            reason="missing-auth",
+        )
+        log_policy_event(
+            "fetch-review",
+            ok=False,
+            details={"source": "cli", "url": safe_url, "auth_configured": False, "exit_code": 2},
+        )
+        _write_policy_fetch_review_result(stderr, result, pretty=args.pretty)
+        return 2
+
+    started = time.time()
+    secret = args.api_key or (os.getenv(args.api_key_env) if args.api_key_env else None)
+    try:
+        response = httpx.get(args.url, headers=headers, params=_managed_policy_query(args), timeout=args.timeout)
+        latency_ms = int((time.time() - started) * 1000)
+    except httpx.HTTPError as exc:
+        result = _policy_fetch_review_error_result(
+            error_type=exc.__class__.__name__,
+            message=_redact_secret(str(exc), secret),
+            url=args.url,
+            auth_configured=auth_configured,
+            reason="request-failed",
+        )
+        result["fetch"]["latency_ms"] = int((time.time() - started) * 1000)
+        log_policy_event(
+            "fetch-review",
+            ok=False,
+            details={
+                "source": "cli",
+                "url": safe_url,
+                "auth_configured": auth_configured,
+                "auth_source": auth_source,
+                "error_type": exc.__class__.__name__,
+                "exit_code": 1,
+            },
+        )
+        _write_policy_fetch_review_result(stderr, result, pretty=args.pretty)
+        return 1
+
+    if response.status_code >= 400:
+        result = _policy_fetch_review_error_result(
+            error_type="server_error",
+            message="managed server returned an error response",
+            url=args.url,
+            auth_configured=auth_configured,
+            reason="server-error",
+            status_code=response.status_code,
+            body=_redact_secret(response.text, secret),
+        )
+        result["fetch"]["latency_ms"] = latency_ms
+        log_policy_event(
+            "fetch-review",
+            ok=False,
+            details={
+                "source": "cli",
+                "url": safe_url,
+                "auth_configured": auth_configured,
+                "auth_source": auth_source,
+                "status_code": response.status_code,
+                "exit_code": 1,
+            },
+        )
+        _write_policy_fetch_review_result(stderr, result, pretty=args.pretty)
+        return 1
+
+    try:
+        bundle = response.json()
+    except ValueError as exc:
+        validation = _validation_result_error(f"invalid JSON: {exc}", path="$")
+        result = _policy_fetch_review_error_result(
+            error_type="invalid_json",
+            message=f"managed server response was not valid JSON: {exc}",
+            url=args.url,
+            auth_configured=auth_configured,
+            reason="invalid-json",
+            status_code=response.status_code,
+        )
+        result["fetch"]["latency_ms"] = latency_ms
+        result["validation"] = validation
+        result["review"] = _policy_review_read_error_result(validation)
+        log_policy_event(
+            "fetch-review",
+            ok=False,
+            details={
+                "source": "cli",
+                "url": safe_url,
+                "auth_configured": auth_configured,
+                "auth_source": auth_source,
+                "status_code": response.status_code,
+                "proposed_error_count": len(validation["errors"]),
+                "exit_code": 1,
+            },
+        )
+        _write_policy_fetch_review_result(stderr, result, pretty=args.pretty)
+        return 1
+
+    from agentflow_proxy.policy_bundle import build_policy_bundle, review_policy_bundle, validate_policy_bundle
+
+    validation = validate_policy_bundle(bundle)
+    current = asyncio.run(build_policy_bundle())
+    review = review_policy_bundle(current, bundle)
+    ok = bool(validation["ok"] and review["ok"])
+    result = {
+        "schema": "agentflow.policy_bundle_fetch_review.v1",
+        "ok": ok,
+        "applied": False,
+        "wrote_local_files": False,
+        "fetch": {
+            "status": "received",
+            "reason": "ok",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "query": _managed_policy_query(args),
+        },
+        "validation": validation,
+        "review": review,
+        "recommendation": _managed_recommendation_summary(bundle),
+        "bundle": bundle,
+        "next_manual_command": "agentflow-policy-apply reviewed-bundle.json --dry-run --pretty",
+        "error": None if ok else {"type": "validation_failed", "message": "managed policy bundle is invalid"},
+    }
+    result = _redact_secret(result, secret)
+    log_policy_event(
+        "fetch-review",
+        ok=ok,
+        details={
+            "source": "cli",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "changed": review.get("changed"),
+            "changed_sections": review.get("changed_sections", []),
+            "change_count": review.get("change_count", 0),
+            "safety_warning_count": review.get("safety_warning_count", 0),
+            "proposed_error_count": len(validation.get("errors", [])),
+            "candidate_ids": result.get("recommendation", {}).get("candidate_ids", []),
+            "candidate_count": result.get("recommendation", {}).get("candidate_count", 0),
+            "exit_code": 0 if ok else 1,
+        },
+    )
+    _write_policy_fetch_review_result(stdout if ok else stderr, result, pretty=args.pretty)
+    return 0 if ok else 1
+
+
 def _policy_apply_read_error_result(read_error: dict[str, Any], *, config_dir: str, dry_run: bool) -> dict[str, Any]:
     return {
         "schema": "agentflow.policy_bundle_apply.v1",
@@ -682,6 +1068,10 @@ def policy_diff_main() -> None:
 
 def policy_review_main() -> None:
     raise SystemExit(policy_review_cli())
+
+
+def policy_fetch_review_main() -> None:
+    raise SystemExit(policy_fetch_review_cli())
 
 
 def policy_apply_main() -> None:

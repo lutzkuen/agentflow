@@ -159,12 +159,17 @@ Common policy commands:
 | `agentflow-policy-validate bundle.json` | Validate a policy bundle before use |
 | `agentflow-policy-diff before.json after.json --pretty` | Compare two policy bundles |
 | `agentflow-policy-review proposed.json --pretty` | Review changes and warnings before apply |
+| `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
 | `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |
 | `agentflow-policy-apply proposed.json --config-dir ~/.agentflow` | Apply reviewed local policy files |
 | `agentflow-policy-rollback --config-dir ~/.agentflow --dry-run --pretty` | Preview rollback to the newest backup |
 | `agentflow-policy-reload` | Reload changed policies in a running local proxy |
 
 Policy operations can append compact local audit events under `~/.agentflow/policy_events.jsonl`. Set `AGENTFLOW_POLICY_EVENTS=0` to disable that audit log.
+Managed fetch/review is disabled unless a recommendation URL is supplied, and authenticated
+managed servers should use `AGENTFLOW_MANAGED_API_KEY` or `--api-key-env` rather than putting
+secrets in command history. The command validates and reviews the bundle only; use
+`agentflow-policy-apply --dry-run` separately before writing local YAML files.
 
 ## Configuration
 
