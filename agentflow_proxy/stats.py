@@ -3027,8 +3027,60 @@ async def stats_weekly(store_obj: Any) -> dict[str, Any]:
 
 async def stats_sessions(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
-    rows = conn.execute("""
-        SELECT SUBSTR(session_id,1,8) as sid, session_id, COUNT(*) as calls,
+    sessions_by_key: dict[str, dict[str, Any]] = {}
+
+    def session_bucket(session_key: Any, *, basis: str, source_surface: str, app_family: str, units: int = 1) -> dict[str, Any]:
+        key = str(session_key or "unknown")
+        bucket = sessions_by_key.get(key)
+        if bucket is None:
+            bucket = {
+                "sid": key[:8],
+                "session_id": key,
+                "session_key_basis": basis,
+                "source_surface": source_surface,
+                "app_family": app_family,
+                "calls": 0,
+                "turns": 0,
+                "provider_calls": 0,
+                "codex_turns": 0,
+                "cost_usd": 0.0,
+                "tool_result": 0,
+                "tool_heavy": 0,
+                "short_completion": 0,
+                "code_gen": 0,
+                "chat": 0,
+                "other": 0,
+                "codex_input_text_chars": 0,
+                "codex_result_chars": 0,
+                "codex_input_tokens_est": 0,
+                "codex_output_tokens_est": 0,
+                "codex_total_tokens_est": 0,
+                "codex_cost_est_usd": 0.0,
+                "codex_baseline_cost_est_usd": 0.0,
+                "codex_hard_floor_usd": 0.0,
+                "codex_exact_cache_savings_usd": 0.0,
+                "codex_routed_turns": 0,
+                "codex_crunched_turns": 0,
+                "codex_cache_hits": 0,
+                "codex_optimized_turns": 0,
+                "codex_errors": 0,
+                "codex_cost_basis": CODEX_APP_COST_BASIS,
+                "codex_app_model": CODEX_APP_MODEL,
+                "_source_surface_counts": {},
+                "_app_family_counts": {},
+                "_codex_method_counts": {},
+            }
+            sessions_by_key[key] = bucket
+        bucket["_source_surface_counts"][source_surface] = bucket["_source_surface_counts"].get(source_surface, 0) + int(units)
+        bucket["_app_family_counts"][app_family] = bucket["_app_family_counts"].get(app_family, 0) + int(units)
+        return bucket
+
+    provider_rows = conn.execute("""
+        SELECT session_id,
+            coalesce(provider, 'anthropic') as provider,
+            requested_model,
+            path,
+            COUNT(*) as calls,
             ROUND(SUM(cost_est_usd),6) as cost_usd,
             SUM(CASE WHEN category='tool-result' THEN 1 ELSE 0 END) as tool_result,
             SUM(CASE WHEN category='tool-heavy' THEN 1 ELSE 0 END) as tool_heavy,
@@ -3038,10 +3090,26 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
             SUM(CASE WHEN category IS NULL OR category NOT IN ('tool-result','tool-heavy','short-completion','code-gen','chat') THEN 1 ELSE 0 END) as other
         FROM calls
         WHERE DATE(created_at) = DATE('now') AND session_id IS NOT NULL
-        GROUP BY session_id ORDER BY cost_usd DESC LIMIT 20
+        GROUP BY session_id, coalesce(provider, 'anthropic'), requested_model, path
     """).fetchall()
-    sessions = [dict(r) for r in rows]
-    session_ids = [row["session_id"] for row in sessions]
+    for row in provider_rows:
+        source_surface = _source_surface(row["provider"], str(row["path"] or ""))
+        app_family = _app_family_for_call(str(row["provider"] or ""), row["requested_model"], str(row["path"] or ""))
+        calls = int(row["calls"] or 0)
+        bucket = session_bucket(
+            row["session_id"],
+            basis="session_id",
+            source_surface=source_surface,
+            app_family=app_family,
+            units=calls,
+        )
+        bucket["calls"] += calls
+        bucket["turns"] += calls
+        bucket["provider_calls"] += calls
+        bucket["cost_usd"] += float(row["cost_usd"] or 0.0)
+        for field in ("tool_result", "tool_heavy", "short_completion", "code_gen", "chat", "other"):
+            bucket[field] += int(row[field] or 0)
+
     plateau_rows = conn.execute("""
         SELECT session_id,
                created_at,
@@ -3051,6 +3119,7 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
                    0
                ) AS INTEGER) as text_chars,
                coalesce(provider, 'anthropic') as provider,
+               path,
                coalesce(routed_model, requested_model) as model,
                coalesce(cost_est_usd, 0) as cost_usd,
                coalesce(cache_read_input_tokens, 0) as cache_read_tokens,
@@ -3081,27 +3150,48 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         idx = min(len(sorted_values) - 1, math.ceil((len(sorted_values) - 1) * percentile))
         return sorted_values[idx]
 
-    for row in plateau_rows:
-        sid = row["session_id"]
-        text_chars = int(row["text_chars"] or 0)
+    def plateau_bucket(session_key: Any, *, basis: str, source_surface: str, app_family: str) -> dict[str, Any]:
+        key = str(session_key or "unknown")
         bucket = plateau_by_session.setdefault(
-            sid,
+            key,
             {
-                "session_id": sid,
-                "sid": sid[:8],
+                "session_id": key,
+                "sid": key[:8],
+                "session_key_basis": basis,
+                "source_surface": source_surface,
+                "app_family": app_family,
                 "calls": 0,
                 "cost_usd": 0.0,
                 "plateau_pairs": 0,
                 "large_text_values": [],
                 "cache_read_savings_usd": 0.0,
                 "crunch_saved_chars": 0,
+                "_source_surface_counts": {},
+                "_app_family_counts": {},
             },
         )
+        bucket["_source_surface_counts"][source_surface] = bucket["_source_surface_counts"].get(source_surface, 0) + 1
+        bucket["_app_family_counts"][app_family] = bucket["_app_family_counts"].get(app_family, 0) + 1
+        return bucket
+
+    def add_plateau_observation(
+        session_key: Any,
+        *,
+        basis: str,
+        source_surface: str,
+        app_family: str,
+        text_chars: int,
+        cost_usd: float,
+        cache_read_savings_usd: float = 0.0,
+        crunch_saved_chars: int = 0,
+    ) -> None:
+        key = str(session_key or "unknown")
+        bucket = plateau_bucket(key, basis=basis, source_surface=source_surface, app_family=app_family)
         bucket["calls"] += 1
-        bucket["cost_usd"] += float(row["cost_usd"] or 0.0)
+        bucket["cost_usd"] += float(cost_usd or 0.0)
         if text_chars >= min_plateau_chars:
             bucket["large_text_values"].append(text_chars)
-        prev_text = prev_by_session.get(sid)
+        prev_text = prev_by_session.get(key)
         if (
             prev_text is not None
             and prev_text >= min_plateau_chars
@@ -3109,9 +3199,15 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
             and abs(text_chars - prev_text) / max(prev_text, 1) <= max_plateau_delta_ratio
         ):
             bucket["plateau_pairs"] += 1
-        prev_by_session[sid] = text_chars
+        prev_by_session[key] = text_chars
+        bucket["cache_read_savings_usd"] += float(cache_read_savings_usd or 0.0)
+        bucket["crunch_saved_chars"] += int(crunch_saved_chars or 0)
 
+    for row in plateau_rows:
+        sid = row["session_id"]
+        text_chars = int(row["text_chars"] or 0)
         read_tokens = int(row["cache_read_tokens"] or 0)
+        cache_read_savings = 0.0
         if read_tokens:
             provider = str(row["provider"] or "anthropic").lower()
             full_read_cost = estimate_cost(row["model"], read_tokens, 0, provider=provider) or 0.0
@@ -3123,8 +3219,150 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
                 cache_read=read_tokens,
                 provider=provider,
             ) or 0.0
-            bucket["cache_read_savings_usd"] += max(full_read_cost - cached_read_cost, 0.0)
-        bucket["crunch_saved_chars"] += int(row["crunch_saved_chars"] or 0)
+            cache_read_savings = max(full_read_cost - cached_read_cost, 0.0)
+        source_surface = _source_surface(row["provider"], str(row["path"] or ""))
+        app_family = _app_family_for_call(str(row["provider"] or ""), None, str(row["path"] or ""))
+        add_plateau_observation(
+            sid,
+            basis="session_id",
+            source_surface=source_surface,
+            app_family=app_family,
+            text_chars=text_chars,
+            cost_usd=float(row["cost_usd"] or 0.0),
+            cache_read_savings_usd=cache_read_savings,
+            crunch_saved_chars=int(row["crunch_saved_chars"] or 0),
+        )
+
+    codex_rows = conn.execute("""
+        SELECT s.id as start_event_id,
+               s.created_at,
+               s.request_id,
+               s.thread_id,
+               s.session_id,
+               s.method,
+               s.message_chars,
+               s.params_chars,
+               s.input_items,
+               s.input_text_chars,
+               s.routing_json,
+               s.crunch_json,
+               s.cache_json,
+               (
+                   select r.id from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_event_id,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code,
+               (
+                   select r.error_message from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_message,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms
+        from codex_app_events s
+        where s.direction = 'client_to_server'
+          and s.method = 'turn/start'
+          and date(s.created_at) = date('now')
+        order by coalesce(s.session_id, s.thread_id, s.request_id, ''), s.created_at
+    """).fetchall()
+
+    def codex_session_key(row: dict[str, Any]) -> tuple[str, str]:
+        if row.get("session_id"):
+            return str(row["session_id"]), "session_id"
+        if row.get("thread_id"):
+            return str(row["thread_id"]), "thread_id"
+        if row.get("request_id"):
+            return f"request:{row['request_id']}", "request_id"
+        return "codex:unknown", "unknown"
+
+    for row in codex_rows:
+        r = dict(row)
+        key, basis = codex_session_key(r)
+        unit = _codex_turn_activity_unit(r)
+        input_features = unit["input_features"]
+        outcome_features = unit["outcome_features"]
+        optimization_features = unit["optimization_features"]
+        routing = optimization_features["routing"]
+        crunch = optimization_features["crunch"]
+        cache = optimization_features["cache"]
+        bucket = session_bucket(
+            key,
+            basis=basis,
+            source_surface="codex_app_turn",
+            app_family="codex",
+        )
+        bucket["calls"] += 1
+        bucket["turns"] += 1
+        bucket["codex_turns"] += 1
+        bucket["codex_input_text_chars"] += _as_int(r.get("input_text_chars"))
+        bucket["codex_result_chars"] += _as_int(r.get("response_result_chars"))
+        bucket["codex_input_tokens_est"] += _as_int(input_features.get("input_tokens_est"))
+        bucket["codex_output_tokens_est"] += _as_int(outcome_features.get("output_tokens_est"))
+        bucket["codex_total_tokens_est"] += _as_int(outcome_features.get("total_tokens_est"))
+        cost = _as_float(outcome_features.get("cost_est_usd"))
+        baseline = _as_float(outcome_features.get("cost_baseline_usd"))
+        hard_floor = _as_float(outcome_features.get("hard_floor_usd"))
+        cache_savings = _as_float(outcome_features.get("cache_savings_usd"))
+        bucket["cost_usd"] += cost
+        bucket["codex_cost_est_usd"] += cost
+        bucket["codex_baseline_cost_est_usd"] += baseline
+        bucket["codex_hard_floor_usd"] += hard_floor
+        bucket["codex_exact_cache_savings_usd"] += cache_savings if cache.get("status") == "hit" else 0.0
+        bucket["_codex_method_counts"][str(r.get("method") or "unknown")] = (
+            bucket["_codex_method_counts"].get(str(r.get("method") or "unknown"), 0) + 1
+        )
+        optimized = False
+        if routing.get("applied"):
+            bucket["codex_routed_turns"] += 1
+            optimized = True
+        if crunch.get("changed") or crunch.get("applied"):
+            bucket["codex_crunched_turns"] += 1
+            optimized = True
+        if cache.get("status") == "hit":
+            bucket["codex_cache_hits"] += 1
+            optimized = True
+        if optimized:
+            bucket["codex_optimized_turns"] += 1
+        if r.get("response_error_code") is not None:
+            bucket["codex_errors"] += 1
+        add_plateau_observation(
+            key,
+            basis=basis,
+            source_surface="codex_app_turn",
+            app_family="codex",
+            text_chars=_as_int(r.get("input_text_chars")),
+            cost_usd=cost,
+            cache_read_savings_usd=cache_savings if cache.get("status") == "hit" else 0.0,
+            crunch_saved_chars=_as_int(crunch.get("saved_chars")),
+        )
 
     all_plateau_metrics = []
     for bucket in plateau_by_session.values():
@@ -3134,6 +3372,14 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         bucket["cost_usd"] = round(float(bucket["cost_usd"]), 6)
         bucket["cache_read_savings_usd"] = round(float(bucket["cache_read_savings_usd"]), 6)
         bucket["flagged"] = int(bucket["plateau_pairs"]) > flagged_plateau_pairs
+        source_counts = bucket.pop("_source_surface_counts", {})
+        app_counts = bucket.pop("_app_family_counts", {})
+        bucket["source_surfaces"] = [
+            {"source_surface": source, "units": count}
+            for source, count in sorted(source_counts.items())
+        ]
+        bucket["source_surface"] = next(iter(source_counts), "unknown") if len(source_counts) == 1 else "mixed"
+        bucket["app_family"] = next(iter(app_counts), "unknown") if len(app_counts) == 1 else "mixed"
         all_plateau_metrics.append(bucket)
     context_plateaus = [
         bucket for bucket in all_plateau_metrics
@@ -3145,6 +3391,8 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         row["session_id"]: row
         for row in all_plateau_metrics
     }
+    sessions = list(sessions_by_key.values())
+    session_ids = [row["session_id"] for row in sessions]
     thinking_by_session: dict[str, dict[str, float | int]] = {
         sid: {"thinking_tokens": 0, "thinking_cost_usd": 0.0}
         for sid in session_ids
@@ -3242,6 +3490,29 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
         row["plateau_pairs"] = int(plateau.get("plateau_pairs", 0) or 0)
         row["median_text_chars"] = int(plateau.get("median_text_chars", 0) or 0)
         row["p90_text_chars"] = int(plateau.get("p90_text_chars", 0) or 0)
+        source_counts = row.pop("_source_surface_counts", {})
+        app_counts = row.pop("_app_family_counts", {})
+        method_counts = row.pop("_codex_method_counts", {})
+        row["source_surfaces"] = [
+            {"source_surface": source, "units": count}
+            for source, count in sorted(source_counts.items())
+        ]
+        row["source_surface"] = next(iter(source_counts), "unknown") if len(source_counts) == 1 else "mixed"
+        row["app_family"] = next(iter(app_counts), "unknown") if len(app_counts) == 1 else "mixed"
+        row["codex_method_counts"] = [
+            {"method": method, "turns": count}
+            for method, count in sorted(method_counts.items())
+        ]
+        row["cost_usd"] = round(float(row["cost_usd"]), 6)
+        for money_field in (
+            "codex_cost_est_usd",
+            "codex_baseline_cost_est_usd",
+            "codex_hard_floor_usd",
+            "codex_exact_cache_savings_usd",
+        ):
+            row[money_field] = round(float(row[money_field]), 6)
+    sessions.sort(key=lambda row: (row["cost_usd"], row["calls"], row["codex_turns"]), reverse=True)
+    sessions = sessions[:20]
     return {
         "sessions": sessions,
         "context_plateaus": context_plateaus,
@@ -3550,7 +3821,7 @@ def dashboard_html() -> str:
   <h2>Sessions today</h2>
   <table data-table-id="sessions" data-filter-label="Filter sessions">
     <thead><tr>
-      <th data-sort-type="text">Session</th><th data-sort-type="number">Calls</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Thinking</th><th data-sort-type="money">Thinking cost</th><th data-sort-type="number">Cache write</th><th data-sort-type="number">Cache read</th><th data-sort-type="number">Write/read</th><th data-sort-type="money">Write cost</th><th data-sort-type="money">Read saved</th><th data-sort-type="number">Payback</th><th data-sort-type="number">tool-result</th><th data-sort-type="number">tool-heavy</th><th data-sort-type="number">short-comp</th><th data-sort-type="number">code-gen</th><th data-sort-type="number">chat</th><th data-sort-type="number">other</th>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">App</th><th data-sort-type="text">Session</th><th data-sort-type="number">Units</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Codex input</th><th data-sort-type="number">Codex output</th><th data-sort-type="text">Codex opt</th><th data-sort-type="number">Thinking</th><th data-sort-type="money">Thinking cost</th><th data-sort-type="number">Cache write</th><th data-sort-type="number">Cache read</th><th data-sort-type="number">Write/read</th><th data-sort-type="money">Write cost</th><th data-sort-type="money">Read saved</th><th data-sort-type="number">Payback</th><th data-sort-type="number">tool-result</th><th data-sort-type="number">tool-heavy</th><th data-sort-type="number">short-comp</th><th data-sort-type="number">code-gen</th><th data-sort-type="number">chat</th><th data-sort-type="number">other</th>
     </tr></thead>
     <tbody id="sess-tbody"></tbody>
   </table>
@@ -3559,7 +3830,7 @@ def dashboard_html() -> str:
   <h2>Context plateaus today</h2>
   <table data-table-id="context-plateaus" data-filter-label="Filter context plateaus">
     <thead><tr>
-      <th data-sort-type="text">Session</th><th data-sort-type="number">Calls</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Plateau pairs</th><th data-sort-type="number">Median chars</th><th data-sort-type="number">P90 chars</th><th data-sort-type="money">Cache read saved</th><th data-sort-type="number">Crunch saved chars</th><th data-sort-type="text">Flag</th>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Session</th><th data-sort-type="number">Units</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Plateau pairs</th><th data-sort-type="number">Median chars</th><th data-sort-type="number">P90 chars</th><th data-sort-type="money">Cache read saved</th><th data-sort-type="number">Crunch saved chars</th><th data-sort-type="text">Flag</th>
     </tr></thead>
     <tbody id="plateau-tbody"></tbody>
   </table>
@@ -4268,9 +4539,16 @@ async function refreshSessions(){
     const pb=document.getElementById('plateau-tbody');
     const rows=d.sessions||[];
     tb.innerHTML=rows.map(row=>`<tr>
+      <td class="flags"><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
+      <td>${esc(row.app_family||'unknown')}</td>
       <td class="ts">${row.sid}</td>
-      <td>${(row.calls||0).toLocaleString()}</td>
+      <td>${(row.turns||row.calls||0).toLocaleString()}</td>
+      <td>${(row.provider_calls||0).toLocaleString()}</td>
+      <td>${(row.codex_turns||0).toLocaleString()}</td>
       <td class="cost">${fmt(row.cost_usd,5)}</td>
+      <td class="tokens">${fmtTok(row.codex_input_tokens_est||0)}</td>
+      <td class="tokens">${fmtTok(row.codex_output_tokens_est||0)}</td>
+      <td class="flags"><span class="badge routed">r ${(row.codex_routed_turns||0).toLocaleString()}</span> <span class="badge crunched">c ${(row.codex_crunched_turns||0).toLocaleString()}</span> <span class="badge hit">cache ${(row.codex_cache_hits||0).toLocaleString()}</span>${row.codex_errors?` <span class="badge err">err ${row.codex_errors}</span>`:''}</td>
       <td class="tokens">${fmtTok(row.thinking_tokens||0)}</td>
       <td class="cost">${fmt(row.thinking_cost_usd||0,5)}</td>
       <td class="tokens">${fmtTok(row.cache_creation_tokens||0)}</td>
@@ -4285,9 +4563,10 @@ async function refreshSessions(){
       <td class="tokens">${row.code_gen||0}</td>
       <td class="tokens">${row.chat||0}</td>
       <td class="tokens">${row.other||0}</td>
-    </tr>`).join('')||'<tr><td colspan="17" style="color:#8b949e">No sessions today</td></tr>';
+    </tr>`).join('')||'<tr><td colspan="24" style="color:#8b949e">No sessions today</td></tr>';
     const plateaus=d.context_plateaus||[];
     pb.innerHTML=plateaus.map(row=>`<tr>
+      <td class="flags"><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
       <td class="ts">${row.sid}</td>
       <td>${(row.calls||0).toLocaleString()}</td>
       <td class="cost">${fmt(row.cost_usd,5)}</td>
@@ -4297,7 +4576,7 @@ async function refreshSessions(){
       <td class="savings">${fmt(row.cache_read_savings_usd||0,5)}</td>
       <td class="tokens">${fmtTok(row.crunch_saved_chars||0)}</td>
       <td>${row.flagged?'<span class="badge err">flagged</span>':'<span class="badge miss">watch</span>'}</td>
-    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
+    </tr>`).join('')||'<tr><td colspan="10" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }

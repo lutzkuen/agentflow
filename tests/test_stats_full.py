@@ -1352,6 +1352,134 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(session["cache_warmup_payback_ratio"], 0.139)
         json.dumps(result)
 
+    def test_sessions_include_codex_app_turns_without_raw_payloads(self):
+        raw_prompt_text = "secret raw prompt must not appear"
+
+        def log_codex_turn(
+            request_id: str,
+            *,
+            input_text_chars: int,
+            result_chars: int | None,
+            routing: dict | None = None,
+            crunch: dict | None = None,
+            cache: dict | None = None,
+            error_code: int | None = None,
+            latency_ms: int = 100,
+        ) -> None:
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id="thread-codex-sessions",
+                message_chars=input_text_chars + 50,
+                params_chars=input_text_chars + 20,
+                input_items=2,
+                input_text_chars=input_text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id=None,
+                routing_json=stable_json(routing) if routing is not None else None,
+                crunch_json=stable_json(crunch) if crunch is not None else None,
+                cache_json=stable_json(cache) if cache is not None else None,
+            )
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id="thread-codex-sessions",
+                message_chars=(result_chars or 0) + 20,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=result_chars,
+                error_code=error_code,
+                error_message="metadata-only error" if error_code is not None else None,
+                latency_ms=latency_ms,
+                session_id=None,
+            )
+
+        log_codex_turn(
+            "codex-s1",
+            input_text_chars=10_000,
+            result_chars=400,
+            routing={
+                "applied": True,
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5.1-codex",
+                "policy_source": "local-manual",
+            },
+            crunch={
+                "changed": True,
+                "applied": True,
+                "saved_chars": 1_200,
+                "policy_source": "local-default",
+            },
+            cache={
+                "status": "miss",
+                "reason": "exact-miss",
+                "policy_source": "local-default",
+            },
+        )
+        log_codex_turn(
+            "codex-s2",
+            input_text_chars=10_200,
+            result_chars=200,
+            cache={
+                "status": "hit",
+                "reason": "exact-match",
+                "hit_type": "exact",
+                "policy_source": "local-default",
+            },
+        )
+        log_codex_turn(
+            "codex-s3",
+            input_text_chars=14_000,
+            result_chars=None,
+            error_code=-32000,
+        )
+
+        result = asyncio.run(stats_views.stats_sessions(server.store))
+        [session] = result["sessions"]
+        [plateau] = result["context_plateaus"]
+        encoded = json.dumps(result)
+
+        self.assertEqual(session["session_id"], "thread-codex-sessions")
+        self.assertEqual(session["session_key_basis"], "thread_id")
+        self.assertEqual(session["source_surface"], "codex_app_turn")
+        self.assertEqual(session["app_family"], "codex")
+        self.assertEqual(session["calls"], 3)
+        self.assertEqual(session["provider_calls"], 0)
+        self.assertEqual(session["codex_turns"], 3)
+        self.assertEqual(session["codex_input_text_chars"], 34_200)
+        self.assertEqual(session["codex_input_tokens_est"], 8_550)
+        self.assertEqual(session["codex_output_tokens_est"], 150)
+        self.assertEqual(session["codex_total_tokens_est"], 8_700)
+        self.assertGreater(session["codex_cost_est_usd"], 0.0)
+        self.assertGreater(session["codex_baseline_cost_est_usd"], session["codex_cost_est_usd"])
+        self.assertGreater(session["codex_exact_cache_savings_usd"], 0.0)
+        self.assertEqual(session["codex_routed_turns"], 1)
+        self.assertEqual(session["codex_crunched_turns"], 1)
+        self.assertEqual(session["codex_cache_hits"], 1)
+        self.assertEqual(session["codex_optimized_turns"], 2)
+        self.assertEqual(session["codex_errors"], 1)
+        self.assertEqual(session["codex_method_counts"], [{"method": "turn/start", "turns": 3}])
+        self.assertEqual(plateau["session_id"], "thread-codex-sessions")
+        self.assertEqual(plateau["source_surface"], "codex_app_turn")
+        self.assertEqual(plateau["calls"], 3)
+        self.assertEqual(plateau["plateau_pairs"], 1)
+        self.assertEqual(plateau["median_text_chars"], 10_200)
+        self.assertEqual(plateau["p90_text_chars"], 14_000)
+        self.assertEqual(plateau["crunch_saved_chars"], 1_200)
+        self.assertGreater(plateau["cache_read_savings_usd"], 0.0)
+        self.assertNotIn(raw_prompt_text, encoded)
+        self.assertNotIn("raw_prompt", encoded)
+
     def test_recent_session_spending_summary_breaks_down_cost_drivers(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
@@ -1850,6 +1978,10 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("data-sort-type=\"percent\"", html)
         self.assertIn("data-sort-type=\"latency\"", html)
         self.assertIn("data-sort-type=\"time\"", html)
+        self.assertIn("<th data-sort-type=\"text\">Surface</th><th data-sort-type=\"text\">App</th><th data-sort-type=\"text\">Session</th>", html)
+        self.assertIn("<th data-sort-type=\"number\">Codex turns</th>", html)
+        self.assertIn("<th data-sort-type=\"number\">Codex input</th>", html)
+        self.assertIn("row.codex_routed_turns", html)
         self.assertIn("No matching rows", html)
         self.assertIn("applyAllDataTables();", html)
 
