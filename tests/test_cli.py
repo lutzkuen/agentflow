@@ -715,6 +715,129 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(call.kwargs["params"]["min_samples"], 3)
         self.assertEqual(call.kwargs["params"]["limit"], 7)
 
+    def test_policy_fetch_review_cli_surfaces_pattern_candidates_without_raw_leakage(self):
+        bundle = self._managed_policy_bundle()
+        bundle["recommendation"]["candidate_ids"].extend([
+            "pattern-crunch-representable",
+            "pattern-cache-health-changed",
+            "pattern-cache-omitted",
+            "pattern-cache-unchanged",
+        ])
+        bundle["recommendation"]["candidate_count"] = 5
+        bundle["policies"]["crunch"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 1,
+            "candidates": [
+                {
+                    "candidate_id": "pattern-crunch-representable",
+                    "candidate_family": "crunch-policy-rule",
+                    "confidence": 0.81,
+                    "sample_count": 64,
+                    "estimated_savings_usd": 2.5,
+                    "action": {
+                        "crunch_profile": "repeated-section-dedupe",
+                        "command": "raw command must not print",
+                    },
+                    "local_action_requirements": {
+                        "expected_policy_section": "crunch",
+                        "actionability_status": "review-only-local-action",
+                    },
+                    "confidence_inputs": {
+                        "score_family": "crunch-policy-rule",
+                        "privacy_profile_counts": {"metadata-only": 64},
+                    },
+                    "review_evidence": {
+                        "crunch": {"saved_tokens_est": 4200},
+                        "raw_policy_yaml": "raw yaml must not print",
+                    },
+                }
+            ],
+        }
+        bundle["policies"]["cache"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 2,
+            "omitted_candidate_count": 1,
+            "candidates": [
+                {
+                    "candidate_id": "pattern-cache-health-changed",
+                    "candidate_family": "cache-policy-rule",
+                    "confidence": 0.66,
+                    "sample_count": 18,
+                    "delta": {"status": "changed-health"},
+                    "local_action_requirements": {
+                        "expected_policy_section": "cache",
+                        "actionability_status": "review-only-local-action",
+                    },
+                    "evidence": {"api_key": "secret must not print"},
+                },
+                {
+                    "candidate_id": "pattern-cache-unchanged",
+                    "candidate_family": "cache-policy-rule",
+                    "confidence": 0.58,
+                    "sample_count": 14,
+                    "delta": {"status": "unchanged"},
+                    "local_action_requirements": {
+                        "expected_policy_section": "cache",
+                        "actionability_status": "review-only-local-action",
+                    },
+                },
+            ],
+            "omitted_candidates": [
+                {
+                    "candidate_id": "pattern-cache-omitted",
+                    "candidate_family": "cache-policy-rule",
+                    "reason": "cache-policy-rule-not-representable-in-local-bundle-schema-yet",
+                    "sample_count": 7,
+                    "local_action_requirements": {
+                        "expected_policy_section": "cache",
+                        "actionability_status": "review-only-local-action",
+                    },
+                    "evidence": {"raw_response": "raw provider body must not print"},
+                }
+            ],
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with TemporaryDirectory() as tmp:
+            env = {
+                "AGENTFLOW_POLICY_CONFIG_DIR": tmp,
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(Path(tmp) / "policy_events.jsonl"),
+                cli.MANAGED_POLICY_API_KEY_ENV: "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("agentflow_proxy.cli.httpx.get") as get:
+                    get.return_value = httpx.Response(200, json=bundle)
+                    code = cli.policy_fetch_review_cli(
+                        [
+                            "--url",
+                            "http://managed.test/v1/policy-bundle-recommendation",
+                            "--allow-unauthenticated",
+                            "--pretty",
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+            self.assertFalse((Path(tmp) / "crunch_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+
+        payload = json.loads(stdout.getvalue())
+        rendered = stdout.getvalue() + stderr.getvalue()
+
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["recommendation"]["pattern_candidate_count"], 4)
+        self.assertEqual(payload["recommendation"]["crunch_pattern_candidate_count"], 1)
+        self.assertEqual(payload["recommendation"]["cache_pattern_candidate_count"], 3)
+        self.assertEqual(payload["review"]["section_reviews"]["crunch"]["candidate_count"], 1)
+        self.assertEqual(payload["review"]["section_reviews"]["cache"]["changed_health_candidate_count"], 1)
+        self.assertEqual(payload["review"]["section_reviews"]["cache"]["unchanged_candidate_count"], 1)
+        self.assertIn("crunch pattern candidates: 1 total", " ".join(payload["review"]["human_summary"]))
+        self.assertNotIn("raw command must not print", rendered)
+        self.assertNotIn("raw yaml must not print", rendered)
+        self.assertNotIn("secret must not print", rendered)
+        self.assertNotIn("raw provider body must not print", rendered)
+
     def test_policy_fetch_review_cli_surfaces_managed_health_without_raw_leakage(self):
         bundle = self._managed_policy_bundle()
         bundle["recommendation"]["health"] = {

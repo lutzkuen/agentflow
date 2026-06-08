@@ -553,6 +553,8 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
     policies = bundle.get("policies")
     routing = policies.get("routing") if isinstance(policies, dict) and isinstance(policies.get("routing"), dict) else {}
     codex_app = policies.get("codex_app") if isinstance(policies, dict) and isinstance(policies.get("codex_app"), dict) else {}
+    crunch = policies.get("crunch") if isinstance(policies, dict) and isinstance(policies.get("crunch"), dict) else {}
+    cache = policies.get("cache") if isinstance(policies, dict) and isinstance(policies.get("cache"), dict) else {}
     routing_recommendation = (
         routing.get("recommendation")
         if isinstance(routing, dict) and isinstance(routing.get("recommendation"), dict)
@@ -593,6 +595,19 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         from agentflow_proxy.policy_bundle import codex_app_policy_review_summary
 
         codex_app_summary = codex_app_policy_review_summary(codex_app)
+    pattern_summaries: dict[str, Any] = {}
+    if crunch or cache:
+        from agentflow_proxy.policy_bundle import pattern_policy_review_summary
+
+        if crunch:
+            pattern_summaries["crunch"] = pattern_policy_review_summary(crunch, section="crunch")
+        if cache:
+            pattern_summaries["cache"] = pattern_policy_review_summary(cache, section="cache")
+    pattern_candidate_ids = [
+        candidate_id
+        for summary in pattern_summaries.values()
+        for candidate_id in summary.get("candidate_ids", [])
+    ]
 
     return {
         "schema": recommendation.get("schema"),
@@ -604,6 +619,12 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         "codex_app_candidate_count": codex_app_summary.get("candidate_count", 0),
         "codex_app_review_only": codex_app_summary.get("review_only", False),
         "codex_app_application_status": (codex_app_summary.get("application") or {}).get("status"),
+        "pattern_candidate_ids": pattern_candidate_ids,
+        "pattern_candidate_count": sum(summary.get("candidate_count", 0) for summary in pattern_summaries.values()),
+        "crunch_pattern_candidate_count": pattern_summaries.get("crunch", {}).get("candidate_count", 0),
+        "cache_pattern_candidate_count": pattern_summaries.get("cache", {}).get("candidate_count", 0),
+        "pattern_review_only_candidate_count": sum(summary.get("review_only_candidate_count", 0) for summary in pattern_summaries.values()),
+        "pattern_omitted_candidate_count": sum(summary.get("omitted_candidate_count", 0) for summary in pattern_summaries.values()),
         "omitted_candidate_count": recommendation.get(
             "omitted_candidate_count",
             routing_recommendation.get("omitted_candidate_count", 0),
@@ -611,6 +632,7 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         "filters": recommendation.get("filters", {}),
         "candidates": candidates,
         "codex_app": codex_app_summary,
+        "patterns": pattern_summaries,
         "health": summarize_recommendation_health(bundle),
     }
 

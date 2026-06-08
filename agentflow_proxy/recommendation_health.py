@@ -5,16 +5,25 @@ from typing import Any
 
 RAW_HEALTH_KEYS = {
     "arguments",
+    "api_key",
+    "apikey",
+    "authorization",
     "body",
+    "command",
+    "commands",
     "completion",
     "content",
     "developer",
+    "file_content",
     "input",
+    "local_file",
     "message",
     "messages",
     "output",
     "params",
+    "policy_yaml",
     "prompt",
+    "provider_body",
     "raw_prompt",
     "raw_request",
     "raw_response",
@@ -68,7 +77,23 @@ _SAFE_SCALAR_KEYS = {
 
 def _raw_key(key: Any) -> bool:
     lowered = str(key).lower()
-    return lowered in RAW_HEALTH_KEYS or any(part in lowered for part in ("prompt", "transcript", "raw_request", "raw_response"))
+    return lowered in RAW_HEALTH_KEYS or any(
+        part in lowered
+        for part in (
+            "api_key",
+            "apikey",
+            "authorization",
+            "command",
+            "policy_yaml",
+            "prompt",
+            "provider_body",
+            "raw",
+            "raw_request",
+            "raw_response",
+            "secret",
+            "transcript",
+        )
+    )
 
 
 def _safe_scalar(value: Any) -> Any:

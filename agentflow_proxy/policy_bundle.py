@@ -23,6 +23,7 @@ POLICY_BUNDLE_ROLLBACK_SCHEMA = "agentflow.policy_bundle_rollback.v1"
 POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
 POLICY_BUNDLE_PROVENANCE_SCHEMA = "agentflow.policy_bundle_provenance.v1"
 POLICY_BUNDLE_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.policy_bundle_provenance_verification.v1"
+PATTERN_CANDIDATE_REVIEW_SCHEMA = "agentflow.pattern_candidate_review.v1"
 POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
 MANAGED_POLICY_VERIFICATION_SECRET_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"
 MANAGED_POLICY_VERIFICATION_SECRETS_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS"
@@ -526,6 +527,7 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
             f"{base}.thinking_deduplication.skip_latest_assistant",
             thinking_dedup["skip_latest_assistant"],
         )
+    _validate_pattern_recommendation(policy, errors, base=base, expected_section="crunch")
 
 
 def _validate_cache_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
@@ -558,6 +560,94 @@ def _validate_cache_policy(policy: dict[str, Any], errors: list[dict[str, str]])
         _validate_non_empty_string(errors, f"{base}.file_watch.root", file_watch["root"])
     if "max_paths" in file_watch:
         _validate_intish(errors, f"{base}.file_watch.max_paths", file_watch["max_paths"], min_value=0)
+    _validate_pattern_recommendation(policy, errors, base=base, expected_section="cache")
+
+
+def _validate_pattern_candidate(
+    candidate: Any,
+    errors: list[dict[str, str]],
+    path: str,
+    *,
+    expected_section: str,
+) -> None:
+    if not isinstance(candidate, dict):
+        _add_error(errors, path, "expected pattern candidate object")
+        return
+    candidate_id = candidate.get("candidate_id") or candidate.get("policy_id") or candidate.get("recommendation_id")
+    if candidate_id is not None:
+        _validate_non_empty_string(errors, f"{path}.candidate_id", candidate_id)
+    if "confidence" in candidate:
+        _validate_floatish(errors, f"{path}.confidence", candidate["confidence"], min_value=0.0, max_value=1.0)
+    if "sample_count" in candidate:
+        _validate_intish(errors, f"{path}.sample_count", candidate["sample_count"], min_value=0)
+    if "error_rate" in candidate:
+        _validate_floatish(errors, f"{path}.error_rate", candidate["error_rate"], min_value=0.0, max_value=1.0)
+    if "local_action_requirements" in candidate:
+        requirements = candidate["local_action_requirements"]
+        if not isinstance(requirements, dict):
+            _add_error(errors, f"{path}.local_action_requirements", "expected object")
+        elif requirements.get("expected_policy_section") not in (None, expected_section):
+            _add_error(
+                errors,
+                f"{path}.local_action_requirements.expected_policy_section",
+                f"expected {expected_section}",
+            )
+    for key in ("confidence_inputs", "evidence", "review_evidence", "delta", "change_summary"):
+        if key in candidate and not isinstance(candidate[key], dict):
+            _add_error(errors, f"{path}.{key}", "expected object")
+    for key in ("omission_reasons", "warning_reasons"):
+        if key in candidate:
+            value = candidate[key]
+            if not isinstance(value, list):
+                _add_error(errors, f"{path}.{key}", "expected list")
+            else:
+                for index, item in enumerate(value):
+                    _validate_non_empty_string(errors, f"{path}.{key}[{index}]", item)
+
+
+def _validate_pattern_recommendation(
+    policy: dict[str, Any],
+    errors: list[dict[str, str]],
+    *,
+    base: str,
+    expected_section: str,
+) -> None:
+    recommendation = policy.get("recommendation")
+    if recommendation is None:
+        return
+    if not isinstance(recommendation, dict):
+        _add_error(errors, f"{base}.recommendation", "expected object")
+        return
+    if "candidate_count" in recommendation:
+        _validate_intish(errors, f"{base}.recommendation.candidate_count", recommendation["candidate_count"], min_value=0)
+    if "review_only_candidate_count" in recommendation:
+        _validate_intish(
+            errors,
+            f"{base}.recommendation.review_only_candidate_count",
+            recommendation["review_only_candidate_count"],
+            min_value=0,
+        )
+    if "omitted_candidate_count" in recommendation:
+        _validate_intish(
+            errors,
+            f"{base}.recommendation.omitted_candidate_count",
+            recommendation["omitted_candidate_count"],
+            min_value=0,
+        )
+    for list_key in ("candidates", "review_only_candidates", "omitted_candidates"):
+        value = recommendation.get(list_key)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            _add_error(errors, f"{base}.recommendation.{list_key}", "expected list")
+            continue
+        for index, candidate in enumerate(value):
+            _validate_pattern_candidate(
+                candidate,
+                errors,
+                f"{base}.recommendation.{list_key}[{index}]",
+                expected_section=expected_section,
+            )
 
 
 def _validate_routing_experiment_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
@@ -1396,6 +1486,316 @@ def codex_app_policy_review_summary(policy: Any) -> dict[str, Any]:
     }
 
 
+_PATTERN_RAW_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "command",
+    "content",
+    "file_content",
+    "local_file",
+    "message",
+    "param",
+    "policy_yaml",
+    "prompt",
+    "provider_body",
+    "raw",
+    "request",
+    "response",
+    "secret",
+    "system",
+    "tool_payload",
+    "transcript",
+)
+
+
+def _safe_pattern_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(part in lowered for part in _PATTERN_RAW_KEY_PARTS):
+                continue
+            cleaned = _safe_pattern_value(item)
+            if cleaned is not None:
+                safe[str(key)] = cleaned
+        return safe
+    if isinstance(value, list):
+        return [item for item in (_safe_pattern_value(item) for item in value[:50]) if item is not None]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:240]
+    return None
+
+
+def _first_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _candidate_id(candidate: dict[str, Any], index: int, *, section: str) -> str:
+    for key in ("candidate_id", "policy_id", "recommendation_id"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+    for key in ("candidate_id", "policy_id", "recommendation_id"):
+        value = evidence.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return f"{section}-pattern-candidate-{index + 1}"
+
+
+def _bucket_sample_count(sample_count: Any) -> str:
+    count = _as_int(sample_count)
+    if count <= 0:
+        return "zero"
+    if count < 5:
+        return "lt_5"
+    if count < 10:
+        return "5_9"
+    if count < 25:
+        return "10_24"
+    if count < 100:
+        return "25_99"
+    return "gte_100"
+
+
+def _bucket_savings(value: Any) -> str:
+    amount = _as_float(value)
+    if amount <= 0:
+        return "zero"
+    if amount < 0.01:
+        return "lt_1_cent"
+    if amount < 0.10:
+        return "1_10_cents"
+    if amount < 1.0:
+        return "10_100_cents"
+    return "gte_1_usd"
+
+
+def _pattern_delta_for_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    delta = _first_mapping(candidate.get("delta"), candidate.get("change_summary"), candidate.get("health_delta"))
+    confidence_inputs = candidate.get("confidence_inputs") if isinstance(candidate.get("confidence_inputs"), dict) else {}
+    if "lifecycle_delta" in confidence_inputs:
+        delta = {**delta, "lifecycle_delta": confidence_inputs.get("lifecycle_delta")}
+    if not delta:
+        status = candidate.get("delta_status") or candidate.get("change_status")
+        if isinstance(status, str) and status.strip():
+            delta = {"status": status}
+    return _safe_pattern_value(delta) if delta else {}
+
+
+def _candidate_action(candidate: dict[str, Any]) -> dict[str, Any]:
+    action = _first_mapping(candidate.get("action"), candidate.get("recommended_action"))
+    if action:
+        return _safe_pattern_value(action) or {}
+    keys = (
+        "cache_eligibility",
+        "cache_policy",
+        "crunch_profile",
+        "dedupe_rule",
+        "invalidation_rule",
+        "threshold_rule",
+    )
+    return {key: _safe_pattern_value(candidate[key]) for key in keys if key in candidate}
+
+
+def _pattern_candidate_review(
+    candidate: dict[str, Any],
+    index: int,
+    *,
+    section: str,
+    list_name: str,
+) -> dict[str, Any]:
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else candidate
+    requirements = _first_mapping(candidate.get("local_action_requirements"), evidence.get("local_action_requirements"))
+    confidence_inputs = _first_mapping(candidate.get("confidence_inputs"), evidence.get("confidence_inputs"))
+    review_evidence = _first_mapping(candidate.get("review_evidence"), evidence.get("review_evidence"))
+    privacy_profiles = (
+        candidate.get("privacy_profile_counts")
+        or evidence.get("privacy_profile_counts")
+        or confidence_inputs.get("privacy_profile_counts")
+        or {}
+    )
+    sample_count = candidate.get("sample_count", evidence.get("sample_count"))
+    savings = (
+        candidate.get("estimated_savings_usd")
+        if "estimated_savings_usd" in candidate
+        else evidence.get("estimated_savings_usd", evidence.get("avg_savings_usd"))
+    )
+    omission_reasons = _as_string_list(candidate.get("omission_reasons")) or _as_string_list(candidate.get("reason"))
+    warning_reasons = _as_string_list(candidate.get("warning_reasons"))
+    actionability = requirements.get("actionability_status") or (
+        "omitted" if list_name == "omitted_candidates" else "review-only-local-action"
+    )
+    delta = _pattern_delta_for_candidate(candidate)
+    changed = bool(delta and str(delta.get("status") or "").lower() not in {"unchanged", "none", "no-change"})
+    if list_name == "candidates":
+        candidate_status = "candidate"
+    elif list_name == "review_only_candidates":
+        candidate_status = "review_only"
+    else:
+        candidate_status = "omitted"
+    return {
+        "path": f"$.policies.{section}.recommendation.{list_name}[{index}]",
+        "candidate_id": _candidate_id(candidate, index, section=section),
+        "policy_section": section,
+        "candidate_family": candidate.get("candidate_family") or evidence.get("candidate_family") or f"{section}-policy-rule",
+        "candidate_status": candidate_status,
+        "policy_source": candidate.get("policy_source") or evidence.get("policy_source") or "managed-recommended",
+        "confidence": candidate.get("confidence", evidence.get("confidence")),
+        "confidence_inputs": _safe_pattern_value(confidence_inputs),
+        "sample_count": sample_count,
+        "sample_count_bucket": candidate.get("sample_count_bucket") or _bucket_sample_count(sample_count),
+        "savings_bucket": candidate.get("savings_bucket") or _bucket_savings(savings),
+        "estimated_savings_usd": savings,
+        "error_rate": candidate.get("error_rate", evidence.get("error_rate")),
+        "evidence_buckets": {
+            "source_surface": candidate.get("source_surface", evidence.get("source_surface")),
+            "app_family": candidate.get("app_family", evidence.get("app_family")),
+            "category": candidate.get("category", evidence.get("category")),
+            "phase": candidate.get("phase", evidence.get("phase")),
+            "text_bucket": candidate.get("text_bucket", evidence.get("text_bucket")),
+            "token_bucket": candidate.get("token_bucket", evidence.get("token_bucket")),
+            "privacy_profile_counts": _safe_pattern_value(privacy_profiles),
+        },
+        "review_evidence": _safe_pattern_value(review_evidence),
+        "action": _candidate_action(candidate),
+        "local_action_requirements": _safe_pattern_value(requirements),
+        "actionability_status": actionability,
+        "omission_reasons": omission_reasons,
+        "warning_reasons": warning_reasons,
+        "delta": delta,
+        "changed_since_last_review": changed,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_policy_yaml_included": False,
+            "raw_provider_bodies_included": False,
+            "commands_included": False,
+            "credentials_included": False,
+            "local_file_contents_included": False,
+        },
+    }
+
+
+def pattern_policy_review_summary(policy: Any, *, section: str) -> dict[str, Any]:
+    if not isinstance(policy, dict):
+        policy = {}
+    recommendation = policy.get("recommendation") if isinstance(policy.get("recommendation"), dict) else {}
+    candidate_sources = (
+        ("candidates", recommendation.get("candidates") if isinstance(recommendation.get("candidates"), list) else []),
+        (
+            "review_only_candidates",
+            recommendation.get("review_only_candidates") if isinstance(recommendation.get("review_only_candidates"), list) else [],
+        ),
+        (
+            "omitted_candidates",
+            recommendation.get("omitted_candidates") if isinstance(recommendation.get("omitted_candidates"), list) else [],
+        ),
+    )
+    candidates: list[dict[str, Any]] = []
+    for list_name, items in candidate_sources:
+        for index, candidate in enumerate(items):
+            if isinstance(candidate, dict):
+                candidates.append(_pattern_candidate_review(candidate, index, section=section, list_name=list_name))
+
+    representable = [item for item in candidates if item["candidate_status"] == "candidate"]
+    review_only = [item for item in candidates if item["actionability_status"] == "review-only-local-action"]
+    omitted = [item for item in candidates if item["candidate_status"] == "omitted"]
+    changed = [item for item in candidates if item["changed_since_last_review"]]
+    unchanged = [
+        item for item in candidates
+        if item.get("delta") and not item["changed_since_last_review"]
+    ]
+    application_status = "review-only-not-applied" if candidates else "no-pattern-candidates"
+    return {
+        "schema": PATTERN_CANDIDATE_REVIEW_SCHEMA,
+        "status": "review-only" if candidates else "empty",
+        "policy_source": recommendation.get("policy_source") or policy.get("policy_source"),
+        "policy_section": section,
+        "candidate_count": len(candidates),
+        "representable_candidate_count": len(representable),
+        "review_only_candidate_count": len(review_only),
+        "omitted_candidate_count": len(omitted),
+        "changed_health_candidate_count": len(changed),
+        "unchanged_candidate_count": len(unchanged),
+        "candidate_ids": [item["candidate_id"] for item in candidates],
+        "application": {
+            "status": application_status,
+            "reason": (
+                f"Managed {section} pattern candidates are reviewed locally and are not written by review commands."
+                if candidates
+                else f"No managed {section} pattern candidates are present."
+            ),
+            "expected_policy_section": section,
+            "writes_local_policy_files": False,
+        },
+        "rationale": recommendation.get("rationale"),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_policy_yaml_included": False,
+            "raw_provider_bodies_included": False,
+            "commands_included": False,
+            "credentials_included": False,
+            "local_file_contents_included": False,
+        },
+        "candidates": candidates,
+    }
+
+
+def _review_human_summary(result: dict[str, Any]) -> list[str]:
+    lines = [
+        f"Policy review: {'ok' if result.get('ok') else 'invalid'}; changed sections: {', '.join(result.get('changed_sections') or []) or 'none'}.",
+    ]
+    section_reviews = result.get("section_reviews") if isinstance(result.get("section_reviews"), dict) else {}
+    for section in ("crunch", "cache", "codex_app"):
+        review = section_reviews.get(section)
+        if not isinstance(review, dict):
+            continue
+        if section in {"crunch", "cache"}:
+            lines.append(
+                f"{section} pattern candidates: {review.get('candidate_count', 0)} total, "
+                f"{review.get('review_only_candidate_count', 0)} review-only, "
+                f"{review.get('omitted_candidate_count', 0)} omitted; application: "
+                f"{(review.get('application') or {}).get('status')}."
+            )
+        elif review.get("candidate_count"):
+            lines.append(
+                f"codex_app candidates: {review.get('candidate_count', 0)} review-only; application: "
+                f"{(review.get('application') or {}).get('status')}."
+            )
+    return lines
+
+
+def _review_diff_payload(diff: dict[str, Any]) -> dict[str, Any]:
+    changes = []
+    for change in diff.get("changes", []):
+        if not isinstance(change, dict):
+            continue
+        sanitized = {
+            key: value
+            for key, value in change.items()
+            if key not in {"old", "new"}
+        }
+        sanitized["old"] = _safe_pattern_value(change.get("old"))
+        sanitized["new"] = _safe_pattern_value(change.get("new"))
+        changes.append(sanitized)
+    return {
+        "schema": diff.get("schema"),
+        "ok": diff.get("ok"),
+        "changed": diff.get("changed"),
+        "changed_sections": diff.get("changed_sections", []),
+        "change_count": diff.get("change_count", 0),
+        "changes": changes,
+    }
+
+
 def simulate_policy_bundle_impact(
     proposed: Any,
     *,
@@ -1554,23 +1954,23 @@ def review_policy_bundle(
         "safety_warnings": warnings,
         "current_validation": diff.get("before_validation"),
         "proposed_validation": diff.get("after_validation"),
-        "diff": {
-            "schema": diff.get("schema"),
-            "ok": diff.get("ok"),
-            "changed": diff.get("changed"),
-            "changed_sections": diff.get("changed_sections", []),
-            "change_count": diff.get("change_count", 0),
-            "changes": diff.get("changes", []),
-        },
+        "diff": _review_diff_payload(diff),
     }
     proposed_validation = diff.get("after_validation") if isinstance(diff.get("after_validation"), dict) else {}
     result["provenance"] = proposed_validation.get("provenance")
     result["recommendation_health"] = summarize_recommendation_health(proposed)
     policies = proposed.get("policies") if isinstance(proposed, dict) and isinstance(proposed.get("policies"), dict) else {}
+    section_reviews: dict[str, Any] = {}
+    for section in ("crunch", "cache"):
+        if isinstance(policies.get(section), dict):
+            review = pattern_policy_review_summary(policies[section], section=section)
+            if review.get("candidate_count"):
+                section_reviews[section] = review
     if isinstance(policies.get("codex_app"), dict):
-        result["section_reviews"] = {
-            "codex_app": codex_app_policy_review_summary(policies["codex_app"]),
-        }
+        section_reviews["codex_app"] = codex_app_policy_review_summary(policies["codex_app"])
+    if section_reviews:
+        result["section_reviews"] = section_reviews
+    result["human_summary"] = _review_human_summary(result)
     if include_impact:
         result["impact_summary"] = simulate_policy_bundle_impact(
             proposed,

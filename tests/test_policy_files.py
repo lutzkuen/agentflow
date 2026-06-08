@@ -295,6 +295,140 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("recommended_model", codex_review["action_keys_present"])
         self.assertFalse(codex_review["privacy"]["raw_prompts_included"])
 
+    def test_policy_review_reports_managed_pattern_candidate_evidence_without_raw_leakage(self):
+        current = asyncio.run(build_policy_bundle())
+        proposed = json.loads(json.dumps(current))
+        proposed["recommendation"] = {
+            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "policy_source": "managed-recommended",
+            "candidate_ids": [
+                "pattern-crunch-representable",
+                "pattern-cache-health-changed",
+                "pattern-cache-omitted",
+                "pattern-cache-unchanged",
+            ],
+            "candidate_count": 4,
+            "change_summary": {
+                "since_bundle_hash": "sha256:last-reviewed",
+                "changed_candidate_ids": ["pattern-cache-health-changed"],
+                "unchanged_candidate_ids": ["pattern-cache-unchanged"],
+            },
+        }
+        proposed["managed_optimizer"] = {
+            "enabled": False,
+            "policy_source": "managed-recommended",
+            "note": "Review-only managed pattern evidence.",
+        }
+        proposed["policies"]["crunch"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 1,
+            "candidates": [
+                {
+                    "candidate_id": "pattern-crunch-representable",
+                    "candidate_family": "crunch-policy-rule",
+                    "confidence": 0.78,
+                    "sample_count": 42,
+                    "estimated_savings_usd": 1.25,
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "tool-result",
+                    "text_bucket": "8k_30k_chars",
+                    "token_bucket": "1k_4k_tokens",
+                    "action": {
+                        "crunch_profile": "repeated-section-dedupe",
+                        "command": "raw shell command must not render",
+                    },
+                    "local_action_requirements": {
+                        "expected_policy_section": "crunch",
+                        "actionability_status": "review-only-local-action",
+                        "action_requirements": {"crunch_profile_support": True},
+                    },
+                    "confidence_inputs": {
+                        "score_family": "crunch-policy-rule",
+                        "privacy_profile_counts": {"metadata-only": 42},
+                    },
+                    "review_evidence": {
+                        "crunch": {"saved_tokens_est": 3200},
+                        "raw_prompt": "raw prompt must not render",
+                    },
+                }
+            ],
+        }
+        proposed["policies"]["cache"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 2,
+            "omitted_candidate_count": 1,
+            "candidates": [
+                {
+                    "candidate_id": "pattern-cache-health-changed",
+                    "candidate_family": "cache-policy-rule",
+                    "confidence": 0.65,
+                    "sample_count": 18,
+                    "estimated_savings_usd": 0.12,
+                    "delta": {"status": "changed-health", "old_health": "warning", "new_health": "healthy"},
+                    "warning_reasons": ["lifecycle-warning-cleared"],
+                    "local_action_requirements": {
+                        "expected_policy_section": "cache",
+                        "actionability_status": "review-only-local-action",
+                    },
+                    "evidence": {
+                        "review_evidence": {"cache": {"blocker": "tool_calls_without_file_dependencies"}},
+                        "api_key": "secret must not render",
+                    },
+                },
+                {
+                    "candidate_id": "pattern-cache-unchanged",
+                    "candidate_family": "cache-policy-rule",
+                    "confidence": 0.51,
+                    "sample_count": 11,
+                    "delta": {"status": "unchanged"},
+                    "local_action_requirements": {
+                        "expected_policy_section": "cache",
+                        "actionability_status": "review-only-local-action",
+                    },
+                },
+            ],
+            "omitted_candidates": [
+                {
+                    "candidate_id": "pattern-cache-omitted",
+                    "candidate_family": "cache-policy-rule",
+                    "reason": "cache-policy-rule-not-representable-in-local-bundle-schema-yet",
+                    "omission_reasons": ["cache-policy-rule-not-representable-in-local-bundle-schema-yet"],
+                    "sample_count": 9,
+                    "local_action_requirements": {
+                        "expected_policy_section": "cache",
+                        "actionability_status": "review-only-local-action",
+                    },
+                    "evidence": {"raw_response": "raw provider response must not render"},
+                }
+            ],
+        }
+
+        result = review_policy_bundle(current, proposed, include_impact=False)
+        rendered = json.dumps(result, sort_keys=True)
+
+        self.assertTrue(result["ok"])
+        self.assertIn("crunch", result["section_reviews"])
+        self.assertIn("cache", result["section_reviews"])
+        crunch_review = result["section_reviews"]["crunch"]
+        cache_review = result["section_reviews"]["cache"]
+        self.assertEqual(crunch_review["schema"], "agentflow.pattern_candidate_review.v1")
+        self.assertEqual(crunch_review["candidate_count"], 1)
+        self.assertEqual(crunch_review["representable_candidate_count"], 1)
+        self.assertEqual(crunch_review["candidates"][0]["sample_count_bucket"], "25_99")
+        self.assertEqual(crunch_review["candidates"][0]["savings_bucket"], "gte_1_usd")
+        self.assertEqual(cache_review["candidate_count"], 3)
+        self.assertEqual(cache_review["changed_health_candidate_count"], 1)
+        self.assertEqual(cache_review["unchanged_candidate_count"], 1)
+        self.assertEqual(cache_review["omitted_candidate_count"], 1)
+        self.assertEqual(cache_review["application"]["status"], "review-only-not-applied")
+        self.assertIn("cache pattern candidates: 3 total", " ".join(result["human_summary"]))
+        self.assertNotIn("raw prompt must not render", rendered)
+        self.assertNotIn("raw shell command must not render", rendered)
+        self.assertNotIn("secret must not render", rendered)
+        self.assertNotIn("raw provider response must not render", rendered)
+        self.assertNotIn("api_key", rendered)
+
     def test_policy_apply_reports_codex_app_review_only_and_writes_no_codex_yaml(self):
         bundle = asyncio.run(build_policy_bundle())
         bundle["policies"]["codex_app"] = {
