@@ -37,6 +37,20 @@ def summarize_policy_state(policies: Any) -> dict[str, Any]:
             "rule_path": value.get("rule_path"),
             "reload_required": file_status.get("reload_required"),
         }
+    source_surfaces = policies.get("source_surfaces")
+    if isinstance(source_surfaces, dict):
+        compact_surfaces = {}
+        for name, value in source_surfaces.items():
+            if not isinstance(value, dict):
+                continue
+            compact_surfaces[name] = {
+                "enabled": value.get("enabled"),
+                "policy_source": value.get("policy_source"),
+                "reload_required": value.get("reload_required"),
+                "cache_enabled": ((value.get("cache") or {}).get("enabled") if isinstance(value.get("cache"), dict) else None),
+            }
+        if compact_surfaces:
+            summary["source_surfaces"] = compact_surfaces
     return summary
 
 

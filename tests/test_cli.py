@@ -86,7 +86,15 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_policy_export_cli_prints_policy_bundle_json(self):
         stdout = io.StringIO()
 
-        code = cli.policy_export_cli([], stdout=stdout)
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_CODEX_APP_OPTIMIZE": "1",
+                "AGENTFLOW_CODEX_APP_CACHE": "0",
+            },
+            clear=False,
+        ):
+            code = cli.policy_export_cli([], stdout=stdout)
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
@@ -94,6 +102,11 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["generator"]["mode"], "local-offline")
         self.assertFalse(payload["managed_optimizer"]["enabled"])
         self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
+        self.assertIn("routing", payload["policies"])
+        surface = payload["policies"]["source_surfaces"]["codex_app_turn"]
+        self.assertTrue(surface["optimization"]["enabled"])
+        self.assertFalse(surface["cache"]["enabled"])
+        self.assertFalse(surface["managed_optimizer_required"])
 
     def test_codex_diagnose_cli_reads_local_metadata_only(self):
         from agentflow_proxy.store import Store, stable_json, utc_now

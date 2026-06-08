@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 HAS_RUNTIME_DEPS = all(
     importlib.util.find_spec(module_name) is not None
@@ -71,6 +72,57 @@ class StatsFullTest(unittest.TestCase):
 
         self.assertAlmostEqual(summary["crunch_savings_usd"], 0.00057, places=6)
         self.assertAlmostEqual(summary["today_crunch_savings_usd"], 0.00057, places=6)
+
+    def test_policy_state_exposes_codex_app_surface_cache_disabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_CODEX_APP_OPTIMIZE": "1",
+                "AGENTFLOW_CODEX_APP_CACHE": "0",
+                "AGENTFLOW_CODEX_APP_UPSTREAM": "ws://127.0.0.1:4999",
+            },
+            clear=False,
+        ):
+            result = asyncio.run(stats_views.stats_policies())
+
+        self.assertIn("routing", result)
+        self.assertIn("crunch", result)
+        self.assertIn("cache", result)
+        surface = result["source_surfaces"]["codex_app_turn"]
+        self.assertTrue(surface["optimization"]["enabled"])
+        self.assertFalse(surface["cache"]["enabled"])
+        self.assertFalse(surface["cache"]["exact_cache"]["enabled"])
+        self.assertEqual(surface["cache"]["disabled_reason"], "AGENTFLOW_CODEX_APP_CACHE is not 1")
+        self.assertEqual(surface["cache"]["exact_cache"]["upstream"], "ws://127.0.0.1:4999")
+        self.assertIn("input", surface["safe_turn_params"]["allowed_keys"])
+        self.assertEqual(surface["action_like_skip_behavior"]["reason"], "action-like-params")
+        self.assertEqual(surface["routing"]["policy_source"], result["routing"]["policy_source"])
+        self.assertEqual(surface["crunch"]["rule_path"], result["crunch"]["rule_path"])
+        self.assertEqual(surface["cache"]["rule_path"], result["cache"]["rule_path"])
+        self.assertEqual(surface["managed_optimizer_required"], False)
+        self.assertEqual(result["summary"]["policy_count"], 4)
+        self.assertEqual(result["summary"]["source_surface_policy_count"], 1)
+
+    def test_policy_state_exposes_codex_app_surface_cache_enabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AGENTFLOW_CODEX_APP_OPTIMIZE": "0",
+                "AGENTFLOW_CODEX_APP_CACHE": "1",
+                "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE": "codex-test",
+            },
+            clear=False,
+        ):
+            result = asyncio.run(stats_views.stats_policies())
+
+        surface = result["source_surfaces"]["codex_app_turn"]
+        self.assertFalse(surface["optimization"]["enabled"])
+        self.assertTrue(surface["cache"]["enabled"])
+        self.assertTrue(surface["cache"]["exact_cache"]["enabled"])
+        self.assertEqual(surface["cache"]["exact_cache"]["namespace"], "codex-test")
+        self.assertEqual(surface["cache"]["exact_cache"]["provider"], "codex-app")
+        self.assertEqual(surface["cache"]["exact_cache"]["cache_url"], "codex-app://turn/start")
+        self.assertEqual(surface["cache"]["exact_cache"]["replayability_level"], "local-exact-response")
 
     def test_full_stats_include_executive_summary_for_top_dashboard_tiles(self):
         server.store.log_call(
@@ -2087,6 +2139,14 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("id=\"codex-tbody\"", html)
         self.assertIn("const tabs=['activity','usage','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
 
+    def test_dashboard_policy_panel_renders_codex_app_surface_state(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn("Codex app-server", html)
+        self.assertIn("Codex exact cache off", html)
+        self.assertIn("safe keys", html)
+        self.assertIn("action-like skip on", html)
+
     def test_dashboard_exposes_usage_by_app_engineer_table(self):
         html = stats_views.dashboard_html()
 
@@ -2121,7 +2181,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("Provider cache discount", html)
         self.assertNotIn("Old-context summaries", html)
         self.assertNotIn("Thinking cost today", html)
-        self.assertNotIn("Codex app-server", html)
+        self.assertIn("Codex app-server", html)
 
     def test_dashboard_exposes_error_breakdown_tables(self):
         html = stats_views.dashboard_html()

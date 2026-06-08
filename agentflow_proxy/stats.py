@@ -7,6 +7,7 @@ import sqlite3
 from datetime import date, timedelta
 from typing import Any, Optional
 
+from agentflow_proxy.codex_app_policy import codex_app_surface_policy_state
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
@@ -130,6 +131,9 @@ async def stats_policies() -> dict[str, Any]:
         },
     }
     sections = ("routing", "crunch", "cache", "routing_experiments")
+    state["source_surfaces"] = {
+        "codex_app_turn": codex_app_surface_policy_state(state),
+    }
     reload_required_sections = [
         section
         for section in sections
@@ -156,6 +160,7 @@ async def stats_policies() -> dict[str, Any]:
         ),
         "reload_required": bool(reload_required_sections),
         "reload_required_sections": reload_required_sections,
+        "source_surface_policy_count": len(state["source_surfaces"]),
     }
     return state
 
@@ -4737,6 +4742,27 @@ async function refreshPolicies(){
         ])
       }
     ];
+    const codexSurface=d.source_surfaces&&d.source_surfaces.codex_app_turn;
+    if(codexSurface){
+      const codexCache=codexSurface.cache||{};
+      const codexExact=codexCache.exact_cache||{};
+      const codexSafe=codexSurface.safe_turn_params||{};
+      const codexSkip=codexSurface.action_like_skip_behavior||{};
+      rows.push({
+        name:'Codex app-server',
+        enabled:codexSurface.enabled,
+        source:codexSurface.policy_source,
+        path:codexExact.namespace?('namespace '+codexExact.namespace):codexExact.upstream,
+        settings:compactSettings([
+          codexSurface.reload_required?'reload required':'loaded',
+          codexSurface.optimization&&codexSurface.optimization.enabled?'optimization on':'optimization off',
+          codexCache.enabled?'Codex exact cache on':'Codex exact cache off',
+          codexExact.upstream?('upstream '+codexExact.upstream):'',
+          'safe keys '+(codexSafe.allowed_key_count??0),
+          codexSkip.enabled?'action-like skip on':'action-like skip off'
+        ])
+      });
+    }
     document.getElementById('policies-tbody').innerHTML=rows.map(row=>`<tr>
       <td><span class="badge provider">${esc(row.name)}</span></td>
       <td>${policyStatus(row.enabled)}</td>

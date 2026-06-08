@@ -16,6 +16,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from agentflow_proxy.cache import cache_file_dependency_snapshots, cache_key_for
+from agentflow_proxy.codex_app_policy import (
+    CODEX_ACTION_KEY_HINTS,
+    CODEX_ACTION_VALUE_HINTS,
+    CODEX_MODEL_FIELDS,
+    CODEX_SAFE_TURN_PARAM_KEYS,
+    CODEX_TEXT_INPUT_TYPES,
+    DEFAULT_CODEX_APP_UPSTREAM,
+    codex_app_cache_enabled,
+    codex_app_optimize_enabled,
+)
 from agentflow_proxy.crunch import TOKEN_CHARS, crunch_body, crunch_codex_turn_params
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
@@ -25,58 +35,17 @@ load_dotenv()
 DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
 DEFAULT_HOST = os.getenv("AGENTFLOW_CODEX_APP_PROXY_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_CODEX_APP_PROXY_PORT", "4013"))
-DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", "ws://127.0.0.1:4014")
+DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", DEFAULT_CODEX_APP_UPSTREAM)
 LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
 DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
-CODEX_APP_OPTIMIZE = os.getenv("AGENTFLOW_CODEX_APP_OPTIMIZE", "1") != "0"
-CODEX_APP_CACHE = os.getenv("AGENTFLOW_CODEX_APP_CACHE", "0") == "1"
+CODEX_APP_OPTIMIZE = codex_app_optimize_enabled()
+CODEX_APP_CACHE = codex_app_cache_enabled()
 
 store = Store(DEFAULT_DB)
 if getattr(store, "backend", None) == "sqlite":
     store.conn.execute(f"pragma busy_timeout = {DB_BUSY_TIMEOUT_MS}")
 app = FastAPI(title="AgentFlow Codex App-Server Proxy", version="0.1.0")
 
-_CODEX_ACTION_KEY_HINTS = {
-    "approval",
-    "approvalrequest",
-    "approval_request",
-    "apply_patch",
-    "cmd",
-    "command",
-    "exec",
-    "function_call",
-    "patch",
-    "shell",
-    "tool_call",
-    "tool_calls",
-}
-_CODEX_ACTION_VALUE_HINTS = {
-    "approval_request",
-    "apply_patch",
-    "command",
-    "exec",
-    "function_call",
-    "shell",
-    "tool_call",
-    "tool_result",
-    "tool_use",
-}
-_CODEX_MODEL_FIELDS = ("model", "modelId", "model_id")
-_CODEX_SAFE_TURN_PARAM_KEYS = {
-    "input",
-    "instructions",
-    "max_tokens",
-    "maxTokens",
-    "model",
-    "modelId",
-    "model_id",
-    "temperature",
-    "threadId",
-    "thread_id",
-    "top_p",
-    "topP",
-}
-_CODEX_TEXT_INPUT_TYPES = {"text", "input_text"}
 _INTERNAL_REPLAY_FRAME_KEY = "_agentflow_replay_frame"
 _INTERNAL_CACHE_KEY = "_agentflow_cache_key"
 
@@ -170,9 +139,9 @@ def _contains_action_hint(value: Any) -> bool:
     if isinstance(value, dict):
         for key, nested in value.items():
             key_l = str(key).replace("-", "_").lower()
-            if key_l in _CODEX_ACTION_KEY_HINTS:
+            if key_l in CODEX_ACTION_KEY_HINTS:
                 return True
-            if key_l == "type" and isinstance(nested, str) and nested.strip().lower() in _CODEX_ACTION_VALUE_HINTS:
+            if key_l == "type" and isinstance(nested, str) and nested.strip().lower() in CODEX_ACTION_VALUE_HINTS:
                 return True
             if isinstance(nested, (dict, list)) and _contains_action_hint(nested):
                 return True
@@ -182,7 +151,7 @@ def _contains_action_hint(value: Any) -> bool:
 
 
 def _model_field(params: dict[str, Any]) -> tuple[str | None, str | None]:
-    for field in _CODEX_MODEL_FIELDS:
+    for field in CODEX_MODEL_FIELDS:
         value = params.get(field)
         if value is not None:
             return field, str(value)
@@ -264,7 +233,7 @@ def _is_text_only_input(value: Any) -> bool:
         return all(_is_text_only_input(item) for item in value)
     if isinstance(value, dict):
         block_type = str(value.get("type") or "text").strip().lower()
-        if block_type not in _CODEX_TEXT_INPUT_TYPES:
+        if block_type not in CODEX_TEXT_INPUT_TYPES:
             return False
         text_value = value.get("text", value.get("input_text", value.get("value")))
         return isinstance(text_value, str)
@@ -289,7 +258,7 @@ def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
 
 
 def _codex_cache_eligibility(params: dict[str, Any]) -> tuple[bool, str]:
-    unknown_keys = sorted(str(key) for key in params if str(key) not in _CODEX_SAFE_TURN_PARAM_KEYS)
+    unknown_keys = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)
     if unknown_keys:
         return False, "unknown-param-shape"
     if _contains_action_hint(params):
