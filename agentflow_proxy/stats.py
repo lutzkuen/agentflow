@@ -1103,6 +1103,7 @@ def _managed_breakdown(grouped: dict[str, int]) -> list[dict[str, Any]]:
 
 async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.recommendations import recommendation_server_url, recommendations_enabled
+    from agentflow_proxy.policy_events import recent_policy_events
 
     conn = store_obj.conn
     capped_limit = max(1, min(int(limit or 500), 5000))
@@ -1260,6 +1261,20 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
                 "feedback_error_class": feedback_error_class,
             })
 
+    latest_fetch_review_health: dict[str, Any] | None = None
+    for event in recent_policy_events(limit=100).get("events", []):
+        if not isinstance(event, dict) or event.get("action") != "fetch-review":
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        health = details.get("recommendation_health")
+        if isinstance(health, dict) and health:
+            latest_fetch_review_health = {
+                **health,
+                "event_created_at": event.get("created_at"),
+                "event_ok": bool(event.get("ok")),
+            }
+            break
+
     return {
         "schema": "agentflow.managed_recommendations.v1",
         "generated_at": utc_now(),
@@ -1307,6 +1322,14 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         "policy_ids": _managed_breakdown(policy_counts),
         "feedback_status_breakdown": _managed_breakdown(feedback_status_counts),
         "feedback_reason_breakdown": _managed_breakdown(feedback_reason_counts),
+        "recommendation_health": {
+            "latest_fetch_review": latest_fetch_review_health,
+            "rows": (
+                latest_fetch_review_health.get("rows", [])
+                if isinstance(latest_fetch_review_health, dict)
+                else []
+            ),
+        },
         "recent": recent,
     }
 
@@ -5228,6 +5251,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Managed recommendation health</h2>
+  <table data-table-id="managed-health" data-filter-label="Filter managed health">
+    <thead><tr>
+      <th data-sort-type="time">Fetched</th><th data-sort-type="text">Status</th><th data-sort-type="text">Kind</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Code</th><th data-sort-type="text">Evidence</th>
+    </tr></thead>
+    <tbody id="managed-health-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Managed feedback status</h2>
   <table data-table-id="managed-feedback" data-filter-label="Filter managed feedback">
     <thead><tr>
@@ -6043,6 +6075,14 @@ function managedLastError(summary){
   if(summary.last_recommendation_error_class)parts.push(`<span class="badge err">recommendation ${esc(summary.last_recommendation_error_class)}</span>`);
   return parts.join(' ')||'<span class="badge hit">none</span>';
 }
+function managedHealthDetails(row){
+  const details=row.details||{};
+  const parts=[];
+  ['sample_count','min_samples','error_rate','max_error_rate','last_seen_at','threshold','value','reason'].forEach(key=>{
+    if(details[key]!=null)parts.push(`${key}: ${details[key]}`);
+  });
+  return parts.map(p=>`<span class="badge miss">${esc(p)}</span>`).join(' ')||'<span class="badge miss">metadata only</span>';
+}
 async function refreshManaged(){
   try{
     const r=await fetch('/agentflow/stats/managed-recommendations?limit=500');
@@ -6071,6 +6111,16 @@ async function refreshManaged(){
       <td class="flags">${compactBreakdown(d.fallback_breakdown,'none')}</td>
       <td class="flags">${compactBreakdown(d.policy_ids,'none')}</td>
     </tr>`;
+    const health=(d.recommendation_health||{}).latest_fetch_review||{};
+    const healthRows=(d.recommendation_health||{}).rows||[];
+    document.getElementById('managed-health-tbody').innerHTML=healthRows.map(row=>`<tr>
+      <td class="ts">${ago(health.event_created_at||health.generated_at)}</td>
+      <td class="flags"><span class="badge ${health.status==='warning'?'err':'hit'}">${esc(health.status||'available')}</span></td>
+      <td><span class="badge provider">${esc(row.kind||'health')}</span></td>
+      <td class="model">${esc(row.candidate_id||'—')}</td>
+      <td class="flags"><span class="badge miss">${esc(row.code||'warning')}</span></td>
+      <td class="flags">${managedHealthDetails(row)}</td>
+    </tr>`).join('')||`<tr><td colspan="6" style="color:#8b949e">${health.status?'No weak evidence warnings in latest fetch-review event':'No managed bundle health event recorded'}</td></tr>`;
     const rows=d.recent||[];
     document.getElementById('managed-recent-tbody').innerHTML=rows.map(row=>`<tr>
       <td class="ts">${ago(row.created_at)}</td>

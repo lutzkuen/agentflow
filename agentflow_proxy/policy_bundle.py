@@ -1197,6 +1197,8 @@ def simulate_policy_bundle_impact(
 
 
 def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
+    from agentflow_proxy.recommendation_health import HEALTH_WARNING_CODES, summarize_recommendation_health
+
     warnings: list[dict[str, str]] = []
 
     if not isinstance(bundle, dict):
@@ -1249,6 +1251,21 @@ def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
             "model-assisted summarization changes request context and should be reviewed against quality risk before enabling",
         )
 
+    recommendation_health = summarize_recommendation_health(bundle)
+    for row in recommendation_health.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "health")
+        code = HEALTH_WARNING_CODES.get(kind, f"managed-recommendation-{kind}")
+        candidate_id = row.get("candidate_id")
+        suffix = f" for {candidate_id}" if candidate_id else ""
+        _add_warning(
+            warnings,
+            code,
+            str(row.get("path") or "$.recommendation"),
+            f"managed recommendation evidence health warning{suffix}: {row.get('code') or kind}",
+        )
+
     return warnings
 
 
@@ -1260,6 +1277,8 @@ def review_policy_bundle(
     include_impact: bool = True,
     impact_limit: int = _DEFAULT_IMPACT_LIMIT,
 ) -> dict[str, Any]:
+    from agentflow_proxy.recommendation_health import summarize_recommendation_health
+
     diff = compare_policy_bundles(current, proposed)
     warnings = policy_bundle_safety_warnings(proposed)
     result = {
@@ -1281,6 +1300,7 @@ def review_policy_bundle(
             "changes": diff.get("changes", []),
         },
     }
+    result["recommendation_health"] = summarize_recommendation_health(proposed)
     policies = proposed.get("policies") if isinstance(proposed, dict) and isinstance(proposed.get("policies"), dict) else {}
     if isinstance(policies.get("codex_app"), dict):
         result["section_reviews"] = {

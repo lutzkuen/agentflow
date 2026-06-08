@@ -684,6 +684,77 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(call.kwargs["params"]["min_samples"], 3)
         self.assertEqual(call.kwargs["params"]["limit"], 7)
 
+    def test_policy_fetch_review_cli_surfaces_managed_health_without_raw_leakage(self):
+        bundle = self._managed_policy_bundle()
+        bundle["recommendation"]["health"] = {
+            "generated_at": "2026-06-08T12:00:00+00:00",
+            "privacy_summary": {
+                "telemetry_profile": "metadata-only",
+                "raw_body_storage": False,
+                "raw_prompts_included": False,
+            },
+            "stale_evidence": [
+                {
+                    "candidate_id": "candidate-route-chat",
+                    "last_seen_at": "2026-06-01T12:00:00+00:00",
+                    "raw_prompt": "raw prompt secret must not print",
+                }
+            ],
+            "insufficient_samples": [
+                {
+                    "candidate_id": "candidate-route-chat",
+                    "sample_count": 2,
+                    "min_samples": 10,
+                    "body": "raw request body must not print",
+                }
+            ],
+        }
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with TemporaryDirectory() as tmp:
+            env = {
+                "AGENTFLOW_POLICY_CONFIG_DIR": tmp,
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(Path(tmp) / "policy_events.jsonl"),
+                cli.MANAGED_POLICY_API_KEY_ENV: "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("agentflow_proxy.cli.httpx.get") as get:
+                    get.return_value = httpx.Response(200, json=bundle)
+                    code = cli.policy_fetch_review_cli(
+                        [
+                            "--url",
+                            "http://managed.test/v1/policy-bundle-recommendation",
+                            "--allow-unauthenticated",
+                            "--min-samples",
+                            "10",
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+
+                from agentflow_proxy.policy_events import recent_policy_events
+
+                events = recent_policy_events(limit=5)["events"]
+
+        rendered = stdout.getvalue() + stderr.getvalue()
+        payload = json.loads(stdout.getvalue())
+        warning_codes = {warning["code"] for warning in payload["review"]["safety_warnings"]}
+
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["validation"]["ok"])
+        self.assertTrue(payload["review"]["ok"])
+        self.assertEqual(payload["recommendation"]["health"]["status"], "warning")
+        self.assertEqual(payload["recommendation"]["health"]["counts"]["stale_evidence"], 1)
+        self.assertEqual(payload["recommendation"]["health"]["counts"]["insufficient_samples"], 1)
+        self.assertIn("managed-recommendation-stale-evidence", warning_codes)
+        self.assertIn("managed-recommendation-insufficient-samples", warning_codes)
+        self.assertNotIn("raw prompt secret", rendered)
+        self.assertNotIn("raw request body", rendered)
+        self.assertNotIn('"body"', rendered)
+        self.assertEqual(events[0]["details"]["recommendation_health"]["warning_count"], 2)
+
     def test_policy_fetch_review_cli_rejects_invalid_bundle(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

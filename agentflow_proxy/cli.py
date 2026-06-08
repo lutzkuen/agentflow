@@ -539,6 +539,8 @@ def _managed_policy_query(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
+    from agentflow_proxy.recommendation_health import summarize_recommendation_health
+
     if not isinstance(bundle, dict):
         return {}
     recommendation = bundle.get("recommendation")
@@ -605,6 +607,7 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         "filters": recommendation.get("filters", {}),
         "candidates": candidates,
         "codex_app": codex_app_summary,
+        "health": summarize_recommendation_health(bundle),
     }
 
 
@@ -800,10 +803,12 @@ def policy_fetch_review_cli(
         return 1
 
     from agentflow_proxy.policy_bundle import build_policy_bundle, review_policy_bundle, validate_policy_bundle
+    from agentflow_proxy.recommendation_health import strip_raw_payload_fields
 
     validation = validate_policy_bundle(bundle)
     current = asyncio.run(build_policy_bundle())
     review = review_policy_bundle(current, bundle, impact_db_path=args.db, impact_limit=max(0, args.impact_limit))
+    recommendation = _managed_recommendation_summary(bundle)
     ok = bool(validation["ok"] and review["ok"])
     result = {
         "schema": "agentflow.policy_bundle_fetch_review.v1",
@@ -822,8 +827,8 @@ def policy_fetch_review_cli(
         },
         "validation": validation,
         "review": review,
-        "recommendation": _managed_recommendation_summary(bundle),
-        "bundle": bundle,
+        "recommendation": recommendation,
+        "bundle": strip_raw_payload_fields(bundle),
         "next_manual_command": "agentflow-policy-apply reviewed-bundle.json --dry-run --pretty",
         "error": None if ok else {"type": "validation_failed", "message": "managed policy bundle is invalid"},
     }
@@ -841,6 +846,7 @@ def policy_fetch_review_cli(
             "changed_sections": review.get("changed_sections", []),
             "change_count": review.get("change_count", 0),
             "safety_warning_count": review.get("safety_warning_count", 0),
+            "recommendation_health": recommendation.get("health", {}),
             "impact_status": (review.get("impact_summary") or {}).get("status"),
             "proposed_error_count": len(validation.get("errors", [])),
             "candidate_ids": result.get("recommendation", {}).get("candidate_ids", []),

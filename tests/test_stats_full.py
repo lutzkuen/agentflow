@@ -505,25 +505,61 @@ class StatsFullTest(unittest.TestCase):
         json.dumps(result)
 
     def test_managed_recommendation_dashboard_endpoint_and_panel_render_without_server(self):
-        app = create_dashboard_app(
-            store_obj=server.store,
-            default_db=self.tmp.name,
-            upstream="https://api.anthropic.com",
-            limiter_status=lambda: [],
-            limiter_config={},
-            full_stats_ttl_s=0,
-        )
-        client = TestClient(app)
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl")},
+            clear=False,
+        ):
+            from agentflow_proxy.policy_events import log_policy_event
 
-        stats_response = client.get("/agentflow/stats/managed-recommendations")
-        self.assertEqual(stats_response.status_code, 200)
-        self.assertEqual(stats_response.json()["schema"], "agentflow.managed_recommendations.v1")
+            log_policy_event(
+                "fetch-review",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "recommendation_health": {
+                        "schema": "agentflow.recommendation_health.v1",
+                        "status": "warning",
+                        "warning_count": 1,
+                        "rows": [
+                            {
+                                "kind": "stale_evidence",
+                                "code": "stale-evidence",
+                                "candidate_id": "candidate-route-chat",
+                                "details": {"sample_count": 24, "last_seen_at": "2026-06-01T12:00:00+00:00"},
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                    },
+                },
+            )
 
-        html = client.get("/agentflow/dashboard")
-        self.assertEqual(html.status_code, 200)
-        self.assertIn("Managed recommendation status", html.text)
-        self.assertIn("/agentflow/stats/managed-recommendations", html.text)
-        self.assertIn("managed-summary-tbody", html.text)
+            app = create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.anthropic.com",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+
+            stats_response = client.get("/agentflow/stats/managed-recommendations")
+            self.assertEqual(stats_response.status_code, 200)
+            payload = stats_response.json()
+            self.assertEqual(payload["schema"], "agentflow.managed_recommendations.v1")
+            self.assertEqual(
+                payload["recommendation_health"]["latest_fetch_review"]["rows"][0]["candidate_id"],
+                "candidate-route-chat",
+            )
+
+            html = client.get("/agentflow/dashboard")
+            self.assertEqual(html.status_code, 200)
+            self.assertIn("Managed recommendation status", html.text)
+            self.assertIn("Managed recommendation health", html.text)
+            self.assertIn("/agentflow/stats/managed-recommendations", html.text)
+            self.assertIn("managed-summary-tbody", html.text)
+            self.assertIn("managed-health-tbody", html.text)
 
     def test_full_stats_unifies_source_surface_accounting_for_mixed_traffic(self):
         server.store.log_call(
