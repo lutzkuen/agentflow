@@ -9,9 +9,57 @@ import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
+from agentflow_proxy.policy_bundle import build_policy_bundle
 
 
 class PolicyFileStatusTest(unittest.TestCase):
+    def test_policy_bundle_exports_effective_default_policy_state(self):
+        bundle = asyncio.run(build_policy_bundle())
+
+        self.assertEqual(bundle["schema"], "agentflow.policy_bundle.v1")
+        self.assertEqual(bundle["generator"]["name"], "agentflow-proxy")
+        self.assertEqual(bundle["generator"]["mode"], "local-offline")
+        self.assertFalse(bundle["managed_optimizer"]["enabled"])
+        self.assertEqual(bundle["policies"]["schema"], "agentflow.policy_state.v1")
+        self.assertIn("routing", bundle["policies"])
+        self.assertIn("crunch", bundle["policies"])
+        self.assertIn("cache", bundle["policies"])
+        self.assertIn("routing_experiments", bundle["policies"])
+
+    def test_policy_bundle_exports_manual_policy_source_and_file_status(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      has_tools: false
+    action:
+      route_to: haiku
+      reason: manual bundle export test
+""",
+                encoding="utf-8",
+            )
+            old_env = os.environ.get("AGENTFLOW_ROUTING_RULES")
+            os.environ["AGENTFLOW_ROUTING_RULES"] = str(rules_path)
+            try:
+                asyncio.run(reload_policy_modules())
+                bundle = asyncio.run(build_policy_bundle())
+
+                routing = bundle["policies"]["routing"]
+                self.assertEqual(routing["policy_source"], "local-manual")
+                self.assertEqual(routing["rule_path"], str(rules_path))
+                self.assertFalse(routing["file"]["reload_required"])
+                self.assertEqual(routing["file"]["loaded"]["path"], str(rules_path))
+                self.assertEqual(routing["rules"][0]["action"]["reason"], "manual bundle export test")
+            finally:
+                if old_env is None:
+                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                else:
+                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_env
+                asyncio.run(reload_policy_modules())
+
     def test_policy_file_status_marks_reload_required_after_file_change(self):
         with TemporaryDirectory() as tmp:
             rules_path = Path(tmp) / "routing_rules.yaml"

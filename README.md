@@ -94,6 +94,17 @@ The command posts to the proxy's loopback-only admin endpoint at
 `http://127.0.0.1:${AGENTFLOW_PORT:-4000}/agentflow/admin/reload-policies` and prints the
 refreshed `agentflow.policy_reload.v1` JSON. It refuses non-loopback URLs by default.
 
+Export the effective local policy bundle without contacting the proxy or any managed service:
+
+```bash
+agentflow-policy-export --pretty
+```
+
+The command prints `agentflow.policy_bundle.v1` JSON containing routing, crunch, cache, and
+routing-experiment policy state, including policy sources, rule paths, and reload status. This
+is an offline local export shape for auditability and future optimizer interfaces; it does not
+upload data or enable managed-server behavior.
+
 ## Point Claude Code / Claude CLI at it
 
 The exact environment variable names can differ by Claude Code version, but the intended setup is:

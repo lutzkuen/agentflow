@@ -68,6 +68,18 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status_code"], 403)
 
+    def test_policy_export_cli_prints_policy_bundle_json(self):
+        stdout = io.StringIO()
+
+        code = cli.policy_export_cli([], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle.v1")
+        self.assertEqual(payload["generator"]["mode"], "local-offline")
+        self.assertFalse(payload["managed_optimizer"]["enabled"])
+        self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
+
 
 if __name__ == "__main__":
     unittest.main()

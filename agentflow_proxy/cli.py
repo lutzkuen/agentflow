@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import ipaddress
 import json
 import os
@@ -109,6 +110,27 @@ def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, 
     return 1
 
 
+def policy_export_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Export the effective local AgentFlow policy bundle as JSON")
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.policy_bundle import build_policy_bundle
+
+    bundle = asyncio.run(build_policy_bundle())
+    if args.pretty:
+        stdout.write(json.dumps(bundle, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, bundle)
+    return 0
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -122,3 +144,7 @@ def proxy_main() -> None:
 
 def policy_reload_main() -> None:
     raise SystemExit(policy_reload_cli())
+
+
+def policy_export_main() -> None:
+    raise SystemExit(policy_export_cli())
