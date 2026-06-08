@@ -58,7 +58,7 @@ from agentflow_proxy.recommendations import (
     build_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
-    send_outcome_feedback,
+    queue_outcome_feedback,
 )
 from agentflow_proxy.store import stable_json, utc_now
 
@@ -128,7 +128,12 @@ async def _record_managed_outcome_feedback(
         session_id=session_id,
         error=error,
     )
-    managed["outcome_feedback"] = await send_outcome_feedback(managed, outcome)
+    managed["outcome_feedback"] = await queue_outcome_feedback(
+        context.store,
+        managed,
+        outcome,
+        source_surface="anthropic_messages",
+    )
     if isinstance(experiment_meta, dict) and experiment_meta.get("sampled"):
         feedback_meta = managed["outcome_feedback"]
         experiment_meta["managed_feedback"] = {

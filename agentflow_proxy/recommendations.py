@@ -946,10 +946,12 @@ async def flush_queued_outcome_feedback(
     return results
 
 
-async def queue_codex_outcome_feedback(
+async def queue_outcome_feedback(
     store_obj: Any,
     recommendation_meta: dict[str, Any],
     outcome_features: dict[str, Any],
+    *,
+    source_surface: str | None = None,
 ) -> dict[str, Any]:
     if not recommendations_enabled():
         return {
@@ -969,12 +971,18 @@ async def queue_codex_outcome_feedback(
         return await send_outcome_feedback(recommendation_meta, outcome_features)
 
     payload = _sanitize_features(outcome_features)
+    surface = (
+        source_surface
+        or str(payload.get("source_surface") or "")
+        or str(recommendation_meta.get("source_surface") or "")
+        or CODEX_APP_SOURCE_SURFACE
+    )
     queue_id = str(uuid.uuid4())
     row = {
         "id": queue_id,
         "created_at": utc_now(),
         "updated_at": utc_now(),
-        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "source_surface": surface,
         "endpoint": endpoint,
         "optimization_unit_id": unit_id,
         "payload_json": stable_json(payload),
@@ -994,3 +1002,16 @@ async def queue_codex_outcome_feedback(
 
     meta = await _flush_claimed_outcome_feedback(store_obj, claimed)
     return meta
+
+
+async def queue_codex_outcome_feedback(
+    store_obj: Any,
+    recommendation_meta: dict[str, Any],
+    outcome_features: dict[str, Any],
+) -> dict[str, Any]:
+    return await queue_outcome_feedback(
+        store_obj,
+        recommendation_meta,
+        outcome_features,
+        source_surface=CODEX_APP_SOURCE_SURFACE,
+    )

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -62,6 +63,8 @@ class RecommendationTest(unittest.TestCase):
         "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
         "AGENTFLOW_RECOMMENDATION_FAILURE_MODE",
         "AGENTFLOW_MANAGED_API_KEY",
+        "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
+        "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
     )
 
     def setUp(self):
@@ -413,6 +416,69 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["status"], "error")
         self.assertEqual(meta["reason"], "request-failed")
         self.assertIn("feedback unavailable", meta["error"])
+
+    def test_queued_provider_outcome_feedback_disabled_does_not_enqueue(self):
+        from agentflow_proxy.store import Store
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                meta = asyncio.run(
+                    recommendations.queue_outcome_feedback(
+                        store,
+                        {"optimization_unit_id": 7},
+                        {"source_surface": "anthropic_messages", "status_code": 200},
+                    )
+                )
+                row = store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "disabled")
+        self.assertEqual(row["c"], 0)
+
+    def test_queued_provider_outcome_feedback_records_retryable_sanitized_payload(self):
+        from agentflow_proxy.store import Store
+
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "3"
+        FakeAsyncClient.error = RuntimeError("feedback unavailable")
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                    meta = asyncio.run(
+                        recommendations.queue_outcome_feedback(
+                            store,
+                            {"optimization_unit_id": 7},
+                            {
+                                "source_surface": "anthropic_messages",
+                                "status_code": 200,
+                                "raw_request": "must stay local",
+                                "raw_response": "raw provider response",
+                                "quality_signals": {"status": "success"},
+                            },
+                        )
+                    )
+                row = store.conn.execute(
+                    "select source_surface, status, attempts, last_error, payload_json "
+                    "from managed_outcome_feedback_queue"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "retryable-error")
+        self.assertEqual(meta["reason"], "request-failed")
+        self.assertEqual(row["source_surface"], "anthropic_messages")
+        self.assertEqual(row["status"], "retryable-error")
+        self.assertEqual(row["attempts"], 1)
+        self.assertIn("feedback unavailable", row["last_error"])
+        self.assertNotIn("raw_request", row["payload_json"])
+        self.assertNotIn("raw_response", row["payload_json"])
+        self.assertNotIn("must stay local", row["payload_json"])
+        self.assertNotIn("raw provider response", row["payload_json"])
 
     def test_provider_mismatch_recommendation_is_not_applied(self):
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}

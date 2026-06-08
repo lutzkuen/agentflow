@@ -321,6 +321,13 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         feedback_meta = routing["managed_recommendation"]["outcome_feedback"]
         self.assertEqual(feedback_meta["status"], "sent")
         self.assertEqual(feedback_meta["optimization_unit_id"], 42)
+        [queue_row] = server.store.conn.execute(
+            "select source_surface, status, attempts, payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        self.assertEqual(queue_row["source_surface"], "anthropic_messages")
+        self.assertEqual(queue_row["status"], "sent")
+        self.assertEqual(queue_row["attempts"], 1)
+        self.assertNotIn("raw prompt secret", queue_row["payload_json"])
 
     def test_anthropic_managed_recommendation_records_feature_unit_and_model_change(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
@@ -542,9 +549,17 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         [row] = server.store.conn.execute("select routing_json from calls").fetchall()
         feedback_meta = json.loads(row["routing_json"])["managed_recommendation"]["outcome_feedback"]
-        self.assertEqual(feedback_meta["status"], "error")
+        self.assertEqual(feedback_meta["status"], "retryable-error")
         self.assertEqual(feedback_meta["reason"], "request-failed")
         self.assertIn("feedback down", feedback_meta["error"])
+        [queue_row] = server.store.conn.execute(
+            "select source_surface, status, attempts, last_error, payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        self.assertEqual(queue_row["source_surface"], "anthropic_messages")
+        self.assertEqual(queue_row["status"], "retryable-error")
+        self.assertEqual(queue_row["attempts"], 1)
+        self.assertIn("feedback down", queue_row["last_error"])
+        self.assertNotIn("hello", queue_row["payload_json"])
 
     def test_openai_managed_recommendation_sends_outcome_feedback(self):
         server.configure_provider("openai", openai_upstream="https://openai.test", openai_auth_mode="client")
@@ -573,6 +588,13 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(feedback["actual_input_tokens"], 9)
         self.assertEqual(feedback["actual_output_tokens"], 3)
         self.assertNotIn("raw openai prompt", str(feedback))
+        [queue_row] = server.store.conn.execute(
+            "select source_surface, status, attempts, payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        self.assertEqual(queue_row["source_surface"], "openai_responses")
+        self.assertEqual(queue_row["status"], "sent")
+        self.assertEqual(queue_row["attempts"], 1)
+        self.assertNotIn("raw openai prompt", queue_row["payload_json"])
 
     def test_anthropic_route_forwards_allowlisted_headers_and_does_not_log_bodies(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
