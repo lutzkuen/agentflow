@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
+import yaml
 
 from agentflow_proxy import cli
 
@@ -257,6 +258,98 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertTrue(events[0]["ok"])
         self.assertEqual(events[0]["details"]["changed_sections"], ["cache"])
         self.assertEqual(events[0]["details"]["safety_warning_count"], 1)
+
+    def test_policy_apply_cli_dry_run_reports_files_without_writing(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["cache"]["semantic_cache"]["threshold"] = 0.91
+
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--dry-run", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(set(payload["applied_sections"]), {"routing", "crunch", "cache", "routing_experiments"})
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+            self.assertTrue(any(file["section"] == "cache" and file["changed"] for file in payload["files"]))
+
+    def test_policy_apply_cli_writes_selected_section_and_creates_backup(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["cache"]["semantic_cache"]["threshold"] = 0.91
+
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache_rules.yaml"
+            cache_path.write_text("exact_cache:\n  enabled: false\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "cache", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["applied_sections"], ["cache"])
+            self.assertEqual(payload["skipped_sections"][0]["reason"], "not-requested")
+            applied = yaml.safe_load(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(applied["semantic_cache"]["threshold"], 0.91)
+            backups = list(Path(tmp).glob("cache_rules.yaml.bak-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("enabled: false", backups[0].read_text(encoding="utf-8"))
+
+            second_stdout = io.StringIO()
+            second_code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "cache", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=second_stdout,
+            )
+            second_payload = json.loads(second_stdout.getvalue())
+            self.assertEqual(second_code, 0)
+            self.assertFalse(second_payload["files"][0]["changed"])
+            self.assertEqual(len(list(Path(tmp).glob("cache_rules.yaml.bak-*"))), 1)
+
+    def test_policy_apply_cli_refuses_risky_bundle_unless_allowed(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["cache"]["exact_cache"]["cache_tool_calls"] = True
+
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "cache", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 1)
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "risky_policy")
+            self.assertEqual(payload["safety_warning_count"], 1)
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+
+            allowed_stdout = io.StringIO()
+            allowed_code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "cache", "--allow-risky", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=allowed_stdout,
+            )
+            allowed_payload = json.loads(allowed_stdout.getvalue())
+            self.assertEqual(allowed_code, 0)
+            self.assertTrue(allowed_payload["ok"])
+            self.assertTrue(yaml.safe_load((Path(tmp) / "cache_rules.yaml").read_text(encoding="utf-8"))["exact_cache"]["cache_tool_calls"])
 
     def test_policy_cli_records_compact_local_events(self):
         exported = io.StringIO()

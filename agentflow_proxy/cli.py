@@ -412,6 +412,106 @@ def policy_review_cli(
     return 0 if result["ok"] else 1
 
 
+def _policy_apply_read_error_result(read_error: dict[str, Any], *, config_dir: str, dry_run: bool) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.policy_bundle_apply.v1",
+        "ok": False,
+        "dry_run": bool(dry_run),
+        "config_dir": config_dir,
+        "applied_sections": [],
+        "skipped_sections": [],
+        "files": [],
+        "validation": read_error,
+        "safety_warning_count": 0,
+        "safety_warnings": [],
+        "error": {"type": "read_failed", "message": "policy bundle could not be read"},
+    }
+
+
+def policy_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Apply an AgentFlow policy bundle to local YAML rule files offline")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Policy bundle JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["routing", "crunch", "cache", "routing_experiments"],
+        help="Apply only one policy section. Repeat to apply multiple sections.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and report the files that would change without writing them.",
+    )
+    parser.add_argument(
+        "--allow-risky",
+        action="store_true",
+        help="Apply bundles with safety warnings. The warnings are still included in the JSON result.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print apply JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = _policy_apply_read_error_result(read_error, config_dir=args.config_dir, dry_run=args.dry_run)
+    else:
+        from agentflow_proxy.policy_bundle import apply_policy_bundle
+
+        result = apply_policy_bundle(
+            bundle,
+            config_dir=args.config_dir,
+            dry_run=args.dry_run,
+            allow_risky=args.allow_risky,
+            sections=args.section,
+        )
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "apply",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "config_dir": args.config_dir,
+            "dry_run": args.dry_run,
+            "allow_risky": args.allow_risky,
+            "applied_sections": result.get("applied_sections", []),
+            "changed_files": [
+                file.get("path")
+                for file in result.get("files", [])
+                if isinstance(file, dict) and file.get("changed")
+            ],
+            "safety_warning_count": result.get("safety_warning_count", 0),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
+    _write_policy_apply_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -427,6 +527,13 @@ def _write_policy_diff_result(stream: Any, payload: dict[str, Any], *, pretty: b
 
 
 def _write_policy_review_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
+def _write_policy_apply_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
@@ -462,3 +569,7 @@ def policy_diff_main() -> None:
 
 def policy_review_main() -> None:
     raise SystemExit(policy_review_cli())
+
+
+def policy_apply_main() -> None:
+    raise SystemExit(policy_apply_cli())

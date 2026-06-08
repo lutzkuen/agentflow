@@ -124,7 +124,20 @@ The diff command prints `agentflow.policy_bundle_diff.v1` JSON with changed poli
 and JSON paths under routing, crunch, cache, and routing experiments. It validates both
 inputs first and exits non-zero for malformed bundles.
 
-Policy reload/export/validate/diff operations append compact local audit events to
+Review and apply a proposed policy bundle offline:
+
+```bash
+agentflow-policy-review proposed.json --pretty
+agentflow-policy-apply proposed.json --dry-run --pretty
+agentflow-policy-apply proposed.json --config-dir ~/.agentflow
+```
+
+The apply command writes loader-compatible YAML rule files for routing, crunch, cache, and
+routing experiments. It validates the bundle first, refuses risky policy warnings unless
+`--allow-risky` is explicit, creates timestamped backups before changed files are overwritten,
+and does not contact the proxy or any managed service.
+
+Policy reload/export/validate/diff/review/apply operations append compact local audit events to
 `~/.agentflow/policy_events.jsonl` by default. The read-only dashboard exposes recent entries
 at `/agentflow/stats/policy-events` and in the Policies tab. Set `AGENTFLOW_POLICY_EVENTS=0`
 to disable the audit log, or `AGENTFLOW_POLICY_EVENTS_LOG=/path/to/events.jsonl` to choose a

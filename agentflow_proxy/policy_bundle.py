@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from agentflow_proxy import __version__
 from agentflow_proxy.store import utc_now
 
+POLICY_BUNDLE_APPLY_SCHEMA = "agentflow.policy_bundle_apply.v1"
 POLICY_BUNDLE_SCHEMA = "agentflow.policy_bundle.v1"
 POLICY_BUNDLE_DIFF_SCHEMA = "agentflow.policy_bundle_diff.v1"
 POLICY_BUNDLE_REVIEW_SCHEMA = "agentflow.policy_bundle_review.v1"
@@ -23,6 +28,12 @@ REQUIRED_POLICY_SECTIONS = (
     "cache",
     "routing_experiments",
 )
+_POLICY_SECTION_FILES = {
+    "routing": "routing_rules.yaml",
+    "crunch": "crunch_rules.yaml",
+    "cache": "cache_rules.yaml",
+    "routing_experiments": "routing_experiments.yaml",
+}
 
 
 async def build_policy_bundle() -> dict[str, Any]:
@@ -293,3 +304,125 @@ def review_policy_bundle(current: Any, proposed: Any) -> dict[str, Any]:
             "changes": diff.get("changes", []),
         },
     }
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
+    if section == "routing":
+        return {"rules": policy.get("rules") if isinstance(policy.get("rules"), list) else []}
+    if section == "crunch":
+        payload: dict[str, Any] = {}
+        if "enabled" in policy:
+            payload["enabled"] = policy.get("enabled")
+        if "threshold_chars" in policy:
+            payload["threshold_chars"] = policy.get("threshold_chars")
+        for key in ("prompt_cache", "old_context_summarization", "thinking_deduplication"):
+            if isinstance(policy.get(key), dict):
+                payload[key] = policy[key]
+        return payload
+    if section == "cache":
+        return {key: policy[key] for key in ("exact_cache", "semantic_cache", "file_watch") if isinstance(policy.get(key), dict)}
+    if section == "routing_experiments":
+        experiment_policy = policy.get("policy")
+        return experiment_policy if isinstance(experiment_policy, dict) else {}
+    return {}
+
+
+def _backup_suffix() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _write_policy_file(path: Path, text: str) -> str | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path: str | None = None
+    if path.exists():
+        backup = path.with_name(f"{path.name}.bak-{_backup_suffix()}")
+        backup.write_bytes(path.read_bytes())
+        backup_path = str(backup)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return backup_path
+
+
+def apply_policy_bundle(
+    bundle: Any,
+    *,
+    config_dir: str | Path,
+    dry_run: bool = False,
+    allow_risky: bool = False,
+    sections: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    validation = validate_policy_bundle(bundle)
+    warnings = policy_bundle_safety_warnings(bundle)
+    requested_sections = list(sections or REQUIRED_POLICY_SECTIONS)
+    invalid_sections = sorted(set(requested_sections) - set(REQUIRED_POLICY_SECTIONS))
+    config_path = Path(config_dir).expanduser()
+    result: dict[str, Any] = {
+        "schema": POLICY_BUNDLE_APPLY_SCHEMA,
+        "ok": False,
+        "dry_run": bool(dry_run),
+        "config_dir": str(config_path),
+        "applied_sections": [],
+        "skipped_sections": [],
+        "files": [],
+        "validation": validation,
+        "safety_warning_count": len(warnings),
+        "safety_warnings": warnings,
+        "error": None,
+    }
+
+    if invalid_sections:
+        result["error"] = {
+            "type": "invalid_sections",
+            "message": "unknown policy section requested",
+            "sections": invalid_sections,
+        }
+        return result
+    if not validation["ok"]:
+        result["error"] = {"type": "validation_failed", "message": "policy bundle is invalid"}
+        return result
+    if warnings and not allow_risky:
+        result["error"] = {
+            "type": "risky_policy",
+            "message": "policy bundle has safety warnings; rerun with --allow-risky to apply explicitly",
+        }
+        return result
+
+    policies = bundle["policies"]
+    for section in REQUIRED_POLICY_SECTIONS:
+        if section not in requested_sections:
+            result["skipped_sections"].append({"section": section, "reason": "not-requested"})
+            continue
+
+        policy = policies.get(section) if isinstance(policies.get(section), dict) else {}
+        yaml_payload = _policy_apply_yaml(section, policy)
+        text = yaml.safe_dump(yaml_payload, sort_keys=False)
+        path = config_path / _POLICY_SECTION_FILES[section]
+        old_text: str | None = None
+        if path.exists():
+            try:
+                old_text = path.read_text(encoding="utf-8")
+            except OSError:
+                old_text = None
+        changed = old_text != text
+        backup_path = None
+        if changed and not dry_run:
+            backup_path = _write_policy_file(path, text)
+
+        result["files"].append({
+            "section": section,
+            "path": str(path),
+            "changed": bool(changed),
+            "backup_path": backup_path,
+            "sha256_before": _sha256_text(old_text) if old_text is not None else None,
+            "sha256_after": _sha256_text(text),
+            "bytes_after": len(text.encode("utf-8")),
+        })
+        result["applied_sections"].append(section)
+
+    result["ok"] = True
+    return result
