@@ -351,6 +351,31 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertTrue(allowed_payload["ok"])
             self.assertTrue(yaml.safe_load((Path(tmp) / "cache_rules.yaml").read_text(encoding="utf-8"))["exact_cache"]["cache_tool_calls"])
 
+    def test_policy_apply_cli_rejects_malformed_section_schema_before_writing(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["routing"]["rules"][0]["conditions"]["text_chars_lt"] = "small"
+        proposed["policies"]["cache"]["semantic_cache"]["threshold"] = 2
+
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 1)
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "validation_failed")
+            paths = {error["path"] for error in payload["validation"]["errors"]}
+            self.assertIn("$.policies.routing.rules[0].conditions.text_chars_lt", paths)
+            self.assertIn("$.policies.cache.semantic_cache.threshold", paths)
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+
     def test_policy_rollback_cli_dry_run_reports_latest_backup_without_writing(self):
         with TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "cache_rules.yaml"

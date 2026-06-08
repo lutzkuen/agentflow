@@ -71,6 +71,296 @@ def _add_error(errors: list[dict[str, str]], path: str, message: str) -> None:
     errors.append({"path": path, "message": message})
 
 
+_BOOL_STRINGS = {"0", "1", "false", "true", "no", "yes", "off", "on"}
+
+
+def _is_boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _BOOL_STRINGS
+    return isinstance(value, (int, float)) and value in (0, 1)
+
+
+def _is_intish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return value.is_integer()
+    if isinstance(value, str):
+        try:
+            int(value)
+        except ValueError:
+            return False
+        return True
+    return False
+
+
+def _int_value(value: Any) -> int:
+    return int(value)
+
+
+def _is_floatish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value)
+        except ValueError:
+            return False
+        return True
+    return False
+
+
+def _float_value(value: Any) -> float:
+    return float(value)
+
+
+def _validate_boolish(errors: list[dict[str, str]], path: str, value: Any) -> None:
+    if not _is_boolish(value):
+        _add_error(errors, path, "expected boolean-like value")
+
+
+def _validate_intish(
+    errors: list[dict[str, str]],
+    path: str,
+    value: Any,
+    *,
+    min_value: int | None = 0,
+) -> None:
+    if not _is_intish(value):
+        _add_error(errors, path, "expected integer-like value")
+        return
+    if min_value is not None and _int_value(value) < min_value:
+        _add_error(errors, path, f"expected integer >= {min_value}")
+
+
+def _validate_floatish(
+    errors: list[dict[str, str]],
+    path: str,
+    value: Any,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> None:
+    if not _is_floatish(value):
+        _add_error(errors, path, "expected numeric value")
+        return
+    numeric = _float_value(value)
+    if min_value is not None and numeric < min_value:
+        _add_error(errors, path, f"expected number >= {min_value}")
+    if max_value is not None and numeric > max_value:
+        _add_error(errors, path, f"expected number <= {max_value}")
+
+
+def _validate_non_empty_string(errors: list[dict[str, str]], path: str, value: Any) -> None:
+    if not isinstance(value, str) or not value.strip():
+        _add_error(errors, path, "expected non-empty string")
+
+
+_ROUTING_CONDITION_KEYS = {
+    "model_pattern",
+    "text_chars_lt",
+    "text_chars_gt",
+    "text_chars_lte",
+    "text_chars_gte",
+    "has_tools",
+    "max_tokens_lte",
+    "env_flag",
+    "category",
+    "category_not_in",
+}
+
+
+def _validate_routing_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    if "enabled" in policy:
+        _validate_boolish(errors, "$.policies.routing.enabled", policy["enabled"])
+    rules = policy.get("rules", [])
+    if not isinstance(rules, list):
+        _add_error(errors, "$.policies.routing.rules", "expected list")
+        return
+
+    for index, rule in enumerate(rules):
+        rule_path = f"$.policies.routing.rules[{index}]"
+        if not isinstance(rule, dict):
+            _add_error(errors, rule_path, "expected rule object")
+            continue
+
+        conditions = rule.get("conditions", {})
+        if not isinstance(conditions, dict):
+            _add_error(errors, f"{rule_path}.conditions", "expected object")
+        else:
+            for key in sorted(set(conditions) - _ROUTING_CONDITION_KEYS):
+                _add_error(errors, f"{rule_path}.conditions.{key}", "unknown routing condition")
+            for key in ("model_pattern", "env_flag", "category"):
+                if key in conditions:
+                    _validate_non_empty_string(errors, f"{rule_path}.conditions.{key}", conditions[key])
+            for key in ("text_chars_lt", "text_chars_gt", "text_chars_lte", "text_chars_gte", "max_tokens_lte"):
+                if key in conditions:
+                    _validate_intish(errors, f"{rule_path}.conditions.{key}", conditions[key], min_value=0)
+            if "has_tools" in conditions:
+                _validate_boolish(errors, f"{rule_path}.conditions.has_tools", conditions["has_tools"])
+            if "category_not_in" in conditions:
+                value = conditions["category_not_in"]
+                if isinstance(value, str):
+                    _validate_non_empty_string(errors, f"{rule_path}.conditions.category_not_in", value)
+                elif isinstance(value, list):
+                    for item_index, item in enumerate(value):
+                        _validate_non_empty_string(
+                            errors,
+                            f"{rule_path}.conditions.category_not_in[{item_index}]",
+                            item,
+                        )
+                else:
+                    _add_error(errors, f"{rule_path}.conditions.category_not_in", "expected string or list of strings")
+
+        action = rule.get("action")
+        if not isinstance(action, dict):
+            _add_error(errors, f"{rule_path}.action", "expected object")
+            continue
+        _validate_non_empty_string(errors, f"{rule_path}.action.route_to", action.get("route_to"))
+        if "reason" in action:
+            _validate_non_empty_string(errors, f"{rule_path}.action.reason", action["reason"])
+
+
+def _validate_object_field(policy: dict[str, Any], path: str, key: str, errors: list[dict[str, str]]) -> dict[str, Any]:
+    value = policy.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        _add_error(errors, f"{path}.{key}", "expected object")
+        return {}
+    return value
+
+
+def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    base = "$.policies.crunch"
+    if "enabled" in policy:
+        _validate_boolish(errors, f"{base}.enabled", policy["enabled"])
+    if "threshold_chars" in policy:
+        _validate_intish(errors, f"{base}.threshold_chars", policy["threshold_chars"], min_value=0)
+
+    prompt_cache = _validate_object_field(policy, base, "prompt_cache", errors)
+    if "enabled" in prompt_cache:
+        _validate_boolish(errors, f"{base}.prompt_cache.enabled", prompt_cache["enabled"])
+    if "min_chars" in prompt_cache:
+        _validate_intish(errors, f"{base}.prompt_cache.min_chars", prompt_cache["min_chars"], min_value=0)
+
+    summary = _validate_object_field(policy, base, "old_context_summarization", errors)
+    if "enabled" in summary:
+        _validate_boolish(errors, f"{base}.old_context_summarization.enabled", summary["enabled"])
+    if "model" in summary:
+        _validate_non_empty_string(errors, f"{base}.old_context_summarization.model", summary["model"])
+    if "placement" in summary:
+        if summary["placement"] != "system":
+            _add_error(errors, f"{base}.old_context_summarization.placement", "expected system")
+    for key in (
+        "min_request_chars",
+        "min_summarized_chars",
+        "max_turns",
+        "keep_recent_turns",
+        "max_summary_chars",
+        "max_source_chars",
+    ):
+        if key in summary:
+            _validate_intish(errors, f"{base}.old_context_summarization.{key}", summary[key], min_value=0)
+
+    thinking_dedup = _validate_object_field(policy, base, "thinking_deduplication", errors)
+    if "enabled" in thinking_dedup:
+        _validate_boolish(errors, f"{base}.thinking_deduplication.enabled", thinking_dedup["enabled"])
+    if "min_chars" in thinking_dedup:
+        _validate_intish(errors, f"{base}.thinking_deduplication.min_chars", thinking_dedup["min_chars"], min_value=0)
+    if "similarity_threshold" in thinking_dedup:
+        _validate_floatish(
+            errors,
+            f"{base}.thinking_deduplication.similarity_threshold",
+            thinking_dedup["similarity_threshold"],
+            min_value=0.0,
+            max_value=1.0,
+        )
+    if "skip_latest_assistant" in thinking_dedup:
+        _validate_boolish(
+            errors,
+            f"{base}.thinking_deduplication.skip_latest_assistant",
+            thinking_dedup["skip_latest_assistant"],
+        )
+
+
+def _validate_cache_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    base = "$.policies.cache"
+    if "enabled" in policy:
+        _validate_boolish(errors, f"{base}.enabled", policy["enabled"])
+
+    exact = _validate_object_field(policy, base, "exact_cache", errors)
+    if "enabled" in exact:
+        _validate_boolish(errors, f"{base}.exact_cache.enabled", exact["enabled"])
+    if "cache_tool_calls" in exact:
+        _validate_boolish(errors, f"{base}.exact_cache.cache_tool_calls", exact["cache_tool_calls"])
+
+    semantic = _validate_object_field(policy, base, "semantic_cache", errors)
+    if "enabled" in semantic:
+        _validate_boolish(errors, f"{base}.semantic_cache.enabled", semantic["enabled"])
+    if "threshold" in semantic:
+        _validate_floatish(
+            errors,
+            f"{base}.semantic_cache.threshold",
+            semantic["threshold"],
+            min_value=0.0,
+            max_value=1.0,
+        )
+
+    file_watch = _validate_object_field(policy, base, "file_watch", errors)
+    if "enabled" in file_watch:
+        _validate_boolish(errors, f"{base}.file_watch.enabled", file_watch["enabled"])
+    if "root" in file_watch:
+        _validate_non_empty_string(errors, f"{base}.file_watch.root", file_watch["root"])
+    if "max_paths" in file_watch:
+        _validate_intish(errors, f"{base}.file_watch.max_paths", file_watch["max_paths"], min_value=0)
+
+
+def _validate_routing_experiment_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    experiment = policy.get("policy", policy)
+    if not isinstance(experiment, dict):
+        _add_error(errors, "$.policies.routing_experiments.policy", "expected object")
+        return
+
+    base = "$.policies.routing_experiments"
+    if "policy" in policy:
+        base = f"{base}.policy"
+    if "enabled" in experiment:
+        _validate_boolish(errors, f"{base}.enabled", experiment["enabled"])
+    for key in ("sample_rate", "similarity_threshold"):
+        if key in experiment:
+            _validate_floatish(errors, f"{base}.{key}", experiment[key], min_value=0.0, max_value=1.0)
+    for key in ("min_text_chars", "max_text_chars", "min_samples_for_confidence"):
+        if key in experiment:
+            _validate_intish(errors, f"{base}.{key}", experiment[key], min_value=0)
+    if "categories" in experiment:
+        categories = experiment["categories"]
+        if not isinstance(categories, list):
+            _add_error(errors, f"{base}.categories", "expected list")
+        else:
+            for index, category in enumerate(categories):
+                _validate_non_empty_string(errors, f"{base}.categories[{index}]", category)
+    if "store_response_bodies" in experiment:
+        _validate_boolish(errors, f"{base}.store_response_bodies", experiment["store_response_bodies"])
+
+
+def _validate_policy_section_shape(section: str, value: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    if section == "routing":
+        _validate_routing_policy(value, errors)
+    elif section == "crunch":
+        _validate_crunch_policy(value, errors)
+    elif section == "cache":
+        _validate_cache_policy(value, errors)
+    elif section == "routing_experiments":
+        _validate_routing_experiment_policy(value, errors)
+
+
 def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
@@ -123,6 +413,7 @@ def validate_policy_bundle(bundle: Any) -> dict[str, Any]:
             source = value.get("policy_source")
             if source is not None and source not in POLICY_SOURCES:
                 _add_error(errors, f"$.policies.{section}.policy_source", "unknown policy source")
+            _validate_policy_section_shape(section, value, errors)
 
     return {
         "schema": POLICY_BUNDLE_VALIDATION_SCHEMA,

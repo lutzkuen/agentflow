@@ -60,6 +60,28 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("$.policies.cache", {error["path"] for error in result["errors"]})
 
+    def test_policy_bundle_validation_rejects_malformed_section_shapes(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["routing"]["rules"][0]["conditions"]["text_chars_lt"] = "many"
+        bundle["policies"]["routing"]["rules"][0]["conditions"]["unsupported"] = True
+        bundle["policies"]["routing"]["rules"][0]["action"]["route_to"] = ""
+        bundle["policies"]["crunch"]["old_context_summarization"]["placement"] = "message"
+        bundle["policies"]["crunch"]["thinking_deduplication"]["similarity_threshold"] = 1.5
+        bundle["policies"]["cache"]["semantic_cache"]["threshold"] = -0.1
+        bundle["policies"]["cache"]["file_watch"]["max_paths"] = "lots"
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertFalse(result["ok"])
+        paths = {error["path"] for error in result["errors"]}
+        self.assertIn("$.policies.routing.rules[0].conditions.text_chars_lt", paths)
+        self.assertIn("$.policies.routing.rules[0].conditions.unsupported", paths)
+        self.assertIn("$.policies.routing.rules[0].action.route_to", paths)
+        self.assertIn("$.policies.crunch.old_context_summarization.placement", paths)
+        self.assertIn("$.policies.crunch.thinking_deduplication.similarity_threshold", paths)
+        self.assertIn("$.policies.cache.semantic_cache.threshold", paths)
+        self.assertIn("$.policies.cache.file_watch.max_paths", paths)
+
     def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
         bundle = asyncio.run(build_policy_bundle())
 
