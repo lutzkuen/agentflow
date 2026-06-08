@@ -405,6 +405,17 @@ def policy_review_cli(
         action="store_true",
         help="Pretty-print review JSON instead of emitting one compact line.",
     )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="SQLite metadata database path for local impact simulation, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    parser.add_argument(
+        "--impact-limit",
+        type=int,
+        default=1000,
+        help="Maximum recent calls to scan for metadata-only impact simulation, default: 1000.",
+    )
     args = parser.parse_args(argv)
 
     stdin = stdin if stdin is not None else sys.stdin
@@ -417,7 +428,7 @@ def policy_review_cli(
         from agentflow_proxy.policy_bundle import build_policy_bundle, review_policy_bundle
 
         current = asyncio.run(build_policy_bundle())
-        result = review_policy_bundle(current, proposed)
+        result = review_policy_bundle(current, proposed, impact_db_path=args.db, impact_limit=max(0, args.impact_limit))
 
     from agentflow_proxy.policy_events import log_policy_event
 
@@ -431,6 +442,7 @@ def policy_review_cli(
             "changed_sections": result.get("changed_sections", []),
             "change_count": result.get("change_count", 0),
             "safety_warning_count": result.get("safety_warning_count", 0),
+            "impact_status": (result.get("impact_summary") or {}).get("status"),
             "proposed_error_count": len((result.get("proposed_validation") or {}).get("errors", [])),
             "exit_code": 0 if result["ok"] else 1,
         },
@@ -616,6 +628,17 @@ def policy_fetch_review_cli(
         help="HTTP timeout in seconds, default: 10.",
     )
     parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="SQLite metadata database path for local impact simulation, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    parser.add_argument(
+        "--impact-limit",
+        type=int,
+        default=1000,
+        help="Maximum recent calls to scan for metadata-only impact simulation, default: 1000.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print fetch/review JSON instead of emitting one compact line.",
@@ -750,7 +773,7 @@ def policy_fetch_review_cli(
 
     validation = validate_policy_bundle(bundle)
     current = asyncio.run(build_policy_bundle())
-    review = review_policy_bundle(current, bundle)
+    review = review_policy_bundle(current, bundle, impact_db_path=args.db, impact_limit=max(0, args.impact_limit))
     ok = bool(validation["ok"] and review["ok"])
     result = {
         "schema": "agentflow.policy_bundle_fetch_review.v1",
@@ -788,6 +811,7 @@ def policy_fetch_review_cli(
             "changed_sections": review.get("changed_sections", []),
             "change_count": review.get("change_count", 0),
             "safety_warning_count": review.get("safety_warning_count", 0),
+            "impact_status": (review.get("impact_summary") or {}).get("status"),
             "proposed_error_count": len(validation.get("errors", [])),
             "candidate_ids": result.get("recommendation", {}).get("candidate_ids", []),
             "candidate_count": result.get("recommendation", {}).get("candidate_count", 0),

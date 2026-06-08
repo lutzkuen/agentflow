@@ -319,6 +319,151 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["changed_sections"], ["routing"])
         self.assertEqual(payload["change_count"], 1)
         self.assertEqual(payload["safety_warning_count"], 0)
+        self.assertIn("impact_summary", payload)
+
+    def test_policy_review_cli_simulates_routing_impact_from_test_db(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["routing"]["rules"] = [{
+            "conditions": {"model_pattern": "sonnet", "category": "chat"},
+            "action": {"route_to": "haiku", "reason": "test chat downgrade"},
+        }]
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="review-match-ok",
+                    created_at="2026-06-08T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.0045,
+                    routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                    cache_json=stable_json({"status": "miss"}),
+                    retry_count=0,
+                )
+                store.log_call(
+                    id="review-match-thinking",
+                    created_at="2026-06-08T10:01:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1200,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.0045,
+                    routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                    cache_json=stable_json({"status": "miss"}),
+                    retry_count=0,
+                    thinking_output_tokens=40,
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.policy_review_cli(
+                ["-", "--db", db_path],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        impact = payload["impact_summary"]
+        self.assertEqual(impact["status"], "simulated")
+        self.assertTrue(impact["metadata_only"])
+        self.assertFalse(impact["raw_bodies_read"])
+        rule = impact["sections"]["routing"]["rules"][0]
+        self.assertEqual(rule["would_match_count"], 1)
+        self.assertEqual(rule["excluded_thinking_count"], 1)
+        self.assertGreater(rule["estimated_savings_usd"], 0)
+
+    def test_policy_review_cli_reports_missing_db_impact_unavailable(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+
+        with TemporaryDirectory() as tmp:
+            missing_db = str(Path(tmp) / "missing.sqlite3")
+            stdout = io.StringIO()
+            code = cli.policy_review_cli(
+                ["-", "--db", missing_db],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        impact = json.loads(stdout.getvalue())["impact_summary"]
+        self.assertEqual(impact["status"], "unavailable")
+        self.assertEqual(impact["reason"], "db-not-found")
+
+    def test_policy_review_cli_generates_high_risk_impact_warning(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["routing"]["rules"] = [{
+            "conditions": {"model_pattern": "sonnet", "category": "chat"},
+            "action": {"route_to": "haiku", "reason": "test risky downgrade"},
+        }]
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for index, status in enumerate((200, 500)):
+                    store.log_call(
+                        id=f"review-risk-{index}",
+                        created_at=f"2026-06-08T10:0{index}:00+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=status,
+                        latency_ms=1000,
+                        input_tokens_est=1000,
+                        output_tokens_est=100,
+                        actual_input_tokens=1000,
+                        actual_output_tokens=100,
+                        cost_est_usd=0.0045,
+                        routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                        cache_json=stable_json({"status": "miss"}),
+                        retry_count=1 if status >= 400 else 0,
+                    )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.policy_review_cli(
+                ["-", "--db", db_path],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        impact = json.loads(stdout.getvalue())["impact_summary"]
+        warning_codes = {warning["code"] for warning in impact["warnings"]}
+        self.assertIn("high-error-rate-routing-match", warning_codes)
 
     def test_policy_review_cli_rejects_invalid_bundle(self):
         stdout = io.StringIO()

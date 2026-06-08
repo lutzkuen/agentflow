@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +38,8 @@ _POLICY_SECTION_FILES = {
     "cache": "cache_rules.yaml",
     "routing_experiments": "routing_experiments.yaml",
 }
+POLICY_IMPACT_SCHEMA = "agentflow.policy_bundle_impact.v1"
+_DEFAULT_IMPACT_LIMIT = 1000
 
 
 async def build_policy_bundle() -> dict[str, Any]:
@@ -518,6 +523,482 @@ def _enabled(value: Any) -> bool:
     return False
 
 
+def _json_obj(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
+
+
+def _round_usd(value: float) -> float:
+    return round(value, 6)
+
+
+def _resolve_route_to(route_to: Any) -> str:
+    value = str(route_to or "").strip()
+    if value == "haiku":
+        return os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+    if value == "sonnet":
+        return os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
+    if value == "opus":
+        return os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
+    return value
+
+
+def _routing_condition_match(features: dict[str, Any], conditions: dict[str, Any], *, ignore_tools: bool = False) -> bool:
+    requested = str(features.get("requested_model") or "").lower()
+    category = features.get("category")
+    text_chars = _as_int(features.get("text_chars"))
+    max_tokens = features.get("max_tokens")
+
+    if "model_pattern" in conditions and str(conditions["model_pattern"]).lower() not in requested:
+        return False
+    if "text_chars_lt" in conditions and not (text_chars < _as_int(conditions["text_chars_lt"], -1)):
+        return False
+    if "text_chars_gt" in conditions and not (text_chars > _as_int(conditions["text_chars_gt"], 0)):
+        return False
+    if "text_chars_lte" in conditions and not (text_chars <= _as_int(conditions["text_chars_lte"], -1)):
+        return False
+    if "text_chars_gte" in conditions and not (text_chars >= _as_int(conditions["text_chars_gte"], 0)):
+        return False
+    if not ignore_tools and "has_tools" in conditions and bool(conditions["has_tools"]) != bool(features.get("has_tools")):
+        return False
+    if "env_flag" in conditions:
+        raw = os.getenv(str(conditions["env_flag"]), "0")
+        if raw.strip().lower() not in {"1", "true", "yes", "on"}:
+            return False
+    if "max_tokens_lte" in conditions:
+        if max_tokens is None or not (_as_int(max_tokens) <= _as_int(conditions["max_tokens_lte"], -1)):
+            return False
+    if "category" in conditions and conditions["category"] != category:
+        return False
+    if "category_not_in" in conditions:
+        excluded = conditions["category_not_in"]
+        if isinstance(excluded, str):
+            excluded = [excluded]
+        if category in set(excluded):
+            return False
+    return True
+
+
+def _call_features(row: dict[str, Any]) -> dict[str, Any]:
+    routing = _json_obj(row.get("routing_json"))
+    crunch = _json_obj(row.get("crunch_json"))
+    cache = _json_obj(row.get("cache_json"))
+    category = row.get("category") or routing.get("category")
+    text_chars = _as_int(routing.get("text_chars"))
+    if text_chars <= 0:
+        text_chars = max(_as_int(row.get("actual_input_tokens")), _as_int(row.get("input_tokens_est"))) * 4
+    has_tools = routing.get("has_tools")
+    if has_tools is None:
+        has_tools = str(category or "").startswith("tool-")
+    thinking = bool(_as_int(row.get("thinking_output_tokens")) > 0)
+    if not thinking:
+        reason = str(routing.get("reason") or "").lower()
+        thinking = "thinking" in reason
+    return {
+        "id": row.get("id"),
+        "provider": row.get("provider") or "anthropic",
+        "requested_model": row.get("requested_model"),
+        "routed_model": row.get("routed_model") or row.get("requested_model"),
+        "stream": bool(row.get("stream")),
+        "status_code": _as_int(row.get("status_code")),
+        "retry_count": _as_int(row.get("retry_count")),
+        "latency_ms": _as_int(row.get("latency_ms")),
+        "input_tokens": max(_as_int(row.get("actual_input_tokens")), _as_int(row.get("input_tokens_est")), max(text_chars, 0) // 4),
+        "output_tokens": max(_as_int(row.get("actual_output_tokens")), _as_int(row.get("output_tokens_est"))),
+        "cache_creation_input_tokens": _as_int(row.get("cache_creation_input_tokens")),
+        "cache_read_input_tokens": _as_int(row.get("cache_read_input_tokens")),
+        "cost_est_usd": _as_float(row.get("cost_est_usd")),
+        "cost_baseline_usd": _as_float(row.get("cost_baseline_usd")),
+        "category": category,
+        "text_chars": text_chars,
+        "has_tools": bool(has_tools),
+        "thinking": thinking,
+        "routing": routing,
+        "crunch": crunch,
+        "cache": cache,
+    }
+
+
+def _sqlite_db_path(db_path: str) -> Path | None:
+    if db_path.startswith("sqlite:///"):
+        return Path(db_path.removeprefix("sqlite:///")).expanduser()
+    if "://" in db_path:
+        return None
+    return Path(db_path).expanduser()
+
+
+def _load_recent_call_features(db_path: str, *, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    path = _sqlite_db_path(db_path)
+    if path is None:
+        return [], {
+            "status": "unavailable",
+            "reason": "unsupported-db-url",
+            "message": "policy impact simulation currently reads local SQLite metadata only",
+        }
+    if not path.exists():
+        return [], {
+            "status": "unavailable",
+            "reason": "db-not-found",
+            "message": f"AgentFlow SQLite database not found: {path}",
+        }
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        return [], {
+            "status": "unavailable",
+            "reason": "db-open-failed",
+            "message": str(exc),
+        }
+    try:
+        rows = conn.execute(
+            """
+            select id, created_at, provider, requested_model, routed_model, stream, status_code,
+                   latency_ms, input_tokens_est, output_tokens_est, actual_input_tokens,
+                   actual_output_tokens, cost_est_usd, cost_baseline_usd, crunch_json,
+                   routing_json, cache_json, category, cache_creation_input_tokens,
+                   cache_read_input_tokens, retry_count, thinking_output_tokens
+            from calls
+            order by datetime(created_at) desc
+            limit ?
+            """,
+            (limit,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        return [], {
+            "status": "unavailable",
+            "reason": "db-query-failed",
+            "message": str(exc),
+        }
+    finally:
+        conn.close()
+    return [_call_features(dict(row)) for row in rows], None
+
+
+def _rollup(features: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(features)
+    errors = sum(1 for item in features if item["status_code"] >= 400)
+    retried = sum(1 for item in features if item["retry_count"] > 0)
+    latency_values = [item["latency_ms"] for item in features if item["latency_ms"] > 0]
+    return {
+        "would_match_count": total,
+        "historical_error_count": errors,
+        "historical_error_rate": _rate(errors, total),
+        "historical_retry_count": retried,
+        "historical_retry_rate": _rate(retried, total),
+        "avg_latency_ms": int(sum(latency_values) / len(latency_values)) if latency_values else 0,
+        "current_cost_usd": _round_usd(sum(item["cost_est_usd"] for item in features)),
+    }
+
+
+def _impact_warning(code: str, path: str, message: str, *, severity: str = "warning") -> dict[str, str]:
+    return {"code": code, "path": path, "severity": severity, "message": message}
+
+
+def _routing_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    from agentflow_proxy.pricing import estimate_cost
+
+    rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    summaries: list[dict[str, Any]] = []
+    warnings: list[dict[str, str]] = []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        path = f"$.policies.routing.rules[{index}]"
+        pre_safety = [item for item in calls if _routing_condition_match(item, conditions)]
+        matched = [item for item in pre_safety if not item["thinking"]]
+        excluded_thinking = len(pre_safety) - len(matched)
+        if not pre_safety and "has_tools" in conditions:
+            tool_agnostic = [item for item in calls if _routing_condition_match(item, conditions, ignore_tools=True)]
+        else:
+            tool_agnostic = pre_safety
+        excluded_tool = sum(1 for item in tool_agnostic if item["has_tools"] and conditions.get("has_tools") is False)
+        rollup = _rollup(matched)
+        target_model = _resolve_route_to(action.get("route_to"))
+        estimated_target_cost = 0.0
+        cost_known_count = 0
+        for item in matched:
+            cost = estimate_cost(
+                target_model or str(item["routed_model"] or item["requested_model"]),
+                item["input_tokens"],
+                item["output_tokens"],
+                item["cache_creation_input_tokens"],
+                item["cache_read_input_tokens"],
+                provider=str(item["provider"] or "anthropic"),
+            )
+            if cost is not None:
+                estimated_target_cost += cost
+                cost_known_count += 1
+        estimated_savings = max(0.0, rollup["current_cost_usd"] - estimated_target_cost)
+        summary = {
+            "path": path,
+            "action": {
+                "route_to": action.get("route_to"),
+                "target_model": target_model,
+                "reason": action.get("reason"),
+            },
+            "conditions": conditions,
+            **rollup,
+            "excluded_thinking_count": excluded_thinking,
+            "excluded_tool_count": excluded_tool,
+            "estimated_target_cost_usd": _round_usd(estimated_target_cost),
+            "estimated_savings_usd": _round_usd(estimated_savings),
+            "cost_estimate_count": cost_known_count,
+        }
+        if summary["historical_error_rate"] > 0.05:
+            warning = _impact_warning(
+                "high-error-rate-routing-match",
+                path,
+                f"matched historical calls had {summary['historical_error_rate']:.1%} error rate",
+            )
+            warnings.append(warning)
+            summary.setdefault("warnings", []).append(warning)
+        if summary["historical_retry_rate"] > 0.10:
+            warning = _impact_warning(
+                "high-retry-rate-routing-match",
+                path,
+                f"matched historical calls had {summary['historical_retry_rate']:.1%} retry rate",
+            )
+            warnings.append(warning)
+            summary.setdefault("warnings", []).append(warning)
+        if excluded_thinking:
+            summary.setdefault("notes", []).append("thinking-history calls are excluded by local routing safety guard")
+        summaries.append(summary)
+
+    return {
+        "status": "simulated",
+        "policy_source": policy.get("policy_source"),
+        "rule_count": len(summaries),
+        "rules": summaries,
+        "warnings": warnings,
+    }
+
+
+def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    enabled = _enabled(policy.get("enabled", True))
+    threshold = _as_int(policy.get("threshold_chars"), 24000)
+    eligible = [item for item in calls if enabled and item["text_chars"] >= threshold]
+    existing_saved_tokens = sum(_as_int(item["crunch"].get("tokens_saved_est")) for item in eligible)
+    features: list[dict[str, Any]] = [{
+        "name": "base_crunch",
+        "would_match_count": len(eligible),
+        "threshold_chars": threshold,
+        "historical_tokens_saved_est": existing_saved_tokens,
+        **{k: v for k, v in _rollup(eligible).items() if k != "would_match_count"},
+    }]
+    warnings: list[dict[str, str]] = []
+
+    old_context = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
+    if _enabled(old_context.get("enabled")):
+        min_chars = _as_int(old_context.get("min_request_chars"), 32000)
+        matched = [item for item in calls if item["text_chars"] >= min_chars]
+        feature = {
+            "name": "old_context_summarization",
+            "would_match_count": len(matched),
+            "min_request_chars": min_chars,
+            **{k: v for k, v in _rollup(matched).items() if k != "would_match_count"},
+        }
+        warning = _impact_warning(
+            "old-context-summarization-impact-risk",
+            "$.policies.crunch.old_context_summarization.enabled",
+            "old-context summarization changes request context; review matched error/retry rate before applying",
+        )
+        warnings.append(warning)
+        feature["warnings"] = [warning]
+        features.append(feature)
+
+    thinking_dedup = policy.get("thinking_deduplication") if isinstance(policy.get("thinking_deduplication"), dict) else {}
+    if _enabled(thinking_dedup.get("enabled")):
+        min_chars = _as_int(thinking_dedup.get("min_chars"), 2000)
+        matched = [item for item in calls if item["thinking"] and item["text_chars"] >= min_chars]
+        features.append({
+            "name": "thinking_deduplication",
+            "would_match_count": len(matched),
+            "min_chars": min_chars,
+            **{k: v for k, v in _rollup(matched).items() if k != "would_match_count"},
+        })
+
+    return {
+        "status": "simulated",
+        "policy_source": policy.get("policy_source"),
+        "enabled": enabled,
+        "features": features,
+        "warnings": warnings,
+    }
+
+
+def _cache_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    exact = policy.get("exact_cache") if isinstance(policy.get("exact_cache"), dict) else {}
+    semantic = policy.get("semantic_cache") if isinstance(policy.get("semantic_cache"), dict) else {}
+    exact_enabled = _enabled(exact.get("enabled", policy.get("enabled", True)))
+    cache_tool_calls = _enabled(exact.get("cache_tool_calls", False))
+    non_streaming = [item for item in calls if not item["stream"]]
+    eligible = [item for item in non_streaming if exact_enabled and (cache_tool_calls or not item["has_tools"])]
+    excluded_streaming = sum(1 for item in calls if item["stream"])
+    excluded_tool = sum(1 for item in non_streaming if item["has_tools"] and not cache_tool_calls)
+    cache_hits = sum(1 for item in eligible if item["cache"].get("status") == "hit" or item["cache"].get("cache_hit"))
+    warnings: list[dict[str, str]] = []
+    if cache_tool_calls:
+        warnings.append(_impact_warning(
+            "tool-call-cache-impact-risk",
+            "$.policies.cache.exact_cache.cache_tool_calls",
+            "historical tool calls would become cache-eligible; stale filesystem-dependent results remain a safety risk",
+        ))
+    if _enabled(semantic.get("enabled")):
+        warnings.append(_impact_warning(
+            "semantic-cache-impact-risk",
+            "$.policies.cache.semantic_cache.enabled",
+            "semantic cache impact cannot be proven from metadata-only review; false-positive reuse requires quality checks",
+        ))
+    return {
+        "status": "simulated",
+        "policy_source": policy.get("policy_source"),
+        "exact_cache": {
+            "enabled": exact_enabled,
+            "cache_tool_calls": cache_tool_calls,
+            **_rollup(eligible),
+            "excluded_streaming_count": excluded_streaming,
+            "excluded_tool_count": excluded_tool,
+            "historical_cache_hit_count": cache_hits,
+            "estimated_savings_usd": _round_usd(sum(item["cost_est_usd"] for item in eligible if item["cache"].get("status") == "hit")),
+            "estimate_note": "metadata-only review cannot infer new exact duplicate hashes without stored request bodies or hashes",
+        },
+        "semantic_cache": {
+            "enabled": _enabled(semantic.get("enabled")),
+            "threshold": semantic.get("threshold"),
+        },
+        "warnings": warnings,
+    }
+
+
+def _routing_experiment_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    experiment = policy.get("policy") if isinstance(policy.get("policy"), dict) else policy
+    enabled = _enabled(experiment.get("enabled"))
+    min_text = _as_int(experiment.get("min_text_chars"), 0)
+    max_text = _as_int(experiment.get("max_text_chars"), 30000)
+    categories = experiment.get("categories")
+    category_set = {str(item) for item in categories} if isinstance(categories, list) else set()
+    eligible = [
+        item for item in calls
+        if enabled
+        and not item["stream"]
+        and min_text <= item["text_chars"] <= max_text
+        and (not category_set or item["category"] in category_set)
+    ]
+    sample_rate = _as_float(experiment.get("sample_rate"), 0.0)
+    warnings: list[dict[str, str]] = []
+    if _enabled(experiment.get("store_response_bodies")):
+        warnings.append(_impact_warning(
+            "routing-experiment-response-body-storage",
+            "$.policies.routing_experiments.store_response_bodies",
+            "storing response bodies is outside the default metadata-only posture",
+        ))
+    return {
+        "status": "simulated",
+        "policy_source": policy.get("policy_source"),
+        "enabled": enabled,
+        "eligible_call_count": len(eligible),
+        "estimated_sample_count": round(len(eligible) * sample_rate, 2),
+        "sample_rate": sample_rate,
+        **{k: v for k, v in _rollup(eligible).items() if k != "would_match_count"},
+        "warnings": warnings,
+    }
+
+
+def simulate_policy_bundle_impact(
+    proposed: Any,
+    *,
+    db_path: str | None = None,
+    limit: int = _DEFAULT_IMPACT_LIMIT,
+) -> dict[str, Any]:
+    path = db_path or os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv(
+        "AGENTFLOW_DB",
+        str(Path.home() / ".agentflow" / "agentflow.sqlite3"),
+    )
+    if not isinstance(proposed, dict):
+        return {
+            "schema": POLICY_IMPACT_SCHEMA,
+            "status": "unavailable",
+            "reason": "invalid-bundle",
+            "message": "proposed policy bundle is not an object",
+        }
+    calls, unavailable = _load_recent_call_features(str(path), limit=limit)
+    if unavailable:
+        return {
+            "schema": POLICY_IMPACT_SCHEMA,
+            "status": "unavailable",
+            "ok": False,
+            **unavailable,
+            "db_path": str(path),
+            "lookback_call_limit": limit,
+            "sections": {},
+            "warnings": [],
+        }
+
+    policies = proposed.get("policies") if isinstance(proposed.get("policies"), dict) else {}
+    sections: dict[str, Any] = {}
+    if isinstance(policies.get("routing"), dict):
+        sections["routing"] = _routing_impact(policies["routing"], calls)
+    if isinstance(policies.get("crunch"), dict):
+        sections["crunch"] = _crunch_impact(policies["crunch"], calls)
+    if isinstance(policies.get("cache"), dict):
+        sections["cache"] = _cache_impact(policies["cache"], calls)
+    if isinstance(policies.get("routing_experiments"), dict):
+        sections["routing_experiments"] = _routing_experiment_impact(policies["routing_experiments"], calls)
+    warnings = [
+        warning
+        for section in sections.values()
+        if isinstance(section, dict)
+        for warning in section.get("warnings", [])
+    ]
+    return {
+        "schema": POLICY_IMPACT_SCHEMA,
+        "status": "simulated",
+        "ok": True,
+        "metadata_only": True,
+        "raw_bodies_read": False,
+        "db_path": str(path),
+        "lookback_call_limit": limit,
+        "sampled_call_count": len(calls),
+        "sections": sections,
+        "warning_count": len(warnings),
+        "warnings": warnings,
+    }
+
+
 def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
 
@@ -574,10 +1055,17 @@ def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
     return warnings
 
 
-def review_policy_bundle(current: Any, proposed: Any) -> dict[str, Any]:
+def review_policy_bundle(
+    current: Any,
+    proposed: Any,
+    *,
+    impact_db_path: str | None = None,
+    include_impact: bool = True,
+    impact_limit: int = _DEFAULT_IMPACT_LIMIT,
+) -> dict[str, Any]:
     diff = compare_policy_bundles(current, proposed)
     warnings = policy_bundle_safety_warnings(proposed)
-    return {
+    result = {
         "schema": POLICY_BUNDLE_REVIEW_SCHEMA,
         "ok": bool(diff["ok"]),
         "changed": bool(diff.get("changed", False)) if diff["ok"] else False,
@@ -596,6 +1084,13 @@ def review_policy_bundle(current: Any, proposed: Any) -> dict[str, Any]:
             "changes": diff.get("changes", []),
         },
     }
+    if include_impact:
+        result["impact_summary"] = simulate_policy_bundle_impact(
+            proposed,
+            db_path=impact_db_path,
+            limit=impact_limit,
+        )
+    return result
 
 
 def _sha256_text(value: str) -> str:
