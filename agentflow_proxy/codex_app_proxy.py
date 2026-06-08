@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -22,8 +23,11 @@ DEFAULT_HOST = os.getenv("AGENTFLOW_CODEX_APP_PROXY_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_CODEX_APP_PROXY_PORT", "4013"))
 DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", "ws://127.0.0.1:4014")
 LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
+DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
 
 store = Store(DEFAULT_DB)
+if getattr(store, "backend", None) == "sqlite":
+    store.conn.execute(f"pragma busy_timeout = {DB_BUSY_TIMEOUT_MS}")
 app = FastAPI(title="AgentFlow Codex App-Server Proxy", version="0.1.0")
 
 
@@ -54,6 +58,13 @@ def _request_id(msg: dict[str, Any]) -> Optional[str]:
     return str(value) if value is not None else None
 
 
+def _log_codex_app_event(**kwargs: Any) -> None:
+    try:
+        store.log_codex_app_event(**kwargs)
+    except Exception as exc:
+        print(f"AgentFlow Codex app telemetry skipped: {exc}", file=sys.stderr)
+
+
 def _record_message(
     raw: str | bytes,
     *,
@@ -68,7 +79,7 @@ def _record_message(
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            store.log_codex_app_event(
+            _log_codex_app_event(
                 id=str(uuid.uuid4()),
                 created_at=utc_now(),
                 direction=direction,
@@ -81,7 +92,7 @@ def _record_message(
     try:
         msg = json.loads(text)
     except Exception:
-        store.log_codex_app_event(
+        _log_codex_app_event(
             id=str(uuid.uuid4()),
             created_at=utc_now(),
             direction=direction,
@@ -110,7 +121,7 @@ def _record_message(
     if direction == "client_to_server" and rid is not None and method is not None:
         request_started[rid] = time.time()
 
-    store.log_codex_app_event(
+    _log_codex_app_event(
         id=str(uuid.uuid4()),
         created_at=utc_now(),
         direction=direction,
