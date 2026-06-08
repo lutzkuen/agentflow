@@ -9,7 +9,7 @@ import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
-from agentflow_proxy.policy_bundle import build_policy_bundle
+from agentflow_proxy.policy_bundle import build_policy_bundle, validate_policy_bundle
 
 
 class PolicyFileStatusTest(unittest.TestCase):
@@ -25,6 +25,24 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("crunch", bundle["policies"])
         self.assertIn("cache", bundle["policies"])
         self.assertIn("routing_experiments", bundle["policies"])
+
+    def test_policy_bundle_validation_accepts_exported_bundle(self):
+        bundle = asyncio.run(build_policy_bundle())
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(result["errors"], [])
+
+    def test_policy_bundle_validation_rejects_missing_policy_section(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"].pop("cache")
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("$.policies.cache", {error["path"] for error in result["errors"]})
 
     def test_policy_bundle_exports_manual_policy_source_and_file_status(self):
         with TemporaryDirectory() as tmp:

@@ -80,6 +80,44 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["managed_optimizer"]["enabled"])
         self.assertEqual(payload["policies"]["schema"], "agentflow.policy_state.v1")
 
+    def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        stdout = io.StringIO()
+
+        code = cli.policy_validate_cli(["-"], stdin=io.StringIO(exported.getvalue()), stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(payload["errors"], [])
+
+    def test_policy_validate_cli_rejects_invalid_json_with_structured_errors(self):
+        stdout = io.StringIO()
+
+        code = cli.policy_validate_cli(["-"], stdin=io.StringIO("{"), stdout=stdout)
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertIn("invalid JSON", payload["errors"][0]["message"])
+
+    def test_policy_validate_cli_rejects_malformed_bundle(self):
+        stdout = io.StringIO()
+
+        code = cli.policy_validate_cli(
+            ["-"],
+            stdin=io.StringIO(json.dumps({"schema": "wrong"})),
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertIn("$.schema", {error["path"] for error in payload["errors"]})
+
 
 if __name__ == "__main__":
     unittest.main()

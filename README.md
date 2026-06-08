@@ -105,6 +105,15 @@ routing-experiment policy state, including policy sources, rule paths, and reloa
 is an offline local export shape for auditability and future optimizer interfaces; it does not
 upload data or enable managed-server behavior.
 
+Validate an exported policy bundle offline:
+
+```bash
+agentflow-policy-export | agentflow-policy-validate -
+```
+
+The validator prints `agentflow.policy_bundle_validation.v1` JSON and exits non-zero for
+malformed JSON or bundles that do not match the local offline export contract.
+
 ## Point Claude Code / Claude CLI at it
 
 The exact environment variable names can differ by Claude Code version, but the intended setup is:

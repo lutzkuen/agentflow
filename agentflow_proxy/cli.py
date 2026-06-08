@@ -5,6 +5,7 @@ import asyncio
 import ipaddress
 import json
 import os
+from pathlib import Path
 import sys
 from typing import Any, Sequence
 from urllib.parse import urlparse
@@ -131,6 +132,70 @@ def policy_export_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) 
     return 0
 
 
+def _validation_result_error(message: str, *, path: str = "$") -> dict[str, Any]:
+    return {
+        "schema": "agentflow.policy_bundle_validation.v1",
+        "ok": False,
+        "bundle_schema": None,
+        "errors": [{"path": path, "message": message}],
+        "warnings": [],
+    }
+
+
+def policy_validate_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Validate an AgentFlow policy bundle JSON file offline")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Policy bundle JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print validation JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.path == "-":
+        raw = stdin.read()
+    else:
+        try:
+            raw = Path(args.path).read_text(encoding="utf-8")
+        except OSError as exc:
+            result = _validation_result_error(str(exc), path=args.path)
+            _write_validation_result(stdout, result, pretty=args.pretty)
+            return 1
+
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        result = _validation_result_error(f"invalid JSON: {exc}", path="$")
+        _write_validation_result(stdout, result, pretty=args.pretty)
+        return 1
+
+    from agentflow_proxy.policy_bundle import validate_policy_bundle
+
+    result = validate_policy_bundle(payload)
+    _write_validation_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
+def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -148,3 +213,7 @@ def policy_reload_main() -> None:
 
 def policy_export_main() -> None:
     raise SystemExit(policy_export_cli())
+
+
+def policy_validate_main() -> None:
+    raise SystemExit(policy_validate_cli())
