@@ -130,6 +130,8 @@ Review and apply a proposed policy bundle offline:
 agentflow-policy-review proposed.json --pretty
 agentflow-policy-apply proposed.json --dry-run --pretty
 agentflow-policy-apply proposed.json --config-dir ~/.agentflow
+agentflow-policy-rollback --config-dir ~/.agentflow --dry-run --pretty
+agentflow-policy-rollback --config-dir ~/.agentflow --section cache
 ```
 
 The apply command writes loader-compatible YAML rule files for routing, crunch, cache, and
@@ -137,11 +139,15 @@ routing experiments. It validates the bundle first, refuses risky policy warning
 `--allow-risky` is explicit, creates timestamped backups before changed files are overwritten,
 and does not contact the proxy or any managed service.
 
-Policy reload/export/validate/diff/review/apply operations append compact local audit events to
-`~/.agentflow/policy_events.jsonl` by default. The read-only dashboard exposes recent entries
-at `/agentflow/stats/policy-events` and in the Policies tab. Set `AGENTFLOW_POLICY_EVENTS=0`
-to disable the audit log, or `AGENTFLOW_POLICY_EVENTS_LOG=/path/to/events.jsonl` to choose a
-different local file.
+The rollback command restores the newest backup for each requested policy section and creates
+a backup of the current file before replacing it. It fails with structured JSON if any requested
+section has no backup, so mixed rollback requests do not partially write files.
+
+Policy reload/export/validate/diff/review/apply/rollback operations append compact local audit
+events to `~/.agentflow/policy_events.jsonl` by default. The read-only dashboard exposes recent
+entries at `/agentflow/stats/policy-events` and in the Policies tab. Set
+`AGENTFLOW_POLICY_EVENTS=0` to disable the audit log, or
+`AGENTFLOW_POLICY_EVENTS_LOG=/path/to/events.jsonl` to choose a different local file.
 
 ## Point Claude Code / Claude CLI at it
 

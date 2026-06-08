@@ -351,6 +351,104 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertTrue(allowed_payload["ok"])
             self.assertTrue(yaml.safe_load((Path(tmp) / "cache_rules.yaml").read_text(encoding="utf-8"))["exact_cache"]["cache_tool_calls"])
 
+    def test_policy_rollback_cli_dry_run_reports_latest_backup_without_writing(self):
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache_rules.yaml"
+            cache_path.write_text("exact_cache:\n  enabled: true\n", encoding="utf-8")
+            (Path(tmp) / "cache_rules.yaml.bak-20260101T000000000000Z").write_text(
+                "exact_cache:\n  enabled: false\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            code = cli.policy_rollback_cli(
+                ["--config-dir", tmp, "--section", "cache", "--dry-run"],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["restored_sections"], ["cache"])
+            self.assertTrue(payload["files"][0]["changed"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), "exact_cache:\n  enabled: true\n")
+            self.assertEqual(len(list(Path(tmp).glob("cache_rules.yaml.bak-*"))), 1)
+
+    def test_policy_rollback_cli_restores_selected_section_and_backs_up_current_file(self):
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache_rules.yaml"
+            cache_path.write_text("exact_cache:\n  enabled: true\n", encoding="utf-8")
+            (Path(tmp) / "cache_rules.yaml.bak-20260101T000000000000Z").write_text(
+                "exact_cache:\n  enabled: false\n",
+                encoding="utf-8",
+            )
+            latest = Path(tmp) / "cache_rules.yaml.bak-20260102T000000000000Z"
+            latest.write_text("exact_cache:\n  enabled: newest\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.policy_rollback_cli(["--config-dir", tmp, "--section", "cache"], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "agentflow.policy_bundle_rollback.v1")
+            self.assertEqual(payload["restored_sections"], ["cache"])
+            self.assertEqual(payload["files"][0]["restored_from"], str(latest))
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), "exact_cache:\n  enabled: newest\n")
+            current_backups = [
+                path
+                for path in Path(tmp).glob("cache_rules.yaml.bak-*")
+                if path.name != "cache_rules.yaml.bak-20260101T000000000000Z"
+                and path.name != "cache_rules.yaml.bak-20260102T000000000000Z"
+            ]
+            self.assertEqual(len(current_backups), 1)
+            self.assertEqual(current_backups[0].read_text(encoding="utf-8"), "exact_cache:\n  enabled: true\n")
+
+    def test_policy_rollback_cli_missing_backup_fails_without_partial_writes(self):
+        with TemporaryDirectory() as tmp:
+            routing_path = Path(tmp) / "routing_rules.yaml"
+            cache_path = Path(tmp) / "cache_rules.yaml"
+            routing_path.write_text("rules: []\n", encoding="utf-8")
+            cache_path.write_text("exact_cache:\n  enabled: true\n", encoding="utf-8")
+            (Path(tmp) / "cache_rules.yaml.bak-20260101T000000000000Z").write_text(
+                "exact_cache:\n  enabled: false\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            code = cli.policy_rollback_cli(
+                ["--config-dir", tmp, "--section", "routing", "--section", "cache"],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 1)
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "missing_backups")
+            self.assertEqual(payload["error"]["sections"], ["routing"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), "exact_cache:\n  enabled: true\n")
+            self.assertEqual(len(list(Path(tmp).glob("cache_rules.yaml.bak-*"))), 1)
+
+    def test_policy_rollback_cli_records_compact_event(self):
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache_rules.yaml"
+            cache_path.write_text("exact_cache:\n  enabled: true\n", encoding="utf-8")
+            (Path(tmp) / "cache_rules.yaml.bak-20260101T000000000000Z").write_text(
+                "exact_cache:\n  enabled: false\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            cli.policy_rollback_cli(["--config-dir", tmp, "--section", "cache"], stdout=stdout)
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        events = recent_policy_events(limit=5)["events"]
+        self.assertEqual(events[0]["action"], "rollback")
+        self.assertTrue(events[0]["ok"])
+        self.assertEqual(events[0]["details"]["restored_sections"], ["cache"])
+        self.assertEqual(events[0]["details"]["exit_code"], 0)
+
     def test_policy_cli_records_compact_local_events(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)

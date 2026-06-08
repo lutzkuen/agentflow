@@ -512,6 +512,62 @@ def policy_apply_cli(
     return 0 if result["ok"] else 1
 
 
+def policy_rollback_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Rollback local AgentFlow policy YAML files from apply backups")
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["routing", "crunch", "cache", "routing_experiments"],
+        help="Rollback only one policy section. Repeat to rollback multiple sections.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the backups that would be restored without writing files.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print rollback JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.policy_bundle import rollback_policy_files
+    from agentflow_proxy.policy_events import log_policy_event
+
+    result = rollback_policy_files(config_dir=args.config_dir, dry_run=args.dry_run, sections=args.section)
+    log_policy_event(
+        "rollback",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "config_dir": args.config_dir,
+            "dry_run": args.dry_run,
+            "restored_sections": result.get("restored_sections", []),
+            "changed_files": [
+                file.get("path")
+                for file in result.get("files", [])
+                if isinstance(file, dict) and file.get("changed")
+            ],
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
+    _write_policy_rollback_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -534,6 +590,13 @@ def _write_policy_review_result(stream: Any, payload: dict[str, Any], *, pretty:
 
 
 def _write_policy_apply_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
+def _write_policy_rollback_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
@@ -573,3 +636,7 @@ def policy_review_main() -> None:
 
 def policy_apply_main() -> None:
     raise SystemExit(policy_apply_cli())
+
+
+def policy_rollback_main() -> None:
+    raise SystemExit(policy_rollback_cli())

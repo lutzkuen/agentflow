@@ -14,6 +14,7 @@ POLICY_BUNDLE_APPLY_SCHEMA = "agentflow.policy_bundle_apply.v1"
 POLICY_BUNDLE_SCHEMA = "agentflow.policy_bundle.v1"
 POLICY_BUNDLE_DIFF_SCHEMA = "agentflow.policy_bundle_diff.v1"
 POLICY_BUNDLE_REVIEW_SCHEMA = "agentflow.policy_bundle_review.v1"
+POLICY_BUNDLE_ROLLBACK_SCHEMA = "agentflow.policy_bundle_rollback.v1"
 POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
 POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
 POLICY_SOURCES = {
@@ -348,6 +349,11 @@ def _write_policy_file(path: Path, text: str) -> str | None:
     return backup_path
 
 
+def _latest_policy_backup(path: Path) -> Path | None:
+    backups = sorted(path.parent.glob(f"{path.name}.bak-*"))
+    return backups[-1] if backups else None
+
+
 def apply_policy_bundle(
     bundle: Any,
     *,
@@ -423,6 +429,118 @@ def apply_policy_bundle(
             "bytes_after": len(text.encode("utf-8")),
         })
         result["applied_sections"].append(section)
+
+    result["ok"] = True
+    return result
+
+
+def rollback_policy_files(
+    *,
+    config_dir: str | Path,
+    dry_run: bool = False,
+    sections: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    requested_sections = list(sections or REQUIRED_POLICY_SECTIONS)
+    invalid_sections = sorted(set(requested_sections) - set(REQUIRED_POLICY_SECTIONS))
+    config_path = Path(config_dir).expanduser()
+    result: dict[str, Any] = {
+        "schema": POLICY_BUNDLE_ROLLBACK_SCHEMA,
+        "ok": False,
+        "dry_run": bool(dry_run),
+        "config_dir": str(config_path),
+        "restored_sections": [],
+        "skipped_sections": [],
+        "files": [],
+        "error": None,
+    }
+
+    if invalid_sections:
+        result["error"] = {
+            "type": "invalid_sections",
+            "message": "unknown policy section requested",
+            "sections": invalid_sections,
+        }
+        return result
+
+    plans: list[dict[str, Any]] = []
+    missing_sections: list[str] = []
+    unreadable_backups: list[dict[str, str]] = []
+    for section in REQUIRED_POLICY_SECTIONS:
+        if section not in requested_sections:
+            result["skipped_sections"].append({"section": section, "reason": "not-requested"})
+            continue
+
+        path = config_path / _POLICY_SECTION_FILES[section]
+        backup = _latest_policy_backup(path)
+        old_text: str | None = None
+        if path.exists():
+            try:
+                old_text = path.read_text(encoding="utf-8")
+            except OSError:
+                old_text = None
+        if backup is None:
+            missing_sections.append(section)
+            result["files"].append({
+                "section": section,
+                "path": str(path),
+                "restored_from": None,
+                "changed": False,
+                "backup_path": None,
+                "sha256_before": _sha256_text(old_text) if old_text is not None else None,
+                "sha256_after": None,
+                "bytes_after": None,
+            })
+            continue
+
+        try:
+            backup_text = backup.read_text(encoding="utf-8")
+        except OSError as exc:
+            unreadable_backups.append({"section": section, "path": str(backup), "message": str(exc)})
+            continue
+
+        plans.append({
+            "section": section,
+            "path": path,
+            "backup": backup,
+            "old_text": old_text,
+            "backup_text": backup_text,
+        })
+
+    if missing_sections:
+        result["error"] = {
+            "type": "missing_backups",
+            "message": "one or more requested policy sections have no backup file",
+            "sections": missing_sections,
+        }
+        return result
+    if unreadable_backups:
+        result["error"] = {
+            "type": "unreadable_backups",
+            "message": "one or more requested policy backups could not be read",
+            "backups": unreadable_backups,
+        }
+        return result
+
+    for plan in plans:
+        path = plan["path"]
+        old_text = plan["old_text"]
+        backup_text = plan["backup_text"]
+        changed = old_text != backup_text
+        backup_path = None
+        if changed and not dry_run:
+            backup_path = _write_policy_file(path, backup_text)
+
+        result["files"].append({
+            "section": plan["section"],
+            "path": str(path),
+            "restored_from": str(plan["backup"]),
+            "changed": bool(changed),
+            "backup_path": backup_path,
+            "sha256_before": _sha256_text(old_text) if old_text is not None else None,
+            "sha256_after": _sha256_text(backup_text),
+            "bytes_after": len(backup_text.encode("utf-8")),
+        })
+        result["restored_sections"].append(plan["section"])
 
     result["ok"] = True
     return result
