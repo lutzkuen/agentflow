@@ -594,6 +594,86 @@ class RecommendationTest(unittest.TestCase):
         self.assertIn(("crunch", "errored"), outcomes)
         self.assertIn(("cache", "errored"), outcomes)
 
+    def test_pattern_decision_summaries_distinguish_canary_cohorts(self):
+        pattern_hash = "sha256:" + "f" * 64
+        summaries = recommendations.pattern_decision_summaries(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=200,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.002,
+            cache_meta={
+                "status": "skipped",
+                "reason": "tools-disabled",
+                "policy_source": "local-manual",
+                "exact_enabled": False,
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "matched_count": 0,
+                    "skip_reasons": [
+                        {
+                            "rule_id": "cache-canary-rule",
+                            "candidate_id": "cache-canary-candidate",
+                            "policy_source": "managed-recommended",
+                            "reason": "canary_holdout",
+                            "matched_hashes": [pattern_hash],
+                            "canary": {
+                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "enabled": True,
+                                "selected": False,
+                                "status": "holdout",
+                                "cohort": "canary_holdout",
+                                "fraction": 0.1,
+                                "unit": "request_fingerprint",
+                                "cohort_key_hash": "sha256:" + "1" * 64,
+                            },
+                        }
+                    ],
+                },
+            },
+            crunch_meta={
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "crunch-canary-rule",
+                            "candidate_id": "crunch-canary-candidate",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": [pattern_hash],
+                            "applied_count": 1,
+                            "saved_chars": 400,
+                            "canary": {
+                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "enabled": True,
+                                "selected": True,
+                                "status": "applied",
+                                "cohort": "canary_applied",
+                                "fraction": 0.1,
+                                "unit": "request_fingerprint",
+                                "cohort_key_hash": "sha256:" + "2" * 64,
+                            },
+                        }
+                    ],
+                }
+            },
+            routing_meta={"category": "tool-result"},
+            category="tool-result",
+        )
+
+        cohorts = {
+            (item["decision_type"], item.get("candidate_id")): item.get("cohort")
+            for item in summaries
+        }
+        self.assertEqual(cohorts[("crunch", "crunch-canary-candidate")], "canary_applied")
+        self.assertEqual(cohorts[("cache", "cache-canary-candidate")], "canary_holdout")
+        cache_holdout = next(item for item in summaries if item.get("candidate_id") == "cache-canary-candidate")
+        self.assertEqual(cache_holdout["status"], "holdout")
+        self.assertEqual(cache_holdout["outcome"], "holdout")
+        self.assertEqual(cache_holdout["pattern_hash"], pattern_hash)
+
     def test_outcome_feedback_failure_is_non_fatal_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")

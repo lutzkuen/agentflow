@@ -864,6 +864,45 @@ def _pattern_outcome(status_code: int | None, *, applied: bool, bypassed: bool =
     return "skipped"
 
 
+def _pattern_canary_cohort(meta: dict[str, Any]) -> str | None:
+    canary = meta.get("canary")
+    if not isinstance(canary, dict) or not canary.get("enabled"):
+        return None
+    cohort = canary.get("cohort")
+    if isinstance(cohort, str) and cohort:
+        return cohort
+    status = canary.get("status")
+    if status == "holdout":
+        return "canary_holdout"
+    if status == "applied":
+        return "canary_applied"
+    return None
+
+
+def _copy_canary_meta(meta: dict[str, Any]) -> dict[str, Any] | None:
+    canary = meta.get("canary")
+    if not isinstance(canary, dict) or not canary.get("enabled"):
+        return None
+    return {
+        key: canary.get(key)
+        for key in (
+            "schema",
+            "enabled",
+            "selected",
+            "status",
+            "cohort",
+            "reason",
+            "fraction",
+            "salt",
+            "unit",
+            "bucket",
+            "threshold",
+            "cohort_key_hash",
+        )
+        if canary.get(key) is not None
+    }
+
+
 def _pattern_cost_savings(
     *,
     provider: str,
@@ -942,6 +981,14 @@ def pattern_decision_summaries(
                     "raw_pattern_strings_included": False,
                 },
             }
+            canary_meta = _copy_canary_meta(rule)
+            if canary_meta:
+                base["canary"] = canary_meta
+                base["cohort"] = _pattern_canary_cohort(rule)
+                if canary_meta.get("status") == "holdout":
+                    base["status"] = "holdout"
+                    base["reason"] = "canary_holdout"
+                    base["outcome"] = "holdout"
             matched_hashes = [
                 str(item)
                 for item in rule.get("matched_hashes") or []
@@ -996,6 +1043,8 @@ def pattern_decision_summaries(
         cache_reason = str(cache_meta.get("reason") or "unknown")
         cache_applied = cache_status == "hit"
         cache_bypassed = cache_status in {"bypass", "bypassed"} or "bypass" in cache_reason or "disabled" in cache_reason
+        pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+        pattern_rules = cache_meta.get("pattern_rules") if isinstance(cache_meta.get("pattern_rules"), dict) else {}
         descriptor = {
             "schema": "agentflow.cache_pattern_decision_basis.v1",
             "source_surface": source_surface,
@@ -1018,10 +1067,16 @@ def pattern_decision_summaries(
             "app_family": app_family,
             "category": descriptor["category"],
             "workflow_phase": workflow_phase,
-            "rule_id": cache_meta.get("rule_id") or cache_meta.get("policy_id") or cache_status,
-            "candidate_id": cache_meta.get("candidate_id"),
-            "pattern_hash": cache_meta.get("pattern_hash") if isinstance(cache_meta.get("pattern_hash"), str) and str(cache_meta.get("pattern_hash")).startswith("sha256:") else _pattern_hash(descriptor),
-            "policy_source": cache_meta.get("policy_source"),
+            "rule_id": pattern_rule.get("rule_id") or cache_meta.get("rule_id") or cache_meta.get("policy_id") or cache_status,
+            "candidate_id": pattern_rule.get("candidate_id") or cache_meta.get("candidate_id"),
+            "pattern_hash": (
+                pattern_rule.get("matched_hashes", [None])[0]
+                if isinstance(pattern_rule.get("matched_hashes"), list) and pattern_rule.get("matched_hashes")
+                else cache_meta.get("pattern_hash") if isinstance(cache_meta.get("pattern_hash"), str) and str(cache_meta.get("pattern_hash")).startswith("sha256:")
+                else _pattern_hash(descriptor)
+            ),
+            "pattern_hashes": pattern_rule.get("matched_hashes") if isinstance(pattern_rule.get("matched_hashes"), list) else None,
+            "policy_source": pattern_rule.get("policy_source") or cache_meta.get("policy_source"),
             "status": cache_status,
             "reason": cache_reason,
             "outcome": _pattern_outcome(status_code, applied=cache_applied, bypassed=cache_bypassed),
@@ -1045,6 +1100,46 @@ def pattern_decision_summaries(
                 "raw_pattern_strings_included": False,
             },
         })
+        if pattern_rule:
+            canary_meta = _copy_canary_meta(pattern_rule)
+            if canary_meta:
+                rows[-1]["canary"] = canary_meta
+                rows[-1]["cohort"] = _pattern_canary_cohort(pattern_rule)
+
+        for item in pattern_rules.get("skip_reasons") or []:
+            if not isinstance(item, dict) or item.get("reason") != "canary_holdout":
+                continue
+            canary_meta = _copy_canary_meta(item)
+            rows.append({
+                "schema": "agentflow.pattern_decision_summary.v1",
+                "decision_type": "cache",
+                "source_surface": source_surface,
+                "app_family": app_family,
+                "category": descriptor["category"],
+                "workflow_phase": workflow_phase,
+                "rule_id": item.get("rule_id"),
+                "candidate_id": item.get("candidate_id"),
+                "pattern_hash": item.get("matched_hashes", [None])[0] if isinstance(item.get("matched_hashes"), list) and item.get("matched_hashes") else _pattern_hash(descriptor),
+                "pattern_hashes": item.get("matched_hashes") if isinstance(item.get("matched_hashes"), list) else None,
+                "policy_source": item.get("policy_source") or cache_meta.get("policy_source"),
+                "status": "holdout",
+                "reason": "canary_holdout",
+                "outcome": "holdout",
+                "hit_type": cache_meta.get("hit_type"),
+                "applied_count": 0,
+                "saved_chars": 0,
+                "tokens_saved_est": 0,
+                "estimated_cost_savings_usd": 0.0,
+                "canary": canary_meta,
+                "cohort": _pattern_canary_cohort(item),
+                "safety_gates": {
+                    "exact_enabled": bool(cache_meta.get("exact_enabled")),
+                    "semantic_enabled": bool(cache_meta.get("semantic_enabled")),
+                    "tool_cache_enabled": bool(cache_meta.get("tool_cache_enabled")),
+                    "file_watch_enabled": bool(cache_meta.get("file_watch_enabled")),
+                    "raw_pattern_strings_included": False,
+                },
+            })
 
     return _sanitize_features(rows)
 

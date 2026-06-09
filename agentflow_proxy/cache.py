@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.crunch import sha256_text
+from agentflow_proxy.pattern_rollout import (
+    normalize_pattern_rollout,
+    pattern_canary_decision,
+    pattern_rollout_public_meta,
+)
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import stable_json
 
@@ -154,6 +159,7 @@ def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
                 ),
                 "streaming": _as_bool(action.get("streaming"), False),
             },
+            "rollout": normalize_pattern_rollout(item.get("rollout")),
         })
     return rules
 
@@ -332,6 +338,23 @@ def _cache_pattern_rule_match(
             if has_tool_blocks and not CACHE_FILE_WATCH_ENABLED:
                 skip_reasons.append({"rule_id": rule_id, "reason": "file-watch-required"})
                 continue
+            canary = pattern_canary_decision(
+                rollout=rule.get("rollout"),
+                rule_id=rule_id,
+                candidate_id=rule.get("candidate_id"),
+                pattern_hashes=matched_hashes,
+                features=pattern_features,
+            )
+            if canary.get("enabled") and not canary.get("selected", True):
+                skip_reasons.append({
+                    "rule_id": rule_id,
+                    "candidate_id": rule.get("candidate_id"),
+                    "policy_source": rule.get("policy_source") or "managed-recommended",
+                    "reason": "canary_holdout",
+                    "matched_hashes": matched_hashes,
+                    "canary": canary,
+                })
+                continue
             return {
                 "rule_id": rule_id,
                 "candidate_id": rule.get("candidate_id"),
@@ -340,6 +363,8 @@ def _cache_pattern_rule_match(
                 "replayability_level": local_replayability_level,
                 "allow_tool_calls": bool(action.get("allow_tool_calls")),
                 "safe_invalidation": bool(action.get("safe_invalidation")),
+                "rollout": pattern_rollout_public_meta(rule.get("rollout")),
+                "canary": canary if canary.get("enabled") else None,
             }, skip_reasons
     return None, skip_reasons
 
@@ -366,6 +391,8 @@ def _attach_cache_pattern_meta(
                 "replayability_level",
                 "allow_tool_calls",
                 "safe_invalidation",
+                "rollout",
+                "canary",
             }
         }
         meta["pattern_rules"]["rules"] = [meta["pattern_rule"]]

@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+from agentflow_proxy.pattern_rollout import (
+    normalize_pattern_rollout,
+    pattern_canary_decision,
+    pattern_rollout_public_meta,
+)
 from agentflow_proxy.store import stable_json
 
 TOKEN_CHARS = 4  # rough estimator only
@@ -265,6 +270,7 @@ def _parse_pattern_rules_yaml(value: Any, *, default_policy_source: str) -> list
             "description": str(item.get("description") or ""),
             "conditions": normalized_conditions,
             "action": normalized_action,
+            "rollout": normalize_pattern_rollout(item.get("rollout")),
         })
     return rules
 
@@ -533,6 +539,50 @@ def _pattern_rule_matches_request(rule: dict[str, Any], body: dict[str, Any], ca
     return True
 
 
+def _text_bucket(chars: int) -> str:
+    if chars < 2_000:
+        return "lt_2k_chars"
+    if chars < 8_000:
+        return "2k_8k_chars"
+    if chars < 32_000:
+        return "8k_32k_chars"
+    if chars < 128_000:
+        return "32k_128k_chars"
+    return "gte_128k_chars"
+
+
+def _token_bucket(tokens: int) -> str:
+    if tokens < 1_000:
+        return "lt_1k_tokens"
+    if tokens < 4_000:
+        return "1k_4k_tokens"
+    if tokens < 16_000:
+        return "4k_16k_tokens"
+    if tokens < 64_000:
+        return "16k_64k_tokens"
+    return "gte_64k_tokens"
+
+
+def _pattern_canary_features(
+    *,
+    body: dict[str, Any],
+    category: str,
+    pattern_hash: str,
+    before_chars: int,
+) -> dict[str, Any]:
+    return {
+        "source_surface": "provider_request",
+        "app_family": "unknown",
+        "category": category,
+        "workflow_phase": category,
+        "text_bucket": _text_bucket(before_chars),
+        "token_bucket": _token_bucket(max(1, before_chars // TOKEN_CHARS)),
+        "requested_model": body.get("model"),
+        "candidate_target_model": body.get("model"),
+        "pattern_hashes": [pattern_hash],
+    }
+
+
 def _build_pattern_replacement(entry: dict[str, Any], rule: dict[str, Any]) -> str | None:
     action = rule.get("action") or {}
     original = str(entry.get("text") or "")
@@ -593,8 +643,10 @@ def _apply_pattern_rules(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
             "enabled": bool(rule.get("enabled", True)),
             "policy_source": rule.get("policy_source") or CRUNCH_POLICY_SOURCE,
             "action": (rule.get("action") or {}).get("type", "shorten"),
+            "rollout": pattern_rollout_public_meta(rule.get("rollout")),
             "matched_hashes": [],
             "applied_count": 0,
+            "holdout_count": 0,
             "saved_chars": 0,
             "skip_reasons": [],
         }
@@ -625,6 +677,33 @@ def _apply_pattern_rules(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
                 rule_meta["skip_reasons"].append({"reason": "min-repeated-count-not-met", "pattern_hash": pattern_hash, "count": safe_count})
                 continue
             occurrences = [entry for entry in entries if entry["hash"] == pattern_hash]
+            if pattern_hash not in rule_meta["matched_hashes"]:
+                rule_meta["matched_hashes"].append(pattern_hash)
+            canary = pattern_canary_decision(
+                rollout=rule.get("rollout"),
+                rule_id=rule_id,
+                candidate_id=rule.get("candidate_id"),
+                pattern_hashes=[pattern_hash],
+                features=_pattern_canary_features(
+                    body=body,
+                    category=category,
+                    pattern_hash=pattern_hash,
+                    before_chars=before_chars,
+                ),
+            )
+            if canary.get("enabled"):
+                rule_meta["canary"] = canary
+            if canary.get("enabled") and not canary.get("selected", True):
+                holdout_count = len(occurrences)
+                rule_meta["holdout_count"] += holdout_count
+                _pattern_rule_skip(skip_counts, rule_id, "canary_holdout", holdout_count)
+                rule_meta["skip_reasons"].append({
+                    "reason": "canary_holdout",
+                    "pattern_hash": pattern_hash,
+                    "count": holdout_count,
+                    "canary": canary,
+                })
+                continue
             protected_start = max(0, len(occurrences) - keep_recent_matches)
             for occurrence_index, entry in enumerate(occurrences):
                 if entry.get("pattern_rule_applied"):
@@ -654,11 +733,10 @@ def _apply_pattern_rules(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
                 rule_meta["applied_count"] += 1
                 rule_meta["saved_chars"] += saved
                 applied_by_hash[pattern_hash] = applied_by_hash.get(pattern_hash, 0) + 1
-                if pattern_hash not in rule_meta["matched_hashes"]:
-                    rule_meta["matched_hashes"].append(pattern_hash)
         meta["rules"].append(rule_meta)
 
     meta["applied_count"] = sum(int(rule.get("applied_count") or 0) for rule in meta["rules"])
+    meta["holdout_count"] = sum(int(rule.get("holdout_count") or 0) for rule in meta["rules"])
     meta["changed"] = meta["applied_count"] > 0
     after_chars = len(stable_json(body))
     meta["before_chars"] = before_chars

@@ -13,6 +13,7 @@ import yaml
 
 from agentflow_proxy import __version__
 from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE, canonical_source_surface
+from agentflow_proxy.pattern_rollout import pattern_canary_decision
 from agentflow_proxy.store import utc_now
 
 POLICY_BUNDLE_APPLY_SCHEMA = "agentflow.policy_bundle_apply.v1"
@@ -1586,15 +1587,14 @@ def _condition_values_match(item: dict[str, Any], conditions: dict[str, Any], bl
 
 
 def _canary_selected(item: dict[str, Any], rollout: dict[str, Any]) -> bool:
-    fraction = _as_float(rollout.get("canary_fraction"), 0.0)
-    if fraction >= 1.0:
-        return True
-    if fraction <= 0.0:
-        return False
-    salt = str(rollout.get("canary_salt") or "")
-    digest = hashlib.sha256(f"{salt}:{item.get('id') or ''}".encode("utf-8")).hexdigest()
-    bucket = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
-    return bucket < fraction
+    decision = pattern_canary_decision(
+        rollout=rollout,
+        rule_id=str(item.get("rule_id") or item.get("id") or "policy-impact"),
+        candidate_id=item.get("candidate_id"),
+        pattern_hashes=item.get("pattern_hashes") or [],
+        features=item,
+    )
+    return bool(decision.get("selected", True))
 
 
 def _pattern_traffic_rollup(items: list[dict[str, Any]]) -> dict[str, Any]:

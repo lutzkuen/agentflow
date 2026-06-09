@@ -283,6 +283,98 @@ semantic_cache:
             for forbidden in ("raw_prompt", "provider_body", "transcript", "tool_payload", "cache-key"):
                 self.assertNotIn(forbidden, serialized)
 
+    def test_cache_pattern_canary_rollout_is_deterministic(self):
+        pattern_hash = "sha256:" + "e" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            rules_path = config / "cache_rules.yaml"
+            rules_path.write_text(
+                f"""
+exact_cache:
+  enabled: true
+  cache_tool_calls: false
+pattern_rules:
+  - id: reviewed-cache-canary
+    enabled: true
+    policy_source: managed-recommended
+    candidate_id: cache-candidate-canary
+    conditions:
+      pattern_hashes:
+        - {pattern_hash}
+      source_surface: anthropic_messages
+      app_family: claude_code
+      category: tool-result
+      workflow_phase: tool-result
+      has_tools: true
+      stream: false
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: 0.10
+      canary_salt: sha256:0000000000000000000000000000000000000000000000000000000000000004
+      canary_unit: request_fingerprint
+    action:
+      type: exact_cache_pattern
+      allow_tool_calls: true
+      safe_invalidation: true
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(cache_module)
+            features = {
+                "pattern_hashes": [pattern_hash],
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-result",
+                "workflow_phase": "tool-result",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "1k_4k_tokens",
+                "has_tools": True,
+                "stream": False,
+                "raw_pattern_strings_included": False,
+            }
+
+            can_exact_1, _, meta_1 = manual.cache_lookup_meta(has_tool_blocks=True, pattern_features=features)
+            can_exact_2, _, meta_2 = manual.cache_lookup_meta(has_tool_blocks=True, pattern_features=features)
+
+            self.assertTrue(can_exact_1)
+            self.assertTrue(can_exact_2)
+            self.assertEqual(meta_1["reason"], "exact-pattern-miss")
+            self.assertEqual(meta_1["pattern_rule"]["candidate_id"], "cache-candidate-canary")
+            self.assertEqual(meta_1["pattern_rule"]["canary"]["status"], "applied")
+            self.assertEqual(meta_1["pattern_rule"]["canary"], meta_2["pattern_rule"]["canary"])
+
+            rules_path.write_text(
+                rules_path.read_text(encoding="utf-8").replace(
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+                encoding="utf-8",
+            )
+            holdout = importlib.reload(cache_module)
+            can_exact_holdout, _, holdout_meta = holdout.cache_lookup_meta(
+                has_tool_blocks=True,
+                pattern_features=features,
+            )
+
+            self.assertFalse(can_exact_holdout)
+            self.assertEqual(holdout_meta["status"], "skipped")
+            self.assertEqual(holdout_meta["reason"], "tools-disabled")
+            holdout_reason = holdout_meta["pattern_rules"]["skip_reasons"][-1]
+            self.assertEqual(holdout_reason["reason"], "canary_holdout")
+            self.assertEqual(holdout_reason["candidate_id"], "cache-candidate-canary")
+            self.assertEqual(holdout_reason["canary"]["status"], "holdout")
+
+            rules_path.write_text("exact_cache:\n  enabled: true\n  cache_tool_calls: false\n", encoding="utf-8")
+            default = importlib.reload(cache_module)
+            can_exact_default, _, default_meta = default.cache_lookup_meta(has_tool_blocks=True, pattern_features=features)
+            self.assertFalse(can_exact_default)
+            self.assertEqual(default_meta["pattern_rules"]["configured_count"], 0)
+
     def test_cache_pattern_validation_rejects_unsafe_tool_rule(self):
         exported = io.StringIO()
         self.assertEqual(cli.policy_export_cli([], stdout=exported), 0)

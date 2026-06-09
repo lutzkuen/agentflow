@@ -177,6 +177,74 @@ pattern_rules:
             self.assertIn("pattern_hash=", crunched["messages"][0]["content"])
             self.assertEqual(crunched["messages"][2]["content"], scaffold)
 
+    def test_managed_pattern_rule_canary_holdout_is_stable(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            scaffold = (
+                "Reviewed canary scaffold section.\n"
+                + "\n".join(f"stable canary instruction line {i}" for i in range(80))
+            )
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+pattern_rules:
+  - id: reviewed-canary
+    enabled: true
+    policy_source: managed-recommended
+    candidate_id: candidate-canary
+    conditions:
+      pattern_hashes:
+        - {pattern_hash}
+      min_repeated_count: 1
+      keep_recent_matches: 0
+      min_text_chars: 1000
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: 0.10
+      canary_salt: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      canary_unit: request_fingerprint
+    action:
+      type: shorten
+      head_chars: 80
+      tail_chars: 70
+      max_replacement_chars: 260
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": scaffold},
+                ],
+            }
+
+            crunched_1, meta_1 = manual.crunch_body(body)
+            crunched_2, meta_2 = manual.crunch_body(body)
+
+            self.assertEqual(crunched_1, body)
+            self.assertEqual(crunched_2, body)
+            self.assertFalse(meta_1["changed"])
+            self.assertEqual(meta_1["pattern_rules_applied"], 0)
+            rule_meta = meta_1["pattern_rules"]["rules"][0]
+            self.assertEqual(rule_meta["candidate_id"], "candidate-canary")
+            self.assertEqual(rule_meta["holdout_count"], 1)
+            self.assertEqual(rule_meta["canary"]["status"], "holdout")
+            self.assertEqual(rule_meta["canary"], meta_2["pattern_rules"]["rules"][0]["canary"])
+            reasons = {(item["reason"], item.get("pattern_hash")) for item in rule_meta["skip_reasons"]}
+            self.assertIn(("canary_holdout", pattern_hash), reasons)
+
+            (config / "crunch_rules.yaml").write_text("enabled: true\npattern_rules: []\n", encoding="utf-8")
+            no_rule = importlib.reload(crunch_module)
+            _, default_meta = no_rule.crunch_body(body)
+            self.assertEqual(default_meta["pattern_rules"]["configured_count"], 0)
+
     def test_pattern_rules_skip_tool_bearing_payloads_with_reason(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
