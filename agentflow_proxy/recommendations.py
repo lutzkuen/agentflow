@@ -21,6 +21,7 @@ from agentflow_proxy.managed_egress import (
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 from agentflow_proxy.store import stable_json, utc_now
+from agentflow_proxy.terminal_features import TERMINAL_LOG_FEATURE_SCHEMA
 
 
 RECOMMENDATION_PATH = "/v1/recommendation"
@@ -537,6 +538,7 @@ def build_codex_turn_optimization_unit(
     workflow_phase_reason: str | None = None,
     request_id: str | None = None,
     thread_id: str | None = None,
+    terminal_log_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_state, model_field, requested_model, routed_model = _codex_model_state(routing_meta)
     input_tokens_est = max(1, int(input_text_chars / TOKEN_CHARS)) if input_text_chars else 0
@@ -559,6 +561,9 @@ def build_codex_turn_optimization_unit(
         crunch_meta=crunch_meta,
         cache_meta=cache_meta,
     )
+    terminal_features = terminal_log_features if isinstance(terminal_log_features, dict) else routing_meta.get("terminal_log_features")
+    if not isinstance(terminal_features, dict) or terminal_features.get("schema") != TERMINAL_LOG_FEATURE_SCHEMA:
+        terminal_features = None
     unit = {
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "source_surface": CODEX_APP_SOURCE_SURFACE,
@@ -613,6 +618,8 @@ def build_codex_turn_optimization_unit(
         "replayability_level": replayability_level,
         "pattern_features": pattern_features,
     }
+    if terminal_features is not None:
+        unit["input_features"]["terminal_log_features"] = terminal_features
     return _sanitize_features(unit)
 
 
@@ -1228,6 +1235,20 @@ def pattern_decision_summaries(
     return _sanitize_features(rows)
 
 
+def _terminal_log_features_from_routing_meta(routing_meta: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(routing_meta, dict):
+        return None
+    candidates: list[Any] = [routing_meta.get("terminal_log_features")]
+    for key in ("openai_feature_unit", "openai_preflight_unit", "openai_local_feature_unit"):
+        summary = routing_meta.get(key)
+        if isinstance(summary, dict):
+            candidates.append(summary.get("terminal_log_features"))
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("schema") == TERMINAL_LOG_FEATURE_SCHEMA:
+            return candidate
+    return None
+
+
 def build_outcome_feedback(
     *,
     provider: str,
@@ -1344,6 +1365,9 @@ def build_outcome_feedback(
         },
         "quality_signals": quality_signals,
     }
+    terminal_log_features = _terminal_log_features_from_routing_meta(routing_meta)
+    if terminal_log_features is not None:
+        features["terminal_log_features"] = terminal_log_features
     summary_feedback = build_old_context_summary_outcome_feedback(
         provider=provider,
         path=path,
@@ -1867,6 +1891,9 @@ def build_codex_turn_outcome_feedback(
         },
         "quality_signals": quality_signals,
     }
+    terminal_log_features = _terminal_log_features_from_routing_meta(routing_meta)
+    if terminal_log_features is not None:
+        features["terminal_log_features"] = terminal_log_features
     if error_code is not None:
         features["error_class"] = "jsonrpc_error"
     return _sanitize_features(features)

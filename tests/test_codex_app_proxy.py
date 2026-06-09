@@ -1068,6 +1068,7 @@ exact_cache:
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
         secret = "raw codex prompt secret"
+        log_secret = "2026-06-09T20:00:00Z ERROR pid=1234 codex-secret failed"
         message = {
             "jsonrpc": "2.0",
             "id": "turn-managed",
@@ -1075,7 +1076,7 @@ exact_cache:
             "params": {
                 "threadId": "thread-managed",
                 "model": "gpt-5-codex",
-                "input": [{"type": "text", "text": secret}],
+                "input": [{"type": "text", "text": f"{secret}\n{log_secret}"}],
                 "temperature": 0,
                 "transcript": "must not leave local machine",
             },
@@ -1133,6 +1134,9 @@ exact_cache:
         self.assertEqual(unit["granularity"], "agent_turn")
         self.assertEqual(unit["feature_schema_version"], recommendations.FEATURE_SCHEMA_VERSION)
         self.assertEqual(unit["candidate_target_model"], "gpt-5-codex")
+        self.assertEqual(unit["input_features"]["terminal_log_features"]["schema"], "agentflow.terminal_log_features.v1")
+        self.assertEqual(unit["input_features"]["terminal_log_features"]["error_line_count_bucket"], "one")
+        self.assertEqual(outcome["terminal_log_features"]["error_line_count_bucket"], "one")
         self.assertEqual(
             sorted(unit["grouping_identifiers"]),
             ["request_id_hash", "thread_id_hash"],
@@ -1150,9 +1154,11 @@ exact_cache:
         self.assertTrue(forbidden.isdisjoint(self._keys_in(unit)))
         self.assertTrue(forbidden.isdisjoint(self._keys_in(outcome)))
         self.assertNotIn(secret, json.dumps(unit))
+        self.assertNotIn(log_secret, json.dumps(unit))
         self.assertNotIn("turn-managed", json.dumps(unit))
         self.assertNotIn("thread-managed", json.dumps(unit))
         self.assertNotIn(secret, json.dumps(outcome))
+        self.assertNotIn(log_secret, json.dumps(outcome))
         self.assertNotIn("must not leave", json.dumps(unit))
         self.assertNotIn("must be stripped", json.dumps(outcome))
         managed = routing["managed_recommendation"]

@@ -46,6 +46,7 @@ from agentflow_proxy.recommendations import (
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
+from agentflow_proxy.terminal_features import terminal_log_features_from_text
 
 load_dotenv()
 
@@ -833,6 +834,10 @@ def _codex_input_texts(value: Any) -> list[str]:
     return []
 
 
+def _codex_terminal_log_features(params: dict[str, Any]) -> dict[str, Any]:
+    return terminal_log_features_from_text("\n".join(_codex_input_texts(params.get("input"))))
+
+
 def _codex_summary_phase_reason(params: dict[str, Any]) -> str | None:
     text = "\n".join(_codex_input_texts(params.get("input"))).strip()
     if not text:
@@ -1241,7 +1246,9 @@ async def _attach_codex_managed_recommendation(
         cache_meta=cache,
         request_id=str(request_id) if request_id is not None else None,
         thread_id=thread_id,
+        terminal_log_features=routing.get("terminal_log_features") or _codex_terminal_log_features(params),
     )
+    routing["terminal_log_features"] = unit["input_features"].get("terminal_log_features")
     routing["managed_pattern_features"] = pattern_feature_diagnostics(unit)
     managed = await fetch_recommendation(unit)
     managed.setdefault("applied", False)
@@ -1291,6 +1298,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
 
     crunched_params, crunch_meta = _codex_crunch_params(params)
     routed_params, routing_meta = _codex_route_params(crunched_params)
+    routing_meta["terminal_log_features"] = _codex_terminal_log_features(params)
 
     optimized = copy.deepcopy(msg)
     optimized["params"] = routed_params

@@ -175,7 +175,14 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
                 "model": "gpt-5-codex",
                 "input": [
                     {"role": "system", "content": "raw openai prompt"},
-                    {"type": "message", "content": "raw chat message /home/lutz/project/app.py"},
+                    {
+                        "type": "message",
+                        "content": "\n".join([
+                            "raw chat message /home/lutz/project/app.py",
+                            "2026-06-09T20:00:00Z INFO pid=1234 secret-app started",
+                            "2026-06-09T20:00:01Z ERROR pid=1234 secret-app failed",
+                        ]),
+                    },
                     {"type": "function_call", "arguments": "raw function args"},
                 ],
                 "tools": [{"type": "function", "name": "lookup", "description": "raw tool output"}],
@@ -211,13 +218,20 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(unit["input_features"]["old_context"]["shape"], "responses_input_items")
         self.assertTrue(unit["input_features"]["cache_eligibility"]["streaming_bypass_hint"])
         self.assertFalse(unit["input_features"]["cache_eligibility"]["raw_cache_key_included"])
+        terminal_features = unit["input_features"]["terminal_log_features"]
+        self.assertEqual(terminal_features["schema"], "agentflow.terminal_log_features.v1")
+        self.assertEqual(terminal_features["log_line_fraction_bucket"], "25_50pct")
+        self.assertEqual(terminal_features["error_line_count_bucket"], "one")
+        self.assertFalse(terminal_features["privacy"]["raw_log_text_included"])
         self.assertEqual(summary["local_mutation_stage"], "preflight")
+        self.assertEqual(summary["terminal_log_features"], terminal_features)
         self.assertTrue(summary["has_tools"])
         for forbidden_key in ("messages", "input", "cache_key", "request_id", "session_id"):
             self.assertNotIn(f'"{forbidden_key}"', rendered)
         self.assertEqual(managed_egress_violations(unit), [])
         self._assert_no_raw_values(unit)
         self.assertNotIn("/home/lutz/project/app.py", rendered)
+        self.assertNotIn("secret-app", rendered)
 
     def test_pipeline_preflight_stage_is_guarded_feature_only_metadata(self):
         body = {
@@ -266,7 +280,10 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self._assert_no_raw_values(seen["unit"])
 
     def test_pipeline_local_policy_stage_applies_local_actions_without_provider_io(self):
-        body = {"model": "gpt-5-codex", "input": "raw openai prompt"}
+        body = {
+            "model": "gpt-5-codex",
+            "input": "raw openai prompt\n2026-06-09T20:00:00Z ERROR pid=1234 secret-app failed",
+        }
         parsed = openai_pipeline.parse_openai_request_body(body, ["gpt-5-codex"])
         preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
         events = []
@@ -319,8 +336,13 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(local.provider_body["input"], "locally crunched prompt")
         self.assertEqual(local.routing_meta["managed_recommendation"]["status"], "applied")
         self.assertEqual(local.routing_meta["openai_feature_unit"]["local_mutation_stage"], "preflight")
+        self.assertEqual(
+            local.routing_meta["openai_feature_unit"]["terminal_log_features"]["error_line_count_bucket"],
+            "one",
+        )
         self.assertEqual(local.routing_meta["openai_local_feature_unit"]["source_surface"], "openai_responses")
         self.assertNotIn("raw openai prompt", json.dumps(local.routing_meta, sort_keys=True))
+        self.assertNotIn("secret-app", json.dumps(local.routing_meta, sort_keys=True))
 
     def test_pipeline_outcome_serialization_is_feature_only_and_guarded(self):
         summary = openai_pipeline.serialize_openai_outcome_summary(
@@ -341,7 +363,17 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
             cost_baseline_usd=0.002,
             cache_meta={"status": "miss", "reason": "exact-miss"},
             crunch_meta={"changed": False},
-            routing_meta={"reason": "test", "managed_recommendation": {"status": "applied"}},
+            routing_meta={
+                "reason": "test",
+                "managed_recommendation": {"status": "applied"},
+                "openai_feature_unit": {
+                    "terminal_log_features": {
+                        "schema": "agentflow.terminal_log_features.v1",
+                        "terminal_output_char_fraction_bucket": "gte_75pct",
+                        "raw_log_text_included": False,
+                    },
+                },
+            },
             category="chat",
             session_id="secret session id",
             error=None,
@@ -349,6 +381,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
 
         self.assertEqual(summary["schema"], "agentflow.openai_outcome_summary.v1")
         self.assertEqual(summary["status_code"], 200)
+        self.assertEqual(summary["terminal_log_features"]["terminal_output_char_fraction_bucket"], "gte_75pct")
         self.assertFalse(summary["raw_payload_included"])
         self.assertEqual(managed_egress_violations(summary), [])
         self._assert_no_raw_values(summary)

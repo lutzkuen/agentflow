@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from agentflow_proxy.recommendations import build_optimization_unit, build_outcome_feedback
+from agentflow_proxy.router import extract_text
+from agentflow_proxy.terminal_features import terminal_log_features_from_text
 
 
 OPENAI_FEATURE_SUMMARY_SCHEMA = "agentflow.openai_feature_summary.v1"
@@ -221,6 +223,7 @@ def build_openai_preflight_feature_unit(
     input_tokens_est: int | None,
 ) -> dict[str, Any]:
     tool_features = _openai_tool_features(body)
+    terminal_log_features = terminal_log_features_from_text(extract_text(body))
     normalized_routing = dict(routing_meta)
     normalized_routing.update({
         "provider": "openai",
@@ -265,6 +268,7 @@ def build_openai_preflight_feature_unit(
         "pre_crunch_input_token_bucket": _token_bucket(input_tokens_est),
         "old_context": _openai_old_context_features(body),
         "cache_eligibility": _openai_cache_eligibility_hints(stream=stream, tool_features=tool_features),
+        "terminal_log_features": terminal_log_features,
         "raw_payload_included": False,
     })
     unit.update({
@@ -300,6 +304,7 @@ def build_openai_request_feature_unit(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     tool_features = _openai_tool_features(body)
+    terminal_log_features = terminal_log_features_from_text(extract_text(body))
     normalized_routing = dict(routing_meta)
     normalized_routing.update({
         "provider": "openai",
@@ -335,6 +340,7 @@ def build_openai_request_feature_unit(
     unit["input_features"]["provider"] = "openai"
     unit["input_features"]["requested_model_family"] = unit["requested_model_family"]
     unit["input_features"]["routed_model_family"] = unit["routed_model_family"]
+    unit["input_features"]["terminal_log_features"] = terminal_log_features
     unit.setdefault("tool_features", {}).update(tool_features)
     return unit
 
@@ -377,6 +383,8 @@ def summarize_openai_request_feature_unit(unit: dict[str, Any]) -> dict[str, Any
         summary["old_context"] = input_features.get("old_context")
     if input_features.get("cache_eligibility") is not None:
         summary["cache_eligibility"] = input_features.get("cache_eligibility")
+    if input_features.get("terminal_log_features") is not None:
+        summary["terminal_log_features"] = input_features.get("terminal_log_features")
     return summary
 
 
@@ -446,7 +454,7 @@ def summarize_openai_outcome_feature_unit(unit: dict[str, Any]) -> dict[str, Any
     savings = None
     if isinstance(baseline, (int, float)) and isinstance(actual, (int, float)):
         savings = max(float(baseline) - float(actual), 0.0)
-    return {
+    summary = {
         "schema": OPENAI_OUTCOME_SUMMARY_SCHEMA,
         "provider": "openai",
         "source_surface": unit.get("source_surface"),
@@ -473,3 +481,6 @@ def summarize_openai_outcome_feature_unit(unit: dict[str, Any]) -> dict[str, Any
         "quality_risk": quality.get("risk"),
         "raw_payload_included": False,
     }
+    if unit.get("terminal_log_features") is not None:
+        summary["terminal_log_features"] = unit.get("terminal_log_features")
+    return summary
