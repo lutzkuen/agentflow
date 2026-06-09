@@ -39,29 +39,22 @@ from agentflow_proxy.headers import (
 )
 from agentflow_proxy.limiter import TierBackoffActive, model_tier, tier_backoff_headers, tier_backoff_payload
 from agentflow_proxy.optimization.openai_features import (
-    build_openai_outcome_feature_unit,
-    build_openai_preflight_feature_unit,
-    build_openai_request_feature_unit,
     openai_call_store_fields,
-    summarize_openai_outcome_feature_unit,
-    summarize_openai_request_feature_unit,
 )
-from agentflow_proxy.optimization.openai_recommendations import (
-    apply_openai_recommendation_decision,
-    fetch_openai_recommendation_decision,
-)
-from agentflow_proxy.optimization.managed_actions import (
-    cache_profile_from_decision,
-    crunch_profile_from_decision,
+from agentflow_proxy.optimization.openai_pipeline import (
+    execute_openai_local_policy,
+    extract_openai_preflight_features,
+    fetch_openai_policy_decision,
+    parse_openai_request_body,
+    serialize_openai_outcome_summary,
 )
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.recommendations import (
     build_outcome_feedback,
-    pattern_feature_diagnostics,
     queue_outcome_feedback,
 )
-from agentflow_proxy.router import categorize_request, extract_text, has_tools, route_openai_model
+from agentflow_proxy.router import extract_text, has_tools
 from agentflow_proxy.store import stable_json, utc_now
 
 
@@ -257,7 +250,7 @@ def _attach_openai_outcome_summary(
     session_id: str | None,
     error: str | None = None,
 ) -> None:
-    outcome_unit = build_openai_outcome_feature_unit(
+    routing_meta["openai_outcome_unit"] = serialize_openai_outcome_summary(
         path=path,
         requested_model=requested_model,
         routed_model=routed_model,
@@ -280,7 +273,6 @@ def _attach_openai_outcome_summary(
         session_id=session_id,
         error=error,
     )
-    routing_meta["openai_outcome_unit"] = summarize_openai_outcome_feature_unit(outcome_unit)
 
 
 async def _check_session_cost_alert(context: ProviderContext, sid: str) -> None:
@@ -399,39 +391,12 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         return JSONResponse(client_json_error_body("openai", exc.message), status_code=400)
     if raw_body is None:
         return await context.openai_passthrough_handler(context, request, path)
-    stream = bool(raw_body.get("stream"))
-    requested_model = str(raw_body.get("model") or context.openai_model_list[0])
-    raw_body.setdefault("model", requested_model)
-    category = categorize_request(raw_body)
-    preflight_text_chars = len(extract_text(raw_body))
-    preflight_input_tokens = estimate_tokens_from_text(extract_text(raw_body))
-    preflight_routing_meta = {
-        "enabled": False,
-        "requested_model": requested_model,
-        "routed_model": None,
-        "reason": "preflight feature extraction before local mutation",
-        "text_chars": preflight_text_chars,
-        "has_tools": has_tools(raw_body),
-        "category": category,
-        "policy_source": "preflight",
-        "provider": "openai",
-    }
-    preflight_unit = build_openai_preflight_feature_unit(
-        body=raw_body,
-        path=path,
-        requested_model=requested_model,
-        routing_meta=preflight_routing_meta,
-        category=category,
-        stream=stream,
-        input_tokens_est=preflight_input_tokens,
-    )
-    preflight_summary = summarize_openai_request_feature_unit(preflight_unit)
-    preflight_pattern_features = pattern_feature_diagnostics(preflight_unit)
-    preflight_decision = await fetch_openai_recommendation_decision(
-        recommendation_unit=preflight_unit,
-        current_model=requested_model,
-        input_tokens_est=preflight_input_tokens,
-    )
+    parsed = parse_openai_request_body(raw_body, context.openai_model_list)
+    stream = parsed.stream
+    requested_model = parsed.requested_model
+    category = parsed.category
+    preflight = extract_openai_preflight_features(parsed, path=path)
+    preflight_decision = await fetch_openai_policy_decision(preflight)
     status_code = 200
     error: Optional[str] = None
     crunch_meta: dict[str, Any] = {}
@@ -441,46 +406,24 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
     net_retries = 0
 
     try:
-        managed_crunch_profile = crunch_profile_from_decision(preflight_decision)
-        managed_cache_profile = cache_profile_from_decision(preflight_decision)
-        if managed_crunch_profile:
-            crunched, crunch_meta = crunch_body(
-                raw_body,
-                store_obj=context.store,
-                managed_profile=managed_crunch_profile,
-            )
-        else:
-            crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
-        routed_model, routing_meta = route_openai_model(crunched)
-        resolved_requested_model = str(crunched.get("model") or requested_model)
-        crunched["model"] = routed_model
-        input_tokens = estimate_tokens_from_text(extract_text(crunched))
-        local_feature_unit = build_openai_request_feature_unit(
-            body=crunched,
+        local_policy = execute_openai_local_policy(
+            raw_body=raw_body,
             path=path,
-            requested_model=resolved_requested_model,
-            routed_model=str(crunched.get("model") or routed_model),
-            routing_meta=routing_meta,
-            crunch_meta=crunch_meta,
-            cache_meta=cache_meta,
+            requested_model=requested_model,
             category=category,
             stream=stream,
-            input_tokens_est=input_tokens,
             session_id=session_id,
+            preflight=preflight,
+            policy_decision=preflight_decision,
+            store_obj=context.store,
+            cruncher=crunch_body,
         )
-        routing_meta["openai_feature_unit"] = preflight_summary
-        routing_meta["openai_preflight_unit"] = preflight_summary
-        routing_meta["openai_local_feature_unit"] = summarize_openai_request_feature_unit(local_feature_unit)
-        routing_meta.update(openai_call_store_fields(path, resolved_requested_model, str(crunched.get("model") or routed_model)))
-        routing_meta["managed_pattern_features"] = preflight_pattern_features
-        if isinstance(preflight_decision.get("local_actions"), dict):
-            routing_meta["managed_local_actions"] = preflight_decision["local_actions"]
-        recommendation_meta = apply_openai_recommendation_decision(
-            body=crunched,
-            routing_meta=routing_meta,
-            decision=preflight_decision,
-        )
-        routing_meta["managed_recommendation"] = recommendation_meta
+        crunched = local_policy.provider_body
+        crunch_meta = local_policy.crunch_meta
+        routing_meta = local_policy.routing_meta
+        input_tokens = local_policy.input_tokens_est
+        resolved_requested_model = local_policy.resolved_requested_model
+        managed_cache_profile = local_policy.managed_cache_profile
         headers = build_forward_headers(context, request)
 
         if stream:

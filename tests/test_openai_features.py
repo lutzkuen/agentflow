@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import importlib.util
 import json
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import openai_features
+from agentflow_proxy.optimization import openai_pipeline
 from agentflow_proxy.store import stable_json
 
 
@@ -216,6 +218,140 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(managed_egress_violations(unit), [])
         self._assert_no_raw_values(unit)
         self.assertNotIn("/home/lutz/project/app.py", rendered)
+
+    def test_pipeline_preflight_stage_is_guarded_feature_only_metadata(self):
+        body = {
+            "model": "gpt-5-codex",
+            "input": [
+                {"type": "message", "content": "raw openai prompt"},
+                {"type": "function_call", "arguments": "raw function args"},
+            ],
+            "tools": [{"type": "function", "name": "lookup", "description": "raw tool output"}],
+            "metadata": {"session_id": "secret session id", "api_key": "api-key-secret"},
+            "stream": True,
+        }
+
+        parsed = openai_pipeline.parse_openai_request_body(body, ["gpt-5-codex"])
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+
+        self.assertEqual(parsed.stage, "parse_request")
+        self.assertEqual(preflight.stage, "extract_preflight_features")
+        self.assertEqual(preflight.feature_unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+        self.assertEqual(preflight.feature_summary["local_mutation_stage"], "preflight")
+        self.assertEqual(managed_egress_violations(preflight.feature_unit), [])
+        self.assertEqual(managed_egress_violations(preflight.feature_summary), [])
+        self._assert_no_raw_values(preflight.feature_unit)
+        self._assert_no_raw_values(preflight.feature_summary)
+
+    def test_pipeline_policy_fetch_uses_only_guarded_preflight_unit(self):
+        parsed = openai_pipeline.parse_openai_request_body(
+            {"model": "gpt-5-codex", "input": "raw openai prompt"},
+            ["gpt-5-codex"],
+        )
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+        seen = {}
+
+        async def fake_fetcher(*, recommendation_unit, current_model, input_tokens_est):
+            seen["unit"] = recommendation_unit
+            seen["current_model"] = current_model
+            seen["input_tokens_est"] = input_tokens_est
+            return {"status": "skipped", "apply_reason": "test-fallback"}
+
+        decision = asyncio.run(openai_pipeline.fetch_openai_policy_decision(preflight, fetcher=fake_fetcher))
+
+        self.assertEqual(decision["apply_reason"], "test-fallback")
+        self.assertIs(seen["unit"], preflight.feature_unit)
+        self.assertEqual(seen["current_model"], "gpt-5-codex")
+        self.assertEqual(managed_egress_violations(seen["unit"]), [])
+        self._assert_no_raw_values(seen["unit"])
+
+    def test_pipeline_local_policy_stage_applies_local_actions_without_provider_io(self):
+        body = {"model": "gpt-5-codex", "input": "raw openai prompt"}
+        parsed = openai_pipeline.parse_openai_request_body(body, ["gpt-5-codex"])
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+        events = []
+
+        def fake_crunch(raw_body, *, store_obj=None):
+            events.append("crunch")
+            crunched = copy.deepcopy(raw_body)
+            crunched["input"] = "locally crunched prompt"
+            return crunched, {"changed": True, "saved_chars": 5, "status": "applied"}
+
+        def fake_router(provider_body):
+            events.append("route")
+            return "gpt-5-codex", {
+                "enabled": True,
+                "requested_model": provider_body["model"],
+                "routed_model": "gpt-5-codex",
+                "reason": "test local route",
+                "text_chars": 23,
+                "has_tools": False,
+                "category": "chat",
+                "policy_source": "local-default",
+            }
+
+        decision = {
+            "schema": "agentflow.openai_managed_recommendation_decision.v1",
+            "status": "selected",
+            "apply_reason": "canary-selected",
+            "target_model_normalized": "gpt-5-mini",
+            "policy_id": "test-policy",
+            "reason": "test policy",
+            "local_actions": {"status": "applied"},
+        }
+        local = openai_pipeline.execute_openai_local_policy(
+            raw_body=body,
+            path="/v1/responses",
+            requested_model=parsed.requested_model,
+            category=parsed.category,
+            stream=parsed.stream,
+            session_id="secret session id",
+            preflight=preflight,
+            policy_decision=decision,
+            store_obj=None,
+            cruncher=fake_crunch,
+            router=fake_router,
+        )
+
+        self.assertEqual(events, ["crunch", "route"])
+        self.assertEqual(local.stage, "execute_local_policy")
+        self.assertEqual(local.provider_body["model"], "gpt-5-mini")
+        self.assertEqual(local.provider_body["input"], "locally crunched prompt")
+        self.assertEqual(local.routing_meta["managed_recommendation"]["status"], "applied")
+        self.assertEqual(local.routing_meta["openai_feature_unit"]["local_mutation_stage"], "preflight")
+        self.assertEqual(local.routing_meta["openai_local_feature_unit"]["source_surface"], "openai_responses")
+        self.assertNotIn("raw openai prompt", json.dumps(local.routing_meta, sort_keys=True))
+
+    def test_pipeline_outcome_serialization_is_feature_only_and_guarded(self):
+        summary = openai_pipeline.serialize_openai_outcome_summary(
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routed_model="gpt-5-mini",
+            status_code=200,
+            latency_ms=10,
+            retry_count=0,
+            input_tokens_est=20,
+            output_tokens_est=3,
+            actual_input_tokens=21,
+            actual_output_tokens=4,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.002,
+            cache_meta={"status": "miss", "reason": "exact-miss"},
+            crunch_meta={"changed": False},
+            routing_meta={"reason": "test", "managed_recommendation": {"status": "applied"}},
+            category="chat",
+            session_id="secret session id",
+            error=None,
+        )
+
+        self.assertEqual(summary["schema"], "agentflow.openai_outcome_summary.v1")
+        self.assertEqual(summary["status_code"], 200)
+        self.assertFalse(summary["raw_payload_included"])
+        self.assertEqual(managed_egress_violations(summary), [])
+        self._assert_no_raw_values(summary)
 
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
