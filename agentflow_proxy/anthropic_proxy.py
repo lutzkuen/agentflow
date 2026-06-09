@@ -55,10 +55,14 @@ from agentflow_proxy.routing_experiments import (
 )
 from agentflow_proxy.recommendations import (
     apply_recommendation_to_body,
+    build_old_context_summary_outcome_event,
+    build_old_context_summary_outcome_feedback,
     build_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
+    OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
     pattern_feature_diagnostics,
+    queue_policy_event_feedback,
     queue_outcome_feedback,
 )
 from agentflow_proxy.store import stable_json, utc_now
@@ -94,8 +98,45 @@ async def _record_managed_outcome_feedback(
     session_id: str | None,
     error: str | None = None,
 ) -> None:
+    dirty_routing_meta = False
+    summary_feedback = build_old_context_summary_outcome_feedback(
+        provider="anthropic",
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        cache_hit=cache_meta.get("status") == "hit",
+        crunch_meta=crunch_meta,
+        category=category,
+        error=error,
+    )
+    if summary_feedback is not None:
+        event = build_old_context_summary_outcome_event(summary_feedback)
+        meta = await queue_policy_event_feedback(
+            context.store,
+            event,
+            source_surface=OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+        )
+        routing_meta["old_context_summary_feedback"] = {
+            "enabled": bool(meta.get("enabled")),
+            "status": meta.get("status"),
+            "reason": meta.get("reason"),
+            "endpoint": meta.get("endpoint"),
+            "queue_id": meta.get("queue_id"),
+            "attempts": meta.get("attempts"),
+            "status_code": meta.get("status_code"),
+            "latency_ms": meta.get("latency_ms"),
+            "source_surface": OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+            "payload_included": False,
+        }
+        dirty_routing_meta = True
+
     managed = routing_meta.get("managed_recommendation")
     if not isinstance(managed, dict) or not managed.get("enabled"):
+        if dirty_routing_meta:
+            context.store.update_call_routing_json(call_id, stable_json(routing_meta))
         return
     experiment_meta = routing_meta.get("routing_experiment")
     if isinstance(experiment_meta, dict) and experiment_meta.get("sampled"):

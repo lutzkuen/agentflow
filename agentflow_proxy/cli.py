@@ -471,6 +471,7 @@ def policy_review_cli(
             "exit_code": 0 if result["ok"] else 1,
         },
     )
+    _attach_old_context_summary_lifecycle_feedback(result, command="review", db_path=str(args.db))
     _write_policy_review_result(stdout, result, pretty=args.pretty)
     return 0 if result["ok"] else 1
 
@@ -1413,6 +1414,7 @@ def old_context_summary_dry_run_cli(
             "exit_code": 0 if result.get("ok") else 1,
         },
     )
+    _attach_old_context_summary_lifecycle_feedback(result, command="dry-run", db_path=str(args.db))
     if args.pretty:
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
@@ -2145,6 +2147,150 @@ def _attach_rollout_lifecycle_feedback(result: dict[str, Any], *, command: str, 
         }
     finally:
         store.conn.close()
+
+    public_meta = _public_lifecycle_feedback_meta(meta)
+    result["managed_lifecycle_feedback"] = public_meta
+    if command == "dry-run" and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+        result["managed_server_calls_made"] = True
+
+
+def _old_context_summary_lifecycle_result(command: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    if command == "review":
+        impact = result.get("impact_summary") if isinstance(result.get("impact_summary"), dict) else {}
+        sections = impact.get("sections") if isinstance(impact.get("sections"), dict) else {}
+        crunch = sections.get("crunch") if isinstance(sections.get("crunch"), dict) else {}
+        dry_run = crunch.get("old_context_summary_dry_run")
+        return dry_run if isinstance(dry_run, dict) else None
+    return result
+
+
+def _old_context_summary_lifecycle_event_type(command: str, result: dict[str, Any]) -> str:
+    if not result.get("ok"):
+        return "rejected"
+    if command == "review":
+        return "reviewed"
+    return "dry-run"
+
+
+def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    from agentflow_proxy import __version__
+
+    dry_run = _old_context_summary_lifecycle_result(command, result)
+    if not isinstance(dry_run, dict):
+        return None
+    policy = dry_run.get("policy") if isinstance(dry_run.get("policy"), dict) else {}
+    summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
+    groups = [item for item in dry_run.get("groups", []) if isinstance(item, dict)]
+    eligible_groups = [item for item in groups if item.get("blocker") == "eligible"]
+    group_counts: dict[str, int] = {}
+    for group in groups:
+        blocker = str(group.get("blocker") or "unknown")
+        group_counts[blocker] = group_counts.get(blocker, 0) + int(group.get("call_count") or 0)
+    basis = {
+        "command": command,
+        "rule_id": policy.get("rule_id"),
+        "candidate_id": policy.get("candidate_id"),
+        "eligible_call_count": summary.get("eligible_call_count"),
+        "projected_saved_tokens": summary.get("projected_saved_tokens"),
+    }
+    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    event_type = _old_context_summary_lifecycle_event_type(command, dry_run)
+    metadata = {
+        "schema": "agentflow.old_context_summary_lifecycle_metadata.v1",
+        "lifecycle_kind": "old_context_summarization",
+        "command": "policy-review" if command == "review" else "old-context-summary-dry-run",
+        "local_result_status": "ok" if dry_run.get("ok") else "error",
+        "dry_run": True,
+        "read_only": bool(dry_run.get("read_only", True)),
+        "policy_source": policy.get("policy_source"),
+        "rule_id": policy.get("rule_id"),
+        "candidate_id": policy.get("candidate_id"),
+        "model": policy.get("model"),
+        "placement": policy.get("placement"),
+        "canary_enabled": ((policy.get("canary") or {}).get("enabled") if isinstance(policy.get("canary"), dict) else None),
+        "canary_fraction": ((policy.get("canary") or {}).get("fraction") if isinstance(policy.get("canary"), dict) else None),
+        "safety_stop_enabled": ((policy.get("safety_stop") or {}).get("enabled") if isinstance(policy.get("safety_stop"), dict) else None),
+        "sampled_call_count": summary.get("sampled_call_count"),
+        "sampled_provider_call_count": summary.get("sampled_provider_call_count"),
+        "request_body_available_count": summary.get("request_body_available_count"),
+        "request_body_replayed_count": summary.get("request_body_replayed_count"),
+        "eligible_call_count": summary.get("eligible_call_count"),
+        "summary_cache_hit_count": summary.get("summary_cache_hit_count"),
+        "eligible_old_turns": summary.get("eligible_old_turns"),
+        "eligible_chars": summary.get("eligible_chars"),
+        "projected_saved_chars": summary.get("projected_saved_chars"),
+        "projected_saved_tokens": summary.get("projected_saved_tokens"),
+        "estimated_summary_cost_usd": summary.get("estimated_summary_cost_usd"),
+        "projected_gross_savings_usd": summary.get("projected_gross_savings_usd"),
+        "projected_net_savings_usd": summary.get("projected_net_savings_usd"),
+        "eligible_group_count": len(eligible_groups),
+        "blocker_counts": dict(sorted(group_counts.items())),
+        "reload_required": dry_run.get("reload_required"),
+        "error_type": (dry_run.get("error") or {}).get("type") if isinstance(dry_run.get("error"), dict) else None,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_old_turns_included": False,
+            "raw_summaries_included": False,
+            "provider_bodies_included": False,
+            "raw_session_ids_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "db_path_included": False,
+        },
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+    return {
+        "event_type": event_type,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "recommendation_id": f"old-context-summary:{digest}",
+        "bundle_hash": None,
+        "policy_sections": ["crunch"],
+        "validation_warning_count": 0,
+        "review_warning_count": 0,
+        "applied_files": [],
+        "local_tool_version": __version__,
+        "metadata": metadata,
+    }
+
+
+def _attach_old_context_summary_lifecycle_feedback(result: dict[str, Any], *, command: str, db_path: str) -> None:
+    from agentflow_proxy import recommendations
+
+    payload = _old_context_summary_lifecycle_payload(command, result)
+    if payload is None:
+        return
+    if not recommendations.recommendations_enabled():
+        result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta({
+            **recommendations.disabled_outcome_feedback_meta(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "disabled",
+        })
+        return
+
+    store = None
+    try:
+        store = _open_store_for_db(str(db_path))
+        meta = asyncio.run(
+            recommendations.queue_policy_event_feedback(
+                store,
+                payload,
+                source_surface=recommendations.OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": True,
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+        }
+    finally:
+        if store is not None:
+            store.conn.close()
 
     public_meta = _public_lifecycle_feedback_meta(meta)
     result["managed_lifecycle_feedback"] = public_meta

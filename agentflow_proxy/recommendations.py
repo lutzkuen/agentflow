@@ -26,6 +26,8 @@ RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
 RECOMMENDATION_FAILURE_MODE_ENV = "AGENTFLOW_RECOMMENDATION_FAILURE_MODE"
 DEFAULT_RECOMMENDATION_SERVER_URL = "http://127.0.0.1:4100"
 ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE = "rollout_action_lifecycle"
+OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE = "old_context_summary_lifecycle"
+OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE = "old_context_summary_outcome"
 
 RAW_FEATURE_KEYS = {
     "account_id",
@@ -131,6 +133,49 @@ def _text_bucket(value: Any) -> str:
 
 def _token_bucket(value: Any) -> str:
     return _bucket_number(value, TOKEN_BUCKETS, "gte_64k_tokens")
+
+
+def _latency_bucket(value: Any) -> str:
+    return _bucket_number(
+        value,
+        (
+            (500, "lt_500ms"),
+            (2_000, "500ms_2s"),
+            (10_000, "2s_10s"),
+            (30_000, "10s_30s"),
+        ),
+        "gte_30s",
+    )
+
+
+def _retry_bucket(value: Any) -> str:
+    return _bucket_number(
+        value,
+        (
+            (1, "none"),
+            (2, "one"),
+            (4, "two_three"),
+        ),
+        "gte_4",
+    )
+
+
+def _net_savings_bucket(value: Any) -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if amount < 0:
+        return "negative"
+    if amount == 0:
+        return "zero"
+    if amount < 0.001:
+        return "lt_0_001_usd"
+    if amount < 0.01:
+        return "0_001_0_01_usd"
+    if amount < 0.1:
+        return "0_01_0_1_usd"
+    return "gte_0_1_usd"
 
 
 def _model_family(model: str | None) -> str | None:
@@ -1259,6 +1304,21 @@ def build_outcome_feedback(
         },
         "quality_signals": quality_signals,
     }
+    summary_feedback = build_old_context_summary_outcome_feedback(
+        provider=provider,
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        cache_hit=cache_meta.get("status") == "hit",
+        crunch_meta=crunch_meta,
+        category=category,
+        error=error,
+    )
+    if summary_feedback is not None:
+        features["old_context_summarization"] = summary_feedback
     experiment = routing_meta.get("routing_experiment") if isinstance(routing_meta, dict) else None
     if isinstance(experiment, dict):
         feedback_features = experiment.get("optimization_feedback")
@@ -1266,6 +1326,178 @@ def build_outcome_feedback(
             features["routing_experiment"] = feedback_features
     features.update(_compact_error(error, status_code))
     return _sanitize_features(features)
+
+
+def build_old_context_summary_outcome_feedback(
+    *,
+    provider: str,
+    path: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    cache_hit: bool,
+    crunch_meta: dict[str, Any],
+    category: str | None,
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    summary_meta = crunch_meta.get("old_context_summarization") if isinstance(crunch_meta, dict) else None
+    if not isinstance(summary_meta, dict) or not summary_meta.get("enabled"):
+        return None
+    status = str(summary_meta.get("status") or "")
+    reason = str(summary_meta.get("reason") or "")
+    canary = summary_meta.get("canary") if isinstance(summary_meta.get("canary"), dict) else {}
+    relevant = (
+        status in {"applied", "bypass"}
+        or reason in {"canary_holdout", "local-canary-safety-stop"}
+        or (canary.get("enabled") and canary.get("cohort") in {"canary_applied", "canary_holdout"})
+    )
+    if not relevant:
+        return None
+
+    try:
+        eligible_chars = int(summary_meta.get("eligible_chars") or 0)
+    except (TypeError, ValueError):
+        eligible_chars = 0
+    try:
+        eligible_turns = int(summary_meta.get("eligible_turns") or 0)
+    except (TypeError, ValueError):
+        eligible_turns = 0
+    try:
+        saved_chars = int(summary_meta.get("saved_chars") or 0)
+    except (TypeError, ValueError):
+        saved_chars = 0
+    try:
+        saved_tokens = int(summary_meta.get("tokens_saved_est") or 0)
+    except (TypeError, ValueError):
+        saved_tokens = max(0, saved_chars // TOKEN_CHARS)
+    try:
+        summary_cost = float(summary_meta.get("summary_cost_est_usd") or 0.0)
+    except (TypeError, ValueError):
+        summary_cost = 0.0
+    try:
+        net_savings = float(summary_meta.get("estimated_net_savings_usd") or 0.0)
+    except (TypeError, ValueError):
+        net_savings = 0.0
+
+    safety_stop = summary_meta.get("safety_stop") if isinstance(summary_meta.get("safety_stop"), dict) else {}
+    feedback = {
+        "schema": "agentflow.old_context_summary_outcome_feedback.v1",
+        "source_surface": _source_surface(provider, path),
+        "category": category or summary_meta.get("category") or "unknown",
+        "status": status or "unknown",
+        "reason": reason or None,
+        "outcome": (
+            "errored"
+            if status_code is not None and int(status_code) >= 400
+            else "applied"
+            if status == "applied"
+            else "holdout"
+            if reason == "canary_holdout"
+            else "bypassed"
+            if status == "bypass"
+            else "skipped"
+        ),
+        "requested_model_tier": _model_family(requested_model),
+        "routed_model_tier": _model_family(routed_model),
+        "summary_policy_id": summary_meta.get("rule_id"),
+        "rule_id": summary_meta.get("rule_id"),
+        "candidate_id": summary_meta.get("candidate_id"),
+        "policy_source": summary_meta.get("policy_source"),
+        "canary": {
+            "enabled": bool(canary.get("enabled")),
+            "selected": canary.get("selected"),
+            "status": canary.get("status"),
+            "cohort": canary.get("cohort"),
+            "fraction": canary.get("fraction"),
+            "unit": canary.get("unit"),
+        },
+        "canary_cohort": canary.get("cohort"),
+        "eligible_turns": eligible_turns,
+        "eligible_chars": eligible_chars,
+        "eligible_chars_bucket": _text_bucket(eligible_chars),
+        "request_chars_bucket": _text_bucket(summary_meta.get("before_chars")),
+        "saved_chars": saved_chars,
+        "saved_tokens_est": saved_tokens,
+        "saved_tokens_bucket": _token_bucket(saved_tokens),
+        "summary_cost_est_usd": round(summary_cost, 8),
+        "summary_cache_hit": bool(summary_meta.get("summary_cache_hit")),
+        "provider_cache_hit": bool(cache_hit),
+        "net_savings_bucket": _net_savings_bucket(net_savings),
+        "status_code": status_code,
+        "latency_bucket": _latency_bucket(latency_ms),
+        "retry_bucket": _retry_bucket(retry_count),
+        "error_bucket": (_compact_error(error, status_code).get("error_class") if error else None),
+        "safety_stop": {
+            "stopped": bool(safety_stop.get("stopped")),
+            "reason": safety_stop.get("reason"),
+            "trigger_metrics": [
+                item.get("metric")
+                for item in safety_stop.get("triggers", [])
+                if isinstance(item, dict) and item.get("metric")
+            ],
+        } if safety_stop else None,
+        "privacy": {
+            "metadata_only": True,
+            "raw_old_turns_included": False,
+            "raw_summary_included": False,
+            "summary_request_content_included": False,
+            "provider_request_included": False,
+            "provider_response_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "local_session_ids_included": False,
+            "file_paths_included": False,
+        },
+    }
+    return _sanitize_features({key: value for key, value in feedback.items() if value not in (None, "", [], {})})
+
+
+def build_old_context_summary_outcome_event(
+    outcome_feedback: dict[str, Any],
+    *,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    from agentflow_proxy import __version__
+
+    basis = {
+        "rule_id": outcome_feedback.get("rule_id"),
+        "candidate_id": outcome_feedback.get("candidate_id"),
+        "category": outcome_feedback.get("category"),
+        "canary_cohort": outcome_feedback.get("canary_cohort"),
+        "outcome": outcome_feedback.get("outcome"),
+    }
+    digest = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:24]
+    return _sanitize_features({
+        "event_type": "outcome",
+        "occurred_at": occurred_at or utc_now(),
+        "recommendation_id": f"old-context-summary:{digest}",
+        "bundle_hash": None,
+        "policy_sections": ["crunch"],
+        "validation_warning_count": 0,
+        "review_warning_count": 0,
+        "applied_files": [],
+        "local_tool_version": __version__,
+        "metadata": {
+            "schema": "agentflow.old_context_summary_outcome_event_metadata.v1",
+            "lifecycle_kind": "old_context_summarization",
+            "outcome": outcome_feedback,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "raw_responses_included": False,
+                "raw_transcripts_included": False,
+                "summary_text_included": False,
+                "summary_request_content_included": False,
+                "cache_keys_included": False,
+                "request_ids_included": False,
+                "local_session_ids_included": False,
+                "file_paths_included": False,
+            },
+        },
+    })
 
 
 def build_codex_turn_outcome_feedback(
@@ -1679,7 +1911,12 @@ async def queue_outcome_feedback(
     return meta
 
 
-async def queue_policy_event_feedback(store_obj: Any, event_payload: dict[str, Any]) -> dict[str, Any]:
+async def queue_policy_event_feedback(
+    store_obj: Any,
+    event_payload: dict[str, Any],
+    *,
+    source_surface: str = ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE,
+) -> dict[str, Any]:
     if not recommendations_enabled():
         return {
             **disabled_outcome_feedback_meta(),
@@ -1696,7 +1933,7 @@ async def queue_policy_event_feedback(store_obj: Any, event_payload: dict[str, A
         "id": queue_id,
         "created_at": now,
         "updated_at": now,
-        "source_surface": ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE,
+        "source_surface": source_surface,
         "endpoint": POLICY_EVENTS_PATH,
         "optimization_unit_id": 0,
         "payload_json": stable_json(payload),

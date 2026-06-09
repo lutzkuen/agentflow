@@ -746,6 +746,50 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("tool-secret", encoded)
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
         self.assertFalse(payload["privacy"]["cache_keys_included"])
+        self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "disabled")
+        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+
+    def test_old_context_summary_dry_run_sends_metadata_only_lifecycle_feedback(self):
+        proposed = self._old_context_summary_bundle()
+        ManagedFeedbackFlushClient.calls = []
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_dry_run_rows(db_path)
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.old_context_summary_dry_run_cli(
+                        ["-", "--db", db_path, "--limit", "10"],
+                        stdin=io.StringIO(json.dumps(proposed)),
+                        stdout=stdout,
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "dry-run")
+        self.assertEqual(sent_payload["policy_sections"], ["crunch"])
+        metadata = sent_payload["metadata"]
+        self.assertEqual(metadata["lifecycle_kind"], "old_context_summarization")
+        self.assertEqual(metadata["rule_id"], "test-old-context-dry-run")
+        self.assertEqual(metadata["eligible_call_count"], 1)
+        self.assertFalse(metadata["privacy"]["cache_keys_included"])
+        rendered_payload = json.dumps(sent_payload, sort_keys=True)
+        self.assertNotIn("raw-secret-old-context", rendered_payload)
+        self.assertNotIn("session-secret-should-not-leak", rendered_payload)
+        self.assertNotIn("tool-secret", rendered_payload)
+        self.assertNotIn("secret.py", rendered_payload)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "sent")
+        self.assertEqual(output["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
+        self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
 
     def test_policy_review_cli_includes_old_context_summary_dry_run(self):
         proposed = self._old_context_summary_bundle()

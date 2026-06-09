@@ -56,6 +56,10 @@ class FakeAsyncClient:
         return self.__class__.response
 
 
+class _NoQueueStore:
+    pass
+
+
 class RecommendationTest(unittest.TestCase):
     ENV_KEYS = (
         "AGENTFLOW_RECOMMENDATION_ENABLED",
@@ -540,6 +544,111 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("must not leave", str(FakeAsyncClient.last_json))
         self.assertNotIn("must be stripped", str(FakeAsyncClient.last_json))
         self.assertNotIn("raw pattern text", str(FakeAsyncClient.last_json))
+
+    def test_outcome_feedback_includes_old_context_summary_metadata_only(self):
+        outcome = recommendations.build_outcome_feedback(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            status_code=200,
+            latency_ms=2200,
+            retry_count=0,
+            input_tokens_est=20000,
+            output_tokens_est=500,
+            actual_input_tokens=18000,
+            actual_output_tokens=450,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=0.03,
+            cost_baseline_usd=0.05,
+            cache_meta={"status": "miss", "reason": "exact-miss"},
+            crunch_meta={
+                "old_context_summarization": {
+                    "enabled": True,
+                    "status": "applied",
+                    "reason": "summary-created",
+                    "rule_id": "summary-rule-1",
+                    "candidate_id": "summary-candidate-1",
+                    "policy_source": "managed-recommended",
+                    "category": "chat",
+                    "before_chars": 100000,
+                    "eligible_turns": 4,
+                    "eligible_chars": 60000,
+                    "saved_chars": 50000,
+                    "tokens_saved_est": 12500,
+                    "summary_cost_est_usd": 0.002,
+                    "estimated_net_savings_usd": 0.02,
+                    "summary_cache_hit": False,
+                    "summary": "must not leave local machine",
+                    "summary_request": {"messages": [{"content": "secret old turn text"}]},
+                    "cache_key": "secret-cache-key",
+                    "source_hash": "secret-source-hash",
+                    "canary": {
+                        "enabled": True,
+                        "selected": True,
+                        "status": "applied",
+                        "cohort": "canary_applied",
+                        "fraction": 0.5,
+                        "unit": "source_hash",
+                    },
+                }
+            },
+            routing_meta={"reason": "small request", "policy_source": "local-manual"},
+            category="chat",
+            session_id="session-secret",
+            error=None,
+        )
+
+        summary = outcome["old_context_summarization"]
+        self.assertEqual(summary["schema"], "agentflow.old_context_summary_outcome_feedback.v1")
+        self.assertEqual(summary["outcome"], "applied")
+        self.assertEqual(summary["summary_policy_id"], "summary-rule-1")
+        self.assertEqual(summary["canary_cohort"], "canary_applied")
+        self.assertEqual(summary["eligible_chars_bucket"], "32k_128k_chars")
+        self.assertEqual(summary["saved_tokens_bucket"], "4k_16k_tokens")
+        self.assertEqual(summary["latency_bucket"], "2s_10s")
+        self.assertTrue(summary["privacy"]["metadata_only"])
+        rendered = str(outcome)
+        self.assertNotIn("must not leave", rendered)
+        self.assertNotIn("secret old turn text", rendered)
+        self.assertNotIn("secret-cache-key", rendered)
+        self.assertNotIn("secret-source-hash", rendered)
+        self.assertNotIn("session-secret", rendered)
+        self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(outcome)))
+
+    def test_old_context_summary_outcome_event_posts_to_policy_events(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        outcome = {
+            "schema": "agentflow.old_context_summary_outcome_feedback.v1",
+            "source_surface": "anthropic_messages",
+            "category": "chat",
+            "outcome": "holdout",
+            "rule_id": "summary-rule-1",
+            "candidate_id": "summary-candidate-1",
+            "canary_cohort": "canary_holdout",
+            "privacy": {"metadata_only": True},
+        }
+        event = recommendations.build_old_context_summary_outcome_event(outcome)
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.queue_policy_event_feedback(
+                _NoQueueStore(),
+                event,
+                source_surface=recommendations.OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+            ))
+
+        self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-events")
+        self.assertEqual(meta["status"], "sent")
+        self.assertEqual(FakeAsyncClient.last_json["event_type"], "outcome")
+        self.assertEqual(FakeAsyncClient.last_json["policy_sections"], ["crunch"])
+        self.assertEqual(
+            FakeAsyncClient.last_json["metadata"]["outcome"]["canary_cohort"],
+            "canary_holdout",
+        )
+        self.assertNotIn("payload_json", str(FakeAsyncClient.last_json))
 
     def test_pattern_decision_summaries_cover_bypassed_and_errored_outcomes(self):
         bypassed = recommendations.pattern_decision_summaries(
