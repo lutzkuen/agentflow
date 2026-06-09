@@ -129,6 +129,10 @@ def create_dashboard_router(
     async def stats_managed_recommendations(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_managed_recommendations(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/rollout-actions/readiness")
+    async def stats_rollout_actions_readiness(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_rollout_actions_readiness(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/safety")
     async def stats_safety() -> dict[str, Any]:
         return await stats_views.stats_safety(

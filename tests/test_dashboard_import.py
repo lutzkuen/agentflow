@@ -76,6 +76,7 @@ class DashboardImportTests(unittest.TestCase):
             policies = client.get("/agentflow/stats/policies")
             policy_events = client.get("/agentflow/stats/policy-events")
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
+            rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
             safety = client.get("/agentflow/stats/safety")
             admin_reload = client.post("/agentflow/admin/reload-policies")
             dashboard = client.get("/agentflow/dashboard")
@@ -92,6 +93,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(codex_effectiveness.status_code, 200)
             self.assertEqual(codex_effectiveness.json()["schema"], "agentflow.codex_app_effectiveness.v1")
             self.assertFalse(codex_effectiveness.json()["privacy"]["raw_prompts_included"])
+            self.assertEqual(rollout_readiness.status_code, 200)
+            self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
+            self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
             self.assertEqual(safety.status_code, 200)
             self.assertEqual(safety.json()["schema"], "agentflow.safety_privacy.v1")
             self.assertFalse(safety.json()["privacy"]["raw_prompts_included"])
@@ -141,6 +145,161 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Safety / privacy status", dashboard.text)
             self.assertIn("/agentflow/stats/safety", dashboard.text)
             self.assertIn("safety-warnings-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/rollout-actions/readiness", dashboard.text)
+            self.assertIn("Rollout-action readiness", dashboard.text)
+            self.assertIn("rollout-readiness-tbody", dashboard.text)
+        finally:
+            if old_event_log is None:
+                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+            store.conn.close()
+            tmp.close()
+            event_tmp.cleanup()
+
+    def test_rollout_action_readiness_endpoint_summarizes_metadata_only(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        store = Store(tmp.name)
+        try:
+            from agentflow_proxy.policy_events import log_policy_event
+
+            log_policy_event(
+                "rollout-actions-review",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "path": "/tmp/raw-action-payload.json",
+                    "config_dir": "/tmp/local-yaml-config",
+                    "action_count": 2,
+                    "planned_action_count": 2,
+                    "changed_action_count": 1,
+                    "provenance_status": "verified",
+                    "exit_code": 0,
+                },
+            )
+            log_policy_event(
+                "rollout-actions-dry-run",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "path": "/tmp/raw-action-payload.json",
+                    "config_dir": "/tmp/local-yaml-config",
+                    "db_path": tmp.name,
+                    "dry_run": True,
+                    "action_count": 2,
+                    "affected_metadata_row_count": 9,
+                    "exit_code": 0,
+                },
+            )
+            log_policy_event(
+                "pattern-canary-safety-stop",
+                ok=True,
+                details={
+                    "reason": "local-canary-safety-stop",
+                    "policy_section": "crunch",
+                    "rule_id": "rule-id-not-rendered",
+                    "pattern_hash": "sha256:" + ("b" * 64),
+                    "sample_count": 6,
+                    "raw_payload_included": False,
+                },
+            )
+            store.enqueue_managed_outcome_feedback(
+                id="rollout-feedback-queued",
+                created_at="2026-06-09T03:40:00+00:00",
+                updated_at="2026-06-09T03:40:00+00:00",
+                source_surface="rollout_action_lifecycle",
+                endpoint="/v1/policy-events",
+                optimization_unit_id=0,
+                payload_json=json.dumps({
+                    "event_type": "dry-run",
+                    "occurred_at": "2026-06-09T03:40:00+00:00",
+                    "bundle_hash": "sha256:" + ("c" * 64),
+                    "action_ids": ["must-not-render-action-id"],
+                    "metadata": {
+                        "schema": "agentflow.rollout_action_lifecycle_metadata.v1",
+                        "command": "rollout-actions-dry-run",
+                        "local_result_status": "ok",
+                        "dry_run": True,
+                        "read_only": True,
+                        "action_count": 2,
+                        "planned_action_count": 2,
+                        "changed_action_count": 1,
+                        "action_type_counts": {"widen": 1, "rollback": 1},
+                        "policy_section_counts": {"crunch": 2},
+                        "local_status_counts": {"planned": 2},
+                        "affected_metadata_row_count": 9,
+                        "affected_provider_call_count": 5,
+                        "affected_codex_turn_count": 4,
+                        "projected_additional_applied_count": 3,
+                        "projected_local_bypass_or_disable_count": 2,
+                        "historical_tokens_saved_est": 1200,
+                        "historical_estimated_cost_savings_usd": 0.0123,
+                        "safety_stop_reason_counts": {"local-canary-safety-stop": 1},
+                        "candidate_ids": ["candidate-id-not-rendered"],
+                        "rule_ids": ["rule-id-not-rendered"],
+                        "pattern_hashes": ["sha256:" + ("b" * 64)],
+                        "raw_prompt": "raw prompt must stay hidden",
+                        "yaml_contents": "local YAML must stay hidden",
+                        "privacy": {
+                            "metadata_only": True,
+                            "raw_prompts_included": False,
+                            "raw_messages_included": False,
+                            "raw_responses_included": False,
+                            "raw_transcripts_included": False,
+                            "raw_params_included": False,
+                            "tool_payloads_included": False,
+                            "request_ids_included": False,
+                            "local_session_ids_included": False,
+                            "file_paths_included": False,
+                            "yaml_contents_included": False,
+                        },
+                    },
+                    "raw_request": "raw request body must stay hidden",
+                }),
+                status="queued",
+                attempts=0,
+                next_attempt_at="2000-01-01T09:00:00+00:00",
+            )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            response = client.get("/agentflow/stats/rollout-actions/readiness")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.rollout_actions_readiness.v1")
+            self.assertEqual(payload["summary"]["pending_lifecycle_feedback_count"], 1)
+            self.assertEqual(payload["summary"]["due_lifecycle_feedback_count"], 1)
+            self.assertEqual(payload["summary"]["affected_metadata_row_count"], 9)
+            self.assertEqual(payload["dry_run_impact"]["projected_additional_applied_count"], 3)
+            self.assertEqual(payload["dry_run_impact"]["projected_local_bypass_or_disable_count"], 2)
+            self.assertEqual({row["value"]: row["count"] for row in payload["action_type_counts"]}, {"widen": 1, "rollback": 1})
+            self.assertTrue(payload["safety_stop"]["active"])
+            self.assertFalse(payload["privacy"]["raw_action_payloads_included"])
+            self.assertFalse(payload["privacy"]["yaml_contents_included"])
+            self.assertIn("rollout-readiness-tbody", dashboard.text)
+            self.assertIn("rollout-action-counts-tbody", dashboard.text)
+
+            rendered = json.dumps(payload) + dashboard.text
+            self.assertNotIn("raw prompt must stay hidden", rendered)
+            self.assertNotIn("raw request body must stay hidden", rendered)
+            self.assertNotIn("local YAML must stay hidden", rendered)
+            self.assertNotIn("must-not-render-action-id", rendered)
+            self.assertNotIn("candidate-id-not-rendered", rendered)
+            self.assertNotIn("rule-id-not-rendered", rendered)
+            self.assertNotIn("/tmp/raw-action-payload.json", rendered)
+            self.assertNotIn("/tmp/local-yaml-config", rendered)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)

@@ -637,6 +637,373 @@ async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
     return recent_policy_events(limit=limit)
 
 
+ROLLOUT_ACTION_STAGES = {
+    "rollout-actions-review": "review",
+    "rollout-actions-dry-run": "dry_run",
+    "rollout-actions-apply": "apply",
+    "pattern-canary-safety-stop": "safety_stop",
+}
+
+
+def _nonzero(value: Any) -> int | float | None:
+    number = _as_float(value)
+    if number == 0:
+        return None
+    integer = _as_int(value)
+    if float(integer) == number:
+        return integer
+    return round(number, 8)
+
+
+def _rollout_count_breakdown(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return []
+    counts: dict[str, int] = {}
+    for key, value in raw.items():
+        if key is None:
+            continue
+        counts[str(key)] = counts.get(str(key), 0) + _as_int(value)
+    return _managed_breakdown(counts)
+
+
+def _rollout_details_counts(details: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_count": _as_int(details.get("action_count")),
+        "planned_action_count": _as_int(details.get("planned_action_count")),
+        "changed_action_count": _as_int(details.get("changed_action_count")),
+        "rejected_action_count": _as_int(details.get("rejected_action_count")),
+        "changed_file_count": _as_int(details.get("changed_file_count")),
+        "affected_metadata_row_count": _as_int(details.get("affected_metadata_row_count")),
+        "validation_error_count": _as_int(details.get("validation_error_count") or details.get("error_count")),
+        "validation_warning_count": _as_int(details.get("validation_warning_count")),
+        "review_error_count": _as_int(details.get("review_error_count")),
+        "review_warning_count": _as_int(details.get("review_warning_count")),
+    }
+
+
+def _public_rollout_policy_event(event: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    stage = ROLLOUT_ACTION_STAGES.get(str(event.get("action") or ""), "unknown")
+    counts = _rollout_details_counts(details)
+    return {
+        "created_at": event.get("created_at"),
+        "age_seconds": _seconds_since_iso(event.get("created_at"), now),
+        "action": event.get("action"),
+        "stage": stage,
+        "ok": bool(event.get("ok")),
+        "dry_run": bool(details.get("dry_run") or stage == "dry_run"),
+        "source": details.get("source"),
+        "provenance_status": details.get("provenance_status"),
+        "status_code": details.get("status_code"),
+        "error_type": details.get("error_type"),
+        "exit_code": details.get("exit_code"),
+        "counts": {key: value for key, value in counts.items() if value not in (None, 0)},
+        "payload_included": False,
+        "raw_payload_included": False,
+        "file_paths_included": False,
+        "yaml_contents_included": False,
+    }
+
+
+def _rollout_lifecycle_rows(store_obj: Any, *, limit: int) -> list[dict[str, Any]]:
+    if store_obj is None or not hasattr(store_obj, "conn"):
+        return []
+    capped = max(1, min(int(limit or 500), 5000))
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                   payload_json, status, attempts, next_attempt_at, last_error,
+                   last_status_code, sent_at
+            from managed_outcome_feedback_queue
+            where source_surface = ?
+            order by created_at desc
+            limit ?
+            """,
+            ("rollout_action_lifecycle", capped),
+        ).fetchall()
+    except Exception:
+        return []
+    return [dict(row) for row in rows]
+
+
+def _public_rollout_lifecycle_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    payload = _json_obj(row.get("payload_json"))
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    missing: list[str] = []
+    if _as_int(metadata.get("action_count")) > 0 and not isinstance(metadata.get("action_type_counts"), dict):
+        missing.append("action_type_counts")
+    if _as_int(metadata.get("action_count")) > 0 and not isinstance(metadata.get("policy_section_counts"), dict):
+        missing.append("policy_section_counts")
+    if metadata.get("affected_metadata_row_count") is None and str(payload.get("event_type") or "") == "dry-run":
+        missing.append("affected_metadata_row_count")
+
+    projected = {
+        "affected_metadata_row_count": _nonzero(metadata.get("affected_metadata_row_count")),
+        "affected_provider_call_count": _nonzero(metadata.get("affected_provider_call_count")),
+        "affected_codex_turn_count": _nonzero(metadata.get("affected_codex_turn_count")),
+        "projected_additional_applied_count": _nonzero(metadata.get("projected_additional_applied_count")),
+        "projected_local_bypass_or_disable_count": _nonzero(metadata.get("projected_local_bypass_or_disable_count")),
+        "historical_tokens_saved_est": _nonzero(metadata.get("historical_tokens_saved_est")),
+        "historical_estimated_cost_savings_usd": _nonzero(metadata.get("historical_estimated_cost_savings_usd")),
+    }
+    return {
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "age_seconds": _seconds_since_iso(row.get("created_at"), now),
+        "source_surface": row.get("source_surface"),
+        "endpoint": row.get("endpoint"),
+        "feedback_status": row.get("status"),
+        "attempts": _as_int(row.get("attempts")),
+        "next_attempt_at": row.get("next_attempt_at"),
+        "sent_at": row.get("sent_at"),
+        "last_status_code": row.get("last_status_code"),
+        "last_error_class": _managed_feedback_error_class(row),
+        "event_type": payload.get("event_type"),
+        "occurred_at": payload.get("occurred_at"),
+        "command": metadata.get("command"),
+        "local_result_status": metadata.get("local_result_status"),
+        "dry_run": bool(metadata.get("dry_run")),
+        "read_only": bool(metadata.get("read_only")),
+        "action_count": _as_int(metadata.get("action_count")),
+        "planned_action_count": _as_int(metadata.get("planned_action_count")),
+        "changed_action_count": _as_int(metadata.get("changed_action_count")),
+        "rejected_action_count": _as_int(metadata.get("rejected_action_count")),
+        "action_type_counts": _rollout_count_breakdown(metadata.get("action_type_counts")),
+        "policy_section_counts": _rollout_count_breakdown(metadata.get("policy_section_counts")),
+        "local_status_counts": _rollout_count_breakdown(metadata.get("local_status_counts")),
+        "validation_error_count": _as_int(metadata.get("validation_error_count")),
+        "validation_warning_count": _as_int(metadata.get("validation_warning_count")),
+        "review_error_count": _as_int(metadata.get("review_error_count")),
+        "review_warning_count": _as_int(metadata.get("review_warning_count")),
+        "changed_file_count": _as_int(metadata.get("changed_file_count")),
+        "projected_impact": {key: value for key, value in projected.items() if value is not None},
+        "safety_stop_reason_counts": _rollout_count_breakdown(metadata.get("safety_stop_reason_counts")),
+        "missing_metadata": missing,
+        "bundle_hash_present": bool(payload.get("bundle_hash") or metadata.get("computed_bundle_hash") or metadata.get("provenance_bundle_hash")),
+        "payload_included": False,
+        "raw_payload_included": False,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "raw_params_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "yaml_contents_included": False,
+        },
+    }
+
+
+def _rollout_feedback_queue_summary(rows: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    pending_count = 0
+    due_count = 0
+    oldest_due_age: int | None = None
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        _increment_count(status_counts, status)
+        _increment_count(endpoint_counts, str(row.get("endpoint") or "unknown"))
+        if status in {"queued", "retryable-error"}:
+            pending_count += 1
+            next_attempt = _parse_utc_datetime(row.get("next_attempt_at"))
+            if next_attempt is None or next_attempt <= now:
+                due_count += 1
+                age = _seconds_since_iso(row.get("next_attempt_at") or row.get("created_at"), now)
+                if age is not None:
+                    oldest_due_age = age if oldest_due_age is None else max(oldest_due_age, age)
+    return {
+        "available": True,
+        "summary": {
+            "total": len(rows),
+            "pending": pending_count,
+            "due": due_count,
+            "queued": status_counts.get("queued", 0),
+            "retryable_error": status_counts.get("retryable-error", 0),
+            "sent": status_counts.get("sent", 0),
+            "dropped_after_limit": status_counts.get("dropped-after-limit", 0),
+            "oldest_due_age_seconds": oldest_due_age,
+        },
+        "status_breakdown": _managed_breakdown(status_counts),
+        "endpoint_breakdown": _managed_breakdown(endpoint_counts),
+        "payload_included": False,
+    }
+
+
+def _latest_rollout_event(events: list[dict[str, Any]], action: str) -> dict[str, Any] | None:
+    for event in events:
+        if event.get("action") == action:
+            return event
+    return None
+
+
+def _latest_lifecycle(
+    public_rows: list[dict[str, Any]],
+    event_types: set[str],
+    commands: set[str] | None = None,
+) -> dict[str, Any] | None:
+    for row in public_rows:
+        if str(row.get("event_type") or "") in event_types and (
+            commands is None or str(row.get("command") or "") in commands
+        ):
+            return row
+    return None
+
+
+def _rollout_safety_stop_state(events: list[dict[str, Any]], public_rows: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
+    latest_event = _latest_rollout_event(events, "pattern-canary-safety-stop")
+    latest_public = _public_rollout_policy_event(latest_event, now=now) if latest_event else None
+    reason_counts: dict[str, int] = {}
+    if latest_event:
+        details = latest_event.get("details") if isinstance(latest_event.get("details"), dict) else {}
+        reason = details.get("reason")
+        if reason:
+            reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+    for row in public_rows:
+        for item in row.get("safety_stop_reason_counts") or []:
+            reason_counts[str(item.get("value") or "unknown")] = reason_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
+    return {
+        "active": bool(latest_event or reason_counts),
+        "latest": latest_public,
+        "reason_breakdown": _managed_breakdown(reason_counts),
+        "payload_included": False,
+    }
+
+
+def _next_rollout_read_only_command(
+    *,
+    latest_review: dict[str, Any] | None,
+    latest_dry_run: dict[str, Any] | None,
+) -> str | None:
+    if not latest_review or not latest_review.get("ok", True):
+        return "agentflow-managed-rollout-actions-review actions.json --pretty"
+    if not latest_dry_run or not latest_dry_run.get("ok", True):
+        return "agentflow-managed-rollout-actions-dry-run actions.json --db ~/.agentflow/agentflow.sqlite3 --pretty"
+    return "agentflow-managed-rollout-actions-apply actions.json --config-dir ~/.agentflow --dry-run --pretty"
+
+
+async def stats_rollout_actions_readiness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.policy_events import recent_policy_events
+
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    now = datetime.now(timezone.utc)
+    events = [
+        event
+        for event in recent_policy_events(limit=500).get("events", [])
+        if isinstance(event, dict) and str(event.get("action") or "") in ROLLOUT_ACTION_STAGES
+    ]
+    public_events = [_public_rollout_policy_event(event, now=now) for event in events]
+    lifecycle_rows = _rollout_lifecycle_rows(store_obj, limit=capped_limit)
+    public_lifecycle = [_public_rollout_lifecycle_row(row, now=now) for row in lifecycle_rows]
+
+    review_event = _latest_rollout_event(events, "rollout-actions-review")
+    dry_run_event = _latest_rollout_event(events, "rollout-actions-dry-run")
+    apply_event = _latest_rollout_event(events, "rollout-actions-apply")
+    latest_review = _latest_lifecycle(public_lifecycle, {"reviewed", "rejected"}, {"rollout-actions-review"}) or (
+        _public_rollout_policy_event(review_event, now=now) if review_event else None
+    )
+    latest_dry_run = _latest_lifecycle(public_lifecycle, {"dry-run"}, {"rollout-actions-dry-run"}) or (
+        _public_rollout_policy_event(dry_run_event, now=now) if dry_run_event else None
+    )
+    latest_apply_or_rollback = _latest_lifecycle(
+        public_lifecycle,
+        {"applied", "rollback", "rejected"},
+        {"rollout-actions-apply"},
+    ) or (
+        _public_rollout_policy_event(apply_event, now=now) if apply_event else None
+    )
+    latest_lifecycle = public_lifecycle[0] if public_lifecycle else None
+    action_counts = (latest_lifecycle or {}).get("action_type_counts") or []
+    latest_projected = (latest_dry_run or {}).get("projected_impact") if isinstance(latest_dry_run, dict) else None
+    if not isinstance(latest_projected, dict):
+        latest_projected = ((latest_dry_run or {}).get("counts") if isinstance(latest_dry_run, dict) else {}) or {}
+    feedback_queue = _rollout_feedback_queue_summary(lifecycle_rows, now=now)
+
+    warning_count = 0
+    if isinstance(latest_lifecycle, dict):
+        warning_count += _as_int(latest_lifecycle.get("validation_warning_count"))
+        warning_count += _as_int(latest_lifecycle.get("review_warning_count"))
+    if isinstance(latest_review, dict):
+        warning_count += _as_int((latest_review.get("counts") or {}).get("validation_warning_count"))
+        warning_count += _as_int((latest_review.get("counts") or {}).get("review_warning_count"))
+
+    missing_metadata = sorted(
+        {
+            str(item)
+            for row in public_lifecycle[:10]
+            for item in (row.get("missing_metadata") or [])
+            if item
+        }
+    )
+    ready = bool(
+        latest_review
+        and latest_review.get("ok", True)
+        and latest_dry_run
+        and latest_dry_run.get("ok", True)
+        and not _as_int(feedback_queue.get("summary", {}).get("due"))
+    )
+    return {
+        "schema": "agentflow.rollout_actions_readiness.v1",
+        "generated_at": utc_now(),
+        "status": "ready" if ready else "needs-review",
+        "limit": capped_limit,
+        "summary": {
+            "policy_event_count": len(public_events),
+            "lifecycle_feedback_count": len(public_lifecycle),
+            "latest_action_count": sum(_as_int(row.get("count")) for row in action_counts),
+            "latest_warning_count": warning_count,
+            "pending_lifecycle_feedback_count": _as_int(feedback_queue.get("summary", {}).get("pending")),
+            "due_lifecycle_feedback_count": _as_int(feedback_queue.get("summary", {}).get("due")),
+            "affected_metadata_row_count": _as_int(latest_projected.get("affected_metadata_row_count")),
+            "projected_additional_applied_count": _as_int(latest_projected.get("projected_additional_applied_count")),
+            "projected_local_bypass_or_disable_count": _as_int(latest_projected.get("projected_local_bypass_or_disable_count")),
+            "historical_tokens_saved_est": _as_int(latest_projected.get("historical_tokens_saved_est")),
+            "historical_estimated_cost_savings_usd": _as_float(latest_projected.get("historical_estimated_cost_savings_usd")),
+            "missing_metadata_count": len(missing_metadata),
+        },
+        "latest_review": latest_review,
+        "latest_dry_run": latest_dry_run,
+        "latest_apply_or_rollback": latest_apply_or_rollback,
+        "latest_lifecycle_feedback": latest_lifecycle,
+        "action_type_counts": action_counts,
+        "policy_section_counts": (latest_lifecycle or {}).get("policy_section_counts") or [],
+        "local_status_counts": (latest_lifecycle or {}).get("local_status_counts") or [],
+        "dry_run_impact": latest_projected,
+        "missing_metadata": missing_metadata,
+        "safety_stop": _rollout_safety_stop_state(events, public_lifecycle, now=now),
+        "lifecycle_feedback_queue": feedback_queue,
+        "recent_events": public_events[:25],
+        "recent_lifecycle_feedback": public_lifecycle[:25],
+        "next_read_only_command": _next_rollout_read_only_command(
+            latest_review=latest_review,
+            latest_dry_run=latest_dry_run,
+        ),
+        "privacy": {
+            "metadata_only": True,
+            "raw_action_payloads_included": False,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "yaml_contents_included": False,
+            "local_session_ids_included": False,
+            "payload_json_included": False,
+            "basis": "local policy-event metadata plus queued rollout lifecycle feedback aggregates only",
+        },
+    }
+
+
 def _source_surface(provider: str, path: str) -> str:
     provider_l = (provider or "").lower()
     path_l = (path or "").lower()
@@ -7073,6 +7440,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Rollout-action readiness</h2>
+  <table data-table-id="rollout-readiness" data-filter-label="Filter rollout readiness">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="time">Latest review</th><th data-sort-type="time">Latest dry-run</th><th data-sort-type="number">Affected rows</th><th data-sort-type="number">Projected applied</th><th data-sort-type="number">Bypass / disable</th><th data-sort-type="text">Safety stop</th><th data-sort-type="number">Pending feedback</th><th data-sort-type="text">Next read-only command</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="rollout-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Latest rollout-action counts</h2>
+  <table data-table-id="rollout-action-counts" data-filter-label="Filter rollout action counts">
+    <thead><tr>
+      <th data-sort-type="text">Action</th><th data-sort-type="number">Count</th><th data-sort-type="text">Sections</th><th data-sort-type="text">Local status</th><th data-sort-type="number">Warnings</th><th data-sort-type="text">Missing metadata</th>
+    </tr></thead>
+    <tbody id="rollout-action-counts-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Managed pattern adoption funnel</h2>
   <table data-table-id="managed-pattern-funnel" data-filter-label="Filter managed pattern funnel">
     <thead><tr>
@@ -8047,12 +8432,14 @@ function blockerBadges(rows){
 }
 async function refreshManaged(){
   try{
-    const [managedResponse,safetyResponse]=await Promise.all([
+    const [managedResponse,safetyResponse,rolloutResponse]=await Promise.all([
       fetch('/agentflow/stats/managed-recommendations?limit=500'),
-      fetch('/agentflow/stats/safety')
+      fetch('/agentflow/stats/safety'),
+      fetch('/agentflow/stats/rollout-actions/readiness?limit=500')
     ]);
     const d=await managedResponse.json();
     const safety=await safetyResponse.json();
+    const rollout=await rolloutResponse.json();
     const s=d.summary||{};
     const cfg=d.current_config||{};
     const queue=((((safety||{}).checks||{}).managed||{}).feedback_queue)||{};
@@ -8090,6 +8477,39 @@ async function refreshManaged(){
       <td class="ts">${lastSent.sent_at?ago(lastSent.sent_at):'—'}</td>
       <td class="flags">${compactBreakdown(queue.source_surface_breakdown,'none')} <span class="badge hit">payload omitted</span></td>
     </tr>`;
+    const rolloutSummary=rollout.summary||{};
+    const review=rollout.latest_review||{};
+    const dryRun=rollout.latest_dry_run||{};
+    const dryImpact=rollout.dry_run_impact||{};
+    const stop=rollout.safety_stop||{};
+    const stopReasons=compactBreakdown(stop.reason_breakdown,'none');
+    const feedbackSummary=((rollout.lifecycle_feedback_queue||{}).summary)||{};
+    const readyCls=rollout.status==='ready'?'hit':'routed';
+    const privacy=rollout.privacy||{};
+    document.getElementById('rollout-readiness-tbody').innerHTML=`<tr>
+      <td><span class="badge ${readyCls}">${esc(rollout.status||'unknown')}</span></td>
+      <td class="ts">${review.created_at?ago(review.created_at):'—'} ${review.ok===false?'<span class="badge err">failed</span>':review.created_at?'<span class="badge hit">ok</span>':''}</td>
+      <td class="ts">${dryRun.created_at?ago(dryRun.created_at):'—'} ${dryRun.ok===false?'<span class="badge err">failed</span>':dryRun.created_at?'<span class="badge hit">ok</span>':''}</td>
+      <td class="tokens">${(dryImpact.affected_metadata_row_count??rolloutSummary.affected_metadata_row_count??0).toLocaleString()}</td>
+      <td class="tokens">${(dryImpact.projected_additional_applied_count??rolloutSummary.projected_additional_applied_count??0).toLocaleString()}</td>
+      <td class="tokens">${(dryImpact.projected_local_bypass_or_disable_count??rolloutSummary.projected_local_bypass_or_disable_count??0).toLocaleString()}</td>
+      <td class="flags">${stop.active?`<span class="badge err">active</span> ${stopReasons}`:'<span class="badge hit">clear</span>'}</td>
+      <td class="tokens">${(feedbackSummary.pending||0).toLocaleString()} pending · ${(feedbackSummary.due||0).toLocaleString()} due</td>
+      <td class="model">${esc(rollout.next_read_only_command||'—')}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">payload omitted</span></td>
+    </tr>`;
+    const actionRows=rollout.action_type_counts||[];
+    const sections=compactBreakdown(rollout.policy_section_counts,'unknown');
+    const statuses=compactBreakdown(rollout.local_status_counts,'unknown');
+    const missing=(rollout.missing_metadata||[]).map(item=>`<span class="badge routed">${esc(item)}</span>`).join(' ')||'<span class="badge hit">none</span>';
+    document.getElementById('rollout-action-counts-tbody').innerHTML=actionRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.value||'unknown')}</span></td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+      <td class="flags">${sections}</td>
+      <td class="flags">${statuses}</td>
+      <td class="tokens">${(rolloutSummary.latest_warning_count||0).toLocaleString()}</td>
+      <td class="flags">${missing}</td>
+    </tr>`).join('')||`<tr><td colspan="6" style="color:#8b949e">No rollout-action lifecycle metadata yet; ${esc(rollout.next_read_only_command||'review command available')}</td></tr>`;
     const adoption=d.adoption||{};
     const funnel=adoption.funnel||[];
     document.getElementById('managed-pattern-funnel-tbody').innerHTML=funnel.map(row=>`<tr>
