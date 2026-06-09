@@ -5739,7 +5739,8 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
     output_tokens = r.get("actual_output_tokens")
     if output_tokens is None:
         output_tokens = r.get("output_tokens_est")
-    source_surface = _source_surface(provider, str(r.get("path") or ""))
+    source_surface = str(r.get("source_surface") or _source_surface(provider, str(r.get("path") or "")))
+    endpoint = str(r.get("endpoint") or str(r.get("path") or ""))
     quality_signals = derive_provider_quality_signals(
         source_surface=source_surface,
         status_code=r.get("status_code"),
@@ -5764,8 +5765,14 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
         "candidate_target_model": target_model,
         "target_model": target_model,
         "routed_model": routed_model,
+        "provider": provider,
+        "endpoint": endpoint,
+        "requested_model_family": r.get("requested_model_family"),
+        "routed_model_family": r.get("routed_model_family"),
         "input_features": {
             "path": r.get("path"),
+            "endpoint": endpoint,
+            "source_surface": source_surface,
             "stream": bool(r.get("stream")),
             "category": r.get("category") or routing.get("category"),
             "text_chars": routing.get("text_chars"),

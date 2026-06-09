@@ -250,6 +250,10 @@ class SQLiteStore:
             self._ensure_column("calls", "cache_json", "text")
             self._ensure_column("calls", "thinking_output_tokens", "integer")
             self._ensure_column("calls", "provider", "text")
+            self._ensure_column("calls", "source_surface", "text")
+            self._ensure_column("calls", "endpoint", "text")
+            self._ensure_column("calls", "requested_model_family", "text")
+            self._ensure_column("calls", "routed_model_family", "text")
             cur.execute("""
             create table if not exists routing_experiments (
               id text primary key,
@@ -454,6 +458,7 @@ class SQLiteStore:
             "latency_ms", "input_tokens_est", "output_tokens_est", "actual_input_tokens", "actual_output_tokens",
             "cost_est_usd", "cost_baseline_usd", "crunch_json", "routing_json", "cache_json", "error", "request_json", "response_json", "session_id",
             "category", "cache_creation_input_tokens", "cache_read_input_tokens", "retry_count", "thinking_output_tokens", "provider",
+            "source_surface", "endpoint", "requested_model_family", "routed_model_family",
         ]
         values = [kwargs.get(c, "anthropic") if c == "provider" else kwargs.get(c) for c in cols]
         with self._lock:
@@ -852,7 +857,11 @@ class PostgresStore(SQLiteStore):
               cache_read_input_tokens integer,
               retry_count integer,
               thinking_output_tokens integer,
-              provider text
+              provider text,
+              source_surface text,
+              endpoint text,
+              requested_model_family text,
+              routed_model_family text
             )
             """,
             """
@@ -931,6 +940,8 @@ class PostgresStore(SQLiteStore):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
+        for column in ("source_surface", "endpoint", "requested_model_family", "routed_model_family"):
+            self.conn.execute(f"alter table calls add column if not exists {column} text")
         self.conn.execute("""
             create index if not exists idx_codex_app_events_start_recent
             on codex_app_events(direction, method, created_at)
