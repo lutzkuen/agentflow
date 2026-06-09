@@ -1003,6 +1003,141 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(cache_holdout["outcome"], "holdout")
         self.assertEqual(cache_holdout["pattern_hash"], pattern_hash)
 
+    def test_pattern_policy_evidence_queues_metadata_only_outcomes(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        FakeAsyncClient.error = RuntimeError("feedback unavailable")
+        pattern_hash = "sha256:" + "c" * 64
+        routing_meta = {
+            "category": "tool-result",
+            "managed_recommendation": {"optimization_unit_id": 7, "policy_id": "routing-candidate"},
+            "managed_pattern_features": {
+                "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                "present": True,
+                "pattern_hash": pattern_hash,
+                "normalized_pattern_hash": pattern_hash,
+                "pattern_hashes": [pattern_hash],
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-result",
+                "workflow_phase": "tool-result",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "1k_4k_tokens",
+                "pattern_types": ["tool_results"],
+                "local_pattern_module_families": ["tool_results"],
+                "local_pattern_module_count": 1,
+                "raw_pattern_strings_included": False,
+            },
+        }
+        outcome = recommendations.build_outcome_feedback(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            status_code=400,
+            latency_ms=2200,
+            retry_count=2,
+            input_tokens_est=1200,
+            output_tokens_est=120,
+            actual_input_tokens=1100,
+            actual_output_tokens=80,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            thinking_output_tokens=None,
+            cost_est_usd=0.002,
+            cost_baseline_usd=0.006,
+            cache_meta={
+                "status": "skipped",
+                "reason": "tools-disabled",
+                "policy_source": "local-default",
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "skip_reasons": [
+                        {
+                            "rule_id": "cache-holdout-rule",
+                            "candidate_id": "cache-holdout-candidate",
+                            "policy_source": "managed-recommended",
+                            "reason": "canary_holdout",
+                            "matched_hashes": [pattern_hash],
+                            "canary": {"enabled": True, "status": "holdout", "cohort": "canary_holdout"},
+                        }
+                    ],
+                },
+            },
+            crunch_meta={
+                "pattern_rules": {
+                    "configured_count": 2,
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "crunch-applied-rule",
+                            "candidate_id": "crunch-applied-candidate",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": [pattern_hash],
+                            "applied_count": 1,
+                            "saved_chars": 800,
+                            "canary": {"enabled": True, "status": "applied", "cohort": "canary_applied"},
+                        },
+                        {
+                            "rule_id": "crunch-bypass-rule",
+                            "candidate_id": "crunch-bypass-candidate",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": [pattern_hash],
+                            "applied_count": 0,
+                            "skip_reasons": [{"reason": "local-canary-safety-stop", "count": 1, "pattern_hash": pattern_hash}],
+                        },
+                    ],
+                },
+                "raw_request": "must stay local",
+                "pattern_text": "raw pattern text must stay local",
+            },
+            routing_meta=routing_meta,
+            category="tool-result",
+            session_id="session-secret",
+            error="raw upstream error body must stay local enough to be classed only",
+        )
+
+        recommendations.assert_managed_egress_safe(outcome)
+        evidence = outcome["pattern_policy_evidence"]
+        cohorts = {item["cohort"] for item in evidence}
+        actions = {item["action_family"] for item in evidence}
+        outcomes = {item["outcome"] for item in evidence}
+        self.assertIn("canary_applied", cohorts)
+        self.assertIn("canary_holdout", cohorts)
+        self.assertIn("bypassed", cohorts)
+        self.assertIn("routing", actions)
+        self.assertIn("crunch", actions)
+        self.assertIn("cache", actions)
+        self.assertIn("failed", outcomes)
+        self.assertTrue(all(item["status_code_bucket"] == "4xx" for item in evidence))
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                    meta = asyncio.run(
+                        recommendations.queue_outcome_feedback(
+                            store,
+                            {"optimization_unit_id": 7},
+                            outcome,
+                            source_surface="anthropic_messages",
+                        )
+                    )
+                row = store.conn.execute("select payload_json from managed_outcome_feedback_queue").fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "retryable-error")
+        payload = json.loads(row["payload_json"])
+        recommendations.assert_managed_egress_safe(payload)
+        self.assertIn("pattern_policy_evidence", payload)
+        rendered = stable_json(payload)
+        self.assertNotIn("session-secret", rendered)
+        self.assertNotIn("must stay local", rendered)
+        self.assertNotIn("raw pattern text", rendered)
+
     def test_outcome_feedback_failure_is_non_fatal_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         FakeAsyncClient.error = RuntimeError("feedback unavailable")

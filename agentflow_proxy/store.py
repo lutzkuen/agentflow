@@ -756,6 +756,36 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def managed_outcome_feedback_payload_rows(
+        self,
+        *,
+        source_surface: str | None = None,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        if source_surface:
+            rows = self.conn.execute(
+                """
+                select id, source_surface, endpoint, status, payload_json
+                from managed_outcome_feedback_queue
+                where source_surface = ?
+                order by created_at asc
+                limit ?
+                """,
+                (source_surface, capped),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                select id, source_surface, endpoint, status, payload_json
+                from managed_outcome_feedback_queue
+                order by created_at asc
+                limit ?
+                """,
+                (capped,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def log_routing_experiment(self, **kwargs: Any) -> None:
         cols = [
             "id", "call_id", "created_at", "requested_model", "routed_model",

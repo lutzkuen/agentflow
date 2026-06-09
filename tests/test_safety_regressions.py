@@ -526,7 +526,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(feedback["error_class"], "invalid_request_error")
         self.assertEqual(feedback["quality_signals"]["status"], "failure")
         self.assertIn("failure", feedback["quality_signals"]["signal_codes"])
-        self.assertIn("provider rejected request", feedback["error_message_prefix"])
+        self.assertTrue(feedback["error_present"])
+        self.assertFalse(feedback["raw_error_included"])
+        self.assertNotIn("provider rejected request", str(feedback))
         self.assertNotIn("raw failing prompt", str(feedback))
 
     def test_anthropic_feedback_failure_is_silent_and_recorded_locally(self):

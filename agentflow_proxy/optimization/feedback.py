@@ -49,6 +49,67 @@ def breakdown_from_counts(counts: dict[str, int]) -> list[dict[str, Any]]:
     ]
 
 
+def _safe_payload_json(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _pattern_evidence_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    item_count = 0
+    status_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    endpoint_status: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        payload = _safe_payload_json(row)
+        evidence = payload.get("pattern_policy_evidence")
+        if not isinstance(evidence, list) or not evidence:
+            continue
+        row_count += 1
+        row_items = [item for item in evidence if isinstance(item, dict)]
+        item_count += len(row_items)
+        status = str(row.get("status") or "unknown")
+        endpoint = str(row.get("endpoint") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
+        key = (endpoint, status)
+        bucket = endpoint_status.setdefault(
+            key,
+            {"endpoint": endpoint, "status": status, "queue_rows": 0, "evidence_items": 0},
+        )
+        bucket["queue_rows"] += 1
+        bucket["evidence_items"] += len(row_items)
+        for item in row_items:
+            action = str(item.get("action_family") or "unknown")
+            action_counts[action] = action_counts.get(action, 0) + 1
+    return {
+        "schema": "agentflow.managed_pattern_evidence_queue_status.v1",
+        "queue_rows": row_count,
+        "evidence_items": item_count,
+        "status_breakdown": breakdown_from_counts(status_counts),
+        "endpoint_breakdown": breakdown_from_counts(endpoint_counts),
+        "action_family_breakdown": breakdown_from_counts(action_counts),
+        "endpoint_status_breakdown": sorted(
+            endpoint_status.values(),
+            key=lambda item: (-int(item["queue_rows"]), str(item["endpoint"]), str(item["status"])),
+        ),
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -136,6 +197,7 @@ def managed_feedback_status_result(
         "oldest_pending_age_seconds": seconds_since(oldest_pending.get("created_at"), now) if oldest_pending else None,
         "retry_limit_drops": dropped,
     }
+    pattern_evidence = _pattern_evidence_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -143,6 +205,7 @@ def managed_feedback_status_result(
         "source_surface": source_surface,
         "managed_feedback": managed_feedback_config(),
         "summary": summary,
+        "pattern_evidence": pattern_evidence,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,

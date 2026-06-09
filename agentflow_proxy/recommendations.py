@@ -125,6 +125,22 @@ def _retry_bucket(value: Any) -> str:
     )
 
 
+def _status_code_bucket(value: Any) -> str:
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if code < 200:
+        return "lt_2xx"
+    if code < 300:
+        return "2xx"
+    if code < 400:
+        return "3xx"
+    if code < 500:
+        return "4xx"
+    return "5xx"
+
+
 def _net_savings_bucket(value: Any) -> str:
     try:
         amount = float(value)
@@ -967,11 +983,14 @@ def _compact_error(error: str | None, status_code: int | None) -> dict[str, Any]
                 error_class = body["type"]
     except Exception:
         head = error_text.split(":", 1)[0].strip()
-        if head and len(head) <= 80:
+        if head and len(head) <= 80 and all(ch.isalnum() or ch in {"_", "-"} for ch in head):
             error_class = head
     return {
         "error_class": error_class,
-        "error_message_prefix": error_text[:200],
+        "error_present": True,
+        "error_chars_bucket": _text_bucket(len(error_text)),
+        "error_sha256": "sha256:" + hashlib.sha256(error_text.encode("utf-8")).hexdigest(),
+        "raw_error_included": False,
     }
 
 
@@ -1036,6 +1055,206 @@ def _copy_canary_meta(meta: dict[str, Any]) -> dict[str, Any] | None:
         )
         if canary.get(key) is not None
     }
+
+
+def _pattern_evidence_cohort(decision: dict[str, Any]) -> str:
+    cohort = decision.get("cohort")
+    if cohort in {"canary_applied", "canary_holdout", "bypassed", "skipped"}:
+        return str(cohort)
+    status = str(decision.get("status") or "").lower()
+    outcome = str(decision.get("outcome") or "").lower()
+    reason = str(decision.get("reason") or "").lower()
+    if status == "holdout" or outcome == "holdout" or reason == "canary_holdout":
+        return "canary_holdout"
+    if status in {"bypass", "bypassed"} or outcome == "bypassed" or "bypass" in reason or "disabled" in reason:
+        return "bypassed"
+    if status in {"applied", "hit"} or _safe_int(decision.get("applied_count")) > 0:
+        return "canary_applied"
+    return "skipped"
+
+
+def _pattern_evidence_outcome(decision: dict[str, Any], status_code: int | None) -> str:
+    if status_code is not None and int(status_code) >= 400:
+        return "failed"
+    outcome = decision.get("outcome")
+    if isinstance(outcome, str) and outcome:
+        if outcome == "errored":
+            return "failed"
+        return outcome
+    status = decision.get("status")
+    if isinstance(status, str) and status:
+        return status
+    return "unknown"
+
+
+def _pattern_evidence_action_family(decision: dict[str, Any]) -> str:
+    decision_type = str(decision.get("decision_type") or "")
+    if decision_type in {"routing", "crunch", "cache"}:
+        return decision_type
+    pattern_family = str(decision.get("pattern_family") or "")
+    if pattern_family in {"routing", "crunch", "cache"}:
+        return pattern_family
+    if decision_type == "local_pattern_fingerprint":
+        return "fingerprint"
+    return decision_type or "unknown"
+
+
+def _pattern_evidence_hashes(decision: dict[str, Any]) -> tuple[str | None, list[str]]:
+    hashes: list[str] = []
+    for item in decision.get("pattern_hashes") or []:
+        if isinstance(item, str) and item.startswith("sha256:"):
+            hashes.append(item)
+    pattern_hash = decision.get("pattern_hash")
+    if isinstance(pattern_hash, str) and pattern_hash.startswith("sha256:"):
+        hashes.insert(0, pattern_hash)
+    deduped = sorted(set(hashes))
+    primary = pattern_hash if isinstance(pattern_hash, str) and pattern_hash.startswith("sha256:") else (deduped[0] if deduped else None)
+    return primary, deduped
+
+
+def _pattern_evidence_row(
+    decision: dict[str, Any],
+    *,
+    action_family: str | None = None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    savings_usd: float | None = None,
+) -> dict[str, Any] | None:
+    pattern_hash, pattern_hashes = _pattern_evidence_hashes(decision)
+    if pattern_hash is None:
+        return None
+    savings = savings_usd if savings_usd is not None else _safe_float(decision.get("estimated_cost_savings_usd"))
+    row = {
+        "schema": "agentflow.managed_pattern_policy_evidence.v1",
+        "source_surface": decision.get("source_surface"),
+        "app_family": decision.get("app_family"),
+        "action_family": action_family or _pattern_evidence_action_family(decision),
+        "pattern_family": decision.get("pattern_family") or action_family or _pattern_evidence_action_family(decision),
+        "pattern_hash": pattern_hash,
+        "pattern_hashes": pattern_hashes,
+        "candidate_id": decision.get("candidate_id"),
+        "rule_id": decision.get("rule_id"),
+        "policy_source": decision.get("policy_source"),
+        "cohort": _pattern_evidence_cohort(decision),
+        "local_decision_status": decision.get("status"),
+        "local_outcome": decision.get("outcome"),
+        "outcome": _pattern_evidence_outcome(decision, status_code),
+        "status_code_bucket": _status_code_bucket(status_code),
+        "retry_bucket": _retry_bucket(retry_count),
+        "latency_bucket": _latency_bucket(latency_ms),
+        "savings_bucket": _net_savings_bucket(savings),
+        "tokens_saved_bucket": _token_bucket(decision.get("tokens_saved_est")),
+        "category": decision.get("category"),
+        "workflow_phase": decision.get("workflow_phase"),
+        "text_bucket": decision.get("text_bucket"),
+        "token_bucket": decision.get("token_bucket"),
+        "replayability_level": decision.get("replayability_level"),
+        "evidence_only": bool(decision.get("evidence_only")),
+        "raw_pattern_strings_included": False,
+        "raw_payload_included": False,
+    }
+    for key in (
+        "pattern_types",
+        "local_pattern_module_families",
+        "local_pattern_module_count",
+        "hit_type",
+    ):
+        if decision.get(key) is not None:
+            row[key] = decision.get(key)
+    return {key: value for key, value in row.items() if value is not None}
+
+
+def pattern_policy_evidence_summaries(
+    *,
+    provider: str,
+    path: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    cache_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: str | None,
+    pattern_decisions: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build feature-only managed policy evidence from local pattern outcomes."""
+    decisions = pattern_decisions if pattern_decisions is not None else pattern_decision_summaries(
+        provider=provider,
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        cache_meta=cache_meta,
+        crunch_meta=crunch_meta,
+        routing_meta=routing_meta,
+        category=category,
+    )
+    rows: list[dict[str, Any]] = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        row = _pattern_evidence_row(
+            decision,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
+        )
+        if row is not None:
+            rows.append(row)
+
+    diagnostics = routing_meta.get("managed_pattern_features") if isinstance(routing_meta, dict) else None
+    if isinstance(diagnostics, dict) and diagnostics.get("present"):
+        pattern_hash = diagnostics.get("pattern_hash") or diagnostics.get("normalized_pattern_hash")
+        if isinstance(pattern_hash, str) and pattern_hash.startswith("sha256:"):
+            routing_changed = bool(requested_model and routed_model and requested_model != routed_model)
+            managed = routing_meta.get("managed_recommendation") if isinstance(routing_meta.get("managed_recommendation"), dict) else {}
+            routing_decision = {
+                "schema": "agentflow.pattern_decision_summary.v1",
+                "decision_type": "routing",
+                "source_surface": diagnostics.get("source_surface") or _source_surface(provider, path),
+                "app_family": diagnostics.get("app_family") or _app_family(provider, requested_model or "", path),
+                "category": diagnostics.get("category") or category or routing_meta.get("category") or "unknown",
+                "workflow_phase": diagnostics.get("workflow_phase") or routing_meta.get("workflow_phase") or category or "unknown",
+                "rule_id": routing_meta.get("rule_id") or routing_meta.get("routing_rule_id") or routing_meta.get("matched_rule_id"),
+                "candidate_id": managed.get("candidate_id") or routing_meta.get("managed_policy_id") or managed.get("policy_id"),
+                "pattern_hash": pattern_hash,
+                "pattern_hashes": [pattern_hash],
+                "pattern_family": "routing",
+                "pattern_types": diagnostics.get("pattern_types") or [],
+                "local_pattern_module_families": diagnostics.get("local_pattern_module_families") or [],
+                "local_pattern_module_count": _safe_int(diagnostics.get("local_pattern_module_count")),
+                "policy_source": routing_meta.get("final_policy_source") or routing_meta.get("policy_source") or "local-default",
+                "status": "applied" if routing_changed else "skipped",
+                "outcome": _pattern_outcome(status_code, applied=routing_changed),
+                "applied_count": 1 if routing_changed else 0,
+                "estimated_cost_savings_usd": max(_safe_float(cost_baseline_usd) - _safe_float(cost_est_usd), 0.0) if routing_changed else 0.0,
+                "text_bucket": diagnostics.get("text_bucket"),
+                "token_bucket": diagnostics.get("token_bucket"),
+                "replayability_level": diagnostics.get("replayability_level"),
+                "evidence_only": True,
+            }
+            row = _pattern_evidence_row(
+                routing_decision,
+                action_family="routing",
+                status_code=status_code,
+                latency_ms=latency_ms,
+                retry_count=retry_count,
+            )
+            if row is not None:
+                rows.append(row)
+
+    unique: dict[tuple[str, str, str | None], dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row.get("action_family")), str(row.get("pattern_hash")), row.get("rule_id"))
+        unique[key] = row
+    return _sanitize_features(list(unique.values()))
 
 
 def _pattern_cost_savings(
@@ -1405,6 +1624,19 @@ def build_outcome_feedback(
         crunch_meta=crunch_meta,
         cache_meta=cache_meta,
     )
+    pattern_decisions = pattern_decision_summaries(
+        provider=provider,
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        cache_meta=cache_meta,
+        crunch_meta=crunch_meta,
+        routing_meta=routing_meta,
+        category=category,
+    )
     features: dict[str, Any] = {
         "provider": provider,
         "source_surface": source_surface,
@@ -1440,18 +1672,22 @@ def build_outcome_feedback(
         },
         "crunch_saved_chars": crunch_meta.get("saved_chars"),
         "crunch_tokens_saved_est": crunch_meta.get("tokens_saved_est"),
-        "pattern_decisions": pattern_decision_summaries(
+        "pattern_decisions": pattern_decisions,
+        "pattern_policy_evidence": pattern_policy_evidence_summaries(
             provider=provider,
             path=path,
             requested_model=requested_model,
             routed_model=routed_model,
             status_code=status_code,
+            latency_ms=latency_ms,
+            retry_count=retry_count,
             cost_est_usd=cost_est_usd,
             cost_baseline_usd=cost_baseline_usd,
             cache_meta=cache_meta,
             crunch_meta=crunch_meta,
             routing_meta=routing_meta,
             category=category,
+            pattern_decisions=pattern_decisions,
         ),
         "category": category or routing_meta.get("category"),
         "session": {
@@ -1943,6 +2179,19 @@ def build_codex_turn_outcome_feedback(
         crunch_meta=crunch_meta,
         cache_meta=cache_meta,
     )
+    pattern_decisions = pattern_decision_summaries(
+        provider="openai",
+        path="codex-app://turn/start",
+        requested_model=routing_meta.get("requested_model") or codex_app_model(),
+        routed_model=routing_meta.get("routed_model") or routing_meta.get("requested_model") or codex_app_model(),
+        status_code=500 if error_code is not None else 200,
+        cost_est_usd=cost_est,
+        cost_baseline_usd=baseline_cost,
+        cache_meta=cache_meta,
+        crunch_meta=crunch_meta,
+        routing_meta=routing_meta,
+        category=routing_meta.get("category") or "codex_turn",
+    )
     features: dict[str, Any] = {
         "provider": "codex-app",
         "source_surface": CODEX_APP_SOURCE_SURFACE,
@@ -1980,18 +2229,22 @@ def build_codex_turn_outcome_feedback(
             "saved_chars": crunch_meta.get("saved_chars"),
             "tokens_saved_est": crunch_meta.get("tokens_saved_est"),
         },
-        "pattern_decisions": pattern_decision_summaries(
+        "pattern_decisions": pattern_decisions,
+        "pattern_policy_evidence": pattern_policy_evidence_summaries(
             provider="openai",
             path="codex-app://turn/start",
             requested_model=routing_meta.get("requested_model") or codex_app_model(),
             routed_model=routing_meta.get("routed_model") or routing_meta.get("requested_model") or codex_app_model(),
             status_code=500 if error_code is not None else 200,
+            latency_ms=latency_ms,
+            retry_count=0,
             cost_est_usd=cost_est,
             cost_baseline_usd=baseline_cost,
             cache_meta=cache_meta,
             crunch_meta=crunch_meta,
             routing_meta=routing_meta,
             category=routing_meta.get("category") or "codex_turn",
+            pattern_decisions=pattern_decisions,
         ),
         "session": {
             "present": bool(session_id),

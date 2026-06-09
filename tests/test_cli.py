@@ -3802,6 +3802,28 @@ class ManagedFeedbackCliTests(unittest.TestCase):
                         "policy_source": "managed-recommended",
                     }
                 ],
+                "pattern_policy_evidence": [
+                    {
+                        "schema": "agentflow.managed_pattern_policy_evidence.v1",
+                        "source_surface": "codex_turn",
+                        "app_family": "codex",
+                        "action_family": "routing",
+                        "pattern_family": "routing",
+                        "pattern_hash": "sha256:" + "4" * 64,
+                        "pattern_hashes": ["sha256:" + "4" * 64],
+                        "candidate_id": "candidate-routing",
+                        "rule_id": "rule-routing",
+                        "policy_source": "managed-recommended",
+                        "cohort": "canary_applied",
+                        "outcome": "applied",
+                        "status_code_bucket": "2xx",
+                        "retry_bucket": "none",
+                        "latency_bucket": "lt_500ms",
+                        "savings_bucket": "lt_0_001_usd",
+                        "raw_pattern_strings_included": False,
+                        "raw_payload_included": False,
+                    }
+                ],
             }),
             status=status,
             attempts=attempts,
@@ -3830,6 +3852,18 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.managed_feedback_status.v1")
         self.assertEqual(payload["summary"]["queued"], 1)
         self.assertEqual(payload["summary"]["due"], 1)
+        self.assertEqual(payload["pattern_evidence"]["queue_rows"], 1)
+        self.assertEqual(payload["pattern_evidence"]["evidence_items"], 1)
+        self.assertEqual(
+            payload["pattern_evidence"]["endpoint_status_breakdown"][0],
+            {
+                "endpoint": "/v1/optimization-units/77/outcome",
+                "status": "queued",
+                "queue_rows": 1,
+                "evidence_items": 1,
+            },
+        )
+        self.assertFalse(payload["pattern_evidence"]["payload_json_included"])
         self.assertFalse(payload["due_samples"][0]["payload_included"])
         rendered = stdout.getvalue()
         self.assertNotIn("must stay local", rendered)
