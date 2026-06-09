@@ -561,9 +561,17 @@ def cache_lookup_meta(
     *,
     pattern_features: dict[str, Any] | None = None,
     store_obj: Any | None = None,
+    managed_profile: dict[str, Any] | None = None,
 ) -> tuple[bool, bool, dict[str, Any]]:
-    exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
-    semantic_enabled = SEMANTIC_CACHE_ENABLED and not has_tool_blocks
+    managed_profile = managed_profile if isinstance(managed_profile, dict) else None
+    base_exact_enabled = CACHE_ENABLED
+    base_semantic_enabled = SEMANTIC_CACHE_ENABLED
+    if managed_profile and managed_profile.get("exact_enabled") is not None:
+        base_exact_enabled = bool(managed_profile.get("exact_enabled"))
+    if managed_profile and managed_profile.get("semantic_enabled") is not None:
+        base_semantic_enabled = bool(managed_profile.get("semantic_enabled"))
+    exact_enabled = base_exact_enabled and (CACHE_TOOL_CALLS or not has_tool_blocks)
+    semantic_enabled = base_semantic_enabled and not has_tool_blocks
     local_replayability_level = "local-exact-response" if CACHE_ENABLED else "features_only"
     pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
         has_tool_blocks=has_tool_blocks,
@@ -588,13 +596,19 @@ def cache_lookup_meta(
     else:
         status = "skipped"
         reason = "cache-disabled"
-    return exact_enabled, semantic_enabled, _attach_cache_pattern_meta(cache_decision_meta(
+    meta = _attach_cache_pattern_meta(cache_decision_meta(
         status,
         reason,
-        enabled=CACHE_ENABLED or SEMANTIC_CACHE_ENABLED,
+        enabled=base_exact_enabled or base_semantic_enabled,
         exact_enabled=exact_enabled,
         semantic_enabled=semantic_enabled,
     ), pattern_rule=pattern_rule, skip_reasons=pattern_skip_reasons)
+    if managed_profile:
+        meta["policy_source"] = str(managed_profile.get("policy_source") or "managed-recommended")
+        meta["managed_profile"] = managed_profile
+        if managed_profile.get("semantic_threshold") is not None:
+            meta["semantic_threshold"] = float(managed_profile["semantic_threshold"])
+    return exact_enabled, semantic_enabled, meta
 
 
 def streaming_cache_lookup_meta(
@@ -602,8 +616,13 @@ def streaming_cache_lookup_meta(
     *,
     pattern_features: dict[str, Any] | None = None,
     store_obj: Any | None = None,
+    managed_profile: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
+    managed_profile = managed_profile if isinstance(managed_profile, dict) else None
+    base_exact_enabled = CACHE_ENABLED
+    if managed_profile and managed_profile.get("exact_enabled") is not None:
+        base_exact_enabled = bool(managed_profile.get("exact_enabled"))
+    exact_enabled = base_exact_enabled and (CACHE_TOOL_CALLS or not has_tool_blocks)
     pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
         has_tool_blocks=has_tool_blocks,
         stream=True,
@@ -622,13 +641,17 @@ def streaming_cache_lookup_meta(
     else:
         status = "skipped"
         reason = "streaming-cache-disabled"
-    return exact_enabled, _attach_cache_pattern_meta(cache_decision_meta(
+    meta = _attach_cache_pattern_meta(cache_decision_meta(
         status,
         reason,
-        enabled=CACHE_ENABLED,
+        enabled=base_exact_enabled,
         exact_enabled=exact_enabled,
         semantic_enabled=False,
     ), pattern_rule=pattern_rule, skip_reasons=pattern_skip_reasons)
+    if managed_profile:
+        meta["policy_source"] = str(managed_profile.get("policy_source") or "managed-recommended")
+        meta["managed_profile"] = managed_profile
+    return exact_enabled, meta
 
 
 def stream_cache_payload(

@@ -50,6 +50,10 @@ from agentflow_proxy.optimization.openai_recommendations import (
     apply_openai_recommendation_decision,
     fetch_openai_recommendation_decision,
 )
+from agentflow_proxy.optimization.managed_actions import (
+    cache_profile_from_decision,
+    crunch_profile_from_decision,
+)
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.recommendations import (
@@ -437,7 +441,16 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
     net_retries = 0
 
     try:
-        crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
+        managed_crunch_profile = crunch_profile_from_decision(preflight_decision)
+        managed_cache_profile = cache_profile_from_decision(preflight_decision)
+        if managed_crunch_profile:
+            crunched, crunch_meta = crunch_body(
+                raw_body,
+                store_obj=context.store,
+                managed_profile=managed_crunch_profile,
+            )
+        else:
+            crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
         routed_model, routing_meta = route_openai_model(crunched)
         resolved_requested_model = str(crunched.get("model") or requested_model)
         crunched["model"] = routed_model
@@ -460,6 +473,8 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         routing_meta["openai_local_feature_unit"] = summarize_openai_request_feature_unit(local_feature_unit)
         routing_meta.update(openai_call_store_fields(path, resolved_requested_model, str(crunched.get("model") or routed_model)))
         routing_meta["managed_pattern_features"] = preflight_pattern_features
+        if isinstance(preflight_decision.get("local_actions"), dict):
+            routing_meta["managed_local_actions"] = preflight_decision["local_actions"]
         recommendation_meta = apply_openai_recommendation_decision(
             body=crunched,
             routing_meta=routing_meta,
@@ -645,6 +660,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             has_tool_blocks,
             pattern_features=routing_meta.get("managed_pattern_features"),
             store_obj=context.store,
+            managed_profile=managed_cache_profile,
         )
         key = cache_key_for(
             crunched,
@@ -733,7 +749,8 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
 
         if can_semantic_cache:
             emb = build_embedding(extract_text(crunched))
-            sem_resp = context.store.get_semantic_cache(emb, str(crunched.get("model")), SEMANTIC_CACHE_THRESHOLD)
+            semantic_threshold = float(cache_meta.get("semantic_threshold", SEMANTIC_CACHE_THRESHOLD))
+            sem_resp = context.store.get_semantic_cache(emb, str(crunched.get("model")), semantic_threshold)
             if sem_resp is not None:
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(sem_resp))

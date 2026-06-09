@@ -708,27 +708,49 @@ def disabled_recommendation_meta() -> dict[str, Any]:
 def _normalize_recommendation(body: Any) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(body, dict):
         return None, "response was not a JSON object"
-    target_model = body.get("target_model")
+    routing = body.get("routing") if isinstance(body.get("routing"), dict) else {}
+    target_model = body.get("target_model") or routing.get("target_model")
     confidence = body.get("confidence")
-    policy_id = body.get("policy_id")
-    reason = body.get("reason")
-    if not isinstance(target_model, str) or not target_model:
+    policy_id = body.get("policy_id") or routing.get("policy_id")
+    reason = body.get("reason") or routing.get("reason")
+    has_policy_sections = any(isinstance(body.get(section), dict) for section in ("routing", "crunch", "cache"))
+    if not has_policy_sections and (not isinstance(target_model, str) or not target_model):
         return None, "missing target_model"
     if not isinstance(confidence, (int, float)):
+        confidence = 0.0 if has_policy_sections else None
+    if confidence is None:
         return None, "missing confidence"
     if not isinstance(policy_id, str) or not policy_id:
+        policy_id = str(body.get("recommendation_id") or "managed-policy-decision") if has_policy_sections else ""
+    if not policy_id:
         return None, "missing policy_id"
     if not isinstance(reason, str) or not reason:
+        reason = "managed local action policy decision" if has_policy_sections else ""
+    if not reason:
         return None, "missing reason"
 
     replacement_prompt = body.get("replacement_prompt")
     normalized = {
-        "target_model": target_model,
+        "target_model": target_model if isinstance(target_model, str) else None,
         "confidence": float(confidence),
         "policy_id": policy_id,
         "reason": reason,
         "replacement_prompt_present": isinstance(replacement_prompt, str) and bool(replacement_prompt),
     }
+    for key in ("schema", "provider", "source_surface", "expires_at", "expiry"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            normalized[key] = value
+    for key in ("routing", "crunch", "cache", "privacy_summary", "provenance"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            normalized[key] = _sanitize_features(value)
+    actions = body.get("actions")
+    if isinstance(actions, list):
+        normalized["actions"] = _sanitize_features(actions)
+    for key in ("signed", "signature_required", "requires_signature", "raw_payload_included"):
+        if isinstance(body.get(key), bool):
+            normalized[key] = bool(body[key])
     optimization_unit_id = body.get("optimization_unit_id")
     if isinstance(optimization_unit_id, int):
         normalized["optimization_unit_id"] = optimization_unit_id

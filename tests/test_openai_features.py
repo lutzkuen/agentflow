@@ -508,6 +508,207 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(managed["apply_reason"], "provider-mismatch")
         self.assertFalse(managed["applied"])
 
+    def test_openai_policy_decision_applies_routing_crunch_and_cache_profiles_locally(self):
+        long_text = "alpha " * 2200
+        request_body = {
+            "model": "gpt-5-codex",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": long_text},
+                {"role": "assistant", "content": "ack"},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "ack"},
+                {"role": "user", "content": "finish"},
+            ],
+        }
+        recommendation = {
+            "schema": "agentflow.policy_decision.v1",
+            "enabled": True,
+            "status": "received",
+            "provider": "openai",
+            "source_surface": "openai_chat",
+            "confidence": 0.94,
+            "policy_id": "managed-local-actions",
+            "reason": "feature-only policy decision",
+            "routing": {"target_model": "gpt-5-mini"},
+            "crunch": {"profile": "aggressive", "threshold_chars": 1000},
+            "cache": {"profile": "semantic", "semantic_threshold": 0.82},
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+        }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                return_value=recommendation,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/chat/completions", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = CapturingOpenAIClient.calls[0]["json"]
+        self.assertEqual(forwarded["model"], "gpt-5-mini")
+        self.assertIn("middle of long older text block omitted", forwarded["messages"][1]["content"])
+        [row] = server.store.conn.execute("select routed_model, routing_json, crunch_json, cache_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        crunch = json.loads(row["crunch_json"])
+        cache = json.loads(row["cache_json"])
+
+        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(routing["managed_recommendation"]["status"], "applied")
+        self.assertTrue(routing["managed_recommendation"]["changed_model"])
+        self.assertEqual(routing["managed_local_actions"]["crunch"]["status"], "applied")
+        self.assertEqual(routing["managed_local_actions"]["cache"]["status"], "applied")
+        self.assertEqual(crunch["policy_source"], "managed-recommended")
+        self.assertEqual(crunch["threshold_chars"], 1000)
+        self.assertEqual(cache["policy_source"], "managed-recommended")
+        self.assertTrue(cache["semantic_enabled"])
+        self.assertEqual(cache["semantic_threshold"], 0.82)
+        self.assertNotIn(long_text, row["routing_json"])
+
+    def test_openai_policy_decision_rejects_raw_like_unsafe_actions(self):
+        request_body = {"model": "gpt-5-codex", "input": "short prompt"}
+        recommendation = {
+            "schema": "agentflow.policy_decision.v1",
+            "enabled": True,
+            "status": "received",
+            "provider": "openai",
+            "source_surface": "openai_responses",
+            "confidence": 0.9,
+            "policy_id": "unsafe-policy",
+            "reason": "unsafe",
+            "routing": {"target_model": "gpt-5-mini"},
+            "crunch": {"profile": "aggressive", "threshold_chars": 1},
+            "privacy_summary": {"metadata_only": False, "raw_payload_included": True},
+        }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                return_value=recommendation,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routing_json, crunch_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        crunch = json.loads(row["crunch_json"])
+        self.assertEqual(routing["managed_recommendation"]["status"], "skipped")
+        self.assertEqual(routing["managed_recommendation"]["apply_reason"], "privacy-not-metadata-only")
+        self.assertEqual(crunch["policy_source"], "local-default")
+
+    def test_openai_policy_decision_rejects_expired_provider_mismatch_and_unknown_actions(self):
+        cases = [
+            (
+                {
+                    "schema": "agentflow.policy_decision.v1",
+                    "enabled": True,
+                    "status": "received",
+                    "provider": "openai",
+                    "source_surface": "openai_responses",
+                    "expires_at": "2000-01-01T00:00:00Z",
+                    "confidence": 0.9,
+                    "policy_id": "expired-policy",
+                    "reason": "expired",
+                    "routing": {"target_model": "gpt-5-mini"},
+                },
+                "expired-policy",
+            ),
+            (
+                {
+                    "schema": "agentflow.policy_decision.v1",
+                    "enabled": True,
+                    "status": "received",
+                    "provider": "anthropic",
+                    "source_surface": "openai_responses",
+                    "confidence": 0.9,
+                    "policy_id": "provider-mismatch-policy",
+                    "reason": "wrong provider",
+                    "routing": {"target_model": "gpt-5-mini"},
+                },
+                "provider-mismatch",
+            ),
+            (
+                {
+                    "schema": "agentflow.policy_decision.v1",
+                    "enabled": True,
+                    "status": "received",
+                    "provider": "openai",
+                    "source_surface": "openai_responses",
+                    "confidence": 0.9,
+                    "policy_id": "unknown-action-policy",
+                    "reason": "unknown action",
+                    "actions": [{"type": "replacement_prompt"}],
+                    "routing": {"target_model": "gpt-5-mini"},
+                },
+                "unsupported-action-type",
+            ),
+        ]
+        for index, (recommendation, expected) in enumerate(cases):
+            CapturingOpenAIClient.calls = []
+            with self.subTest(expected=expected):
+                with patch.dict(os.environ, {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+                    "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+                }):
+                    with patch(
+                        "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                        return_value=recommendation,
+                    ):
+                        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                            response = TestClient(server.app).post(
+                                "/v1/responses",
+                                json={"model": "gpt-5-codex", "input": f"short prompt {index}"},
+                            )
+                self.assertEqual(response.status_code, 200)
+                routing = json.loads(
+                    server.store.conn.execute(
+                        "select routing_json from calls order by created_at desc limit 1"
+                    ).fetchone()["routing_json"]
+                )
+                managed = routing["managed_recommendation"]
+                if expected == "unsupported-action-type":
+                    self.assertEqual(CapturingOpenAIClient.calls[-1]["json"]["model"], "gpt-5-mini")
+                    self.assertEqual(
+                        managed["local_actions"]["unsupported_actions"][0]["reason"],
+                        "unsupported-action-type",
+                    )
+                    self.assertEqual(managed["status"], "applied")
+                else:
+                    self.assertEqual(CapturingOpenAIClient.calls[-1]["json"]["model"], "gpt-5-codex")
+                    self.assertEqual(managed["status"], "skipped")
+                    self.assertEqual(managed["apply_reason"], expected)
+
+    def test_openai_policy_decision_falls_back_when_managed_disabled(self):
+        with patch.dict(os.environ, {
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+        }, clear=False):
+            os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+            with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                response = TestClient(server.app).post(
+                    "/v1/responses",
+                    json={"model": "gpt-5-codex", "input": "short prompt"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        managed = json.loads(row["routing_json"])["managed_recommendation"]
+        self.assertEqual(managed["status"], "skipped")
+        self.assertEqual(managed["apply_reason"], "disabled")
+        self.assertFalse(managed["applied"])
+
 
 if __name__ == "__main__":
     unittest.main()

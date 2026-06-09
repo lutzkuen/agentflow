@@ -4,6 +4,7 @@ import hashlib
 import os
 from typing import Any
 
+from agentflow_proxy.optimization.managed_actions import evaluate_managed_local_actions
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.recommendations import fetch_recommendation
 from agentflow_proxy.store import stable_json
@@ -123,6 +124,13 @@ def _projection(
     }
 
 
+def _managed_target_model(meta: dict[str, Any]) -> Any:
+    routing = meta.get("routing")
+    if isinstance(routing, dict) and routing.get("target_model") is not None:
+        return routing.get("target_model")
+    return meta.get("target_model")
+
+
 def _cohort(recommendation_unit: dict[str, Any], recommendation_meta: dict[str, Any], fraction: float) -> dict[str, Any]:
     policy_id = str(recommendation_meta.get("policy_id") or "unknown-policy")
     pattern_features = recommendation_unit.get("pattern_features")
@@ -175,7 +183,7 @@ def _base_decision(
         "local_model_before_recommendation": current_model,
         "projection": _projection(
             current_model=current_model,
-            target_model=meta.get("target_model") if isinstance(meta.get("target_model"), str) else None,
+            target_model=_managed_target_model(meta) if isinstance(_managed_target_model(meta), str) else None,
             input_tokens_est=input_tokens_est,
             recommendation_meta=meta,
         ),
@@ -229,14 +237,15 @@ async def fetch_openai_recommendation_decision(
         })
         return decision
 
-    target_model, target_error = _safe_openai_target(fetched.get("target_model"))
+    target_model, target_error = _safe_openai_target(_managed_target_model(fetched))
     decision["projection"] = _projection(
         current_model=current_model,
         target_model=target_model,
         input_tokens_est=input_tokens_est,
         recommendation_meta=fetched,
     )
-    if target_error:
+    has_local_action_sections = any(isinstance(fetched.get(section), dict) for section in ("crunch", "cache"))
+    if target_error and not has_local_action_sections:
         decision.update({
             "status": "skipped",
             "apply_reason": target_error,
@@ -260,10 +269,17 @@ async def fetch_openai_recommendation_decision(
         return decision
 
     if mode == "dry-run":
+        decision["local_actions"] = evaluate_managed_local_actions(
+            fetched,
+            provider="openai",
+            current_model=current_model,
+            source_surface=recommendation_unit.get("source_surface"),
+            application_enabled=False,
+        )
         decision.update({
             "status": "dry-run",
             "apply_reason": "dry-run-local-fallback",
-            "would_change_model": True,
+            "would_change_model": target_model is not None and target_model != current_model,
             "would_route_model": target_model,
             "lifecycle_event": "dry_run",
         })
@@ -273,14 +289,44 @@ async def fetch_openai_recommendation_decision(
     canary = _cohort(recommendation_unit, fetched, fraction)
     decision["canary"] = canary
     if not canary["selected"]:
+        decision["local_actions"] = evaluate_managed_local_actions(
+            fetched,
+            provider="openai",
+            current_model=current_model,
+            source_surface=recommendation_unit.get("source_surface"),
+            application_enabled=False,
+        )
         decision.update({
             "status": "holdout",
             "apply_reason": "canary-holdout",
-            "would_change_model": True,
+            "would_change_model": target_model is not None and target_model != current_model,
             "would_route_model": target_model,
             "lifecycle_event": "holdout",
         })
         return decision
+
+    local_actions = evaluate_managed_local_actions(
+        fetched,
+        provider="openai",
+        current_model=current_model,
+        source_surface=recommendation_unit.get("source_surface"),
+        application_enabled=True,
+    )
+    if local_actions.get("status") == "skipped":
+        decision.update({
+            "status": "skipped",
+            "apply_reason": local_actions.get("apply_reason") or "local-action-validation-failed",
+            "local_actions": local_actions,
+            "lifecycle_event": "fallback",
+        })
+        return decision
+    if target_error:
+        decision["routing"] = {
+            "status": "skipped",
+            "applied": False,
+            "target_model": _managed_target_model(fetched) if isinstance(_managed_target_model(fetched), str) else None,
+            "apply_reason": target_error,
+        }
 
     decision.update({
         "status": "selected",
@@ -288,6 +334,7 @@ async def fetch_openai_recommendation_decision(
         "fallback": None,
         "apply_reason": "canary-selected",
         "target_model_normalized": target_model,
+        "local_actions": local_actions,
         "lifecycle_event": "canary_selected",
     })
     return decision
@@ -303,6 +350,9 @@ def apply_openai_recommendation_decision(
     applied = dict(decision)
     target_model = applied.get("target_model_normalized")
     if applied.get("apply_reason") != "canary-selected" or not isinstance(target_model, str):
+        local_actions = applied.get("local_actions")
+        if isinstance(local_actions, dict):
+            routing_meta["managed_local_actions"] = local_actions
         return applied
 
     current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
@@ -330,4 +380,15 @@ def apply_openai_recommendation_decision(
         "apply_reason": "canary-selected",
         "lifecycle_event": "canary_applied",
     })
+    local_actions = applied.get("local_actions")
+    if isinstance(local_actions, dict):
+        local_actions.setdefault("routing", {})
+        if isinstance(local_actions["routing"], dict):
+            local_actions["routing"].update({
+                "status": "applied",
+                "applied": True,
+                "target_model": target_model,
+                "apply_reason": "provider-compatible-local-route",
+            })
+        routing_meta["managed_local_actions"] = local_actions
     return applied

@@ -1731,7 +1731,12 @@ async def maybe_summarize_old_context(
     return summarized, meta
 
 
-def crunch_body(body: dict[str, Any], *, store_obj: Any | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+def crunch_body(
+    body: dict[str, Any],
+    *,
+    store_obj: Any | None = None,
+    managed_profile: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Conservative request cruncher.
 
     It deliberately does NOT summarize with another model. For agent use this is safer.
@@ -1740,12 +1745,17 @@ def crunch_body(body: dict[str, Any], *, store_obj: Any | None = None) -> tuple[
     - deduplicate exact repeated text blocks within the same request
     - if extremely large, compress older non-tool text blocks to bounded heads/tails
     """
+    managed_profile = managed_profile if isinstance(managed_profile, dict) else None
+    policy_source = str((managed_profile or {}).get("policy_source") or CRUNCH_POLICY_SOURCE)
+    threshold_chars = int((managed_profile or {}).get("threshold_chars") or CRUNCH_THRESHOLD_CHARS)
+
     if not CRUNCH_ENABLED:
         return body, {
             "enabled": False,
             "changed": False,
-            "policy_source": CRUNCH_POLICY_SOURCE,
+            "policy_source": policy_source,
             "rule_path": CRUNCH_RULES_PATH,
+            "managed_profile": managed_profile,
         }
 
     new_body = copy.deepcopy(body)
@@ -1814,7 +1824,7 @@ def crunch_body(body: dict[str, Any], *, store_obj: Any | None = None) -> tuple[
         new_body["input"] = process_content(new_body["input"], allow_shorten=False)
 
     messages = new_body.get("messages") or []
-    huge = before > CRUNCH_THRESHOLD_CHARS
+    huge = before > threshold_chars
     for idx, msg in enumerate(messages):
         # only shorten older text, not the latest user/assistant context
         allow_shorten = huge and idx < max(0, len(messages) - 4)
@@ -1840,9 +1850,10 @@ def crunch_body(body: dict[str, Any], *, store_obj: Any | None = None) -> tuple[
         "pattern_rules_applied": pattern_rules_meta["applied_count"],
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
         "pattern_rules": pattern_rules_meta,
-        "policy_source": CRUNCH_POLICY_SOURCE,
+        "policy_source": policy_source,
         "rule_path": CRUNCH_RULES_PATH,
-        "threshold_chars": CRUNCH_THRESHOLD_CHARS,
+        "threshold_chars": threshold_chars,
+        "managed_profile": managed_profile,
         "thinking_deduplication": {
             "enabled": THINKING_DEDUP_ENABLED,
             "min_chars": THINKING_DEDUP_MIN_CHARS,
