@@ -43,6 +43,7 @@ agentflow-old-context-summary-rollout-actions-impact = "agentflow_proxy.cli:old_
 agentflow-codex-app-proxy = "agentflow_proxy.codex_app_proxy:main"
 agentflow-codex-app-client = "agentflow_proxy.codex_app_client:main"
 agentflow-codex-diagnose = "agentflow_proxy.cli:codex_diagnose_main"
+agentflow-phase-routing-report = "agentflow_proxy.cli:phase_routing_report_main"
 agentflow-managed-feedback-status = "agentflow_proxy.cli:managed_feedback_status_main"
 agentflow-managed-feedback-flush = "agentflow_proxy.cli:managed_feedback_flush_main"
 agentflow-managed-pattern-rollups = "agentflow_proxy.cli:managed_pattern_rollups_main"

@@ -113,6 +113,14 @@ The same read-only report is available from a running dashboard or proxy at:
 
 The report uses stored metadata, sizes, and decision JSON only. It does not include raw prompts, params, responses, transcripts, or tool payloads.
 
+To measure Anthropic phase-routing opportunity and blockers before changing routing behavior, run:
+
+```bash
+agentflow-phase-routing-report --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The report groups recent local metadata by provisional workflow phase and downgrade pair, with projected savings, current routed counts, blocker counts, and risk exclusions. It does not print raw prompts, responses, session IDs, request IDs, file paths, or error bodies.
+
 ## Dashboard
 
 The dashboard shows local usage and optimization behavior, including:
