@@ -17,6 +17,7 @@ import httpx
 
 POLICY_RELOAD_PATH = "/agentflow/admin/reload-policies"
 POLICY_BUNDLE_RECOMMENDATION_URL_ENV = "AGENTFLOW_POLICY_BUNDLE_RECOMMENDATION_URL"
+PATTERN_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_PATTERN_ROLLOUT_ACTIONS_URL"
 MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 
 
@@ -989,6 +990,258 @@ def policy_apply_cli(
     return 0 if result["ok"] else 1
 
 
+def _read_rollout_actions_from_url(args: argparse.Namespace) -> tuple[Any, dict[str, Any] | None, int | None]:
+    headers, auth_configured, auth_source = _managed_policy_auth(args)
+    safe_url = _redact_url(args.url)
+    if not auth_configured and not args.allow_unauthenticated:
+        return None, {
+            "status": "skipped",
+            "reason": "missing-auth",
+            "url": safe_url,
+            "auth_configured": False,
+            "auth_source": "",
+            "error": {"type": "missing_auth", "message": f"set --api-key, --api-key-env, {MANAGED_POLICY_API_KEY_ENV}, or --allow-unauthenticated"},
+        }, 2
+
+    started = time.time()
+    secret = args.api_key or (os.getenv(args.api_key_env) if args.api_key_env else None)
+    try:
+        response = httpx.get(args.url, headers=headers, params=_managed_policy_query(args), timeout=args.timeout)
+        latency_ms = int((time.time() - started) * 1000)
+    except httpx.HTTPError as exc:
+        return None, {
+            "status": "error",
+            "reason": "request-failed",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "latency_ms": int((time.time() - started) * 1000),
+            "error": {"type": exc.__class__.__name__, "message": _redact_secret(str(exc), secret)},
+        }, 1
+    if response.status_code >= 400:
+        return None, {
+            "status": "error",
+            "reason": "server-error",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "body": _redact_secret(response.text[:500], secret),
+            "error": {"type": "server_error", "message": "managed server returned an error response"},
+        }, 1
+    try:
+        return response.json(), {
+            "status": "received",
+            "reason": "ok",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "query": _managed_policy_query(args),
+        }, None
+    except ValueError as exc:
+        return None, {
+            "status": "error",
+            "reason": "invalid-json",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "error": {"type": "invalid_json", "message": f"managed server response was not valid JSON: {exc}"},
+        }, 1
+
+
+def managed_rollout_actions_review_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Review managed pattern rollout actions against local crunch/cache rules")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Rollout action bundle JSON path, or '-' for stdin. Ignored when --url is set.",
+    )
+    parser.add_argument(
+        "--url",
+        default=os.getenv(PATTERN_ROLLOUT_ACTIONS_URL_ENV),
+        help=f"Managed pattern rollout actions URL. May also be set with {PATTERN_ROLLOUT_ACTIONS_URL_ENV}.",
+    )
+    parser.add_argument("--api-key", help="Managed optimizer API key. Prefer --api-key-env for shell history safety.")
+    parser.add_argument(
+        "--api-key-env",
+        default=MANAGED_POLICY_API_KEY_ENV,
+        help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
+    )
+    parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
+    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
+    parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
+    parser.add_argument("--source-surface", help="Optional managed server source_surface filter.")
+    parser.add_argument("--app-family", help="Optional managed server app_family filter.")
+    parser.add_argument("--category", help="Optional managed server category filter.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        help="HTTP timeout in seconds, default: 10.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["crunch", "cache"],
+        help="Review only one policy section. Repeat to review multiple sections.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print review JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    fetch = None
+    if args.url:
+        bundle, fetch, fetch_exit = _read_rollout_actions_from_url(args)
+        if fetch_exit is not None:
+            from agentflow_proxy.policy_events import log_policy_event
+
+            result = {
+                "schema": "agentflow.pattern_rollout_actions_fetch_review.v1",
+                "ok": False,
+                "fetch": fetch,
+                "review": None,
+                "error": fetch.get("error") if isinstance(fetch, dict) else None,
+            }
+            log_policy_event(
+                "rollout-actions-review",
+                ok=False,
+                details={"source": "cli", "url": _redact_url(args.url), "fetch_status": fetch.get("status"), "exit_code": fetch_exit},
+            )
+            _write_rollout_actions_result(stderr, result, pretty=args.pretty)
+            return fetch_exit
+    else:
+        bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+        if read_error:
+            bundle = {"schema": "invalid"}
+            fetch = {"status": "skipped", "reason": "local-input", "error": read_error}
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.rollout_actions import plan_rollout_actions
+
+    review = plan_rollout_actions(bundle, config_dir=args.config_dir, sections=args.section)
+    if fetch:
+        review["fetch"] = fetch
+    log_policy_event(
+        "rollout-actions-review",
+        ok=bool(review["ok"]),
+        details={
+            "source": "cli",
+            "path": None if args.url else args.path,
+            "url": _redact_url(args.url),
+            "config_dir": args.config_dir,
+            "action_count": review.get("action_count", 0),
+            "planned_action_count": review.get("planned_action_count", 0),
+            "changed_action_count": review.get("changed_action_count", 0),
+            "provenance_status": (review.get("provenance") or {}).get("status"),
+            "error_count": len(review.get("errors", [])),
+            "exit_code": 0 if review["ok"] else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout if review["ok"] else stderr, review, pretty=args.pretty)
+    return 0 if review["ok"] else 1
+
+
+def managed_rollout_actions_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Apply reviewed managed pattern rollout actions to local YAML rule files")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Rollout action bundle JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["crunch", "cache"],
+        help="Apply only one policy section. Repeat to apply multiple sections.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Report exact YAML edits without writing files.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print apply JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.pattern_rollout_actions_apply.v1",
+            "ok": False,
+            "dry_run": bool(args.dry_run),
+            "config_dir": args.config_dir,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "rollout action bundle could not be read"},
+            "files": [],
+            "actions": [],
+        }
+    else:
+        from agentflow_proxy.rollout_actions import apply_rollout_actions
+
+        result = apply_rollout_actions(
+            bundle,
+            config_dir=args.config_dir,
+            dry_run=args.dry_run,
+            sections=args.section,
+        )
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "rollout-actions-apply",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "config_dir": args.config_dir,
+            "dry_run": args.dry_run,
+            "applied_sections": result.get("applied_sections", []),
+            "changed_files": [
+                file.get("path")
+                for file in result.get("files", [])
+                if isinstance(file, dict) and file.get("changed")
+            ],
+            "provenance_status": (result.get("provenance") or {}).get("status"),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def policy_rollback_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -1414,6 +1667,13 @@ def _write_policy_apply_result(stream: Any, payload: dict[str, Any], *, pretty: 
         _write_json(stream, payload)
 
 
+def _write_rollout_actions_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
 def _write_policy_rollback_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -1458,6 +1718,14 @@ def policy_fetch_review_main() -> None:
 
 def policy_apply_main() -> None:
     raise SystemExit(policy_apply_cli())
+
+
+def managed_rollout_actions_review_main() -> None:
+    raise SystemExit(managed_rollout_actions_review_cli())
+
+
+def managed_rollout_actions_apply_main() -> None:
+    raise SystemExit(managed_rollout_actions_apply_cli())
 
 
 def policy_rollback_main() -> None:

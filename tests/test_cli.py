@@ -944,6 +944,235 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
         return bundle
 
+    def _pattern_hash(self):
+        return "sha256:" + ("a" * 64)
+
+    def _rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False):
+        action = {
+            "schema": "agentflow.pattern_rollout_action.v1",
+            "action_type": action_type,
+            "target_candidate_id": "candidate-crunch-rollout",
+            "target_rule_id": "managed-crunch-pattern-candidate-crunch-rollout",
+            "policy_section": "crunch",
+            "pattern_hash": self._pattern_hash(),
+            "current_fraction": 0.1,
+            "recommended_fraction": 0.25 if action_type == "widen" else 0.0,
+            "confidence": 0.91,
+            "rationale": "Canary-applied outcomes show positive section savings without error regression.",
+            "blockers": [] if action_type == "widen" else ["pattern-applied-cohort-errors"],
+            "required_local_review": True,
+            "managed_enforced": False,
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_payloads_returned": False,
+            },
+            "evidence": {
+                "pattern_cohorts": {
+                    "outcome_counts": {"applied": 12, "bypassed": 8},
+                },
+            },
+        }
+        if raw_like:
+            action["evidence"]["raw_request"] = "raw prompt body must be rejected"
+        return {
+            "schema": "agentflow.pattern_rollout_actions.v1",
+            "generated_at": "2026-06-09T03:10:00+00:00",
+            "tenant_scope": "local-dev",
+            "filters": {"min_samples": 3},
+            "thresholds": {"min_samples": 3, "max_error_rate": 0.05},
+            "summary": {
+                "candidate_count": 1,
+                "action_count": 1,
+                "action_counts": {action_type: 1},
+                "managed_enforced": False,
+                "required_local_review": True,
+            },
+            "actions": [action],
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_payloads_returned": False,
+            },
+        }
+
+    def _write_rollout_crunch_rule(self, tmp: str, *, policy_source: str = "managed-recommended"):
+        path = Path(tmp) / "crunch_rules.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "enabled": True,
+                    "threshold_chars": 24000,
+                    "pattern_rules": [
+                        {
+                            "id": "managed-crunch-pattern-candidate-crunch-rollout",
+                            "enabled": True,
+                            "policy_source": policy_source,
+                            "candidate_id": "candidate-crunch-rollout",
+                            "conditions": {
+                                "pattern_hashes": [self._pattern_hash()],
+                                "min_repeated_count": 2,
+                                "keep_recent_matches": 1,
+                            },
+                            "action": {
+                                "type": "shorten",
+                                "head_chars": 800,
+                                "tail_chars": 600,
+                                "max_replacement_chars": 1800,
+                            },
+                            "rollout": {
+                                "schema": "agentflow.pattern_policy_rollout.v1",
+                                "recommendation_mode": "canary",
+                                "canary_enabled": True,
+                                "canary_fraction": 0.1,
+                                "canary_salt": "local-dev",
+                                "canary_unit": "request_fingerprint",
+                            },
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_managed_rollout_actions_review_cli_reports_local_fraction_edit(self):
+        bundle = self._rollout_action_bundle(action_type="widen")
+
+        with TemporaryDirectory() as tmp:
+            self._write_rollout_crunch_rule(tmp)
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_review_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["planned_action_count"], 1)
+        edit = payload["actions"][0]["proposed_edit"]
+        self.assertTrue(edit["changed"])
+        self.assertFalse(edit["disable"])
+        self.assertEqual(edit["current_fraction"], 0.1)
+        self.assertEqual(edit["recommended_fraction"], 0.25)
+        self.assertEqual(edit["rollout"]["canary_fraction"], 0.25)
+        self.assertEqual(payload["provenance"]["status"], "not-configured")
+
+    def test_managed_rollout_actions_apply_dry_run_reports_without_writing(self):
+        bundle = self._rollout_action_bundle(action_type="widen")
+
+        with TemporaryDirectory() as tmp:
+            path = self._write_rollout_crunch_rule(tmp)
+            before = path.read_text(encoding="utf-8")
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "--dry-run", "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["applied_sections"], ["crunch"])
+        self.assertTrue(payload["files"][0]["changed"])
+        self.assertIsNone(payload["files"][0]["backup_path"])
+        self.assertEqual(before, after)
+        self.assertEqual(payload["actions"][0]["proposed_edit"]["rollout"]["canary_fraction"], 0.25)
+
+    def test_signed_managed_rollout_actions_apply_disables_rule_and_creates_backup(self):
+        from agentflow_proxy.rollout_actions import attach_rollout_action_provenance
+
+        secret = "rollout-secret"
+        bundle = attach_rollout_action_provenance(
+            self._rollout_action_bundle(action_type="rollback"),
+            secret=secret,
+            issuer="agentflow-server",
+            server_id="local-dev",
+            key_id="rollout-key",
+        )
+
+        with TemporaryDirectory() as tmp:
+            path = self._write_rollout_crunch_rule(tmp)
+            stdout = io.StringIO()
+            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS": json.dumps({"rollout-key": secret})}, clear=False):
+                code = cli.managed_rollout_actions_apply_cli(
+                    ["--config-dir", tmp, "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stdout,
+                )
+            written = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["provenance"]["status"], "verified")
+            self.assertEqual(payload["applied_sections"], ["crunch"])
+            self.assertTrue(payload["files"][0]["changed"])
+            self.assertIsNotNone(payload["files"][0]["backup_path"])
+            self.assertEqual(len(list(Path(tmp).glob("crunch_rules.yaml.bak-*"))), 1)
+            rule = written["pattern_rules"][0]
+            self.assertFalse(rule["enabled"])
+            self.assertEqual(rule["rollout"]["canary_fraction"], 0.0)
+            self.assertFalse(rule["rollout"]["canary_enabled"])
+            self.assertEqual(rule["rollout_action"]["action_type"], "rollback")
+            self.assertEqual(rule["rollout_action"]["pattern_hash"], self._pattern_hash())
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        event = recent_policy_events(limit=1)["events"][0]
+        self.assertEqual(event["action"], "rollout-actions-apply")
+        self.assertTrue(event["ok"])
+
+    def test_managed_rollout_actions_reject_raw_like_payload_before_writing(self):
+        bundle = self._rollout_action_bundle(action_type="widen", raw_like=True)
+
+        with TemporaryDirectory() as tmp:
+            path = self._write_rollout_crunch_rule(tmp)
+            before = path.read_text(encoding="utf-8")
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(list(Path(tmp).glob("crunch_rules.yaml.bak-*")), [])
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "validation_failed")
+            messages = [error["message"] for error in payload["validation"]["errors"]]
+            self.assertIn("raw or prompt-like rollout action payloads are not accepted", messages)
+
+    def test_managed_rollout_actions_reject_unknown_rule_before_writing(self):
+        bundle = self._rollout_action_bundle(action_type="widen")
+
+        with TemporaryDirectory() as tmp:
+            path = self._write_rollout_crunch_rule(tmp)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["pattern_rules"][0]["candidate_id"] = "different-candidate"
+            path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+            before = path.read_text(encoding="utf-8")
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(list(Path(tmp).glob("crunch_rules.yaml.bak-*")), [])
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["review"]["actions"][0]["reason"], "unknown-rule")
+
     def test_policy_fetch_review_cli_without_config_skips_network(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

@@ -168,15 +168,22 @@ Common policy commands:
 | `agentflow-managed-feedback-flush --limit 5 --dry-run --pretty` | Preview a bounded retry batch for due managed outcome feedback |
 | `agentflow-managed-feedback-flush --limit 5 --pretty` | Flush due managed outcome feedback when managed recommendations are enabled |
 | `agentflow-managed-pattern-rollups --limit 500 --pretty` | Export metadata-only managed pattern canary cohort outcome rollups for review |
+| `agentflow-managed-rollout-actions-review --url http://127.0.0.1:4100/v1/pattern-rollout-actions --allow-unauthenticated --pretty` | Review managed pattern rollout actions against local crunch/cache rule files |
+| `agentflow-managed-rollout-actions-apply actions.json --config-dir ~/.agentflow --dry-run --pretty` | Preview approved rollout action edits before writing local YAML files |
 
 Policy operations can append compact local audit events under `~/.agentflow/policy_events.jsonl`. Set `AGENTFLOW_POLICY_EVENTS=0` to disable that audit log.
 Managed fetch/review is disabled unless a recommendation URL is supplied, and authenticated
 managed servers should use `AGENTFLOW_MANAGED_API_KEY` or `--api-key-env` rather than putting
 secrets in command history. The command validates and reviews the bundle only; use
 `agentflow-policy-apply --dry-run` separately before writing local YAML files.
+Managed rollout actions are also recommendation-only: review/apply commands reject unknown
+local rules, raw prompt-like payloads, managed-enforced actions, and unsafe rule sources before
+writing. Apply only updates matching local `pattern_rules` metadata in `crunch_rules.yaml` or
+`cache_rules.yaml`, creates backups, and still requires explicit policy reload afterward.
 If `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET` or
 `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS` is configured, managed policy bundles must
 include matching HMAC provenance before `agentflow-policy-apply` writes local YAML files.
+Managed rollout action bundles use the same verification secrets when configured.
 Unsigned local-default/local-manual bundles remain valid for offline use.
 Managed outcome feedback retries are also disabled unless `AGENTFLOW_RECOMMENDATION_ENABLED=1`.
 Status and flush output is metadata-only; queued feedback payload JSON is not printed.
