@@ -296,6 +296,13 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         "token_bucket": pattern_features.get("token_bucket"),
         "workflow_phase": pattern_features.get("workflow_phase"),
         "category": pattern_features.get("category"),
+        "source_surface": pattern_features.get("source_surface"),
+        "app_family": pattern_features.get("app_family"),
+        "requested_model": unit.get("requested_model"),
+        "candidate_target_model": unit.get("candidate_target_model"),
+        "replayability_level": pattern_features.get("replayability_level"),
+        "has_tools": pattern_features.get("has_tools"),
+        "stream": pattern_features.get("stream"),
         "pattern_types": pattern_features.get("pattern_types") or [],
         "raw_pattern_strings_included": False,
     }

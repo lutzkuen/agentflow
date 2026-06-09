@@ -38,7 +38,7 @@ from agentflow_proxy.crunch import (
 )
 from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
-    cache_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
+    cache_decision_meta, cache_hit_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
     is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
     streaming_cache_lookup_meta, cache_file_dependency_snapshots,
 )
@@ -528,7 +528,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
 
         if stream:
             has_tool_blocks = has_tools(crunched)
-            can_stream_cache, cache_meta = streaming_cache_lookup_meta(has_tool_blocks)
+            can_stream_cache, cache_meta = streaming_cache_lookup_meta(
+                has_tool_blocks,
+                pattern_features=routing_meta.get("managed_pattern_features"),
+            )
             key = cache_key_for(
                 crunched,
                 path,
@@ -558,12 +561,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 else estimate_tokens_from_text(cached_output_text)
                             )
                             cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
-                            hit_cache_meta = cache_decision_meta(
-                                "hit",
+                            hit_cache_meta = cache_hit_decision_meta(
                                 "streaming-exact-match",
                                 hit_type="streaming-exact",
                                 exact_enabled=can_stream_cache,
                                 semantic_enabled=False,
+                                lookup_meta=cache_meta,
+                                estimated_saved_cost_usd=cost_baseline,
                             )
                             context.store.log_call(
                                 id=call_id, created_at=utc_now(), path=path,
@@ -796,7 +800,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             )
 
         has_tool_blocks = has_tools(crunched)
-        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)
+        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(
+            has_tool_blocks,
+            pattern_features=routing_meta.get("managed_pattern_features"),
+        )
         key = cache_key_for(
             crunched,
             path,
@@ -815,13 +822,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(response_body))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
-                hit_cache_meta = cache_decision_meta(
-                    "hit",
+                hit_cache_meta = cache_hit_decision_meta(
                     "exact-match",
                     hit_type="exact",
-                    exact_enabled=can_cache,
-                    semantic_enabled=can_semantic_cache,
-                )
+                                exact_enabled=can_cache,
+                                semantic_enabled=can_semantic_cache,
+                                lookup_meta=cache_meta,
+                                estimated_saved_cost_usd=(
+                                    cost_baseline - summary_extra_cost
+                                    if cost_baseline is not None
+                                    else None
+                                ),
+                            )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path,
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
@@ -867,13 +879,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(sem_resp))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens)
-                hit_cache_meta = cache_decision_meta(
-                    "hit",
+                hit_cache_meta = cache_hit_decision_meta(
                     "semantic-match",
                     hit_type="semantic",
-                    exact_enabled=can_cache,
-                    semantic_enabled=can_semantic_cache,
-                )
+                                exact_enabled=can_cache,
+                                semantic_enabled=can_semantic_cache,
+                                lookup_meta=cache_meta,
+                                estimated_saved_cost_usd=(
+                                    cost_baseline - summary_extra_cost
+                                    if cost_baseline is not None
+                                    else None
+                                ),
+                            )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path,
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,

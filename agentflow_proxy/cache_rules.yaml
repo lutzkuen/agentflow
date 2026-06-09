@@ -8,3 +8,4 @@ file_watch:
   enabled: true
   root: .
   max_paths: 128
+pattern_rules: []

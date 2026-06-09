@@ -1,10 +1,16 @@
 import unittest
 import importlib
+import io
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import yaml
+
 import agentflow_proxy.cache as cache_module
+from agentflow_proxy import cli
+from agentflow_proxy.policy_bundle import apply_policy_bundle, validate_policy_bundle
 from agentflow_proxy.store import Store
 
 
@@ -197,6 +203,112 @@ semantic_cache:
             self.assertEqual(meta["policy_source"], "local-manual")
             self.assertTrue(meta["tool_cache_enabled"])
             self.assertTrue(meta["file_watch_enabled"])
+
+    def test_reviewed_bundle_applies_safe_managed_cache_pattern_rule(self):
+        pattern_hash = "sha256:" + "a" * 64
+        unsafe_hash = "sha256:" + "b" * 64
+        with TemporaryDirectory() as tmp:
+            exported = io.StringIO()
+            self.assertEqual(cli.policy_export_cli([], stdout=exported), 0)
+            bundle = json.loads(exported.getvalue())
+            cache_policy = bundle["policies"]["cache"]
+            cache_policy["policy_source"] = "managed-recommended"
+            cache_policy["pattern_rules"] = [{
+                "id": "reviewed-cache-pattern",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "candidate_id": "cache-candidate-safe",
+                "conditions": {
+                    "pattern_hashes": [pattern_hash],
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "tool-result",
+                    "has_tools": True,
+                    "stream": False,
+                    "replayability_level": "local-exact-response",
+                },
+                "action": {
+                    "type": "exact_cache_pattern",
+                    "allow_tool_calls": True,
+                    "safe_invalidation": True,
+                    "estimated_saved_cost_usd": 0.012,
+                },
+            }]
+            cache_policy["recommendation"] = {
+                "policy_source": "managed-recommended",
+                "omitted_candidates": [{
+                    "candidate_id": "cache-candidate-unsafe",
+                    "policy_source": "managed-recommended",
+                    "pattern_hash": unsafe_hash,
+                    "omission_reasons": ["replay-safety-gate-failed"],
+                    "local_action_requirements": {"expected_policy_section": "cache"},
+                }],
+            }
+
+            result = apply_policy_bundle(bundle, config_dir=tmp)
+
+            self.assertTrue(result["ok"], result)
+            cache_rules_path = Path(tmp) / "cache_rules.yaml"
+            written = yaml.safe_load(cache_rules_path.read_text(encoding="utf-8"))
+            self.assertEqual(written["pattern_rules"][0]["candidate_id"], "cache-candidate-safe")
+            self.assertNotIn("cache-candidate-unsafe", cache_rules_path.read_text(encoding="utf-8"))
+
+            os.environ["AGENTFLOW_CACHE_RULES"] = str(cache_rules_path)
+            manual = importlib.reload(cache_module)
+            can_exact, can_semantic, meta = manual.cache_lookup_meta(
+                has_tool_blocks=True,
+                pattern_features={
+                    "pattern_hashes": [pattern_hash],
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-result",
+                    "text_bucket": "2k_8k_chars",
+                    "token_bucket": "1k_4k_tokens",
+                    "has_tools": True,
+                    "stream": False,
+                    "raw_pattern_strings_included": False,
+                },
+            )
+
+            self.assertTrue(can_exact)
+            self.assertFalse(can_semantic)
+            self.assertEqual(meta["status"], "miss")
+            self.assertEqual(meta["reason"], "exact-pattern-miss")
+            self.assertEqual(meta["pattern_rule"]["rule_id"], "reviewed-cache-pattern")
+            self.assertEqual(meta["pattern_rule"]["candidate_id"], "cache-candidate-safe")
+            self.assertEqual(meta["pattern_rule"]["policy_source"], "managed-recommended")
+            self.assertEqual(meta["pattern_rule"]["matched_hashes"], [pattern_hash])
+            serialized = json.dumps(meta, sort_keys=True)
+            for forbidden in ("raw_prompt", "provider_body", "transcript", "tool_payload", "cache-key"):
+                self.assertNotIn(forbidden, serialized)
+
+    def test_cache_pattern_validation_rejects_unsafe_tool_rule(self):
+        exported = io.StringIO()
+        self.assertEqual(cli.policy_export_cli([], stdout=exported), 0)
+        bundle = json.loads(exported.getvalue())
+        bundle["policies"]["cache"]["pattern_rules"] = [{
+            "id": "unsafe-tool-cache-pattern",
+            "policy_source": "managed-recommended",
+            "candidate_id": "cache-candidate-unsafe",
+            "conditions": {
+                "pattern_hash": "sha256:" + "c" * 64,
+                "has_tools": True,
+                "replayability_level": "local-exact-response",
+            },
+            "action": {
+                "type": "exact_cache_pattern",
+                "allow_tool_calls": True,
+            },
+        }]
+
+        validation = validate_policy_bundle(bundle)
+
+        self.assertFalse(validation["ok"])
+        self.assertIn(
+            "$.policies.cache.pattern_rules[0].action.safe_invalidation",
+            {error["path"] for error in validation["errors"]},
+        )
 
     def test_file_dependency_snapshots_capture_paths_under_watch_root(self):
         with TemporaryDirectory() as tmp:

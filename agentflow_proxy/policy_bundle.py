@@ -622,7 +622,109 @@ def _validate_cache_policy(policy: dict[str, Any], errors: list[dict[str, str]])
         _validate_non_empty_string(errors, f"{base}.file_watch.root", file_watch["root"])
     if "max_paths" in file_watch:
         _validate_intish(errors, f"{base}.file_watch.max_paths", file_watch["max_paths"], min_value=0)
+    _validate_cache_pattern_rules(policy.get("pattern_rules"), errors, base=base)
     _validate_pattern_recommendation(policy, errors, base=base, expected_section="cache")
+
+
+_CACHE_PATTERN_CONDITION_KEYS = {
+    "pattern_hash",
+    "pattern_hashes",
+    "model_pattern",
+    "category",
+    "category_not_in",
+    "workflow_phase",
+    "source_surface",
+    "app_family",
+    "text_bucket",
+    "token_bucket",
+    "has_tools",
+    "stream",
+    "replayability_level",
+    "replayability_levels",
+}
+_CACHE_PATTERN_ACTION_KEYS = {
+    "type",
+    "allow_tool_calls",
+    "safe_invalidation",
+    "safe_invalidation_evidence",
+    "streaming",
+    "estimated_saved_cost_usd",
+    "reason",
+}
+
+
+def _validate_cache_pattern_rules(value: Any, errors: list[dict[str, str]], *, base: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        _add_error(errors, f"{base}.pattern_rules", "expected list")
+        return
+    for index, rule in enumerate(value):
+        path = f"{base}.pattern_rules[{index}]"
+        if not isinstance(rule, dict):
+            _add_error(errors, path, "expected object")
+            continue
+        if "id" in rule:
+            _validate_non_empty_string(errors, f"{path}.id", rule["id"])
+        if "candidate_id" in rule:
+            _validate_non_empty_string(errors, f"{path}.candidate_id", rule["candidate_id"])
+        if "enabled" in rule:
+            _validate_boolish(errors, f"{path}.enabled", rule["enabled"])
+        if "policy_source" in rule and rule["policy_source"] not in POLICY_SOURCES:
+            _add_error(errors, f"{path}.policy_source", "expected known policy source")
+        conditions = rule.get("conditions")
+        if not isinstance(conditions, dict):
+            _add_error(errors, f"{path}.conditions", "expected object")
+            continue
+        for key in sorted(set(conditions) - _CACHE_PATTERN_CONDITION_KEYS):
+            _add_error(errors, f"{path}.conditions.{key}", "unknown cache pattern condition")
+        hashes = conditions.get("pattern_hashes", conditions.get("pattern_hash"))
+        if isinstance(hashes, str):
+            _validate_non_empty_string(errors, f"{path}.conditions.pattern_hash", hashes)
+        elif isinstance(hashes, list):
+            if not hashes:
+                _add_error(errors, f"{path}.conditions.pattern_hashes", "expected at least one hash")
+            for hash_index, item in enumerate(hashes):
+                _validate_non_empty_string(errors, f"{path}.conditions.pattern_hashes[{hash_index}]", item)
+        else:
+            _add_error(errors, f"{path}.conditions.pattern_hashes", "expected string or list")
+        for key in ("model_pattern", "category", "workflow_phase", "source_surface", "app_family", "text_bucket", "token_bucket"):
+            if key in conditions:
+                _validate_non_empty_string(errors, f"{path}.conditions.{key}", conditions[key])
+        for key in ("replayability_level", "replayability_levels", "category_not_in"):
+            if key in conditions:
+                values = conditions[key]
+                if isinstance(values, str):
+                    _validate_non_empty_string(errors, f"{path}.conditions.{key}", values)
+                elif isinstance(values, list):
+                    for value_index, item in enumerate(values):
+                        _validate_non_empty_string(errors, f"{path}.conditions.{key}[{value_index}]", item)
+                else:
+                    _add_error(errors, f"{path}.conditions.{key}", "expected string or list")
+        for key in ("has_tools", "stream"):
+            if key in conditions:
+                _validate_boolish(errors, f"{path}.conditions.{key}", conditions[key])
+        action = rule.get("action")
+        if not isinstance(action, dict):
+            _add_error(errors, f"{path}.action", "expected object")
+            continue
+        for key in sorted(set(action) - _CACHE_PATTERN_ACTION_KEYS):
+            _add_error(errors, f"{path}.action.{key}", "unknown cache pattern action")
+        if "type" in action and action["type"] not in {"exact_cache", "exact_cache_pattern"}:
+            _add_error(errors, f"{path}.action.type", "expected exact_cache or exact_cache_pattern")
+        for key in ("allow_tool_calls", "safe_invalidation", "safe_invalidation_evidence", "streaming"):
+            if key in action:
+                _validate_boolish(errors, f"{path}.action.{key}", action[key])
+        if "estimated_saved_cost_usd" in action:
+            _validate_floatish(errors, f"{path}.action.estimated_saved_cost_usd", action["estimated_saved_cost_usd"], min_value=0.0)
+        if _enabled(conditions.get("has_tools")) and _enabled(action.get("allow_tool_calls")):
+            has_safe_invalidation = _enabled(action.get("safe_invalidation")) or _enabled(action.get("safe_invalidation_evidence"))
+            if not has_safe_invalidation:
+                _add_error(
+                    errors,
+                    f"{path}.action.safe_invalidation",
+                    "tool-call cache pattern rules require explicit safe invalidation evidence",
+                )
 
 
 def _validate_pattern_candidate(
@@ -2452,7 +2554,10 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
                 payload[key] = policy[key]
         return payload
     if section == "cache":
-        return {key: policy[key] for key in ("exact_cache", "semantic_cache", "file_watch") if isinstance(policy.get(key), dict)}
+        payload = {key: policy[key] for key in ("exact_cache", "semantic_cache", "file_watch") if isinstance(policy.get(key), dict)}
+        if isinstance(policy.get("pattern_rules"), list):
+            payload["pattern_rules"] = policy["pattern_rules"]
+        return payload
     if section == "routing_experiments":
         experiment_policy = policy.get("policy")
         return experiment_policy if isinstance(experiment_policy, dict) else {}

@@ -20,6 +20,7 @@ from agentflow_proxy.cache import (
     SEMANTIC_CACHE_THRESHOLD,
     cache_decision_meta,
     cache_file_dependency_snapshots,
+    cache_hit_decision_meta,
     cache_key_for,
     cache_lookup_meta,
 )
@@ -524,7 +525,10 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             )
 
         has_tool_blocks = has_tools(crunched)
-        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(has_tool_blocks)
+        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(
+            has_tool_blocks,
+            pattern_features=routing_meta.get("managed_pattern_features"),
+        )
         key = cache_key_for(
             crunched,
             path,
@@ -541,12 +545,13 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(cached))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens, provider="openai")
-                hit_cache_meta = cache_decision_meta(
-                    "hit",
+                hit_cache_meta = cache_hit_decision_meta(
                     "exact-match",
                     hit_type="exact",
                     exact_enabled=can_cache,
                     semantic_enabled=can_semantic_cache,
+                    lookup_meta=cache_meta,
+                    estimated_saved_cost_usd=cost_baseline,
                 )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path, provider="openai",
@@ -593,12 +598,13 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(sem_resp))
                 cost_baseline = estimate_cost(requested_model, input_tokens, out_tokens, provider="openai")
-                hit_cache_meta = cache_decision_meta(
-                    "hit",
+                hit_cache_meta = cache_hit_decision_meta(
                     "semantic-match",
                     hit_type="semantic",
                     exact_enabled=can_cache,
                     semantic_enabled=can_semantic_cache,
+                    lookup_meta=cache_meta,
+                    estimated_saved_cost_usd=cost_baseline,
                 )
                 context.store.log_call(
                     id=call_id, created_at=utc_now(), path=path, provider="openai",

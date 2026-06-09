@@ -40,6 +40,7 @@ def _default_cache_policy() -> dict[str, Any]:
             "root": ".",
             "max_paths": 128,
         },
+        "pattern_rules": [],
     }
 
 
@@ -79,7 +80,82 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
             policy["file_watch"]["root"] = str(file_watch["root"])
         if file_watch.get("max_paths") is not None:
             policy["file_watch"]["max_paths"] = int(file_watch["max_paths"])
+    policy["pattern_rules"] = _load_cache_pattern_rules(data.get("pattern_rules"))
     return policy
+
+
+def _normalize_pattern_hash(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    digest = text.removeprefix("sha256:") if text.startswith("sha256:") else text
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return f"sha256:{digest}"
+
+
+def _parse_pattern_hashes(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return sorted({normalized for item in value if (normalized := _normalize_pattern_hash(item))})
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if isinstance(item, (str, int, float))]
+    return []
+
+
+def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        conditions = item.get("conditions") if isinstance(item.get("conditions"), dict) else {}
+        action = item.get("action") if isinstance(item.get("action"), dict) else {}
+        pattern_hashes = _parse_pattern_hashes(
+            conditions.get("pattern_hashes")
+            or conditions.get("pattern_hash")
+            or item.get("pattern_hashes")
+            or item.get("pattern_hash")
+        )
+        if not pattern_hashes:
+            continue
+        rule_id = str(item.get("id") or item.get("rule_id") or f"cache-pattern-rule-{index + 1}")
+        rules.append({
+            "id": rule_id,
+            "enabled": _as_bool(item.get("enabled"), True),
+            "policy_source": str(item.get("policy_source") or "managed-recommended"),
+            "candidate_id": item.get("candidate_id") or item.get("recommendation_id") or item.get("policy_id"),
+            "conditions": {
+                **conditions,
+                "pattern_hashes": pattern_hashes,
+                "replayability_levels": _string_list(
+                    conditions.get("replayability_levels")
+                    or conditions.get("replayability_level")
+                ),
+                "category_not_in": _string_list(conditions.get("category_not_in")),
+            },
+            "action": {
+                **action,
+                "type": str(action.get("type") or "exact_cache"),
+                "allow_tool_calls": _as_bool(action.get("allow_tool_calls"), False),
+                "safe_invalidation": _as_bool(
+                    action.get("safe_invalidation")
+                    if "safe_invalidation" in action
+                    else action.get("safe_invalidation_evidence"),
+                    False,
+                ),
+                "streaming": _as_bool(action.get("streaming"), False),
+            },
+        })
+    return rules
 
 
 def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
@@ -128,6 +204,7 @@ SEMANTIC_CACHE_THRESHOLD = float(CACHE_POLICY["semantic_cache"]["threshold"])
 CACHE_FILE_WATCH_ENABLED = bool(CACHE_POLICY["file_watch"]["enabled"])
 CACHE_FILE_WATCH_ROOT = str(CACHE_POLICY["file_watch"]["root"])
 CACHE_FILE_WATCH_MAX_PATHS = int(CACHE_POLICY["file_watch"]["max_paths"])
+CACHE_PATTERN_RULES = tuple(CACHE_POLICY.get("pattern_rules") or [])
 
 
 def cache_decision_meta(
@@ -158,6 +235,170 @@ def cache_decision_meta(
     }
     if hit_type:
         meta["hit_type"] = hit_type
+    return meta
+
+
+def _feature_hashes(pattern_features: dict[str, Any] | None) -> list[str]:
+    if not isinstance(pattern_features, dict):
+        return []
+    hashes: list[str] = []
+    for key in ("pattern_hashes", "pattern_hash", "normalized_pattern_hash", "cache_pattern_hash"):
+        value = pattern_features.get(key)
+        if isinstance(value, list):
+            hashes.extend(_parse_pattern_hashes(value))
+        elif (normalized := _normalize_pattern_hash(value)) is not None:
+            hashes.append(normalized)
+    return sorted(set(hashes))
+
+
+def _condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> bool:
+    expected = conditions.get(key)
+    if expected is None:
+        return True
+    expected_values = _string_list(expected)
+    if not expected_values:
+        return True
+    return str(actual or "").lower() in {value.lower() for value in expected_values}
+
+
+def _cache_pattern_rule_match(
+    *,
+    has_tool_blocks: bool,
+    stream: bool,
+    pattern_features: dict[str, Any] | None,
+    local_replayability_level: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    feature_hashes = set(_feature_hashes(pattern_features))
+    skip_reasons: list[dict[str, Any]] = []
+    if not CACHE_PATTERN_RULES:
+        return None, skip_reasons
+    if not feature_hashes:
+        return None, [{"reason": "pattern-features-missing", "configured_count": len(CACHE_PATTERN_RULES)}]
+
+    for rule in CACHE_PATTERN_RULES:
+        rule_id = str(rule.get("id") or "cache-pattern-rule")
+        if not rule.get("enabled", True):
+            skip_reasons.append({"rule_id": rule_id, "reason": "disabled"})
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        rule_hashes = set(_parse_pattern_hashes(conditions.get("pattern_hashes")))
+        matched_hashes = sorted(feature_hashes.intersection(rule_hashes))
+        if not matched_hashes:
+            skip_reasons.append({"rule_id": rule_id, "reason": "pattern-hash-mismatch"})
+            continue
+        if "has_tools" in conditions and _as_bool(conditions.get("has_tools"), False) != bool(has_tool_blocks):
+            skip_reasons.append({"rule_id": rule_id, "reason": "has-tools-mismatch"})
+            continue
+        if "stream" in conditions and _as_bool(conditions.get("stream"), False) != bool(stream):
+            skip_reasons.append({"rule_id": rule_id, "reason": "stream-mismatch"})
+            continue
+        model_pattern = conditions.get("model_pattern")
+        if isinstance(model_pattern, str) and model_pattern.strip():
+            requested_model = str((pattern_features or {}).get("requested_model") or "").lower()
+            routed_model = str((pattern_features or {}).get("candidate_target_model") or "").lower()
+            pattern = model_pattern.strip().lower()
+            if pattern not in requested_model and pattern not in routed_model:
+                skip_reasons.append({"rule_id": rule_id, "reason": "model-pattern-mismatch"})
+                continue
+        if not _condition_matches(conditions, "category", (pattern_features or {}).get("category")):
+            skip_reasons.append({"rule_id": rule_id, "reason": "category-mismatch"})
+            continue
+        excluded_categories = {item.lower() for item in _string_list(conditions.get("category_not_in"))}
+        if excluded_categories and str((pattern_features or {}).get("category") or "").lower() in excluded_categories:
+            skip_reasons.append({"rule_id": rule_id, "reason": "category-excluded"})
+            continue
+        for key in ("workflow_phase", "source_surface", "app_family", "text_bucket", "token_bucket"):
+            if not _condition_matches(conditions, key, (pattern_features or {}).get(key)):
+                skip_reasons.append({"rule_id": rule_id, "reason": f"{key}-mismatch"})
+                break
+        else:
+            replayability_levels = {
+                item.lower()
+                for item in _string_list(conditions.get("replayability_levels"))
+            }
+            if replayability_levels and local_replayability_level.lower() not in replayability_levels:
+                skip_reasons.append({"rule_id": rule_id, "reason": "replayability-gate-mismatch"})
+                continue
+            action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+            if action.get("type") not in {"exact_cache", "exact_cache_pattern"}:
+                skip_reasons.append({"rule_id": rule_id, "reason": "unsupported-action"})
+                continue
+            if stream and not action.get("streaming"):
+                skip_reasons.append({"rule_id": rule_id, "reason": "streaming-not-allowed"})
+                continue
+            if has_tool_blocks and not (action.get("allow_tool_calls") and action.get("safe_invalidation")):
+                skip_reasons.append({"rule_id": rule_id, "reason": "unsafe-tool-cache-pattern"})
+                continue
+            if has_tool_blocks and not CACHE_FILE_WATCH_ENABLED:
+                skip_reasons.append({"rule_id": rule_id, "reason": "file-watch-required"})
+                continue
+            return {
+                "rule_id": rule_id,
+                "candidate_id": rule.get("candidate_id"),
+                "policy_source": rule.get("policy_source") or "managed-recommended",
+                "matched_hashes": matched_hashes,
+                "replayability_level": local_replayability_level,
+                "allow_tool_calls": bool(action.get("allow_tool_calls")),
+                "safe_invalidation": bool(action.get("safe_invalidation")),
+            }, skip_reasons
+    return None, skip_reasons
+
+
+def _attach_cache_pattern_meta(
+    meta: dict[str, Any],
+    *,
+    pattern_rule: dict[str, Any] | None,
+    skip_reasons: list[dict[str, Any]],
+) -> dict[str, Any]:
+    meta["pattern_rules"] = {
+        "configured_count": len(CACHE_PATTERN_RULES),
+        "matched_count": 1 if pattern_rule else 0,
+    }
+    if pattern_rule:
+        meta["pattern_rule"] = {
+            key: value
+            for key, value in pattern_rule.items()
+            if value is not None and key in {
+                "rule_id",
+                "candidate_id",
+                "policy_source",
+                "matched_hashes",
+                "replayability_level",
+                "allow_tool_calls",
+                "safe_invalidation",
+            }
+        }
+        meta["pattern_rules"]["rules"] = [meta["pattern_rule"]]
+    if skip_reasons:
+        meta["pattern_rules"]["skip_reasons"] = skip_reasons[:20]
+    return meta
+
+
+def cache_hit_decision_meta(
+    reason: str,
+    *,
+    hit_type: str,
+    exact_enabled: bool,
+    semantic_enabled: bool,
+    lookup_meta: dict[str, Any] | None = None,
+    estimated_saved_cost_usd: float | None = None,
+) -> dict[str, Any]:
+    meta = cache_decision_meta(
+        "hit",
+        reason,
+        hit_type=hit_type,
+        exact_enabled=exact_enabled,
+        semantic_enabled=semantic_enabled,
+    )
+    if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("pattern_rule"), dict):
+        meta["pattern_rule"] = lookup_meta["pattern_rule"]
+        meta["pattern_rules"] = lookup_meta.get("pattern_rules", {
+            "configured_count": len(CACHE_PATTERN_RULES),
+            "matched_count": 1,
+            "rules": [lookup_meta["pattern_rule"]],
+        })
+    if estimated_saved_cost_usd is not None:
+        meta["estimated_saved_cost_usd"] = round(max(0.0, float(estimated_saved_cost_usd)), 9)
     return meta
 
 
@@ -257,14 +498,27 @@ def cache_file_dependency_snapshots(
     return snapshots
 
 
-def cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, bool, dict[str, Any]]:
+def cache_lookup_meta(
+    has_tool_blocks: bool,
+    *,
+    pattern_features: dict[str, Any] | None = None,
+) -> tuple[bool, bool, dict[str, Any]]:
     exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
     semantic_enabled = SEMANTIC_CACHE_ENABLED and not has_tool_blocks
+    local_replayability_level = "local-exact-response" if CACHE_ENABLED else "features_only"
+    pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
+        has_tool_blocks=has_tool_blocks,
+        stream=False,
+        pattern_features=pattern_features,
+        local_replayability_level=local_replayability_level,
+    )
+    if pattern_rule and CACHE_ENABLED:
+        exact_enabled = True
     if exact_enabled or semantic_enabled:
         if exact_enabled and semantic_enabled:
             reason = "exact-and-semantic-miss"
         elif exact_enabled:
-            reason = "exact-miss"
+            reason = "exact-pattern-miss" if pattern_rule else "exact-miss"
         else:
             reason = "semantic-miss"
         status = "miss"
@@ -274,33 +528,45 @@ def cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, bool, dict[str, Any]
     else:
         status = "skipped"
         reason = "cache-disabled"
-    return exact_enabled, semantic_enabled, cache_decision_meta(
+    return exact_enabled, semantic_enabled, _attach_cache_pattern_meta(cache_decision_meta(
         status,
         reason,
         enabled=CACHE_ENABLED or SEMANTIC_CACHE_ENABLED,
         exact_enabled=exact_enabled,
         semantic_enabled=semantic_enabled,
-    )
+    ), pattern_rule=pattern_rule, skip_reasons=pattern_skip_reasons)
 
 
-def streaming_cache_lookup_meta(has_tool_blocks: bool) -> tuple[bool, dict[str, Any]]:
+def streaming_cache_lookup_meta(
+    has_tool_blocks: bool,
+    *,
+    pattern_features: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
     exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
+    pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
+        has_tool_blocks=has_tool_blocks,
+        stream=True,
+        pattern_features=pattern_features,
+        local_replayability_level="local-exact-response" if CACHE_ENABLED else "features_only",
+    )
+    if pattern_rule and CACHE_ENABLED:
+        exact_enabled = True
     if exact_enabled:
         status = "miss"
-        reason = "streaming-exact-miss"
+        reason = "streaming-exact-pattern-miss" if pattern_rule else "streaming-exact-miss"
     elif has_tool_blocks and CACHE_ENABLED:
         status = "skipped"
         reason = "streaming-tools-disabled"
     else:
         status = "skipped"
         reason = "streaming-cache-disabled"
-    return exact_enabled, cache_decision_meta(
+    return exact_enabled, _attach_cache_pattern_meta(cache_decision_meta(
         status,
         reason,
         enabled=CACHE_ENABLED,
         exact_enabled=exact_enabled,
         semantic_enabled=False,
-    )
+    ), pattern_rule=pattern_rule, skip_reasons=pattern_skip_reasons)
 
 
 def stream_cache_payload(
