@@ -179,6 +179,7 @@ def execute_openai_local_policy(
         input_tokens_est=input_tokens,
         session_id=session_id,
     )
+    local_pattern_features = pattern_feature_diagnostics(local_feature_unit)
     routing_meta["openai_feature_unit"] = preflight.feature_summary
     routing_meta["openai_preflight_unit"] = preflight.feature_summary
     routing_meta["openai_local_feature_unit"] = summarize_openai_request_feature_unit(local_feature_unit)
@@ -187,7 +188,8 @@ def execute_openai_local_policy(
         resolved_requested_model,
         str(provider_body.get("model") or routed_model),
     ))
-    routing_meta["managed_pattern_features"] = preflight.pattern_features
+    routing_meta["openai_preflight_pattern_features"] = preflight.pattern_features
+    routing_meta["managed_pattern_features"] = local_pattern_features
     if isinstance(policy_decision.get("local_actions"), dict):
         routing_meta["managed_local_actions"] = policy_decision["local_actions"]
     recommendation_meta = applier(

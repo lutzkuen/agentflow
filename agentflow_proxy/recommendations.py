@@ -329,6 +329,10 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         "app_family": pattern_features.get("app_family"),
         "requested_model": unit.get("requested_model"),
         "candidate_target_model": unit.get("candidate_target_model"),
+        "pattern_hash": pattern_features.get("pattern_hash"),
+        "normalized_pattern_hash": pattern_features.get("normalized_pattern_hash"),
+        "crunch_pattern_hash": pattern_features.get("crunch_pattern_hash"),
+        "cache_pattern_hash": pattern_features.get("cache_pattern_hash"),
         "replayability_level": pattern_features.get("replayability_level"),
         "has_tools": pattern_features.get("has_tools"),
         "stream": pattern_features.get("stream"),
@@ -1069,6 +1073,56 @@ def pattern_decision_summaries(
     workflow_phase = category or routing_meta.get("category") or "unknown"
     model = routed_model or requested_model
     rows: list[dict[str, Any]] = []
+
+    pattern_diagnostics = routing_meta.get("managed_pattern_features") if isinstance(routing_meta, dict) else None
+    if isinstance(pattern_diagnostics, dict) and pattern_diagnostics.get("present"):
+        raw_hashes = [
+            ("general", pattern_diagnostics.get("pattern_hash") or pattern_diagnostics.get("normalized_pattern_hash")),
+            ("crunch", pattern_diagnostics.get("crunch_pattern_hash")),
+            ("cache", pattern_diagnostics.get("cache_pattern_hash")),
+        ]
+        for item in pattern_diagnostics.get("pattern_hashes") or []:
+            raw_hashes.append(("observed", item))
+        seen_hashes: set[str] = set()
+        for pattern_family, pattern_hash in raw_hashes:
+            if not isinstance(pattern_hash, str) or not pattern_hash.startswith("sha256:"):
+                continue
+            if pattern_hash in seen_hashes:
+                continue
+            seen_hashes.add(pattern_hash)
+            rows.append({
+                "schema": "agentflow.pattern_decision_summary.v1",
+                "decision_type": "local_pattern_fingerprint",
+                "source_surface": pattern_diagnostics.get("source_surface") or source_surface,
+                "app_family": pattern_diagnostics.get("app_family") or app_family,
+                "category": pattern_diagnostics.get("category") or category or routing_meta.get("category") or "unknown",
+                "workflow_phase": pattern_diagnostics.get("workflow_phase") or workflow_phase,
+                "rule_id": None,
+                "candidate_id": None,
+                "pattern_hash": pattern_hash,
+                "pattern_hashes": [pattern_hash],
+                "pattern_family": pattern_family,
+                "pattern_types": pattern_diagnostics.get("pattern_types") or [],
+                "local_pattern_module_families": pattern_diagnostics.get("local_pattern_module_families") or [],
+                "local_pattern_module_count": _safe_int(pattern_diagnostics.get("local_pattern_module_count")),
+                "policy_source": "local-default",
+                "status": "observed",
+                "reason": "local-pattern-fingerprint-observed",
+                "outcome": "errored" if status_code is not None and int(status_code) >= 400 else "observed",
+                "applied_count": 0,
+                "saved_chars": 0,
+                "tokens_saved_est": 0,
+                "estimated_cost_savings_usd": 0.0,
+                "text_bucket": pattern_diagnostics.get("text_bucket"),
+                "token_bucket": pattern_diagnostics.get("token_bucket"),
+                "replayability_level": pattern_diagnostics.get("replayability_level"),
+                "evidence_only": True,
+                "raw_pattern_strings_included": False,
+                "safety_gates": {
+                    "feature_only": True,
+                    "raw_pattern_strings_included": False,
+                },
+            })
 
     pattern_rules = crunch_meta.get("pattern_rules") if isinstance(crunch_meta, dict) else None
     if isinstance(pattern_rules, dict) and pattern_rules.get("configured_count"):

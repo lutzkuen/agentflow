@@ -2684,6 +2684,7 @@ def _managed_pattern_add_summary(
         not policy_source.startswith("managed-")
         and summary.get("candidate_id") is None
         and not isinstance(summary.get("canary"), dict)
+        and not summary.get("evidence_only")
     ):
         return
     cohort = str(summary.get("cohort") or "non_canary")
@@ -2731,6 +2732,15 @@ def _managed_pattern_add_summary(
             "first_seen_at": None,
             "last_seen_at": None,
             "canary": None,
+            "evidence_only": bool(summary.get("evidence_only")),
+            "pattern_family": summary.get("pattern_family"),
+            "pattern_types": summary.get("pattern_types") if isinstance(summary.get("pattern_types"), list) else [],
+            "local_pattern_module_families": (
+                summary.get("local_pattern_module_families")
+                if isinstance(summary.get("local_pattern_module_families"), list)
+                else []
+            ),
+            "local_pattern_module_count": _as_int(summary.get("local_pattern_module_count")),
             "raw_payload_included": False,
         },
     )

@@ -393,6 +393,13 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(metadata["crunch"]["status"], "applied")
         self.assertGreater(metadata["crunch"]["saved_chars"], 0)
         self.assertEqual(metadata["routing"]["status"], "not-applicable")
+        diagnostics = metadata["routing"]["managed_pattern_features"]
+        self.assertTrue(diagnostics["present"])
+        self.assertEqual(diagnostics["source_surface"], "codex_turn")
+        self.assertGreaterEqual(diagnostics["pattern_hash_count"], 3)
+        self.assertTrue(diagnostics["pattern_hash"].startswith("sha256:"))
+        self.assertFalse(diagnostics["raw_pattern_strings_included"])
+        self.assertNotIn(secret, json.dumps(diagnostics, sort_keys=True))
 
         store = CapturingStore()
         with patch.object(codex_app_proxy, "store", store):

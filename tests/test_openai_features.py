@@ -353,6 +353,46 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertNotIn("raw openai prompt", json.dumps(local.routing_meta, sort_keys=True))
         self.assertNotIn("secret-app", json.dumps(local.routing_meta, sort_keys=True))
 
+    def test_pipeline_local_policy_stage_records_post_local_pattern_diagnostics(self):
+        raw_secret = "raw openai prompt secret"
+        body = {
+            "model": "gpt-5-codex",
+            "input": (
+                f"{raw_secret}\n"
+                "diff --git a/app.py b/app.py\n"
+                "--- a/app.py\n"
+                "+++ b/app.py\n"
+                "@@ -1,2 +1,2 @@\n"
+                "-old\n"
+                "+new\n"
+            ),
+        }
+        parsed = openai_pipeline.parse_openai_request_body(body, ["gpt-5-codex"])
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path="/v1/responses")
+
+        local = openai_pipeline.execute_openai_local_policy(
+            raw_body=body,
+            path="/v1/responses",
+            requested_model=parsed.requested_model,
+            category=parsed.category,
+            stream=parsed.stream,
+            session_id="secret session id",
+            preflight=preflight,
+            policy_decision={"status": "skipped", "reason": "disabled"},
+            store_obj=None,
+        )
+
+        diagnostics = local.routing_meta["managed_pattern_features"]
+        self.assertTrue(diagnostics["present"])
+        self.assertEqual(diagnostics["source_surface"], "openai_responses")
+        self.assertIn("diffs", diagnostics["local_pattern_module_families"])
+        self.assertTrue(diagnostics["pattern_hash"].startswith("sha256:"))
+        self.assertFalse(diagnostics["raw_pattern_strings_included"])
+        self.assertEqual(managed_egress_violations(diagnostics), [])
+        rendered = json.dumps(local.routing_meta, sort_keys=True)
+        self.assertNotIn(raw_secret, rendered)
+        self.assertNotIn("secret session id", rendered)
+
     def test_pipeline_outcome_serialization_is_feature_only_and_guarded(self):
         summary = openai_pipeline.serialize_openai_outcome_summary(
             path="/v1/responses",

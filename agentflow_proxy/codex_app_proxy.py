@@ -575,6 +575,53 @@ def _not_applied_metadata(reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) ->
     }
 
 
+def _attach_codex_local_pattern_features(
+    raw: str | bytes,
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict) or msg.get("method") != "turn/start":
+        return None
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return None
+    metadata = optimization_metadata or _not_applied_metadata("missing-optimization-metadata")
+    routing = metadata.setdefault("routing", _policy_decision("routing", "not-applied", "missing-routing-metadata"))
+    crunch = metadata.setdefault("crunch", _policy_decision("crunch", "not-applied", "missing-crunch-metadata"))
+    cache = metadata.setdefault("cache", _codex_cache_decision("skipped", "missing-cache-metadata", eligible=False))
+    request_id = _request_id(msg)
+    thread_id = _thread_id(params)
+    input_value = params.get("input")
+    input_text_chars = _input_text_chars(input_value)
+    input_items = len(input_value) if isinstance(input_value, list) else None
+    unit = build_codex_turn_optimization_unit(
+        method="turn/start",
+        request_id_present=request_id is not None,
+        thread_id_present=thread_id is not None,
+        params_chars=len(stable_json(params)),
+        input_items=input_items,
+        input_text_chars=input_text_chars if input_text_chars else None,
+        routing_meta=routing,
+        crunch_meta=crunch,
+        cache_meta=cache,
+        request_id=str(request_id) if request_id is not None else None,
+        thread_id=thread_id,
+        terminal_log_features=routing.get("terminal_log_features") or _codex_terminal_log_features(params),
+        prompt_difficulty_features=routing.get("prompt_difficulty_features") or _codex_prompt_difficulty_features(params),
+    )
+    routing["terminal_log_features"] = unit["input_features"].get("terminal_log_features")
+    routing["prompt_difficulty_features"] = unit["input_features"].get("prompt_difficulty_features")
+    routing["managed_pattern_features"] = pattern_feature_diagnostics(unit)
+    return {
+        "request_id": request_id,
+        "routing": routing,
+        "crunch": crunch,
+        "cache": cache,
+        "unit": unit,
+        "input_text_chars": input_text_chars if input_text_chars else None,
+    }
+
+
 def _contains_action_hint(value: Any) -> bool:
     if isinstance(value, dict):
         for key, nested in value.items():
@@ -1224,39 +1271,14 @@ async def _attach_codex_managed_recommendation(
     raw: str | bytes,
     optimization_metadata: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    msg = _jsonrpc_message(raw)
-    if not isinstance(msg, dict) or msg.get("method") != "turn/start":
+    local = _attach_codex_local_pattern_features(raw, optimization_metadata)
+    if local is None:
         return None
-    params = msg.get("params")
-    if not isinstance(params, dict):
-        return None
-    metadata = optimization_metadata or _not_applied_metadata("missing-optimization-metadata")
-    routing = metadata.setdefault("routing", _policy_decision("routing", "not-applied", "missing-routing-metadata"))
-    crunch = metadata.setdefault("crunch", _policy_decision("crunch", "not-applied", "missing-crunch-metadata"))
-    cache = metadata.setdefault("cache", _codex_cache_decision("skipped", "missing-cache-metadata", eligible=False))
-    request_id = _request_id(msg)
-    thread_id = _thread_id(params)
-    input_value = params.get("input")
-    input_text_chars = _input_text_chars(input_value)
-    input_items = len(input_value) if isinstance(input_value, list) else None
-    unit = build_codex_turn_optimization_unit(
-        method="turn/start",
-        request_id_present=request_id is not None,
-        thread_id_present=thread_id is not None,
-        params_chars=len(stable_json(params)),
-        input_items=input_items,
-        input_text_chars=input_text_chars if input_text_chars else None,
-        routing_meta=routing,
-        crunch_meta=crunch,
-        cache_meta=cache,
-        request_id=str(request_id) if request_id is not None else None,
-        thread_id=thread_id,
-        terminal_log_features=routing.get("terminal_log_features") or _codex_terminal_log_features(params),
-        prompt_difficulty_features=routing.get("prompt_difficulty_features") or _codex_prompt_difficulty_features(params),
-    )
-    routing["terminal_log_features"] = unit["input_features"].get("terminal_log_features")
-    routing["prompt_difficulty_features"] = unit["input_features"].get("prompt_difficulty_features")
-    routing["managed_pattern_features"] = pattern_feature_diagnostics(unit)
+    request_id = local["request_id"]
+    routing = local["routing"]
+    crunch = local["crunch"]
+    cache = local["cache"]
+    unit = local["unit"]
     managed = await fetch_recommendation(unit)
     managed.setdefault("applied", False)
     if managed.get("status") == "received":
@@ -1270,7 +1292,7 @@ async def _attach_codex_managed_recommendation(
         "crunch": crunch,
         "cache": cache,
         "managed": managed,
-        "input_text_chars": input_text_chars if input_text_chars else None,
+        "input_text_chars": local["input_text_chars"],
     }
 
 
@@ -1301,6 +1323,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
         metadata = _not_applied_metadata("action-like-params")
         if CODEX_APP_SUMMARY_MODEL_HINT:
             _params, metadata["routing"] = _codex_route_params(params)
+        _attach_codex_local_pattern_features(raw, metadata)
         return raw, metadata
 
     crunched_params, crunch_meta = _codex_crunch_params(params)
@@ -1383,12 +1406,17 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
             )
             cache_meta[_INTERNAL_CACHE_KEY] = cache_key
     if optimized == msg:
-        return raw, {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
-    return json.dumps(optimized, separators=(",", ":"), ensure_ascii=False), {
+        metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+        _attach_codex_local_pattern_features(raw, metadata)
+        return raw, metadata
+    forwarded = json.dumps(optimized, separators=(",", ":"), ensure_ascii=False)
+    metadata = {
         "routing": routing_meta,
         "crunch": crunch_meta,
         "cache": cache_meta,
     }
+    _attach_codex_local_pattern_features(forwarded, metadata)
+    return forwarded, metadata
 
 
 def _log_codex_app_event(**kwargs: Any) -> None:

@@ -335,6 +335,80 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("raw cli prompt must stay local", encoded)
         self.assertNotIn("cli-session-secret", encoded)
 
+    def test_managed_pattern_rollups_cli_exports_local_fingerprint_evidence(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        pattern_hash = "sha256:" + "7" * 64
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="cli-local-pattern-call",
+                    created_at="2026-06-10T01:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.004,
+                    cost_baseline_usd=0.006,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({
+                        "category": "tool-result",
+                        "workflow_phase": "tool-result",
+                        "managed_pattern_features": {
+                            "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                            "present": True,
+                            "pattern_hash": pattern_hash,
+                            "normalized_pattern_hash": pattern_hash,
+                            "pattern_hashes": [pattern_hash],
+                            "pattern_hash_count": 1,
+                            "hash_basis": "normalized-structure-and-size-buckets",
+                            "workflow_phase": "tool-result",
+                            "category": "tool-result",
+                            "source_surface": "anthropic_messages",
+                            "app_family": "claude_code",
+                            "text_bucket": "2k_8k_chars",
+                            "token_bucket": "1k_4k_tokens",
+                            "pattern_types": ["tool_results"],
+                            "local_pattern_module_families": ["tool_results"],
+                            "local_pattern_module_count": 1,
+                            "raw_pattern_strings_included": False,
+                        },
+                    }),
+                    cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                    request_json=stable_json({"prompt": "raw local fingerprint prompt must stay local"}),
+                    session_id="local-fingerprint-session-secret",
+                    category="tool-result",
+                    retry_count=0,
+                    provider="anthropic",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.managed_pattern_rollups_cli(["--db", db_path, "--limit", "5", "--min-samples", "1"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        evidence = next(row for row in payload["cohorts"] if row["pattern_hash"] == pattern_hash)
+        self.assertEqual(evidence["policy_section"], "local_pattern_fingerprint")
+        self.assertTrue(evidence["evidence_only"])
+        self.assertEqual(evidence["sample_count"], 1)
+        self.assertEqual(evidence["pattern_family"], "general")
+        self.assertEqual(evidence["local_pattern_module_families"], ["tool_results"])
+        self.assertTrue(evidence["minimum_sample_readiness"]["ready"])
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw local fingerprint prompt must stay local", encoded)
+        self.assertNotIn("local-fingerprint-session-secret", encoded)
+
     def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)

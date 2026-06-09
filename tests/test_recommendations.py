@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import httpx
 
 from agentflow_proxy import recommendations
+from agentflow_proxy.crunch import crunch_body
 from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 
 
@@ -250,6 +252,61 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
         self.assertEqual(routing_meta["final_policy_source"], "managed-recommended")
         self.assertEqual(routing_meta["managed_policy_id"], "policy-1")
+
+    def test_anthropic_local_pattern_diagnostics_do_not_require_managed_server(self):
+        raw_secret = "raw anthropic tool payload secret"
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": f"tool results:\nstdout: ok\nstdout: ok\n{raw_secret}",
+                        }
+                    ],
+                }
+            ],
+        }
+        crunched, crunch_meta = crunch_body(body)
+        routing_meta = {
+            "requested_model": "claude-sonnet-4-6",
+            "routed_model": "claude-sonnet-4-6",
+            "reason": "keep requested model",
+            "text_chars": len(str(crunched)),
+            "has_tools": True,
+            "category": "tool-result",
+            "workflow_phase": "tool-result",
+            "policy_source": "local-default",
+        }
+
+        unit = recommendations.build_optimization_unit(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta={"status": "skipped", "reason": "tools-disabled"},
+            category="tool-result",
+            stream=False,
+            input_tokens_est=120,
+            session_id="session-secret",
+        )
+        diagnostics = recommendations.pattern_feature_diagnostics(unit)
+
+        self.assertTrue(diagnostics["present"])
+        self.assertGreaterEqual(diagnostics["pattern_hash_count"], 3)
+        self.assertIn("tool_results", diagnostics["local_pattern_module_families"])
+        self.assertFalse(diagnostics["raw_pattern_strings_included"])
+        self.assertTrue(diagnostics["pattern_hash"].startswith("sha256:"))
+        self.assertTrue(diagnostics["crunch_pattern_hash"].startswith("sha256:"))
+        self.assertTrue(diagnostics["cache_pattern_hash"].startswith("sha256:"))
+        rendered = json.dumps(diagnostics, sort_keys=True)
+        self.assertNotIn(raw_secret, rendered)
+        self.assertNotIn("session-secret", json.dumps(unit, sort_keys=True))
 
     def test_codex_turn_feature_unit_emits_pattern_features_without_raw_payloads(self):
         unit = recommendations.build_codex_turn_optimization_unit(
