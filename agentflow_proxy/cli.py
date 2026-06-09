@@ -1242,6 +1242,93 @@ def managed_rollout_actions_apply_cli(
     return 0 if result["ok"] else 1
 
 
+def managed_rollout_actions_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run managed pattern rollout actions against recent local traffic metadata")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Rollout action bundle JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls and Codex turns to inspect, default: 500.")
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["crunch", "cache"],
+        help="Dry-run only one policy section. Repeat to include multiple sections.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print dry-run JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.pattern_rollout_actions_dry_run.v1",
+            "ok": False,
+            "dry_run": True,
+            "read_only": True,
+            "config_dir": args.config_dir,
+            "db_path": args.db,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "rollout action bundle could not be read"},
+            "actions": [],
+        }
+    else:
+        from agentflow_proxy.rollout_actions import dry_run_rollout_actions
+
+        store = _open_store_for_db(args.db)
+        try:
+            result = dry_run_rollout_actions(
+                bundle,
+                store_obj=store,
+                config_dir=args.config_dir,
+                sections=args.section,
+                limit=args.limit,
+            )
+            result["db_path"] = args.db
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "rollout-actions-dry-run",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "config_dir": args.config_dir,
+            "db_path": args.db,
+            "dry_run": True,
+            "action_count": len(result.get("actions", [])),
+            "affected_metadata_row_count": (result.get("summary") or {}).get("affected_metadata_row_count"),
+            "provenance_status": (result.get("provenance") or {}).get("status"),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def policy_rollback_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -1726,6 +1813,10 @@ def managed_rollout_actions_review_main() -> None:
 
 def managed_rollout_actions_apply_main() -> None:
     raise SystemExit(managed_rollout_actions_apply_cli())
+
+
+def managed_rollout_actions_dry_run_main() -> None:
+    raise SystemExit(managed_rollout_actions_dry_run_cli())
 
 
 def policy_rollback_main() -> None:

@@ -1173,6 +1173,239 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["review"]["actions"][0]["reason"], "unknown-rule")
 
+    def _log_rollout_pattern_call(self, store, *, pattern_hash: str, cohort: str, status_code: int = 200):
+        from agentflow_proxy.store import stable_json
+
+        applied = cohort == "canary_applied"
+        rule = {
+            "rule_id": "managed-crunch-pattern-candidate-crunch-rollout",
+            "candidate_id": "candidate-crunch-rollout",
+            "policy_source": "managed-recommended",
+            "applied_count": 1 if applied else 0,
+            "saved_chars": 800 if applied else 0,
+            "matched_hashes": [pattern_hash],
+            "canary": {
+                "enabled": True,
+                "status": "holdout" if cohort == "canary_holdout" else "applied",
+                "cohort": cohort,
+                "fraction": 0.1,
+            },
+        }
+        if cohort == "bypassed":
+            rule["skip_reasons"] = [{"reason": "local-canary-safety-stop", "count": 1, "pattern_hash": pattern_hash}]
+            rule["canary"]["status"] = "applied"
+
+        store.log_call(
+            id=f"call-{cohort}-{status_code}",
+            created_at="2026-06-09T03:20:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=10,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({
+                "changed": applied,
+                "policy_source": "managed-recommended",
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "policy_source": "managed-recommended",
+                    "category": "tool-result",
+                    "rules": [rule],
+                },
+            }),
+            routing_json=stable_json({"category": "tool-result"}),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-hidden",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="anthropic",
+        )
+
+    def test_managed_rollout_actions_dry_run_reports_recent_traffic_impact(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        bundle = self._rollout_action_bundle(action_type="widen")
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._write_rollout_crunch_rule(tmp)
+                self._log_rollout_pattern_call(store, pattern_hash=self._pattern_hash(), cohort="canary_applied")
+                self._log_rollout_pattern_call(store, pattern_hash=self._pattern_hash(), cohort="canary_holdout")
+                self._log_rollout_pattern_call(store, pattern_hash=self._pattern_hash(), cohort="bypassed")
+                store.log_codex_app_event(
+                    id="codex-start-rollout",
+                    created_at="2026-06-09T03:21:00+00:00",
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="req-rollout",
+                    thread_id="thread-rollout",
+                    message_chars=100,
+                    params_chars=10,
+                    input_items=1,
+                    input_text_chars=100,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    session_id="codex-session-hidden",
+                    routing_json=stable_json({"category": "codex_turn"}),
+                    crunch_json=stable_json({
+                        "changed": True,
+                        "policy_source": "managed-recommended",
+                        "pattern_rules": {
+                            "configured_count": 1,
+                            "policy_source": "managed-recommended",
+                            "category": "codex_turn",
+                            "rules": [
+                                {
+                                    "rule_id": "managed-crunch-pattern-candidate-crunch-rollout",
+                                    "candidate_id": "candidate-crunch-rollout",
+                                    "policy_source": "managed-recommended",
+                                    "applied_count": 1,
+                                    "saved_chars": 400,
+                                    "matched_hashes": [self._pattern_hash()],
+                                    "canary": {"enabled": True, "status": "applied", "cohort": "canary_applied", "fraction": 0.1},
+                                }
+                            ],
+                        },
+                    }),
+                    cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled"}),
+                )
+                store.log_codex_app_event(
+                    id="codex-end-rollout",
+                    created_at="2026-06-09T03:21:01+00:00",
+                    direction="server_to_client",
+                    method="turn/completed",
+                    request_id="req-rollout",
+                    thread_id="thread-rollout",
+                    message_chars=20,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=20,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=100,
+                    session_id="codex-session-hidden",
+                )
+            finally:
+                store.conn.close()
+
+            before_rule_text = (Path(tmp) / "crunch_rules.yaml").read_text(encoding="utf-8")
+            before_db_size = Path(db_path).stat().st_size
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_dry_run_cli(
+                ["--config-dir", tmp, "--db", db_path, "--limit", "20", "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+            after_rule_text = (Path(tmp) / "crunch_rules.yaml").read_text(encoding="utf-8")
+            after_db_size = Path(db_path).stat().st_size
+
+        self.assertEqual(code, 0)
+        self.assertEqual(before_rule_text, after_rule_text)
+        self.assertEqual(before_db_size, after_db_size)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.pattern_rollout_actions_dry_run.v1")
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["wrote_policy_files"])
+        self.assertFalse(payload["wrote_store"])
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["managed_server_calls_made"])
+        self.assertEqual(payload["summary"]["sampled_provider_calls"], 3)
+        self.assertEqual(payload["summary"]["sampled_codex_turns"], 1)
+        self.assertEqual(payload["summary"]["affected_metadata_row_count"], 4)
+        action = payload["actions"][0]
+        self.assertEqual(action["affected_provider_call_count"], 3)
+        self.assertEqual(action["affected_codex_turn_count"], 1)
+        self.assertEqual(action["current_canary_applied_count"], 2)
+        self.assertEqual(action["current_canary_holdout_count"], 1)
+        self.assertEqual(action["current_bypassed_or_disabled_count"], 1)
+        self.assertEqual(action["current_fraction"], 0.1)
+        self.assertEqual(action["projected_fraction"], 0.25)
+        self.assertEqual(action["projected_canary_applied_count"], 2)
+        self.assertGreater(action["historical_tokens_saved_est"], 0)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        rendered = json.dumps(payload)
+        self.assertNotIn("session-hidden", rendered)
+        self.assertNotIn("codex-session-hidden", rendered)
+
+    def test_managed_rollout_actions_dry_run_covers_hold_rollback_unknown_and_raw_rejection(self):
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._write_rollout_crunch_rule(tmp)
+                self._log_rollout_pattern_call(store, pattern_hash=self._pattern_hash(), cohort="canary_applied")
+            finally:
+                store.conn.close()
+
+            hold_bundle = self._rollout_action_bundle(action_type="hold")
+            hold_bundle["actions"][0]["recommended_fraction"] = 0.1
+            rollback_bundle = self._rollout_action_bundle(action_type="rollback")
+            for bundle, expected_fraction, expected_disabled in (
+                (hold_bundle, 0.1, 0),
+                (rollback_bundle, 0.0, 1),
+            ):
+                stdout = io.StringIO()
+                code = cli.managed_rollout_actions_dry_run_cli(
+                    ["--config-dir", tmp, "--db", db_path, "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stdout,
+                )
+                self.assertEqual(code, 0)
+                action = json.loads(stdout.getvalue())["actions"][0]
+                self.assertEqual(action["projected_fraction"], expected_fraction)
+                self.assertEqual(action["projected_local_bypass_or_disable_count"], expected_disabled)
+
+            unknown = self._rollout_action_bundle(action_type="widen")
+            unknown["actions"][0]["target_rule_id"] = "missing-rule"
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_dry_run_cli(
+                ["--config-dir", tmp, "--db", db_path, "-"],
+                stdin=io.StringIO(json.dumps(unknown)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["actions"][0]["reason"], "unknown-rule")
+            self.assertEqual(payload["error"]["type"], "review_failed")
+
+            raw_like = self._rollout_action_bundle(action_type="widen", raw_like=True)
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_dry_run_cli(
+                ["--config-dir", tmp, "--db", db_path, "-"],
+                stdin=io.StringIO(json.dumps(raw_like)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "validation_failed")
+            messages = [error["message"] for error in payload["validation"]["errors"]]
+            self.assertIn("raw or prompt-like rollout action payloads are not accepted", messages)
+
     def test_policy_fetch_review_cli_without_config_skips_network(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

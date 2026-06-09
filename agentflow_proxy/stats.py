@@ -1838,6 +1838,8 @@ def _managed_policy_event_stage(event: dict[str, Any]) -> str | None:
         if ok:
             return "reviewed"
         return "errored" if details.get("status_code") else "rejected"
+    if action == "rollout-actions-dry-run":
+        return "dry_run" if ok else "rejected"
     if action in {"apply", "rollout-actions-apply"}:
         if bool(details.get("dry_run")):
             return "dry_run" if ok else "rejected"
