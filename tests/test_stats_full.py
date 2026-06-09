@@ -2249,6 +2249,207 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("textarea", html.lower())
         self.assertNotIn("form method", html.lower())
 
+    def test_phase_routing_dashboard_reports_canary_safety_savings_and_feedback(self):
+        secret = "raw phase routing payload must not leak"
+
+        async def seeded_policy_state():
+            return {
+                "schema": "agentflow.policy_state.v1",
+                "routing": {
+                    "enabled": True,
+                    "policy_source": "managed-recommended",
+                    "rule_path": "/tmp/phase-routing-rules.yaml",
+                    "file": {"reload_required": False},
+                    "phase_canary": {
+                        "enabled": True,
+                        "policy_id": "candidate-phase-route",
+                        "model_pattern": "sonnet",
+                        "target_model": "haiku",
+                        "eligible_workflow_phases": ["tool-execution", "summary"],
+                        "excluded_workflow_phases": ["planning", "thinking", "unknown"],
+                        "min_workflow_phase_confidence": "medium",
+                        "canary_fraction": 0.5,
+                        "holdout_fraction": 0.25,
+                        "safety_stop": {
+                            "enabled": True,
+                            "window_hours": 24,
+                            "min_samples": 2,
+                            "min_holdout_samples": 1,
+                            "max_error_rate": 0.05,
+                            "max_retry_rate": 0.2,
+                            "max_fallback_rate": 0.2,
+                        },
+                    },
+                },
+                "summary": {},
+            }
+
+        def log_phase_call(
+            suffix,
+            *,
+            routed_model,
+            status,
+            cohort,
+            cost,
+            baseline,
+            status_code=200,
+            retry_count=0,
+            latency_ms=1000,
+            safety=None,
+        ):
+            server.store.log_call(
+                id=f"phase-routing-{suffix}",
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model=routed_model,
+                stream=1,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                input_tokens_est=2_000,
+                output_tokens_est=200,
+                actual_input_tokens=2_000,
+                actual_output_tokens=200,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                routing_json=stable_json({
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "workflow_phase_confidence": "high",
+                    "text_chars": 8000,
+                    "has_tools": True,
+                    "reason": "phase canary selected Sonnet-to-Haiku route" if status == "applied" else "phase canary holdout; keep requested model",
+                    "phase_canary": {
+                        "enabled": True,
+                        "policy_id": "candidate-phase-route",
+                        "status": status,
+                        "cohort": cohort,
+                        "reason": "safety-stop-tripped" if status == "safety_stopped" else ("selected-canary" if status == "applied" else "selected-holdout"),
+                        "target_model": "claude-haiku-4-5-20251001",
+                        "workflow_phase": "tool-execution",
+                        "workflow_phase_confidence": "high",
+                        "category": "tool-result",
+                        "text_bucket": "2k-8k",
+                        "has_tools": True,
+                        "canary_fraction": 0.5,
+                        "holdout_fraction": 0.25,
+                        "policy_source": "managed-recommended",
+                        "debug_context": secret,
+                        "safety_stop": safety or {"enabled": True, "status": "evaluated", "tripped": False, "reason_codes": [], "sample_count": 2, "holdout_sample_count": 1},
+                    },
+                    "phase_routing_feedback": {
+                        "enabled": True,
+                        "status": "queued",
+                        "reason": "queued",
+                        "source_surface": "phase_routing_outcome",
+                        "queue_id": "phase-queue-secret",
+                        "payload_included": False,
+                    },
+                }),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=secret if status_code >= 400 else None,
+                request_json=stable_json({"messages": [{"content": secret}]}),
+                response_json=stable_json({"content": secret}),
+                session_id="phase-routing-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+
+        log_phase_call("applied", routed_model="claude-haiku-4-5-20251001", status="applied", cohort="applied", cost=0.005, baseline=0.02)
+        log_phase_call("holdout", routed_model="claude-sonnet-4-6", status="holdout", cohort="holdout", cost=0.02, baseline=0.02, latency_ms=1200)
+        log_phase_call(
+            "stopped",
+            routed_model="claude-sonnet-4-6",
+            status="safety_stopped",
+            cohort="stopped",
+            cost=0.02,
+            baseline=0.02,
+            status_code=429,
+            retry_count=1,
+            safety={"enabled": True, "status": "tripped", "tripped": True, "reason_codes": ["error-rate"], "sample_count": 3, "holdout_sample_count": 1},
+        )
+        server.store.enqueue_managed_outcome_feedback(
+            id="phase-outcome-feedback",
+            source_surface="phase_routing_outcome",
+            endpoint="/v1/policy-events",
+            optimization_unit_id=123,
+            payload_json=stable_json({"raw_payload": secret}),
+            status="queued",
+        )
+        server.store.enqueue_managed_outcome_feedback(
+            id="phase-lifecycle-feedback",
+            source_surface="phase_routing_lifecycle",
+            endpoint="/v1/policy-events",
+            optimization_unit_id=0,
+            payload_json=stable_json({
+                "event_type": "dry-run",
+                "recommendation_id": "phase-routing:secret-id",
+                "metadata": {
+                    "schema": "agentflow.phase_routing_lifecycle_metadata.v1",
+                    "command": "phase-routing-dry-run",
+                    "local_result_status": "ok",
+                    "dry_run": True,
+                    "read_only": True,
+                    "policy_source": "managed-recommended",
+                    "sampled_call_count": 3,
+                    "matched_count": 2,
+                    "projected_candidate_count": 1,
+                    "excluded_count": 1,
+                    "projected_savings_usd": 0.015,
+                    "risk_warning_count": 1,
+                    "candidate_rule_ids": ["candidate-phase-route"],
+                    "excluded_count_by_reason": {"thinking": 1},
+                    "raw_payload": secret,
+                },
+            }),
+            status="queued",
+        )
+
+        with patch.object(stats_views, "stats_policies", seeded_policy_state):
+            payload = asyncio.run(stats_views.stats_phase_routing(server.store, limit=50))
+            app = create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.anthropic.com",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            with TestClient(app) as client:
+                endpoint = client.get("/agentflow/stats/phase-routing?limit=50")
+                html = client.get("/agentflow/dashboard").text
+
+        self.assertEqual(payload["schema"], "agentflow.phase_routing_dashboard.v1")
+        self.assertEqual(payload["status"], "safety-stopped")
+        self.assertEqual(payload["summary"]["canary_applied_rows"], 1)
+        self.assertEqual(payload["summary"]["canary_holdout_rows"], 1)
+        self.assertEqual(payload["summary"]["safety_stop_rows"], 1)
+        self.assertGreater(payload["summary"]["projected_savings_usd"], 0)
+        self.assertGreater(payload["summary"]["observed_savings_usd"], 0)
+        self.assertEqual(payload["managed_feedback_queue"]["summary"]["queued"], 1)
+        self.assertEqual(payload["lifecycle"]["summary"]["feedback_count"], 1)
+        self.assertEqual(payload["lifecycle"]["summary"]["latest_dry_run_matched_count"], 2)
+        self.assertTrue(payload["safety_stop"]["active"])
+        self.assertFalse(payload["privacy"]["local_session_ids_included"])
+        self.assertFalse(payload["privacy"]["queue_payload_json_included"])
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(endpoint.json()["schema"], "agentflow.phase_routing_dashboard.v1")
+        self.assertIn("Phase-routing rollout health", html)
+        self.assertIn("phase-routing-opportunity-tbody", html)
+        self.assertIn("phase-routing-canary-tbody", html)
+        self.assertIn("raw prompts omitted", html)
+
+        rendered = json.dumps(payload, sort_keys=True) + html
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("phase-routing-session-secret", rendered)
+        self.assertNotIn("phase-queue-secret", rendered)
+
     def test_cache_decision_breakdown_groups_status_reason_and_hit_type(self):
         rows = [
             {"status": "skipped", "reason": "streaming", "policy_source": "local-default"},
@@ -4315,7 +4516,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','oldcontext','sessions']", html)
+        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','phaserouting','oldcontext','sessions']", html)
 
     def test_dashboard_exposes_codex_quota_token_usage_panel(self):
         html = stats_views.dashboard_html()

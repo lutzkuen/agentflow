@@ -121,6 +121,10 @@ def create_dashboard_router(
     async def stats_old_context_summary() -> dict[str, Any]:
         return await stats_views.stats_old_context_summary(_store(store_obj))
 
+    @router.get("/agentflow/stats/phase-routing")
+    async def stats_phase_routing(limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_phase_routing(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/policies")
     async def stats_policies() -> dict[str, Any]:
         return await stats_views.stats_policies()

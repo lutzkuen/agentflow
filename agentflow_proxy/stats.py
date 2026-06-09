@@ -25,7 +25,12 @@ from agentflow_proxy.quality import (
     derive_provider_quality_signals,
     summarize_quality_signals,
 )
-from agentflow_proxy.recommendations import OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE, pattern_decision_summaries
+from agentflow_proxy.recommendations import (
+    OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+    PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE,
+    PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
+    pattern_decision_summaries,
+)
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
 
@@ -1433,6 +1438,429 @@ def _breakdown_count(rows: list[dict[str, Any]], value: str) -> int:
         if str(row.get("value") or "") == value:
             return _as_int(row.get("count"))
     return 0
+
+
+def _phase_routing_feedback_rows(store_obj: Any, *, source_surface: str, limit: int) -> list[dict[str, Any]]:
+    if store_obj is None:
+        return []
+    capped = max(1, min(int(limit or 500), 5000))
+    if hasattr(store_obj, "conn"):
+        try:
+            rows = store_obj.conn.execute(
+                """
+                select id, created_at, updated_at, source_surface, endpoint, optimization_unit_id,
+                       payload_json, status, attempts, next_attempt_at, last_error,
+                       last_status_code, sent_at
+                from managed_outcome_feedback_queue
+                where source_surface = ?
+                order by created_at desc
+                limit ?
+                """,
+                (source_surface, capped),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception:
+            pass
+    if not hasattr(store_obj, "managed_outcome_feedback_rows"):
+        return []
+    try:
+        return store_obj.managed_outcome_feedback_rows(source_surface=source_surface, limit=capped)
+    except Exception:
+        return []
+
+
+def _phase_routing_public_lifecycle_rows(rows: list[dict[str, Any]], *, now: datetime) -> list[dict[str, Any]]:
+    public: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _json_obj(row.get("payload_json"))
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        public.append({
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "age_seconds": _seconds_since_iso(row.get("created_at"), now),
+            "source_surface": row.get("source_surface"),
+            "endpoint": row.get("endpoint"),
+            "status": row.get("status"),
+            "attempts": _as_int(row.get("attempts")),
+            "last_status_code": row.get("last_status_code"),
+            "sent_at": row.get("sent_at"),
+            "event_type": payload.get("event_type"),
+            "recommendation_id_present": bool(payload.get("recommendation_id")),
+            "command": metadata.get("command"),
+            "local_result_status": metadata.get("local_result_status"),
+            "dry_run": bool(metadata.get("dry_run")),
+            "read_only": bool(metadata.get("read_only", True)),
+            "policy_source": metadata.get("policy_source"),
+            "sampled_call_count": _as_int(metadata.get("sampled_call_count")),
+            "rule_count": _as_int(metadata.get("rule_count")),
+            "matched_count": _as_int(metadata.get("matched_count")),
+            "projected_candidate_count": _as_int(metadata.get("projected_candidate_count")),
+            "excluded_count": _as_int(metadata.get("excluded_count")),
+            "projected_savings_usd": round(_as_float(metadata.get("projected_savings_usd")), 6),
+            "risk_warning_count": _as_int(metadata.get("risk_warning_count")),
+            "candidate_rule_count": len(metadata.get("candidate_rule_ids") or []) if isinstance(metadata.get("candidate_rule_ids"), list) else 0,
+            "excluded_count_by_reason": _count_breakdown(metadata.get("excluded_count_by_reason") if isinstance(metadata.get("excluded_count_by_reason"), dict) else {}),
+            "payload_included": False,
+            "raw_payload_included": False,
+        })
+    return public
+
+
+def _phase_routing_public_health_rows(limit: int = 25) -> list[dict[str, Any]]:
+    from agentflow_proxy.policy_events import recent_policy_events
+
+    rows: list[dict[str, Any]] = []
+    for event in recent_policy_events(limit=100).get("events", []):
+        if not isinstance(event, dict):
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        health = details.get("recommendation_health") if isinstance(details.get("recommendation_health"), dict) else {}
+        for item in health.get("rows") or []:
+            if not isinstance(item, dict):
+                continue
+            haystack = " ".join(
+                str(value or "")
+                for value in (
+                    item.get("candidate_id"),
+                    item.get("rule_id"),
+                    item.get("policy_id"),
+                    item.get("kind"),
+                    item.get("code"),
+                    details.get("policy_sections"),
+                )
+            ).lower()
+            if "phase" not in haystack and "routing" not in haystack:
+                continue
+            rows.append({
+                "event_created_at": event.get("created_at"),
+                "action": event.get("action"),
+                "ok": bool(event.get("ok")),
+                "kind": item.get("kind"),
+                "code": item.get("code"),
+                "candidate_id": item.get("candidate_id"),
+                "rule_id": item.get("rule_id") or item.get("policy_id"),
+                "status": health.get("status"),
+                "warning_count": _as_int(health.get("warning_count")),
+                "details_included": False,
+                "raw_payload_included": False,
+            })
+            if len(rows) >= max(1, int(limit)):
+                return rows
+    return rows
+
+
+def _phase_canary_cohort(meta: dict[str, Any]) -> str:
+    status = str(meta.get("status") or "unknown")
+    cohort = str(meta.get("cohort") or "")
+    reason = str(meta.get("reason") or "")
+    if status == "applied" or cohort == "applied":
+        return "applied"
+    if status == "holdout" or cohort == "holdout":
+        return "holdout"
+    if status == "safety_stopped" or "safety-stop" in reason:
+        return "safety_stopped"
+    if status in {"not_selected", "ineligible", "disabled"}:
+        return status
+    return "unknown"
+
+
+def _new_phase_canary_bucket(policy: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_id": meta.get("policy_id") or policy.get("policy_id"),
+        "policy_source": meta.get("policy_source") or policy.get("policy_source"),
+        "target_model": meta.get("target_model") or policy.get("target_model"),
+        "last_decision_at": None,
+        "observed_rows": 0,
+        "enabled_rows": 0,
+        "applied_rows": 0,
+        "holdout_rows": 0,
+        "not_selected_rows": 0,
+        "ineligible_rows": 0,
+        "safety_stop_rows": 0,
+        "error_rows": 0,
+        "retry_rows": 0,
+        "fallback_rows": 0,
+        "current_cost_usd": 0.0,
+        "baseline_cost_usd": 0.0,
+        "observed_savings_usd": 0.0,
+        "cohorts": {
+            "applied": {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "holdout": {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "not_selected": {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "ineligible": {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "safety_stopped": {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "unknown": {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+        },
+    }
+
+
+def _finalize_phase_canary_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    cohorts: dict[str, Any] = {}
+    for name, raw in bucket["cohorts"].items():
+        count = _as_int(raw.get("count"))
+        latency_samples = _as_int(raw.get("latency_sample_count"))
+        cohorts[name] = {
+            "count": count,
+            "error_count": _as_int(raw.get("error_count")),
+            "retry_count": _as_int(raw.get("retry_count")),
+            "fallback_count": _as_int(raw.get("fallback_count")),
+            "error_rate": round(_as_int(raw.get("error_count")) / count, 6) if count else 0.0,
+            "retry_rate": round(_as_int(raw.get("retry_count")) / count, 6) if count else 0.0,
+            "fallback_rate": round(_as_int(raw.get("fallback_count")) / count, 6) if count else 0.0,
+            "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
+        }
+    applied = cohorts["applied"]
+    holdout = cohorts["holdout"]
+    latency_delta = None
+    if applied["latency_avg_ms"] is not None and holdout["latency_avg_ms"] is not None:
+        latency_delta = round(_as_float(applied["latency_avg_ms"]) - _as_float(holdout["latency_avg_ms"]), 2)
+    return {
+        "policy_id": bucket.get("policy_id"),
+        "policy_source": bucket.get("policy_source"),
+        "target_model": bucket.get("target_model"),
+        "last_decision_at": bucket.get("last_decision_at"),
+        "observed_rows": _as_int(bucket.get("observed_rows")),
+        "enabled_rows": _as_int(bucket.get("enabled_rows")),
+        "applied_rows": _as_int(bucket.get("applied_rows")),
+        "holdout_rows": _as_int(bucket.get("holdout_rows")),
+        "not_selected_rows": _as_int(bucket.get("not_selected_rows")),
+        "ineligible_rows": _as_int(bucket.get("ineligible_rows")),
+        "safety_stop_rows": _as_int(bucket.get("safety_stop_rows")),
+        "error_rows": _as_int(bucket.get("error_rows")),
+        "retry_rows": _as_int(bucket.get("retry_rows")),
+        "fallback_rows": _as_int(bucket.get("fallback_rows")),
+        "error_rate": round(_as_int(bucket.get("error_rows")) / _as_int(bucket.get("observed_rows")), 6) if _as_int(bucket.get("observed_rows")) else 0.0,
+        "retry_rate": round(_as_int(bucket.get("retry_rows")) / _as_int(bucket.get("observed_rows")), 6) if _as_int(bucket.get("observed_rows")) else 0.0,
+        "fallback_rate": round(_as_int(bucket.get("fallback_rows")) / _as_int(bucket.get("observed_rows")), 6) if _as_int(bucket.get("observed_rows")) else 0.0,
+        "current_cost_usd": round(_as_float(bucket.get("current_cost_usd")), 6),
+        "baseline_cost_usd": round(_as_float(bucket.get("baseline_cost_usd")), 6),
+        "observed_savings_usd": round(_as_float(bucket.get("observed_savings_usd")), 6),
+        "applied_minus_holdout_error_rate": round(_as_float(applied["error_rate"]) - _as_float(holdout["error_rate"]), 6),
+        "applied_minus_holdout_retry_rate": round(_as_float(applied["retry_rate"]) - _as_float(holdout["retry_rate"]), 6),
+        "applied_minus_holdout_latency_avg_ms": latency_delta,
+        "cohorts": cohorts,
+    }
+
+
+async def stats_phase_routing(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.phase_routing_report import build_phase_routing_report, _load_recent_rows
+
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    now = datetime.now(timezone.utc)
+    policy_state = await stats_policies()
+    routing_policy = policy_state.get("routing") if isinstance(policy_state.get("routing"), dict) else {}
+    phase_policy = routing_policy.get("phase_canary") if isinstance(routing_policy.get("phase_canary"), dict) else {}
+    opportunity = build_phase_routing_report(store_obj, limit=capped_limit)
+    rows = _load_recent_rows(store_obj, limit=capped_limit)
+
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    phase_counts: dict[str, int] = {}
+    confidence_counts: dict[str, int] = {}
+    feedback_status_counts: dict[str, int] = {}
+    feedback_reason_counts: dict[str, int] = {}
+    safety_stop_reason_counts: dict[str, int] = {}
+    latest_safety_stop: dict[str, Any] | None = None
+    buckets: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        routing = _json_obj(row.get("routing_json"))
+        canary = routing.get("phase_canary") if isinstance(routing.get("phase_canary"), dict) else {}
+        feedback = routing.get("phase_routing_feedback") if isinstance(routing.get("phase_routing_feedback"), dict) else {}
+        if feedback:
+            status = str(feedback.get("status") or "unknown")
+            reason = str(feedback.get("reason") or "unknown")
+            feedback_status_counts[status] = feedback_status_counts.get(status, 0) + 1
+            feedback_reason_counts[reason] = feedback_reason_counts.get(reason, 0) + 1
+        if not canary:
+            continue
+        policy_id = str(canary.get("policy_id") or phase_policy.get("policy_id") or "local-phase-sonnet-haiku-canary-v1")
+        bucket = buckets.setdefault(policy_id, _new_phase_canary_bucket(phase_policy, canary))
+        created_at = row.get("created_at")
+        if created_at and str(created_at) > str(bucket.get("last_decision_at") or ""):
+            bucket["last_decision_at"] = created_at
+        bucket["observed_rows"] += 1
+        bucket["enabled_rows"] += int(bool(canary.get("enabled")))
+        cohort = _phase_canary_cohort(canary)
+        status = str(canary.get("status") or "unknown")
+        reason = str(canary.get("reason") or "unknown")
+        phase = str(canary.get("workflow_phase") or routing.get("workflow_phase") or "unknown")
+        confidence = str(canary.get("workflow_phase_confidence") or routing.get("workflow_phase_confidence") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
+        if cohort == "applied":
+            bucket["applied_rows"] += 1
+        elif cohort == "holdout":
+            bucket["holdout_rows"] += 1
+        elif cohort == "not_selected":
+            bucket["not_selected_rows"] += 1
+        elif cohort == "ineligible":
+            bucket["ineligible_rows"] += 1
+        elif cohort == "safety_stopped":
+            bucket["safety_stop_rows"] += 1
+        errored = _as_int(row.get("status_code")) >= 400
+        retried = _as_int(row.get("retry_count")) > 0
+        fallback = bool(routing.get("fallback_reason") or canary.get("fallback_reason"))
+        bucket["error_rows"] += int(errored)
+        bucket["retry_rows"] += int(retried)
+        bucket["fallback_rows"] += int(fallback)
+        current = _as_float(row.get("cost_est_usd"))
+        baseline = _as_float(row.get("cost_baseline_usd"))
+        bucket["current_cost_usd"] += current
+        bucket["baseline_cost_usd"] += baseline
+        if cohort == "applied":
+            bucket["observed_savings_usd"] += max(0.0, baseline - current)
+        cohort_bucket = bucket["cohorts"].get(cohort, bucket["cohorts"]["unknown"])
+        cohort_bucket["count"] += 1
+        cohort_bucket["error_count"] += int(errored)
+        cohort_bucket["retry_count"] += int(retried)
+        cohort_bucket["fallback_count"] += int(fallback)
+        latency = _as_int(row.get("latency_ms"))
+        if latency > 0:
+            cohort_bucket["latency_ms_total"] += latency
+            cohort_bucket["latency_sample_count"] += 1
+        safety = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
+        if safety:
+            if safety.get("tripped") or status == "safety_stopped":
+                latest_safety_stop = {
+                    "policy_id": policy_id,
+                    "created_at": created_at,
+                    "status": safety.get("status") or status,
+                    "tripped": bool(safety.get("tripped") or status == "safety_stopped"),
+                    "sample_count": _as_int(safety.get("sample_count")),
+                    "holdout_sample_count": _as_int(safety.get("holdout_sample_count")),
+                    "reason_codes": safety.get("reason_codes") or [],
+                }
+            for reason_code in safety.get("reason_codes") or []:
+                safety_stop_reason_counts[str(reason_code)] = safety_stop_reason_counts.get(str(reason_code), 0) + 1
+
+    canary_health = [_finalize_phase_canary_bucket(bucket) for bucket in buckets.values()]
+    canary_health.sort(key=lambda item: (str(item.get("last_decision_at") or ""), item.get("observed_rows") or 0), reverse=True)
+    latest_canary = canary_health[0] if canary_health else {}
+    outcome_queue = _managed_feedback_queue_health(store_obj, sample_limit=5, source_surface=PHASE_ROUTING_OUTCOME_SOURCE_SURFACE)
+    lifecycle_rows = _phase_routing_feedback_rows(
+        store_obj,
+        source_surface=PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE,
+        limit=500,
+    )
+    lifecycle_public_rows = _phase_routing_public_lifecycle_rows(lifecycle_rows, now=now)
+    lifecycle_queue = _managed_feedback_queue_health(store_obj, sample_limit=5, source_surface=PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE)
+    latest_lifecycle = lifecycle_public_rows[0] if lifecycle_public_rows else None
+    lifecycle_summary = {
+        "feedback_count": len(lifecycle_public_rows),
+        "latest_dry_run_matched_count": _as_int((latest_lifecycle or {}).get("matched_count")),
+        "latest_dry_run_projected_candidate_count": _as_int((latest_lifecycle or {}).get("projected_candidate_count")),
+        "latest_dry_run_projected_savings_usd": round(_as_float((latest_lifecycle or {}).get("projected_savings_usd")), 6),
+        "latest_dry_run_risk_warning_count": _as_int((latest_lifecycle or {}).get("risk_warning_count")),
+        "pending_lifecycle_feedback_count": _as_int((lifecycle_queue.get("summary") or {}).get("queued")) + _as_int((lifecycle_queue.get("summary") or {}).get("retryable_error")),
+        "due_lifecycle_feedback_count": _as_int((lifecycle_queue.get("summary") or {}).get("due")),
+    }
+
+    observed_rows = sum(_as_int(row.get("observed_rows")) for row in canary_health)
+    rollout_status = "disabled"
+    if phase_policy.get("enabled"):
+        rollout_status = "not-deployed-yet" if observed_rows <= 0 else "observed"
+        if sum(_as_int(row.get("applied_rows")) for row in canary_health) > 0:
+            rollout_status = "canary-observed"
+        if sum(_as_int(row.get("holdout_rows")) for row in canary_health) > 0:
+            rollout_status = "canary-and-holdout-observed"
+        if latest_safety_stop:
+            rollout_status = "safety-stopped"
+
+    return {
+        "schema": "agentflow.phase_routing_dashboard.v1",
+        "generated_at": utc_now(),
+        "limit": capped_limit,
+        "status": rollout_status,
+        "summary": {
+            "sampled_call_count": _as_int(opportunity.get("sampled_call_count")),
+            "opportunity_candidate_count": _as_int((opportunity.get("summary") or {}).get("candidate_count")),
+            "current_routed_count": _as_int((opportunity.get("summary") or {}).get("current_routed_count")),
+            "projected_savings_usd": round(_as_float((opportunity.get("summary") or {}).get("projected_savings_usd")), 6),
+            "canary_observed_rows": observed_rows,
+            "canary_applied_rows": sum(_as_int(row.get("applied_rows")) for row in canary_health),
+            "canary_holdout_rows": sum(_as_int(row.get("holdout_rows")) for row in canary_health),
+            "safety_stop_rows": sum(_as_int(row.get("safety_stop_rows")) for row in canary_health),
+            "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in canary_health), 6),
+            "outcome_feedback_queued": _as_int((outcome_queue.get("summary") or {}).get("queued")),
+            "outcome_feedback_due": _as_int((outcome_queue.get("summary") or {}).get("due")),
+            "lifecycle_feedback_count": len(lifecycle_public_rows),
+            "managed_health_warning_count": len(_phase_routing_public_health_rows(limit=25)),
+        },
+        "policy": {
+            "enabled": bool(phase_policy.get("enabled")),
+            "policy_id": phase_policy.get("policy_id"),
+            "policy_source": routing_policy.get("policy_source"),
+            "rule_path": routing_policy.get("rule_path"),
+            "reload_required": bool(((routing_policy.get("file") or {}).get("reload_required"))),
+            "model_pattern": phase_policy.get("model_pattern"),
+            "target_model": phase_policy.get("target_model"),
+            "eligible_workflow_phases": phase_policy.get("eligible_workflow_phases") or [],
+            "excluded_workflow_phases": phase_policy.get("excluded_workflow_phases") or [],
+            "min_workflow_phase_confidence": phase_policy.get("min_workflow_phase_confidence"),
+            "canary_fraction": _as_float(phase_policy.get("canary_fraction")),
+            "holdout_fraction": _as_float(phase_policy.get("holdout_fraction")),
+            "safety_stop": phase_policy.get("safety_stop") if isinstance(phase_policy.get("safety_stop"), dict) else {},
+        },
+        "state_flags": {
+            "disabled": not bool(phase_policy.get("enabled")),
+            "not_deployed_yet": bool(phase_policy.get("enabled")) and observed_rows <= 0,
+            "no_observed_rows": observed_rows <= 0,
+            "no_applied_canary_rows": observed_rows > 0 and sum(_as_int(row.get("applied_rows")) for row in canary_health) <= 0,
+            "no_holdout_rows": observed_rows > 0 and sum(_as_int(row.get("holdout_rows")) for row in canary_health) <= 0,
+            "safety_stopped": bool(latest_safety_stop),
+            "read_only": True,
+        },
+        "opportunity": opportunity,
+        "canary_health": canary_health,
+        "latest_canary": latest_canary,
+        "status_breakdown": _count_breakdown(status_counts),
+        "reason_breakdown": _count_breakdown(reason_counts),
+        "phase_breakdown": _count_breakdown(phase_counts),
+        "confidence_breakdown": _count_breakdown(confidence_counts),
+        "feedback_status_breakdown": _count_breakdown(feedback_status_counts),
+        "feedback_reason_breakdown": _count_breakdown(feedback_reason_counts),
+        "safety_stop": {
+            "active": bool(latest_safety_stop),
+            "latest": latest_safety_stop,
+            "reason_code_breakdown": _count_breakdown(safety_stop_reason_counts),
+        },
+        "lifecycle": {
+            "summary": lifecycle_summary,
+            "latest": latest_lifecycle,
+            "recent": lifecycle_public_rows[:25],
+            "feedback_queue": lifecycle_queue,
+        },
+        "managed_feedback_queue": outcome_queue,
+        "managed_recommendation_health": {
+            "rows": _phase_routing_public_health_rows(limit=25),
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "raw_responses_included": False,
+                "provider_bodies_included": False,
+                "raw_health_details_included": False,
+            },
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "error_samples_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+            "queue_payload_json_included": False,
+            "policy_file_contents_included": False,
+        },
+    }
 
 
 async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
@@ -7904,6 +8332,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
+  <button class="tab-btn" onclick="showTab('phaserouting')">Phase routing</button>
   <button class="tab-btn" onclick="showTab('oldcontext')">Old-context summary</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
@@ -8251,6 +8680,45 @@ def dashboard_html() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-phaserouting">
+<div class="section">
+  <h2>Phase-routing rollout health</h2>
+  <table class="activity-table" data-table-id="phase-routing-health" data-filter-label="Filter phase-routing health">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Canary</th><th data-sort-type="text">Safety stop</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Queue</th><th data-sort-type="text">No-data states</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="phase-routing-health-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Phase-routing opportunity by phase</h2>
+  <table class="activity-table" data-table-id="phase-routing-opportunity" data-filter-label="Filter phase-routing opportunity">
+    <thead><tr>
+      <th data-sort-type="text">Phase</th><th data-sort-type="text">Model pair</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Routed</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Blocked</th><th data-sort-type="money">Current cost</th><th data-sort-type="money">Target cost</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Risk exclusions</th>
+    </tr></thead>
+    <tbody id="phase-routing-opportunity-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Phase-routing canary cohorts</h2>
+  <table class="activity-table" data-table-id="phase-routing-canary" data-filter-label="Filter phase-routing canaries">
+    <thead><tr>
+      <th data-sort-type="time">Last seen</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Target</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Error rate</th><th data-sort-type="percent">Retry rate</th><th data-sort-type="percent">Fallback rate</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="money">Savings</th>
+    </tr></thead>
+    <tbody id="phase-routing-canary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Phase-routing feedback and dry-run lifecycle</h2>
+  <table data-table-id="phase-routing-feedback" data-filter-label="Filter phase-routing feedback">
+    <thead><tr>
+      <th data-sort-type="number">Outcome queued</th><th data-sort-type="number">Outcome due</th><th data-sort-type="number">Lifecycle rows</th><th data-sort-type="number">Dry-run matched</th><th data-sort-type="number">Dry-run candidates</th><th data-sort-type="money">Dry-run savings</th><th data-sort-type="number">Warnings</th><th data-sort-type="text">Latest command</th><th data-sort-type="text">Health warnings</th>
+    </tr></thead>
+    <tbody id="phase-routing-feedback-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <div class="tab-panel" id="tab-oldcontext">
 <div class="section">
   <h2>Old-context summarization rollout health</h2>
@@ -8590,7 +9058,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','oldcontext','sessions'];
+  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','phaserouting','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -9416,6 +9884,90 @@ async function refreshManaged(){
   }catch(e){}
 }
 
+async function refreshPhaseRouting(){
+  try{
+    const r=await fetch('/agentflow/stats/phase-routing?limit=1000');
+    const d=await r.json();
+    const summary=d.summary||{};
+    const policy=d.policy||{};
+    const flags=d.state_flags||{};
+    const safety=d.safety_stop||{};
+    const queue=d.managed_feedback_queue||{};
+    const queueSummary=queue.summary||{};
+    const lifecycle=d.lifecycle||{};
+    const lifecycleSummary=lifecycle.summary||{};
+    const healthRows=((d.managed_recommendation_health||{}).rows)||[];
+    const noDataBadges=[
+      flags.disabled?'<span class="badge miss">disabled</span>':'',
+      flags.not_deployed_yet?'<span class="badge routed">not deployed yet</span>':'',
+      flags.no_observed_rows?'<span class="badge miss">no observed rows</span>':'',
+      flags.no_applied_canary_rows?'<span class="badge routed">no applied canary rows</span>':'',
+      flags.no_holdout_rows?'<span class="badge routed">no holdout rows</span>':'',
+      flags.safety_stopped?'<span class="badge err">safety stopped</span>':''
+    ].filter(Boolean).join(' ')||'<span class="badge hit">observed</span>';
+    const policyBadge=policy.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">disabled</span>';
+    const stopLatest=safety.latest||{};
+    document.getElementById('phase-routing-health-tbody').innerHTML=`<tr>
+      <td><span class="badge ${rolloutBadge(d.status)}">${esc(d.status||'unknown')}</span></td>
+      <td class="flags">${policyBadge} <span class="badge provider">${esc(policy.policy_source||'unknown')}</span> <span class="badge provider">${esc(policy.model_pattern||'model')} → ${esc(shortModel(policy.target_model||'target'))}</span>${policy.reload_required?' <span class="badge err">reload required</span>':''}</td>
+      <td class="flags"><span class="badge ${policy.canary_fraction>0?'hit':'miss'}">canary ${fmtPctValue(Number(policy.canary_fraction||0))}</span> <span class="badge ${policy.holdout_fraction>0?'hit':'miss'}">holdout ${fmtPctValue(Number(policy.holdout_fraction||0))}</span> <span class="badge miss">min ${esc(policy.min_workflow_phase_confidence||'unknown')}</span></td>
+      <td class="flags">${(policy.safety_stop||{}).enabled?'<span class="badge hit">on</span>':'<span class="badge miss">off</span>'} ${safety.active?`<span class="badge err">${esc(stopLatest.status||'tripped')}</span>`:'<span class="badge hit">clear</span>'} ${(stopLatest.reason_codes||[]).map(code=>`<span class="badge err">${esc(code)}</span>`).join(' ')}</td>
+      <td class="tokens">${(summary.canary_observed_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(summary.canary_applied_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(summary.canary_holdout_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(summary.safety_stop_rows||0).toLocaleString()}</td>
+      <td class="savings">${fmt(summary.observed_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(summary.projected_savings_usd||0,6)}</td>
+      <td class="flags"><span class="badge provider">${(summary.outcome_feedback_queued||0).toLocaleString()} queued</span> <span class="${summary.outcome_feedback_due?'badge routed':'badge hit'}">${(summary.outcome_feedback_due||0).toLocaleString()} due</span></td>
+      <td class="flags">${noDataBadges}</td>
+      <td class="flags">${(d.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">payload omitted</span></td>
+    </tr>`;
+    const opportunities=((d.opportunity||{}).opportunities)||[];
+    document.getElementById('phase-routing-opportunity-tbody').innerHTML=opportunities.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.phase||'unknown')}</span></td>
+      <td class="model">${esc(row.model_pair||'unknown')} <span class="badge miss">${esc(shortModel(row.target_model||''))}</span></td>
+      <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.current_routed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.projected_candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.blocked_count||0).toLocaleString()}</td>
+      <td class="cost">${fmt(row.current_cost_usd||0,6)}</td>
+      <td class="cost">${fmt(row.projected_target_cost_usd||0,6)}</td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td class="flags">${compactBreakdown(row.blocked_count_by_reason,'none')}</td>
+      <td class="flags">${compactBreakdown(row.risk_exclusions,'none')}</td>
+    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No phase-routing opportunity rows yet</td></tr>';
+    const canaries=d.canary_health||[];
+    document.getElementById('phase-routing-canary-tbody').innerHTML=canaries.map(row=>`<tr>
+      <td class="ts">${ago(row.last_decision_at)}</td>
+      <td class="model">${esc(row.policy_id||'local-phase-canary')} <span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+      <td class="model">${esc(shortModel(row.target_model||'target'))}</td>
+      <td class="tokens">${(row.observed_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.applied_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_rows||0).toLocaleString()}</td>
+      <td class="${(row.error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.error_rate||0)}</td>
+      <td class="${(row.retry_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.retry_rate||0)}</td>
+      <td class="${(row.fallback_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.fallback_rate||0)}</td>
+      <td class="${(row.applied_minus_holdout_error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.applied_minus_holdout_error_rate||0)}</td>
+      <td class="${(row.applied_minus_holdout_retry_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.applied_minus_holdout_retry_rate||0)}</td>
+      <td class="latency">${fmtMs(row.applied_minus_holdout_latency_avg_ms)}</td>
+      <td class="savings">${fmt(row.observed_savings_usd||0,6)}</td>
+    </tr>`).join('')||'<tr><td colspan="13" style="color:#8b949e">No phase-routing canary cohorts observed yet</td></tr>';
+    const latestLifecycle=lifecycle.latest||{};
+    document.getElementById('phase-routing-feedback-tbody').innerHTML=`<tr>
+      <td class="tokens">${(queueSummary.queued||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.due||0).toLocaleString()}</td>
+      <td class="tokens">${(lifecycleSummary.feedback_count||0).toLocaleString()}</td>
+      <td class="tokens">${(lifecycleSummary.latest_dry_run_matched_count||0).toLocaleString()}</td>
+      <td class="tokens">${(lifecycleSummary.latest_dry_run_projected_candidate_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(lifecycleSummary.latest_dry_run_projected_savings_usd||0,6)}</td>
+      <td class="tokens">${(lifecycleSummary.latest_dry_run_risk_warning_count||0).toLocaleString()}</td>
+      <td class="flags"><span class="badge provider">${esc(latestLifecycle.command||'none')}</span> ${latestLifecycle.dry_run?'<span class="badge hit">dry-run</span>':'<span class="badge miss">no dry-run</span>'}</td>
+      <td class="flags">${healthRows.length?healthRows.map(row=>`<span class="badge routed">${esc(row.code||row.kind||'warning')}</span>`).join(' '):'<span class="badge hit">none</span>'}</td>
+    </tr>`;
+    applyAllDataTables();
+  }catch(e){}
+}
+
 async function refreshSessions(){
   try{
     const [r,full]=await Promise.all([fetch('/agentflow/stats/sessions'),loadFullStats()]);
@@ -9590,6 +10142,7 @@ refreshLimiter();
 refreshSafety();
 refreshPolicies();
 refreshManaged();
+refreshPhaseRouting();
 refreshSessions();
 setInterval(refreshSafety,30000);
 setInterval(refreshActivity,5000);
@@ -9603,6 +10156,7 @@ setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
 setInterval(refreshManaged,30000);
+setInterval(refreshPhaseRouting,30000);
 setInterval(refreshSessions,30000);
 </script>
 </body>

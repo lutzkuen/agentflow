@@ -77,6 +77,7 @@ class DashboardImportTests(unittest.TestCase):
             policy_events = client.get("/agentflow/stats/policy-events")
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
+            phase_routing = client.get("/agentflow/stats/phase-routing")
             safety = client.get("/agentflow/stats/safety")
             admin_reload = client.post("/agentflow/admin/reload-policies")
             dashboard = client.get("/agentflow/dashboard")
@@ -96,6 +97,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
+            self.assertEqual(phase_routing.status_code, 200)
+            self.assertEqual(phase_routing.json()["schema"], "agentflow.phase_routing_dashboard.v1")
+            self.assertFalse(phase_routing.json()["privacy"]["raw_prompts_included"])
             self.assertEqual(safety.status_code, 200)
             self.assertEqual(safety.json()["schema"], "agentflow.safety_privacy.v1")
             self.assertFalse(safety.json()["privacy"]["raw_prompts_included"])
@@ -148,6 +152,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/rollout-actions/readiness", dashboard.text)
             self.assertIn("Rollout-action readiness", dashboard.text)
             self.assertIn("rollout-readiness-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/phase-routing", dashboard.text)
+            self.assertIn("Phase-routing rollout health", dashboard.text)
+            self.assertIn("phase-routing-health-tbody", dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
