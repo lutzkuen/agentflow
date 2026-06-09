@@ -99,6 +99,12 @@ def _default_crunch_policy() -> dict[str, Any]:
             "similarity_threshold": 0.95,
             "skip_latest_assistant": True,
         },
+        "terminal_log_boilerplate": {
+            "enabled": True,
+            "min_lines": 8,
+            "min_repeated_lines": 4,
+            "max_annotations": 12,
+        },
         "pattern_rules": [],
         "codex_repeated_scaffolding": {
             "enabled": True,
@@ -151,6 +157,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            terminal_log = data.get("terminal_log_boilerplate") or {}
+            if isinstance(terminal_log, dict):
+                _apply_terminal_log_policy_yaml(policy, terminal_log)
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-manual")
@@ -186,6 +195,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            terminal_log = data.get("terminal_log_boilerplate") or {}
+            if isinstance(terminal_log, dict):
+                _apply_terminal_log_policy_yaml(policy, terminal_log)
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-default")
@@ -347,6 +359,14 @@ def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: di
     )
 
 
+def _apply_terminal_log_policy_yaml(policy: dict[str, Any], terminal_log: dict[str, Any]) -> None:
+    target = policy["terminal_log_boilerplate"]
+    target["enabled"] = _as_bool(terminal_log.get("enabled"), target["enabled"])
+    for key in ("min_lines", "min_repeated_lines", "max_annotations"):
+        if terminal_log.get(key) is not None:
+            target[key] = int(terminal_log[key])
+
+
 def _parse_pattern_hashes(value: Any) -> list[str]:
     if value is None:
         return []
@@ -472,6 +492,11 @@ THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
 THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
 THINKING_DEDUP_SIMILARITY_THRESHOLD = float(THINKING_DEDUP_POLICY["similarity_threshold"])
 THINKING_DEDUP_SKIP_LATEST_ASSISTANT = bool(THINKING_DEDUP_POLICY["skip_latest_assistant"])
+TERMINAL_LOG_POLICY = CRUNCH_POLICY["terminal_log_boilerplate"]
+TERMINAL_LOG_ENABLED = bool(TERMINAL_LOG_POLICY["enabled"])
+TERMINAL_LOG_MIN_LINES = int(TERMINAL_LOG_POLICY["min_lines"])
+TERMINAL_LOG_MIN_REPEATED_LINES = int(TERMINAL_LOG_POLICY["min_repeated_lines"])
+TERMINAL_LOG_MAX_ANNOTATIONS = int(TERMINAL_LOG_POLICY["max_annotations"])
 PATTERN_RULES = list(CRUNCH_POLICY["pattern_rules"])
 CODEX_REPEATED_SCAFFOLDING_POLICY = CRUNCH_POLICY["codex_repeated_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_ENABLED = bool(CODEX_REPEATED_SCAFFOLDING_POLICY["enabled"])
@@ -1305,6 +1330,290 @@ def _dedupe_thinking_blocks(messages: list[Any]) -> int:
     return removed
 
 
+LOG_LEVEL_RE = re.compile(r"^(?:\[(?P<bracketed>TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL)\]|(?P<bare>TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|FATAL|CRITICAL))\b[:\]\s-]*")
+TIMESTAMP_RE = re.compile(
+    r"^(?:\[(?:\d{4}-\d{2}-\d{2}[T ][0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]|\d{4}-\d{2}-\d{2}[T ][0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?|\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+"
+)
+PID_THREAD_RE = re.compile(
+    r"^(?:\[(?:pid|process|thread|tid)?[=:\s-]*[A-Za-z0-9_.:-]{1,48}\]|\((?:pid|process|thread|tid)[=:\s-]*[A-Za-z0-9_.:-]{1,48}\)|(?:pid|process|thread|tid)[=:\s-]+[A-Za-z0-9_.:-]{1,48})\s+",
+    re.IGNORECASE,
+)
+MODULE_RE = re.compile(r"^(?:[A-Za-z_][\w.:-]{1,80}|[A-Za-z_][\w.-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|php|c|cc|cpp|h|hpp|sh|bash|zsh))(?::\d+(?::\d+)?)?\s*(?:-|:)\s+")
+FILE_LINE_RE = re.compile(r"^((?:[A-Za-z]:)?[/\\]?[A-Za-z0-9_./\\-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|php|c|cc|cpp|h|hpp|sh|bash|zsh|log):\d+(?::\d+)?(?::| - )\s+)(.+)$")
+SHELL_PROMPT_RE = re.compile(r"^((?:\([^)]+\)\s*)?(?:[A-Za-z0-9_.-]+@[^:\s]+:)?[^#$%>\n]{0,120}[#$%>]\s+)(\S.*)$")
+CANONICAL_SHEBANG_RE = re.compile(r"^#!\s*/(?:usr/bin/env\s+)?(?:bash|sh|zsh|python(?:3(?:\.\d+)?)?|node|ruby|perl)\s*$")
+PURE_TEST_MARKER_RE = re.compile(r"^\s*(?:[=._-]{6,}|(?:\.|F|E|s|x){8,})\s*$")
+DIAGNOSTIC_LINE_RE = re.compile(
+    r"(?:\b(?:ERROR|ERR|FATAL|CRITICAL|FAILED|FAILURE|AssertionError|Traceback|Exception|exit code|exit status|non-zero|panic:)\b|^\s*File \"[^\"]+\", line \d+|^\s*at .+:\d+|^\s*E\s+|^\s*>\s+)"
+)
+
+
+def _terminal_log_meta(status: str, reason: str) -> dict[str, Any]:
+    return {
+        "enabled": TERMINAL_LOG_ENABLED,
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "min_lines": TERMINAL_LOG_MIN_LINES,
+        "min_repeated_lines": TERMINAL_LOG_MIN_REPEATED_LINES,
+        "max_annotations": TERMINAL_LOG_MAX_ANNOTATIONS,
+        "pattern_types": [],
+        "matched_line_counts": {},
+        "simplified_line_count": 0,
+        "annotations_inserted": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "safety_skips": {},
+        "error_bearing_lines_preserved": False,
+        "raw_log_text_included": False,
+    }
+
+
+def _bump_counter(counts: dict[str, int], key: str, amount: int = 1) -> None:
+    counts[key] = counts.get(key, 0) + amount
+
+
+def _is_diagnostic_line(line: str) -> bool:
+    return bool(DIAGNOSTIC_LINE_RE.search(line))
+
+
+def _strip_log_prefix(line: str) -> tuple[tuple[str, ...], str] | None:
+    rest = line
+    pattern_types: list[str] = []
+    while rest:
+        original = rest
+        match = TIMESTAMP_RE.match(rest)
+        if match:
+            pattern_types.append("timestamp_prefix")
+            rest = rest[match.end():]
+        match = LOG_LEVEL_RE.match(rest)
+        if match:
+            pattern_types.append("log_level_prefix")
+            rest = rest[match.end():]
+        match = PID_THREAD_RE.match(rest)
+        if match:
+            pattern_types.append("pid_thread_prefix")
+            rest = rest[match.end():]
+        match = MODULE_RE.match(rest)
+        if match:
+            pattern_types.append("module_prefix")
+            rest = rest[match.end():]
+        if rest == original:
+            break
+    rest = rest.lstrip(" -:\t")
+    unique_types = tuple(dict.fromkeys(pattern_types))
+    if not rest or len(unique_types) == 0:
+        return None
+    if "timestamp_prefix" not in unique_types and "log_level_prefix" not in unique_types:
+        return None
+    return unique_types, rest
+
+
+def _terminal_line_candidate(line: str) -> dict[str, Any] | None:
+    if not line.strip():
+        return None
+    if CANONICAL_SHEBANG_RE.match(line.strip()):
+        return {
+            "key": ("shebang_line", line.strip()),
+            "pattern_type": "shebang_line",
+            "payload": line.strip(),
+            "preserve_once": True,
+        }
+    if PURE_TEST_MARKER_RE.match(line):
+        return {
+            "key": ("test_progress_marker", "marker"),
+            "pattern_type": "test_progress_marker",
+            "payload": "",
+            "omit_line": True,
+        }
+    match = SHELL_PROMPT_RE.match(line)
+    if match:
+        return {
+            "key": ("shell_prompt_prefix", match.group(1).strip()),
+            "pattern_type": "shell_prompt_prefix",
+            "payload": match.group(2).strip(),
+            "payload_label": "command",
+        }
+    match = FILE_LINE_RE.match(line)
+    if match:
+        return {
+            "key": ("file_line_prefix", match.group(1)),
+            "pattern_type": "file_line_prefix",
+            "payload": match.group(2).strip(),
+            "shared_prefix": match.group(1).strip(),
+        }
+    stripped = _strip_log_prefix(line)
+    if stripped:
+        pattern_types, payload = stripped
+        return {
+            "key": ("log_prefix", pattern_types),
+            "pattern_type": "+".join(pattern_types),
+            "payload": payload,
+        }
+    return None
+
+
+def _terminal_annotation(candidate: dict[str, Any], count: int) -> str:
+    pattern_type = str(candidate["pattern_type"])
+    if pattern_type == "shebang_line":
+        return f"[AgentFlow: {count} repeated shebang lines collapsed; diagnostics preserved]"
+    if pattern_type == "test_progress_marker":
+        return f"[AgentFlow: {count} test progress/divider lines omitted; diagnostics preserved]"
+    if pattern_type == "shell_prompt_prefix":
+        return f"[AgentFlow: {count} shell prompt prefixes omitted; commands preserved]"
+    if pattern_type == "file_line_prefix":
+        prefix = str(candidate.get("shared_prefix") or "")
+        return f"[AgentFlow: {count} repeated file/line prefixes omitted; shared_prefix={prefix}; diagnostics preserved]"
+    rendered = pattern_type.replace("+", ", ")
+    return f"[AgentFlow: {count} log lines shared {rendered}; prefixes omitted; diagnostics preserved]"
+
+
+def _terminal_payload_line(candidate: dict[str, Any], *, first_occurrence: bool) -> str | None:
+    if candidate.get("omit_line"):
+        return None
+    payload = str(candidate.get("payload") or "")
+    if candidate.get("preserve_once"):
+        return payload if first_occurrence else None
+    label = candidate.get("payload_label")
+    if label:
+        return f"{label}: {payload}"
+    return payload
+
+
+def _simplify_terminal_log_boilerplate_text(text: str) -> tuple[str, dict[str, Any]]:
+    meta = _terminal_log_meta("skipped", "no-terminal-log-boilerplate")
+    if not TERMINAL_LOG_ENABLED:
+        meta["reason"] = "disabled"
+        return text, meta
+
+    lines = text.splitlines()
+    if len(lines) < TERMINAL_LOG_MIN_LINES:
+        meta["reason"] = "not-enough-lines"
+        meta["line_count"] = len(lines)
+        return text, meta
+
+    candidates: dict[int, dict[str, Any]] = {}
+    counts: dict[tuple[Any, ...], int] = {}
+    first_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    safety_skips: dict[str, int] = {}
+    for index, line in enumerate(lines):
+        if _is_diagnostic_line(line):
+            _bump_counter(safety_skips, "diagnostic-line")
+            continue
+        candidate = _terminal_line_candidate(line)
+        if not candidate:
+            continue
+        key = candidate["key"]
+        candidates[index] = candidate
+        counts[key] = counts.get(key, 0) + 1
+        first_by_key.setdefault(key, candidate)
+
+    eligible_keys = {
+        key
+        for key, count in counts.items()
+        if count >= TERMINAL_LOG_MIN_REPEATED_LINES
+    }
+    if not eligible_keys:
+        meta["line_count"] = len(lines)
+        meta["safety_skips"] = safety_skips
+        return text, meta
+
+    annotation_count = 0
+    emitted_keys: set[tuple[Any, ...]] = set()
+    output: list[str] = []
+    matched_line_counts: dict[str, int] = {}
+    for index, line in enumerate(lines):
+        candidate = candidates.get(index)
+        if not candidate or candidate["key"] not in eligible_keys:
+            output.append(line)
+            continue
+        key = candidate["key"]
+        pattern_type = str(candidate["pattern_type"])
+        first_occurrence = key not in emitted_keys
+        if first_occurrence:
+            if annotation_count >= TERMINAL_LOG_MAX_ANNOTATIONS:
+                _bump_counter(safety_skips, "annotation-limit")
+                output.append(line)
+                continue
+            output.append(_terminal_annotation(first_by_key[key], counts[key]))
+            annotation_count += 1
+            emitted_keys.add(key)
+        payload_line = _terminal_payload_line(candidate, first_occurrence=first_occurrence)
+        if payload_line:
+            output.append(payload_line)
+        _bump_counter(matched_line_counts, pattern_type)
+
+    trailing_newline = "\n" if text.endswith("\n") else ""
+    simplified = "\n".join(output) + trailing_newline
+    saved_chars = len(text) - len(simplified)
+    if saved_chars <= 0:
+        meta["line_count"] = len(lines)
+        meta["safety_skips"] = safety_skips
+        meta["reason"] = "replacement-not-smaller"
+        return text, meta
+
+    meta.update({
+        "status": "applied",
+        "reason": "terminal-log-boilerplate-simplified",
+        "changed": True,
+        "line_count": len(lines),
+        "simplified_line_count": sum(matched_line_counts.values()),
+        "annotations_inserted": annotation_count,
+        "pattern_types": sorted(matched_line_counts),
+        "matched_line_counts": matched_line_counts,
+        "saved_chars": saved_chars,
+        "tokens_saved_est": saved_chars // TOKEN_CHARS,
+        "safety_skips": safety_skips,
+        "error_bearing_lines_preserved": bool(safety_skips.get("diagnostic-line")),
+    })
+    return simplified, meta
+
+
+def _terminal_log_aggregate_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
+    base = _terminal_log_meta("skipped", "no-terminal-log-boilerplate")
+    if not metas:
+        return base
+    matched_line_counts: dict[str, int] = {}
+    safety_skips: dict[str, int] = {}
+    saved_chars = 0
+    annotations = 0
+    simplified_lines = 0
+    applied = 0
+    reasons: dict[str, int] = {}
+    for item in metas:
+        _bump_counter(reasons, str(item.get("reason") or "unknown"))
+        if item.get("changed"):
+            applied += 1
+        saved_chars += int(item.get("saved_chars") or 0)
+        annotations += int(item.get("annotations_inserted") or 0)
+        simplified_lines += int(item.get("simplified_line_count") or 0)
+        for key, value in (item.get("matched_line_counts") or {}).items():
+            _bump_counter(matched_line_counts, str(key), int(value or 0))
+        for key, value in (item.get("safety_skips") or {}).items():
+            _bump_counter(safety_skips, str(key), int(value or 0))
+    base.update({
+        "status": "applied" if applied else "skipped",
+        "reason": "terminal-log-boilerplate-simplified" if applied else "no-terminal-log-boilerplate",
+        "changed": bool(applied),
+        "text_blocks_examined": len(metas),
+        "text_blocks_changed": applied,
+        "simplified_line_count": simplified_lines,
+        "annotations_inserted": annotations,
+        "pattern_types": sorted(matched_line_counts),
+        "matched_line_counts": matched_line_counts,
+        "saved_chars": saved_chars,
+        "tokens_saved_est": saved_chars // TOKEN_CHARS,
+        "safety_skips": safety_skips,
+        "error_bearing_lines_preserved": bool(safety_skips.get("diagnostic-line")),
+        "skip_reasons": reasons,
+    })
+    if not applied and set(reasons) == {"disabled"}:
+        base["reason"] = "disabled"
+    return base
+
+
 def _summary_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None, managed_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     policy = policy or _effective_summary_policy(managed_profile)
     excluded = policy.get("excluded_categories") or []
@@ -2013,11 +2322,14 @@ def crunch_body(
     near_replacements = 0
     thinking_near_replacements = 0
     shortened = 0
+    terminal_log_metas: list[dict[str, Any]] = []
 
     def process_content(content: Any, allow_shorten: bool) -> Any:
         nonlocal replacements, near_replacements, shortened
         if isinstance(content, str):
-            txt = normalize_text(content)
+            terminal_text, terminal_meta = _simplify_terminal_log_boilerplate_text(content)
+            terminal_log_metas.append(terminal_meta)
+            txt = normalize_text(terminal_text)
             h = sha256_text(txt)
             if len(txt) > 1000 and h in seen:
                 replacements += 1
@@ -2077,6 +2389,7 @@ def crunch_body(
         if isinstance(msg, dict) and "content" in msg:
             msg["content"] = process_content(msg["content"], allow_shorten=allow_shorten)
     thinking_near_replacements = _dedupe_thinking_blocks(messages)
+    terminal_log_meta = _terminal_log_aggregate_meta(terminal_log_metas)
 
     after = len(stable_json(new_body))
     return new_body, {
@@ -2093,6 +2406,9 @@ def crunch_body(
         "near_duplicate_blocks_replaced": near_replacements,
         "thinking_near_duplicate_blocks_removed": thinking_near_replacements,
         "long_blocks_shortened": shortened,
+        "terminal_log_boilerplate_simplified": terminal_log_meta["simplified_line_count"],
+        "terminal_log_boilerplate_saved_chars": terminal_log_meta["saved_chars"],
+        "terminal_log_boilerplate": terminal_log_meta,
         "pattern_rules_applied": pattern_rules_meta["applied_count"],
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
         "pattern_rules": pattern_rules_meta,

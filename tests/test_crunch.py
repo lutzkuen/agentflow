@@ -619,6 +619,119 @@ pattern_rules:
         self.assertEqual(meta["pattern_rules"]["configured_count"], 0)
         self.assertEqual(meta["pattern_rules"]["applied_count"], 0)
 
+    def test_terminal_log_boilerplate_simplifies_timestamp_level_prefixes_and_preserves_diagnostics(self):
+        manual = importlib.reload(crunch_module)
+        lines = [
+            "Operator note before captured logs.",
+            *[
+                f"2026-06-09T22:20:0{idx}Z INFO [pid=4321] worker.py:77 - processed item {idx}"
+                for idx in range(6)
+            ],
+            "2026-06-09T22:20:07Z ERROR [pid=4321] worker.py:77 - failed to open /tmp/important.txt",
+            "Traceback (most recent call last):",
+            '  File "/tmp/important.py", line 12, in <module>',
+            "AssertionError: expected exit code 0",
+            "Exit code: 1",
+            "Operator note after captured logs.",
+        ]
+        body = {"messages": [{"role": "user", "content": "\n".join(lines)}]}
+
+        crunched, meta = manual.crunch_body(body)
+
+        text = crunched["messages"][0]["content"]
+        self.assertTrue(meta["changed"])
+        self.assertGreater(meta["terminal_log_boilerplate_saved_chars"], 0)
+        self.assertIn("timestamp_prefix+log_level_prefix+pid_thread_prefix+module_prefix", meta["terminal_log_boilerplate"]["pattern_types"])
+        self.assertIn("processed item 0", text)
+        self.assertNotIn("2026-06-09T22:20:00Z INFO [pid=4321]", text)
+        self.assertIn("2026-06-09T22:20:07Z ERROR [pid=4321] worker.py:77 - failed to open /tmp/important.txt", text)
+        self.assertIn('File "/tmp/important.py", line 12, in <module>', text)
+        self.assertIn("AssertionError: expected exit code 0", text)
+        self.assertIn("Exit code: 1", text)
+        self.assertIn("Operator note before captured logs.", text)
+        self.assertIn("Operator note after captured logs.", text)
+        self.assertTrue(meta["terminal_log_boilerplate"]["error_bearing_lines_preserved"])
+        rendered_meta = json.dumps(meta["terminal_log_boilerplate"], sort_keys=True)
+        self.assertNotIn("processed item 0", rendered_meta)
+        self.assertNotIn("/tmp/important.txt", rendered_meta)
+
+    def test_terminal_log_boilerplate_simplifies_shell_prompts_without_dropping_commands(self):
+        manual = importlib.reload(crunch_module)
+        terminal = "\n".join([
+            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_alpha",
+            "Ran 4 tests in 0.12s",
+            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ git status --short",
+            " M agentflow_proxy/crunch.py",
+            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_beta",
+            "Ran 8 tests in 0.18s",
+            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ echo done",
+            "done",
+            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_gamma",
+            "Ran 2 tests in 0.03s",
+            "lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$ python -m unittest tests.test_delta",
+            "Ran 1 test in 0.01s",
+        ])
+        body = {"messages": [{"role": "user", "content": terminal}]}
+
+        crunched, meta = manual.crunch_body(body)
+
+        text = crunched["messages"][0]["content"]
+        self.assertTrue(meta["changed"])
+        self.assertIn("shell_prompt_prefix", meta["terminal_log_boilerplate"]["pattern_types"])
+        self.assertIn("command: python -m unittest tests.test_alpha", text)
+        self.assertIn("command: git status --short", text)
+        self.assertIn("command: echo done", text)
+        self.assertNotIn("lutz@dev:/very/long/workspace/path/agentflow/subproject/current-run$", text)
+
+    def test_terminal_log_boilerplate_collapses_repeated_shebangs_and_test_markers(self):
+        manual = importlib.reload(crunch_module)
+        captured = "\n".join(
+            ["#!/usr/bin/env bash", "echo one"]
+            + ["#!/usr/bin/env bash"] * 12
+            + ["echo four"]
+            + ["........"] * 20
+            + ["FAILED tests/test_app.py::test_real_failure - AssertionError: bad value"]
+        )
+        body = {"messages": [{"role": "user", "content": captured}]}
+
+        crunched, meta = manual.crunch_body(body)
+
+        text = crunched["messages"][0]["content"]
+        terminal_meta = meta["terminal_log_boilerplate"]
+        self.assertTrue(meta["changed"])
+        self.assertIn("shebang_line", terminal_meta["pattern_types"])
+        self.assertIn("test_progress_marker", terminal_meta["pattern_types"])
+        self.assertEqual(text.count("#!/usr/bin/env bash"), 1)
+        self.assertNotIn("........", text)
+        self.assertIn("echo one", text)
+        self.assertIn("echo four", text)
+        self.assertIn("FAILED tests/test_app.py::test_real_failure - AssertionError: bad value", text)
+        self.assertTrue(terminal_meta["error_bearing_lines_preserved"])
+
+    def test_config_crunch_rules_can_disable_terminal_log_boilerplate(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+terminal_log_boilerplate:
+  enabled: false
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            text = "\n".join(f"INFO worker - repeated line {idx}" for idx in range(8))
+            body = {"messages": [{"role": "user", "content": text}]}
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertEqual(crunched, body)
+            self.assertFalse(meta["terminal_log_boilerplate"]["enabled"])
+            self.assertEqual(meta["terminal_log_boilerplate"]["reason"], "disabled")
+
     def test_thinking_near_duplicate_dedup_removes_older_assistant_block(self):
         manual = importlib.reload(crunch_module)
         base_words = [f"token{i}" for i in range(520)]

@@ -65,6 +65,15 @@ thinking_deduplication:
   min_chars: 2000
   similarity_threshold: 0.95
   skip_latest_assistant: true
+terminal_log_boilerplate:
+  # Local-only deterministic cleanup for text blocks that look like terminal
+  # logs or test output. Repeated prefixes are compacted, while error lines,
+  # stack frames, failing assertions, exit codes, and tool protocol blocks are
+  # preserved. Metadata records pattern types and counts only, never raw lines.
+  enabled: true
+  min_lines: 8
+  min_repeated_lines: 4
+  max_annotations: 12
 pattern_rules: []
 # Example local-only reviewed rule shape:
 # pattern_rules:
