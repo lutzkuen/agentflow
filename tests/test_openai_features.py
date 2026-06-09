@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import openai_features
 from agentflow_proxy.store import stable_json
 
@@ -117,6 +118,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(summary["source_surface"], "openai_responses")
         self.assertEqual(summary["endpoint"], "responses")
         self.assertFalse(summary["raw_payload_included"])
+        self.assertEqual(managed_egress_violations(unit), [])
         self._assert_no_raw_values(unit)
         self._assert_no_raw_values(summary)
 
@@ -161,6 +163,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(unit["tool_features"]["chat_tool_result_count"], 1)
         self.assertEqual(summary["chat_tool_call_count"], 1)
         self.assertEqual(summary["chat_tool_result_count"], 1)
+        self.assertEqual(managed_egress_violations(unit), [])
         self._assert_no_raw_values(unit)
         self._assert_no_raw_values(summary)
 
@@ -210,6 +213,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertTrue(summary["has_tools"])
         for forbidden_key in ("messages", "input", "cache_key", "request_id", "session_id"):
             self.assertNotIn(f'"{forbidden_key}"', rendered)
+        self.assertEqual(managed_egress_violations(unit), [])
         self._assert_no_raw_values(unit)
         self.assertNotIn("/home/lutz/project/app.py", rendered)
 

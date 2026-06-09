@@ -11,6 +11,13 @@ from typing import Any
 import httpx
 
 from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
+from agentflow_proxy.managed_egress import (
+    LIFECYCLE_METADATA_COMMAND_SCHEMAS,
+    RAW_FEATURE_KEYS,
+    ManagedEgressBlocked,
+    assert_managed_egress_safe,
+    managed_egress_blocked_meta,
+)
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
 from agentflow_proxy.quality import derive_codex_turn_quality_signals, derive_provider_quality_signals
 from agentflow_proxy.store import stable_json, utc_now
@@ -30,78 +37,6 @@ OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE = "old_context_summary_lifecycle"
 OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE = "old_context_summary_outcome"
 PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE = "phase_routing_lifecycle"
 PHASE_ROUTING_OUTCOME_SOURCE_SURFACE = "phase_routing_outcome"
-
-RAW_FEATURE_KEYS = {
-    "account_id",
-    "arguments",
-    "api_key",
-    "authorization",
-    "body",
-    "cache_key",
-    "cache_keys",
-    "command",
-    "command_text",
-    "commands",
-    "completion",
-    "content",
-    "developer",
-    "file_content",
-    "file_contents",
-    "generated_summary",
-    "generated_summaries",
-    "input",
-    "local_file",
-    "local_session_id",
-    "local_session_ids",
-    "message",
-    "messages",
-    "output",
-    "params",
-    "pattern_text",
-    "prompt",
-    "provider_body",
-    "provider_request",
-    "provider_response",
-    "payload",
-    "payloads",
-    "raw_context",
-    "raw_context_turns",
-    "raw_messages",
-    "raw_old_context",
-    "raw_payload",
-    "raw_payloads",
-    "raw_prompt",
-    "raw_request",
-    "raw_response",
-    "request",
-    "request_body",
-    "request_id",
-    "request_ids",
-    "response",
-    "response_body",
-    "secret",
-    "session_id",
-    "session_ids",
-    "summary_prompt",
-    "summary_prompts",
-    "summary_text",
-    "system",
-    "system_prompt",
-    "tenant_id",
-    "tenant_ids",
-    "token",
-    "tool_input",
-    "tool_output",
-    "tool_payload",
-    "tool_payloads",
-    "transcript",
-    "transcripts",
-}
-
-LIFECYCLE_METADATA_COMMAND_SCHEMAS = {
-    "agentflow.old_context_summary_lifecycle_metadata.v1",
-    "agentflow.rollout_action_lifecycle_metadata.v1",
-}
 
 TOKEN_CHARS = 4
 CHAR_BUCKETS = (
@@ -801,6 +736,12 @@ async def fetch_recommendation(unit: dict[str, Any]) -> dict[str, Any]:
         return disabled_recommendation_meta()
 
     meta = _base_meta()
+    try:
+        assert_managed_egress_safe(unit)
+    except ManagedEgressBlocked as exc:
+        meta.update(managed_egress_blocked_meta(endpoint=RECOMMENDATION_PATH, violations=exc.violations))
+        return meta
+
     if not recommendation_server_configured():
         meta.update({
             "status": "skipped",
@@ -1964,6 +1905,16 @@ async def _send_outcome_payload(*, endpoint: str, payload: dict[str, Any], unit_
         "auth_configured": managed_auth_configured(),
         "api_key_value_included": False,
     }
+    try:
+        assert_managed_egress_safe(payload)
+    except ManagedEgressBlocked as exc:
+        meta.update(managed_egress_blocked_meta(
+            endpoint=endpoint,
+            violations=exc.violations,
+            optimization_unit_id=unit_id,
+        ))
+        return meta
+
     if not recommendation_server_configured():
         meta.update({
             "status": "skipped",
@@ -2013,6 +1964,23 @@ async def send_outcome_feedback(recommendation_meta: dict[str, Any], outcome_fea
             "reason": "missing-optimization-unit-id",
         }
 
+    try:
+        assert_managed_egress_safe(outcome_features)
+    except ManagedEgressBlocked as exc:
+        return {
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "timeout_seconds": recommendation_timeout_seconds(),
+            "failure_mode": recommendation_failure_mode(),
+            "auth_configured": managed_auth_configured(),
+            "api_key_value_included": False,
+            **managed_egress_blocked_meta(
+                endpoint=endpoint,
+                violations=exc.violations,
+                optimization_unit_id=unit_id,
+            ),
+        }
+
     payload = _sanitize_features(outcome_features)
     return await _send_outcome_payload(endpoint=endpoint, payload=payload, unit_id=unit_id)
 
@@ -2029,6 +1997,11 @@ async def _send_policy_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
     if not recommendations_enabled():
         meta.update({"status": "disabled", "reason": "disabled"})
+        return meta
+    try:
+        assert_managed_egress_safe(payload)
+    except ManagedEgressBlocked as exc:
+        meta.update(managed_egress_blocked_meta(endpoint=POLICY_EVENTS_PATH, violations=exc.violations))
         return meta
     if not recommendation_server_configured():
         meta.update({"status": "skipped", "reason": "server-url-not-configured"})
@@ -2115,10 +2088,37 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
             "error": error,
         }
 
+    try:
+        assert_managed_egress_safe(payload)
+    except ManagedEgressBlocked as exc:
+        status = "dropped-after-limit"
+        error = "unsafe managed egress payload blocked"
+        if hasattr(store_obj, "mark_managed_outcome_feedback_retry"):
+            store_obj.mark_managed_outcome_feedback_retry(
+                queue_id,
+                status=status,
+                error=error,
+                status_code=None,
+                next_attempt_at=utc_now(),
+            )
+        meta = managed_egress_blocked_meta(
+            endpoint=endpoint,
+            violations=exc.violations,
+            optimization_unit_id=int(unit_id) if isinstance(unit_id, int) else None,
+            queue_id=queue_id,
+        )
+        meta.update({
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "status": status,
+            "attempts": attempts,
+        })
+        return meta
+
     if endpoint == POLICY_EVENTS_PATH:
-        meta = await _send_policy_event_payload(_sanitize_features(payload))
+        meta = await _send_policy_event_payload(payload)
     else:
-        meta = await _send_outcome_payload(endpoint=endpoint, payload=_sanitize_features(payload), unit_id=int(unit_id))
+        meta = await _send_outcome_payload(endpoint=endpoint, payload=payload, unit_id=int(unit_id))
     if meta.get("status") == "sent":
         if hasattr(store_obj, "mark_managed_outcome_feedback_sent"):
             store_obj.mark_managed_outcome_feedback_sent(queue_id, status_code=meta.get("status_code"))
@@ -2193,6 +2193,23 @@ async def queue_outcome_feedback(
     if not hasattr(store_obj, "enqueue_managed_outcome_feedback"):
         return await send_outcome_feedback(recommendation_meta, outcome_features)
 
+    try:
+        assert_managed_egress_safe(outcome_features)
+    except ManagedEgressBlocked as exc:
+        return {
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "timeout_seconds": recommendation_timeout_seconds(),
+            "failure_mode": recommendation_failure_mode(),
+            "auth_configured": managed_auth_configured(),
+            "api_key_value_included": False,
+            **managed_egress_blocked_meta(
+                endpoint=endpoint,
+                violations=exc.violations,
+                optimization_unit_id=unit_id,
+            ),
+        }
+
     payload = _sanitize_features(outcome_features)
     surface = (
         source_surface
@@ -2241,6 +2258,19 @@ async def queue_policy_event_feedback(
         }
     if not hasattr(store_obj, "enqueue_managed_outcome_feedback"):
         return await _send_policy_event_payload(event_payload)
+
+    try:
+        assert_managed_egress_safe(event_payload)
+    except ManagedEgressBlocked as exc:
+        return {
+            "enabled": True,
+            "server_url": recommendation_server_url(),
+            "timeout_seconds": recommendation_timeout_seconds(),
+            "failure_mode": recommendation_failure_mode(),
+            "auth_configured": managed_auth_configured(),
+            "api_key_value_included": False,
+            **managed_egress_blocked_meta(endpoint=POLICY_EVENTS_PATH, violations=exc.violations),
+        }
 
     payload = _sanitize_features(event_payload)
     queue_id = str(uuid.uuid4())

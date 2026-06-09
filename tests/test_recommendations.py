@@ -341,6 +341,36 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["fallback"], "local-policy")
         self.assertIsNone(FakeAsyncClient.last_url)
 
+    def test_recommendation_egress_guard_blocks_raw_payload_before_network(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        unsafe_unit = {
+            "feature_schema_version": recommendations.FEATURE_SCHEMA_VERSION,
+            "requested_model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "raw prompt must stay local"}],
+            "input": "raw OpenAI Responses input must stay local",
+            "tool_payload": {"arguments": "raw tool args must stay local"},
+            "file_path": "/home/lutz/private/project/app.py",
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+        }
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_recommendation(unsafe_unit))
+
+        self.assertIsNone(FakeAsyncClient.last_url)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "unsafe-egress-payload")
+        self.assertEqual(meta["fallback"], "local-policy")
+        self.assertFalse(meta["applied"])
+        self.assertTrue(meta["egress_guard"]["blocked"])
+        self.assertFalse(meta["egress_guard"]["raw_values_logged"])
+        self.assertIn("messages", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("input", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("tool_payload", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("file_path", meta["egress_guard"]["blocked_keys"])
+        self.assertNotIn("raw prompt must stay local", str(meta))
+        self.assertNotIn("/home/lutz/private/project/app.py", str(meta))
+
     def test_timeout_records_bounded_fallback_metadata(self):
         os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
         os.environ["AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"] = "0.1"
@@ -899,6 +929,34 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(meta["reason"], "request-failed")
         self.assertIn("feedback unavailable", meta["error"])
 
+    def test_outcome_feedback_egress_guard_blocks_raw_payload_before_network(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(
+                recommendations.send_outcome_feedback(
+                    {"optimization_unit_id": 7},
+                    {
+                        "source_surface": "openai_responses",
+                        "status_code": 200,
+                        "raw_response": "raw provider response must stay local",
+                        "cache_key": "cache-key-secret",
+                        "local_path": "/home/lutz/private/project/app.py",
+                    },
+                )
+            )
+
+        self.assertIsNone(FakeAsyncClient.last_url)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "unsafe-egress-payload")
+        self.assertEqual(meta["endpoint"], "/v1/optimization-units/7/outcome")
+        self.assertIn("raw_response", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("cache_key", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("local_path", meta["egress_guard"]["blocked_keys"])
+        self.assertNotIn("raw provider response must stay local", str(meta))
+        self.assertNotIn("cache-key-secret", str(meta))
+
     def test_queued_provider_outcome_feedback_disabled_does_not_enqueue(self):
         from agentflow_proxy.store import Store
 
@@ -938,9 +996,15 @@ class RecommendationTest(unittest.TestCase):
                             {
                                 "source_surface": "anthropic_messages",
                                 "status_code": 200,
-                                "raw_request": "must stay local",
-                                "raw_response": "raw provider response",
                                 "quality_signals": {"status": "success"},
+                                "pattern_decisions": [
+                                    {
+                                        "schema": "agentflow.pattern_decision_summary.v1",
+                                        "decision_type": "routing",
+                                        "status": "applied",
+                                        "policy_source": "managed-recommended",
+                                    }
+                                ],
                             },
                         )
                     )
@@ -959,8 +1023,99 @@ class RecommendationTest(unittest.TestCase):
         self.assertIn("feedback unavailable", row["last_error"])
         self.assertNotIn("raw_request", row["payload_json"])
         self.assertNotIn("raw_response", row["payload_json"])
-        self.assertNotIn("must stay local", row["payload_json"])
-        self.assertNotIn("raw provider response", row["payload_json"])
+        self.assertIn("quality_signals", row["payload_json"])
+        self.assertIn("pattern_decisions", row["payload_json"])
+
+    def test_queued_provider_outcome_feedback_egress_guard_does_not_enqueue_raw_payload(self):
+        from agentflow_proxy.store import Store
+
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                    meta = asyncio.run(
+                        recommendations.queue_outcome_feedback(
+                            store,
+                            {"optimization_unit_id": 7},
+                            {
+                                "source_surface": "openai_chat",
+                                "status_code": 200,
+                                "messages": [{"role": "user", "content": "raw chat text"}],
+                                "tool_output": "raw tool output",
+                                "request_id": "req-secret",
+                            },
+                        )
+                    )
+                row = store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertIsNone(FakeAsyncClient.last_url)
+        self.assertEqual(row["c"], 0)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "unsafe-egress-payload")
+        self.assertIn("messages", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("tool_output", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("request_id", meta["egress_guard"]["blocked_keys"])
+        self.assertNotIn("raw chat text", str(meta))
+        self.assertNotIn("req-secret", str(meta))
+
+    def test_policy_event_egress_guard_blocks_raw_payload_before_network(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        event = {
+            "event_type": "applied",
+            "recommendation_id": "policy-1",
+            "policy_sections": ["routing"],
+            "metadata": {
+                "schema": "agentflow.policy_lifecycle_metadata.v1",
+                "messages": [{"content": "raw prompt must stay local"}],
+                "summary_text": "raw summary must stay local",
+                "workspace_path": "/home/lutz/private/project",
+            },
+        }
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.queue_policy_event_feedback(_NoQueueStore(), event))
+
+        self.assertIsNone(FakeAsyncClient.last_url)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "unsafe-egress-payload")
+        self.assertEqual(meta["endpoint"], "/v1/policy-events")
+        self.assertIn("messages", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("summary_text", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("workspace_path", meta["egress_guard"]["blocked_keys"])
+        self.assertNotIn("raw prompt must stay local", str(meta))
+        self.assertNotIn("/home/lutz/private/project", str(meta))
+
+    def test_policy_event_lifecycle_command_enum_is_allowed(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        FakeAsyncClient.response = FakeResponse(body={"accepted": True})
+        event = {
+            "event_type": "dry_run",
+            "recommendation_id": "phase-routing:test",
+            "policy_sections": ["routing"],
+            "metadata": {
+                "schema": "agentflow.phase_routing_lifecycle_metadata.v1",
+                "command": "phase-routing-dry-run",
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "request_ids_included": False,
+                },
+            },
+        }
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.queue_policy_event_feedback(_NoQueueStore(), event))
+
+        self.assertEqual(FakeAsyncClient.last_url, "http://managed.test/v1/policy-events")
+        self.assertEqual(meta["status"], "sent")
+        self.assertEqual(FakeAsyncClient.last_json["metadata"]["command"], "phase-routing-dry-run")
 
     def test_provider_mismatch_recommendation_is_not_applied(self):
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}

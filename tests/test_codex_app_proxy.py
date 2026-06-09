@@ -1274,7 +1274,7 @@ exact_cache:
                         recommendations.queue_codex_outcome_feedback(
                             test_store,
                             {"optimization_unit_id": 77},
-                            {"status": "success", "raw_response": "must be stripped"},
+                            {"status": "success", "quality_signals": {"status": "success"}},
                         )
                     )
                 row = test_store.conn.execute(

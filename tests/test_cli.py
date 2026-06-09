@@ -3719,9 +3719,15 @@ class ManagedFeedbackCliTests(unittest.TestCase):
             optimization_unit_id=77,
             payload_json=stable_json({
                 "status": "success",
-                "raw_request": "must stay local",
-                "raw_response": "raw codex response secret",
                 "quality_signals": {"status": "success"},
+                "pattern_decisions": [
+                    {
+                        "schema": "agentflow.pattern_decision_summary.v1",
+                        "decision_type": "routing",
+                        "status": "applied",
+                        "policy_source": "managed-recommended",
+                    }
+                ],
             }),
             status=status,
             attempts=attempts,
