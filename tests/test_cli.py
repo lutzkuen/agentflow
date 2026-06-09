@@ -1227,6 +1227,318 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
         self.assertTrue(output["managed_server_calls_made"])
 
+    def _summary_rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False, verdict: str = "promote") -> dict:
+        action = {
+            "schema": "agentflow.old_context_summary_rollout_action.v1",
+            "action_type": action_type,
+            "target_candidate_id": "candidate-old-context-rollout",
+            "target_rule_id": "managed-old-context-summary-rollout",
+            "policy_section": "crunch",
+            "current_fraction": 0.1,
+            "recommended_fraction": 0.35 if action_type == "widen" else 0.0,
+            "confidence": 0.92,
+            "rationale": "Quality-gated metadata shows positive old-context summary canary outcomes.",
+            "blockers": [] if action_type == "widen" else ["quality-gate-rollback"],
+            "quality_gate": {
+                "schema": "agentflow.old_context_summary_quality_gate.v1",
+                "verdict": verdict,
+                "reason_codes": ["quality-gate-passed"] if verdict == "promote" else ["applied-retry-rate-above-threshold"],
+                "warning_codes": [],
+            },
+            "required_local_review": True,
+            "managed_enforced": False,
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_context_included": False,
+                "generated_summaries_included": False,
+            },
+        }
+        if raw_like:
+            action["evidence"] = {"prompt": "raw old context must be rejected"}
+        return {
+            "schema": "agentflow.old_context_summary_rollout_actions.v1",
+            "generated_at": "2026-06-09T04:10:00+00:00",
+            "summary": {"action_count": 1, "managed_enforced": False, "required_local_review": True},
+            "actions": [action],
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_context_included": False,
+                "generated_summaries_included": False,
+            },
+        }
+
+    def _write_summary_rollout_rule(self, tmp: str, *, policy_source: str = "managed-recommended"):
+        path = Path(tmp) / "crunch_rules.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "enabled": True,
+                    "threshold_chars": 24000,
+                    "old_context_summarization": {
+                        "enabled": True,
+                        "rule_id": "managed-old-context-summary-rollout",
+                        "candidate_id": "candidate-old-context-rollout",
+                        "policy_source": policy_source,
+                        "model": "claude-haiku-4-5-20251001",
+                        "placement": "system",
+                        "min_request_chars": 32000,
+                        "min_summarized_chars": 12000,
+                        "max_turns": 6,
+                        "keep_recent_turns": 4,
+                        "max_summary_chars": 4000,
+                        "max_source_chars": 80000,
+                        "max_summary_cost_usd": 0.02,
+                        "excluded_categories": ["tool-heavy", "tool-result"],
+                        "block_tool_protocol": True,
+                        "block_thinking": True,
+                        "canary": {
+                            "enabled": True,
+                            "fraction": 0.1,
+                            "salt": "summary-rollout-test",
+                            "unit": "source_hash",
+                        },
+                        "safety_stop": {
+                            "enabled": True,
+                            "min_outcome_samples": 5,
+                            "window": 500,
+                            "max_error_rate": 0.1,
+                            "max_retry_rate": 0.25,
+                            "max_negative_net_savings_rate": 0.5,
+                            "max_summary_failure_rate": 0.1,
+                            "max_error_rate_delta": 0.05,
+                        },
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def _log_summary_rollout_call(
+        self,
+        store,
+        *,
+        cohort: str,
+        created_at: str = "2026-06-09T04:20:00+00:00",
+        id_suffix: str = "",
+        status_code: int = 200,
+    ):
+        from agentflow_proxy.store import stable_json
+
+        applied = cohort == "canary_applied"
+        meta = {
+            "enabled": True,
+            "status": "applied" if applied else "skipped",
+            "reason": "summary-created" if applied else ("canary_holdout" if cohort == "canary_holdout" else "local-canary-safety-stop"),
+            "rule_id": "managed-old-context-summary-rollout",
+            "candidate_id": "candidate-old-context-rollout",
+            "policy_source": "managed-recommended",
+            "category": "chat",
+            "eligible_chars": 32000,
+            "eligible_turns": 3,
+            "saved_chars": 4000 if applied else 0,
+            "tokens_saved_est": 1000 if applied else 0,
+            "estimated_net_savings_usd": 0.002 if applied else 0.0,
+            "summary_status_code": status_code,
+            "canary": {
+                "enabled": True,
+                "cohort": cohort,
+                "selected": applied,
+                "fraction": 0.1,
+                "unit": "source_hash",
+            },
+        }
+        if cohort == "bypassed":
+            meta["status"] = "bypass"
+            meta["safety_stop_state"] = "stopped"
+        store.log_call(
+            id=f"summary-rollout-{cohort}{id_suffix}",
+            created_at=created_at,
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=1000,
+            input_tokens_est=10000,
+            output_tokens_est=200,
+            actual_input_tokens=9000,
+            actual_output_tokens=180,
+            cost_est_usd=0.03,
+            cost_baseline_usd=0.04,
+            routing_json=stable_json({"category": "chat"}),
+            crunch_json=stable_json({"changed": applied, "old_context_summarization": meta}),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            request_json=stable_json({"messages": [{"content": "raw rollout secret must not leak"}]}),
+            response_json=stable_json({"content": "generated rollout summary must not leak"}),
+            session_id="summary-rollout-session-secret",
+            category="chat",
+            retry_count=0,
+            provider="anthropic",
+        )
+
+    def test_old_context_summary_rollout_actions_review_requires_promote_gate(self):
+        bundle = self._summary_rollout_action_bundle(verdict="hold")
+        with TemporaryDirectory() as tmp:
+            self._write_summary_rollout_rule(tmp)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            code = cli.old_context_summary_rollout_actions_review_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stderr.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertIn("widen requires local old-context summary quality_gate verdict promote", [error["message"] for error in payload["validation"]["errors"]])
+
+    def test_old_context_summary_rollout_actions_review_reports_fraction_edit(self):
+        bundle = self._summary_rollout_action_bundle(action_type="widen")
+        with TemporaryDirectory() as tmp:
+            self._write_summary_rollout_rule(tmp)
+            stdout = io.StringIO()
+            code = cli.old_context_summary_rollout_actions_review_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        edit = payload["actions"][0]["proposed_edit"]
+        self.assertTrue(edit["changed"])
+        self.assertEqual(edit["current_fraction"], 0.1)
+        self.assertEqual(edit["recommended_fraction"], 0.35)
+        self.assertEqual(edit["canary"]["fraction"], 0.35)
+        self.assertEqual(payload["actions"][0]["quality_gate"]["verdict"], "promote")
+
+    def test_signed_old_context_summary_rollout_actions_apply_rolls_back_and_creates_backup(self):
+        from agentflow_proxy.old_context_summary_rollout_actions import attach_summary_rollout_action_provenance
+
+        secret = "summary-rollout-secret"
+        bundle = attach_summary_rollout_action_provenance(
+            self._summary_rollout_action_bundle(action_type="rollback", verdict="rollback"),
+            secret=secret,
+            issuer="agentflow-server",
+            server_id="local-dev",
+            key_id="summary-rollout-key",
+        )
+        with TemporaryDirectory() as tmp:
+            path = self._write_summary_rollout_rule(tmp)
+            stdout = io.StringIO()
+            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS": json.dumps({"summary-rollout-key": secret})}, clear=False):
+                code = cli.old_context_summary_rollout_actions_apply_cli(
+                    ["--config-dir", tmp, "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stdout,
+                )
+            written = yaml.safe_load(path.read_text(encoding="utf-8"))
+            backups = list(Path(tmp).glob("crunch_rules.yaml.bak-*"))
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["provenance"]["status"], "verified")
+        self.assertEqual(len(backups), 1)
+        summary = written["old_context_summarization"]
+        self.assertFalse(summary["enabled"])
+        self.assertFalse(summary["canary"]["enabled"])
+        self.assertEqual(summary["canary"]["fraction"], 0.0)
+        self.assertEqual(summary["rollout_action"]["action_type"], "rollback")
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        event = recent_policy_events(limit=1)["events"][0]
+        self.assertEqual(event["action"], "old-context-summary-rollout-actions-apply")
+        event_text = json.dumps(event)
+        self.assertNotIn("raw rollout secret", event_text)
+        self.assertNotIn("generated rollout summary", event_text)
+
+    def test_old_context_summary_rollout_actions_reject_raw_and_unknown_before_writing(self):
+        with TemporaryDirectory() as tmp:
+            path = self._write_summary_rollout_rule(tmp)
+            before = path.read_text(encoding="utf-8")
+            raw_like = self._summary_rollout_action_bundle(raw_like=True)
+            stdout = io.StringIO()
+            code = cli.old_context_summary_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(raw_like)),
+                stdout=stdout,
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(list(Path(tmp).glob("crunch_rules.yaml.bak-*")), [])
+            self.assertIn("raw or prompt-like old-context summary rollout action payloads are not accepted", [error["message"] for error in json.loads(stdout.getvalue())["validation"]["errors"]])
+
+            unknown = self._summary_rollout_action_bundle()
+            unknown["actions"][0]["target_rule_id"] = "missing-rule"
+            stdout = io.StringIO()
+            code = cli.old_context_summary_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(unknown)),
+                stdout=stdout,
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(json.loads(stdout.getvalue())["review"]["actions"][0]["reason"], "unknown-rule")
+
+    def test_old_context_summary_rollout_actions_dry_run_and_impact_are_metadata_only(self):
+        from agentflow_proxy.store import Store
+
+        bundle = self._summary_rollout_action_bundle(action_type="widen")
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._write_summary_rollout_rule(tmp)
+                self._log_summary_rollout_call(store, cohort="canary_applied")
+                self._log_summary_rollout_call(store, cohort="canary_holdout")
+                self._log_summary_rollout_call(store, cohort="bypassed")
+                dry_stdout = io.StringIO()
+                code = cli.old_context_summary_rollout_actions_dry_run_cli(
+                    ["--config-dir", tmp, "--db", db_path, "--limit", "10", "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=dry_stdout,
+                )
+                dry_run = json.loads(dry_stdout.getvalue())
+                self._log_summary_rollout_call(store, cohort="canary_applied", created_at="2026-06-09T05:00:01+00:00", id_suffix="-post")
+            finally:
+                store.conn.close()
+
+            impact_stdout = io.StringIO()
+            impact_code = cli.old_context_summary_rollout_actions_impact_cli(
+                ["--db", db_path, "--limit", "10", "--since", "2026-06-09T05:00:00+00:00", "-"],
+                stdin=io.StringIO(json.dumps(dry_run)),
+                stdout=impact_stdout,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(dry_run["ok"])
+        self.assertTrue(dry_run["read_only"])
+        self.assertFalse(dry_run["wrote_policy_files"])
+        self.assertEqual(dry_run["summary"]["affected_metadata_row_count"], 3)
+        self.assertEqual(dry_run["actions"][0]["current_canary_applied_count"], 1)
+        self.assertEqual(dry_run["actions"][0]["current_canary_holdout_count"], 1)
+        self.assertEqual(dry_run["actions"][0]["current_bypassed_or_disabled_count"], 1)
+        self.assertEqual(dry_run["actions"][0]["projected_fraction"], 0.35)
+        self.assertFalse(dry_run["privacy"]["raw_old_context_included"])
+        rendered = json.dumps(dry_run)
+        self.assertNotIn("summary-rollout-session-secret", rendered)
+        self.assertNotIn("raw rollout secret", rendered)
+
+        self.assertEqual(impact_code, 0)
+        impact = json.loads(impact_stdout.getvalue())
+        self.assertEqual(impact["schema"], "agentflow.old_context_summary_rollout_actions_impact.v1")
+        self.assertTrue(impact["ok"])
+        self.assertEqual(impact["summary"]["actual_matched_metadata_row_count"], 1)
+        self.assertEqual(impact["actions"][0]["actual"]["actual_canary_applied_count"], 1)
+        self.assertFalse(impact["privacy"]["generated_summaries_included"])
+
     def test_policy_review_cli_includes_old_context_summary_dry_run(self):
         proposed = self._old_context_summary_bundle()
         with TemporaryDirectory() as tmp:

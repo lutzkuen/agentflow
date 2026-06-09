@@ -1530,6 +1530,257 @@ def old_context_summary_impact_cli(
     return 0 if result.get("ok") else 1
 
 
+def _summary_rollout_event_details(command: str, result: dict[str, Any], *, path: str | None, config_dir: str | None = None, db_path: str | None = None) -> dict[str, Any]:
+    actions = [item for item in result.get("actions", []) if isinstance(item, dict)]
+    review = result.get("review") if isinstance(result.get("review"), dict) else {}
+    validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    files = [item for item in result.get("files", []) if isinstance(item, dict)]
+
+    snapshots = []
+    for action in actions:
+        edit = action.get("proposed_edit") if isinstance(action.get("proposed_edit"), dict) else {}
+        gate = action.get("quality_gate") if isinstance(action.get("quality_gate"), dict) else {}
+        snapshots.append({
+            key: value
+            for key, value in {
+                "action_id": action.get("action_id"),
+                "target_candidate_id": action.get("target_candidate_id"),
+                "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
+                "action_type": action.get("action_type"),
+                "current_fraction": edit.get("current_fraction") if edit else action.get("current_fraction"),
+                "recommended_fraction": edit.get("recommended_fraction") if edit else action.get("projected_fraction"),
+                "quality_gate_verdict": gate.get("verdict"),
+                "quality_gate_reason_codes": gate.get("reason_codes"),
+                "confidence": action.get("confidence"),
+                "required_local_review": True,
+                "managed_enforced": False,
+            }.items()
+            if value not in (None, "", [], {})
+        })
+
+    return {
+        "source": "cli",
+        "command": f"old-context-summary-rollout-actions-{command}",
+        "input_source": "stdin" if path == "-" else "file",
+        "config_dir_configured": bool(config_dir),
+        "db_configured": bool(db_path),
+        "dry_run": bool(result.get("dry_run")),
+        "read_only": bool(result.get("read_only")),
+        "action_count": len(actions) or result.get("action_count") or validation.get("action_count") or 0,
+        "planned_action_count": result.get("planned_action_count") or review.get("planned_action_count") or 0,
+        "changed_action_count": result.get("changed_action_count") or review.get("changed_action_count") or 0,
+        "rejected_action_count": result.get("rejected_action_count") or review.get("rejected_action_count") or 0,
+        "action_snapshots": snapshots,
+        "affected_metadata_row_count": summary.get("affected_metadata_row_count") or summary.get("actual_matched_metadata_row_count"),
+        "projected_additional_applied_count": summary.get("projected_additional_applied_count"),
+        "projected_local_bypass_or_disable_count": summary.get("projected_local_bypass_or_disable_count"),
+        "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+        "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+        "actual_bypassed_or_disabled_count": summary.get("actual_bypassed_or_disabled_count"),
+        "changed_file_count": sum(1 for item in files if item.get("changed")),
+        "changed_sections": sorted({str(item.get("section")) for item in files if item.get("changed") and item.get("section")}),
+        "provenance_status": provenance.get("status"),
+        "computed_bundle_hash": provenance.get("computed_bundle_hash"),
+        "validation_error_count": len(validation.get("errors", []) if isinstance(validation.get("errors"), list) else []),
+        "validation_warning_count": len(validation.get("warnings", []) if isinstance(validation.get("warnings"), list) else []),
+        "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+        "exit_code": 0 if result.get("ok") else 1,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_old_context_included": False,
+            "generated_summaries_included": False,
+            "raw_messages_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+            "yaml_contents_included": False,
+        },
+    }
+
+
+def old_context_summary_rollout_actions_review_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Review managed old-context summary rollout actions against local crunch rules")
+    parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action bundle JSON path, or '-' for stdin.")
+    parser.add_argument("--config-dir", default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")))
+    parser.add_argument("--pretty", action="store_true")
+    args = parser.parse_args(argv)
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+    bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.old_context_summary_rollout_actions_review.v1",
+            "ok": False,
+            "config_dir": args.config_dir,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "old-context summary rollout action bundle could not be read"},
+            "actions": [],
+        }
+    else:
+        from agentflow_proxy.old_context_summary_rollout_actions import plan_summary_rollout_actions
+
+        result = plan_summary_rollout_actions(bundle, config_dir=args.config_dir)
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "old-context-summary-rollout-actions-review",
+        ok=bool(result.get("ok")),
+        details=_summary_rollout_event_details("review", result, path=args.path, config_dir=args.config_dir),
+    )
+    _write_rollout_actions_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
+def old_context_summary_rollout_actions_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Apply managed old-context summary rollout actions to local crunch rules")
+    parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action bundle JSON path, or '-' for stdin.")
+    parser.add_argument("--config-dir", default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")))
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--pretty", action="store_true")
+    args = parser.parse_args(argv)
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.old_context_summary_rollout_actions_apply.v1",
+            "ok": False,
+            "dry_run": bool(args.dry_run),
+            "config_dir": args.config_dir,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "old-context summary rollout action bundle could not be read"},
+            "files": [],
+            "actions": [],
+        }
+    else:
+        from agentflow_proxy.old_context_summary_rollout_actions import apply_summary_rollout_actions
+
+        result = apply_summary_rollout_actions(bundle, config_dir=args.config_dir, dry_run=args.dry_run)
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "old-context-summary-rollout-actions-apply",
+        ok=bool(result.get("ok")),
+        details=_summary_rollout_event_details("apply", result, path=args.path, config_dir=args.config_dir),
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
+def old_context_summary_rollout_actions_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run managed old-context summary rollout actions against recent local metadata")
+    parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action bundle JSON path, or '-' for stdin.")
+    parser.add_argument("--config-dir", default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")))
+    parser.add_argument("--db", default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")))
+    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--pretty", action="store_true")
+    args = parser.parse_args(argv)
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.old_context_summary_rollout_actions_dry_run.v1",
+            "ok": False,
+            "dry_run": True,
+            "read_only": True,
+            "config_dir": args.config_dir,
+            "db_path": args.db,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "old-context summary rollout action bundle could not be read"},
+            "actions": [],
+        }
+    else:
+        from agentflow_proxy.old_context_summary_rollout_actions import dry_run_summary_rollout_actions
+
+        store = _open_store_for_db(args.db)
+        try:
+            result = dry_run_summary_rollout_actions(
+                bundle,
+                store_obj=store,
+                config_dir=args.config_dir,
+                limit=args.limit,
+            )
+            result["db_path"] = args.db
+        finally:
+            store.conn.close()
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "old-context-summary-rollout-actions-dry-run",
+        ok=bool(result.get("ok")),
+        details=_summary_rollout_event_details("dry-run", result, path=args.path, config_dir=args.config_dir, db_path=args.db),
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
+def old_context_summary_rollout_actions_impact_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Measure post-apply old-context summary rollout-action impact against a dry-run projection")
+    parser.add_argument("path", nargs="?", default="-", help="Old-context summary rollout action dry-run JSON path, or '-' for stdin.")
+    parser.add_argument("--db", default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")))
+    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--since")
+    parser.add_argument("--pretty", action="store_true")
+    args = parser.parse_args(argv)
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    report, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.old_context_summary_rollout_actions_impact.v1",
+            "ok": False,
+            "read_only": True,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "old-context summary rollout action dry-run report could not be read"},
+            "actions": [],
+        }
+    else:
+        from agentflow_proxy.old_context_summary_rollout_actions import measure_summary_rollout_action_impact
+
+        store = _open_store_for_db(args.db)
+        try:
+            result = measure_summary_rollout_action_impact(report, store_obj=store, limit=args.limit, since=args.since)
+        finally:
+            store.conn.close()
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "old-context-summary-rollout-actions-impact",
+        ok=bool(result.get("ok")),
+        details=_summary_rollout_event_details("impact", result, path=args.path, db_path=args.db),
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
 def managed_rollout_actions_impact_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -2564,6 +2815,22 @@ def old_context_summary_dry_run_main() -> None:
 
 def old_context_summary_impact_main() -> None:
     raise SystemExit(old_context_summary_impact_cli())
+
+
+def old_context_summary_rollout_actions_review_main() -> None:
+    raise SystemExit(old_context_summary_rollout_actions_review_cli())
+
+
+def old_context_summary_rollout_actions_apply_main() -> None:
+    raise SystemExit(old_context_summary_rollout_actions_apply_cli())
+
+
+def old_context_summary_rollout_actions_dry_run_main() -> None:
+    raise SystemExit(old_context_summary_rollout_actions_dry_run_cli())
+
+
+def old_context_summary_rollout_actions_impact_main() -> None:
+    raise SystemExit(old_context_summary_rollout_actions_impact_cli())
 
 
 def managed_rollout_actions_impact_main() -> None:
