@@ -7,6 +7,7 @@ from unittest.mock import patch
 import httpx
 
 from agentflow_proxy import recommendations
+from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 
 
 class FakeResponse:
@@ -155,6 +156,9 @@ class RecommendationTest(unittest.TestCase):
             "policy_source": "local-default",
             "command": "raw command text",
             "tenant_id": "tenant-secret",
+            "prompt_difficulty_features": prompt_difficulty_features_from_text(
+                "Find current outstanding vouchers in the database."
+            ),
         }
         unit = recommendations.build_optimization_unit(
             provider="anthropic",
@@ -197,6 +201,14 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(pattern_features["token_bucket"], "lt_1k_tokens")
         self.assertEqual(pattern_features["workflow_phase"], "verification")
         self.assertEqual(FakeAsyncClient.last_json["input_features"]["workflow_phase"], "verification")
+        self.assertEqual(
+            FakeAsyncClient.last_json["input_features"]["prompt_difficulty_features"]["downgrade_risk"],
+            "block",
+        )
+        self.assertEqual(
+            FakeAsyncClient.last_json["input_features"]["prompt_difficulty_features"]["external_source_dependency"],
+            "database",
+        )
         self.assertEqual(
             FakeAsyncClient.last_json["input_features"]["workflow_phase_reason"],
             "verification-intent-text",
@@ -279,6 +291,9 @@ class RecommendationTest(unittest.TestCase):
             },
             request_id="request-secret",
             thread_id="thread-secret",
+            prompt_difficulty_features=prompt_difficulty_features_from_text(
+                "Thank you for checking the vouchers."
+            ),
         )
 
         pattern_features = unit["input_features"]["pattern_features"]
@@ -288,6 +303,11 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(pattern_features["token_bucket"], "1k_4k_tokens")
         self.assertEqual(pattern_features["pattern_types"], ["repeated_input_section"])
         self.assertEqual(pattern_features["local_decision_status"], "routing:skipped|crunch:applied|cache:skipped")
+        self.assertEqual(
+            unit["input_features"]["prompt_difficulty_features"]["task_intent"],
+            "acknowledgement",
+        )
+        self.assertEqual(unit["input_features"]["prompt_difficulty_features"]["downgrade_risk"], "safe")
         self.assertTrue(pattern_features["pattern_hash"].startswith("sha256:"))
         self.assertTrue(pattern_features["crunch_pattern_hash"].startswith("sha256:"))
         self.assertTrue(pattern_features["cache_pattern_hash"].startswith("sha256:"))
@@ -535,6 +555,9 @@ class RecommendationTest(unittest.TestCase):
                     "target_model": "claude-haiku-4-5-20251001",
                     "applied": True,
                 },
+                "prompt_difficulty_features": prompt_difficulty_features_from_text(
+                    "Check the current outstanding vouchers before answering."
+                ),
                 "routing_experiment": {
                     "optimization_feedback": {
                         "schema": "agentflow.routing_experiment_feedback.v1",
@@ -565,6 +588,11 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(FakeAsyncClient.last_json["status_code"], 200)
         self.assertEqual(FakeAsyncClient.last_json["routing_decision"]["reason"], "small request")
         self.assertEqual(FakeAsyncClient.last_json["managed_recommendation"]["optimization_unit_id"], 42)
+        self.assertEqual(FakeAsyncClient.last_json["prompt_difficulty_features"]["downgrade_risk"], "block")
+        self.assertEqual(
+            FakeAsyncClient.last_json["prompt_difficulty_features"]["answerability_from_prompt_only"],
+            "unlikely",
+        )
         self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["output_similarity"], 0.95)
         self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["primary_output_sha256"], "primary-hash")
         pattern_decisions = FakeAsyncClient.last_json["pattern_decisions"]

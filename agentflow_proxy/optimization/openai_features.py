@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 from agentflow_proxy.recommendations import build_optimization_unit, build_outcome_feedback
 from agentflow_proxy.router import extract_text
 from agentflow_proxy.terminal_features import terminal_log_features_from_text
@@ -223,7 +224,9 @@ def build_openai_preflight_feature_unit(
     input_tokens_est: int | None,
 ) -> dict[str, Any]:
     tool_features = _openai_tool_features(body)
-    terminal_log_features = terminal_log_features_from_text(extract_text(body))
+    text = extract_text(body)
+    terminal_log_features = terminal_log_features_from_text(text)
+    prompt_difficulty_features = prompt_difficulty_features_from_text(text)
     normalized_routing = dict(routing_meta)
     normalized_routing.update({
         "provider": "openai",
@@ -269,6 +272,7 @@ def build_openai_preflight_feature_unit(
         "old_context": _openai_old_context_features(body),
         "cache_eligibility": _openai_cache_eligibility_hints(stream=stream, tool_features=tool_features),
         "terminal_log_features": terminal_log_features,
+        "prompt_difficulty_features": prompt_difficulty_features,
         "raw_payload_included": False,
     })
     unit.update({
@@ -304,7 +308,9 @@ def build_openai_request_feature_unit(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     tool_features = _openai_tool_features(body)
-    terminal_log_features = terminal_log_features_from_text(extract_text(body))
+    text = extract_text(body)
+    terminal_log_features = terminal_log_features_from_text(text)
+    prompt_difficulty_features = prompt_difficulty_features_from_text(text)
     normalized_routing = dict(routing_meta)
     normalized_routing.update({
         "provider": "openai",
@@ -341,6 +347,7 @@ def build_openai_request_feature_unit(
     unit["input_features"]["requested_model_family"] = unit["requested_model_family"]
     unit["input_features"]["routed_model_family"] = unit["routed_model_family"]
     unit["input_features"]["terminal_log_features"] = terminal_log_features
+    unit["input_features"]["prompt_difficulty_features"] = prompt_difficulty_features
     unit.setdefault("tool_features", {}).update(tool_features)
     return unit
 
@@ -385,6 +392,8 @@ def summarize_openai_request_feature_unit(unit: dict[str, Any]) -> dict[str, Any
         summary["cache_eligibility"] = input_features.get("cache_eligibility")
     if input_features.get("terminal_log_features") is not None:
         summary["terminal_log_features"] = input_features.get("terminal_log_features")
+    if input_features.get("prompt_difficulty_features") is not None:
+        summary["prompt_difficulty_features"] = input_features.get("prompt_difficulty_features")
     return summary
 
 
@@ -483,4 +492,6 @@ def summarize_openai_outcome_feature_unit(unit: dict[str, Any]) -> dict[str, Any
     }
     if unit.get("terminal_log_features") is not None:
         summary["terminal_log_features"] = unit.get("terminal_log_features")
+    if unit.get("prompt_difficulty_features") is not None:
+        summary["prompt_difficulty_features"] = unit.get("prompt_difficulty_features")
     return summary

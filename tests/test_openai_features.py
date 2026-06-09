@@ -219,12 +219,17 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertTrue(unit["input_features"]["cache_eligibility"]["streaming_bypass_hint"])
         self.assertFalse(unit["input_features"]["cache_eligibility"]["raw_cache_key_included"])
         terminal_features = unit["input_features"]["terminal_log_features"]
+        difficulty_features = unit["input_features"]["prompt_difficulty_features"]
         self.assertEqual(terminal_features["schema"], "agentflow.terminal_log_features.v1")
         self.assertEqual(terminal_features["log_line_fraction_bucket"], "25_50pct")
         self.assertEqual(terminal_features["error_line_count_bucket"], "one")
         self.assertFalse(terminal_features["privacy"]["raw_log_text_included"])
+        self.assertEqual(difficulty_features["schema"], "agentflow.prompt_difficulty_features.v1")
+        self.assertEqual(difficulty_features["downgrade_risk"], "block")
+        self.assertEqual(difficulty_features["external_source_dependency"], "logs")
         self.assertEqual(summary["local_mutation_stage"], "preflight")
         self.assertEqual(summary["terminal_log_features"], terminal_features)
+        self.assertEqual(summary["prompt_difficulty_features"], difficulty_features)
         self.assertTrue(summary["has_tools"])
         for forbidden_key in ("messages", "input", "cache_key", "request_id", "session_id"):
             self.assertNotIn(f'"{forbidden_key}"', rendered)
@@ -340,6 +345,10 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
             local.routing_meta["openai_feature_unit"]["terminal_log_features"]["error_line_count_bucket"],
             "one",
         )
+        self.assertEqual(
+            local.routing_meta["openai_feature_unit"]["prompt_difficulty_features"]["downgrade_risk"],
+            "block",
+        )
         self.assertEqual(local.routing_meta["openai_local_feature_unit"]["source_surface"], "openai_responses")
         self.assertNotIn("raw openai prompt", json.dumps(local.routing_meta, sort_keys=True))
         self.assertNotIn("secret-app", json.dumps(local.routing_meta, sort_keys=True))
@@ -372,6 +381,12 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
                         "terminal_output_char_fraction_bucket": "gte_75pct",
                         "raw_log_text_included": False,
                     },
+                    "prompt_difficulty_features": {
+                        "schema": "agentflow.prompt_difficulty_features.v1",
+                        "task_intent": "data_lookup",
+                        "downgrade_risk": "block",
+                        "privacy": {"metadata_only": True},
+                    },
                 },
             },
             category="chat",
@@ -382,6 +397,7 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self.assertEqual(summary["schema"], "agentflow.openai_outcome_summary.v1")
         self.assertEqual(summary["status_code"], 200)
         self.assertEqual(summary["terminal_log_features"]["terminal_output_char_fraction_bucket"], "gte_75pct")
+        self.assertEqual(summary["prompt_difficulty_features"]["downgrade_risk"], "block")
         self.assertFalse(summary["raw_payload_included"])
         self.assertEqual(managed_egress_violations(summary), [])
         self._assert_no_raw_values(summary)

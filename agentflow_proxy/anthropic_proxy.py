@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.pricing import MODEL_ALIASES, estimate_cost
+from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 from agentflow_proxy.headers import (
     ClientJsonRequestError,
     build_anthropic_forward_headers,
@@ -588,7 +589,9 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunched["thinking"]["budget_tokens"] = MAX_THINKING_BUDGET_TOKENS
             routing_meta["thinking_capped"] = True
             print(f"thinking_cap: original={_original_budget} cap={MAX_THINKING_BUDGET_TOKENS}", flush=True)
-        input_tokens = estimate_tokens_from_text(extract_text(crunched))
+        crunched_text = extract_text(crunched)
+        routing_meta["prompt_difficulty_features"] = prompt_difficulty_features_from_text(crunched_text)
+        input_tokens = estimate_tokens_from_text(crunched_text)
         recommendation_unit = build_optimization_unit(
             provider="anthropic",
             path=path,
