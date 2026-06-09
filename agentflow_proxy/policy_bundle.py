@@ -1722,7 +1722,14 @@ def _pattern_bundle_impact(section: str, policy: dict[str, Any], traffic: list[d
     }
 
 
-def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]], traffic: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _crunch_impact(
+    policy: dict[str, Any],
+    calls: list[dict[str, Any]],
+    traffic: list[dict[str, Any]] | None = None,
+    *,
+    db_path: str | None = None,
+    limit: int = _DEFAULT_IMPACT_LIMIT,
+) -> dict[str, Any]:
     enabled = _enabled(policy.get("enabled", True))
     threshold = _as_int(policy.get("threshold_chars"), 24000)
     eligible = [item for item in calls if enabled and item["text_chars"] >= threshold]
@@ -1735,6 +1742,7 @@ def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]], traffic:
         **{k: v for k, v in _rollup(eligible).items() if k != "would_match_count"},
     }]
     warnings: list[dict[str, str]] = []
+    old_context_dry_run: dict[str, Any] | None = None
 
     old_context = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
     if _enabled(old_context.get("enabled")):
@@ -1754,6 +1762,10 @@ def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]], traffic:
         warnings.append(warning)
         feature["warnings"] = [warning]
         features.append(feature)
+        if db_path:
+            from agentflow_proxy.old_context_summary_dry_run import dry_run_old_context_summary
+
+            old_context_dry_run = dry_run_old_context_summary(policy, db_path=str(db_path), limit=limit)
 
     thinking_dedup = policy.get("thinking_deduplication") if isinstance(policy.get("thinking_deduplication"), dict) else {}
     if _enabled(thinking_dedup.get("enabled")):
@@ -1772,6 +1784,7 @@ def _crunch_impact(policy: dict[str, Any], calls: list[dict[str, Any]], traffic:
         "policy_source": policy.get("policy_source"),
         "enabled": enabled,
         "features": features,
+        "old_context_summary_dry_run": old_context_dry_run,
         "pattern_rules": pattern_impact,
         "warnings": [*warnings, *pattern_impact.get("warnings", [])],
     }
@@ -2385,7 +2398,7 @@ def simulate_policy_bundle_impact(
     if isinstance(policies.get("routing"), dict):
         sections["routing"] = _routing_impact(policies["routing"], calls)
     if isinstance(policies.get("crunch"), dict):
-        sections["crunch"] = _crunch_impact(policies["crunch"], calls, traffic)
+        sections["crunch"] = _crunch_impact(policies["crunch"], calls, traffic, db_path=str(path), limit=limit)
     if isinstance(policies.get("cache"), dict):
         sections["cache"] = _cache_impact(policies["cache"], calls, traffic)
     if isinstance(policies.get("routing_experiments"), dict):

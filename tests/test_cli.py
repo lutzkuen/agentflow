@@ -594,6 +594,180 @@ class PolicyReloadCliTests(unittest.TestCase):
         warning_codes = {warning["code"] for warning in impact["warnings"]}
         self.assertIn("high-error-rate-routing-match", warning_codes)
 
+    def _old_context_summary_bundle(self) -> dict:
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["crunch"]["old_context_summarization"].update({
+            "enabled": True,
+            "rule_id": "test-old-context-dry-run",
+            "model": "claude-haiku-4-5-20251001",
+            "min_request_chars": 1,
+            "min_summarized_chars": 10,
+            "max_turns": 3,
+            "keep_recent_turns": 1,
+            "max_summary_chars": 80,
+            "max_source_chars": 10000,
+            "max_summary_cost_usd": 1.0,
+            "excluded_categories": [],
+            "block_tool_protocol": True,
+            "block_thinking": True,
+        })
+        return proposed
+
+    def _write_old_context_summary_dry_run_rows(self, db_path: str) -> None:
+        from agentflow_proxy.store import Store, stable_json
+
+        old_text = "raw-secret-old-context " + ("durable fact " * 260)
+        eligible_body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": old_text},
+                {"role": "assistant", "content": "decision: keep src/app.py behavior stable " * 120},
+                {"role": "user", "content": "recent request stays verbatim"},
+            ],
+        }
+        tool_blocked_body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool-secret", "name": "Read", "input": {"file": "secret.py"}}]},
+                {"role": "user", "content": "recent request"},
+            ],
+        }
+        store = Store(db_path)
+        try:
+            store.log_call(
+                id="old-summary-eligible",
+                created_at="2026-06-08T10:00:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1000,
+                input_tokens_est=2000,
+                output_tokens_est=100,
+                actual_input_tokens=2000,
+                actual_output_tokens=100,
+                cost_est_usd=0.007,
+                routing_json=stable_json({"category": "chat", "text_chars": len(stable_json(eligible_body)), "has_tools": False}),
+                crunch_json=stable_json({}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                request_json=stable_json(eligible_body),
+                session_id="session-secret-should-not-leak",
+                category="chat",
+                retry_count=0,
+                provider="anthropic",
+            )
+            store.log_call(
+                id="old-summary-tool-blocked",
+                created_at="2026-06-08T10:01:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1000,
+                input_tokens_est=1000,
+                output_tokens_est=100,
+                actual_input_tokens=1000,
+                actual_output_tokens=100,
+                cost_est_usd=0.004,
+                routing_json=stable_json({"category": "chat", "text_chars": len(stable_json(tool_blocked_body)), "has_tools": True}),
+                crunch_json=stable_json({}),
+                cache_json=stable_json({"status": "miss"}),
+                request_json=stable_json(tool_blocked_body),
+                session_id="blocked-session-secret",
+                category="chat",
+                retry_count=0,
+                provider="anthropic",
+            )
+            store.log_call(
+                id="old-summary-no-body",
+                created_at="2026-06-08T10:02:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1000,
+                input_tokens_est=1000,
+                output_tokens_est=100,
+                actual_input_tokens=1000,
+                actual_output_tokens=100,
+                cost_est_usd=0.004,
+                routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                crunch_json=stable_json({}),
+                cache_json=stable_json({"status": "miss"}),
+                request_json=None,
+                session_id="missing-body-session-secret",
+                category="chat",
+                retry_count=0,
+                provider="anthropic",
+            )
+        finally:
+            store.conn.close()
+
+    def test_old_context_summary_dry_run_cli_reports_metadata_only_projection(self):
+        proposed = self._old_context_summary_bundle()
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_dry_run_rows(db_path)
+            stdout = io.StringIO()
+
+            code = cli.old_context_summary_dry_run_cli(
+                ["-", "--db", db_path, "--limit", "10"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.old_context_summary_dry_run.v1")
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["policy"]["rule_id"], "test-old-context-dry-run")
+        self.assertEqual(payload["summary"]["sampled_call_count"], 3)
+        self.assertEqual(payload["summary"]["request_body_available_count"], 2)
+        self.assertEqual(payload["summary"]["eligible_call_count"], 1)
+        self.assertGreater(payload["summary"]["eligible_chars"], 10)
+        self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
+        self.assertGreater(payload["summary"]["estimated_summary_cost_usd"], 0)
+        self.assertGreater(payload["summary"]["projected_gross_savings_usd"], 0)
+        skip_reasons = {row["reason"] for row in payload["summary"]["skip_reasons"]}
+        self.assertIn("tool-protocol-context-blocked", skip_reasons)
+        self.assertIn("request-body-unavailable", skip_reasons)
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-secret-old-context", encoded)
+        self.assertNotIn("session-secret-should-not-leak", encoded)
+        self.assertNotIn("tool-secret", encoded)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["cache_keys_included"])
+
+    def test_policy_review_cli_includes_old_context_summary_dry_run(self):
+        proposed = self._old_context_summary_bundle()
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_dry_run_rows(db_path)
+            stdout = io.StringIO()
+
+            code = cli.policy_review_cli(
+                ["-", "--db", db_path, "--impact-limit", "10"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        dry_run = payload["impact_summary"]["sections"]["crunch"]["old_context_summary_dry_run"]
+        self.assertEqual(dry_run["schema"], "agentflow.old_context_summary_dry_run.v1")
+        self.assertEqual(dry_run["summary"]["eligible_call_count"], 1)
+        encoded = json.dumps(dry_run, sort_keys=True)
+        self.assertNotIn("raw-secret-old-context", encoded)
+
     def test_policy_impact_simulates_managed_pattern_bundle_without_mutation(self):
         from agentflow_proxy.policy_bundle import simulate_policy_bundle_impact
         from agentflow_proxy.store import Store, stable_json

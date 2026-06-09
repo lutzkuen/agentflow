@@ -1343,6 +1343,83 @@ def managed_rollout_actions_dry_run_cli(
     return 0 if result["ok"] else 1
 
 
+def old_context_summary_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run old-context summarization against recent local traffic")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Optional policy bundle JSON path, '-' for stdin, or omit to use the currently loaded local crunch policy.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print dry-run JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    bundle_or_policy: Any = None
+    read_error: dict[str, Any] | None = None
+    if args.path is not None:
+        bundle_or_policy, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+
+    if read_error:
+        from agentflow_proxy.old_context_summary_dry_run import OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA
+
+        result = {
+            "schema": OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA,
+            "ok": False,
+            "dry_run": True,
+            "read_only": True,
+            "db_path": args.db,
+            "lookback_call_limit": max(0, args.limit),
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "policy bundle could not be read"},
+            "groups": [],
+        }
+    else:
+        from agentflow_proxy.old_context_summary_dry_run import dry_run_old_context_summary
+
+        result = dry_run_old_context_summary(
+            bundle_or_policy,
+            db_path=str(args.db),
+            limit=max(0, args.limit),
+        )
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "old-context-summary-dry-run",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.path or "current-policy",
+            "db_path": args.db,
+            "dry_run": True,
+            "eligible_call_count": (result.get("summary") or {}).get("eligible_call_count"),
+            "projected_saved_tokens": (result.get("summary") or {}).get("projected_saved_tokens"),
+            "projected_net_savings_usd": (result.get("summary") or {}).get("projected_net_savings_usd"),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 def managed_rollout_actions_impact_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -2131,6 +2208,10 @@ def managed_rollout_actions_apply_main() -> None:
 
 def managed_rollout_actions_dry_run_main() -> None:
     raise SystemExit(managed_rollout_actions_dry_run_cli())
+
+
+def old_context_summary_dry_run_main() -> None:
+    raise SystemExit(old_context_summary_dry_run_cli())
 
 
 def managed_rollout_actions_impact_main() -> None:
