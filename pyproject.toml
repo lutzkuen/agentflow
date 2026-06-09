@@ -51,7 +51,7 @@ agentflow-managed-pattern-rollups = "agentflow_proxy.cli:managed_pattern_rollups
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]
-packages = ["agentflow_proxy"]
+packages = ["agentflow_proxy", "agentflow_proxy.optimization"]
 
 [tool.setuptools.package-data]
 agentflow_proxy = ["*.yaml"]
