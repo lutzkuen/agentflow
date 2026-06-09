@@ -1116,6 +1116,252 @@ def _old_context_summary_call_cost(meta: dict[str, Any], *, planned: bool) -> tu
     return input_tokens, output_tokens, estimate_cost(model, input_tokens, output_tokens, provider="anthropic") or 0.0
 
 
+def _old_context_summary_quality_cohort(meta: dict[str, Any]) -> str:
+    canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+    cohort = str(canary.get("cohort") or canary.get("status") or "")
+    status = str(meta.get("status") or "")
+    reason = str(meta.get("reason") or "")
+    if cohort == "canary_applied" or status == "applied":
+        return "canary_applied"
+    if cohort == "canary_holdout" or reason == "canary_holdout":
+        return "canary_holdout"
+    if status in {"bypass", "disabled"} or reason in {"disabled", "safety-stop"} or "safety-stop" in reason:
+        return "bypassed_or_disabled"
+    if status == "skipped":
+        return "bypassed_or_disabled"
+    return "unknown"
+
+
+def _old_context_summary_failed(meta: dict[str, Any]) -> bool:
+    return (
+        _as_int(meta.get("summary_status_code")) >= 400
+        or bool(meta.get("summary_error"))
+        or str(meta.get("status") or "") in {"summary_failed", "error"}
+        or str(meta.get("reason") or "") in {"summary-error", "summary-model-error"}
+    )
+
+
+def _old_context_summary_safety_stopped(meta: dict[str, Any]) -> bool:
+    safety = meta.get("safety_stop") if isinstance(meta.get("safety_stop"), dict) else {}
+    return str(meta.get("safety_stop_state") or "") == "stopped" or bool(safety.get("stopped"))
+
+
+def _old_context_summary_quality_thresholds(meta: dict[str, Any]) -> dict[str, Any]:
+    gate = meta.get("quality_gate") if isinstance(meta.get("quality_gate"), dict) else {}
+    gate_thresholds = gate.get("thresholds") if isinstance(gate.get("thresholds"), dict) else {}
+    safety = meta.get("safety_stop") if isinstance(meta.get("safety_stop"), dict) else {}
+    canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+    min_samples = _as_int(
+        gate_thresholds.get("min_matched_samples")
+        or safety.get("min_matched_samples")
+        or safety.get("min_outcome_samples")
+        or 5
+    )
+    min_applied = _as_int(
+        gate_thresholds.get("min_canary_applied_samples")
+        or safety.get("min_canary_applied_samples")
+        or max(1, min_samples // 2)
+    )
+    min_holdout = _as_int(
+        gate_thresholds.get("min_canary_holdout_samples")
+        or safety.get("min_canary_holdout_samples")
+        or (max(1, min_samples // 2) if bool(canary.get("enabled")) else 0)
+    )
+    return {
+        "min_matched_samples": min_samples,
+        "min_canary_applied_samples": min_applied,
+        "min_canary_holdout_samples": min_holdout,
+        "min_net_savings_usd": round(_as_float(gate_thresholds.get("min_net_savings_usd")), 8),
+        "min_payback_ratio": round(_as_float(gate_thresholds.get("min_payback_ratio") or 1.0), 6),
+        "max_error_rate": round(_as_float(gate_thresholds.get("max_error_rate") or safety.get("max_error_rate") or 0.1), 6),
+        "max_error_rate_delta": round(_as_float(gate_thresholds.get("max_error_rate_delta") or safety.get("max_error_rate_delta") or 0.05), 6),
+        "max_retry_rate": round(_as_float(gate_thresholds.get("max_retry_rate") or safety.get("max_retry_rate") or 0.25), 6),
+        "max_retry_rate_delta": round(_as_float(gate_thresholds.get("max_retry_rate_delta") or 0.05), 6),
+        "max_summary_failure_rate": round(
+            _as_float(gate_thresholds.get("max_summary_failure_rate") or safety.get("max_summary_failure_rate") or 0.1),
+            6,
+        ),
+        "max_safety_stop_count": _as_int(gate_thresholds.get("max_safety_stop_count")),
+        "max_latency_regression_ms": _as_int(gate_thresholds.get("max_latency_regression_ms") or 2000),
+        "rollback_error_rate": round(_as_float(gate_thresholds.get("rollback_error_rate") or 0.4), 6),
+        "rollback_summary_failure_rate": round(_as_float(gate_thresholds.get("rollback_summary_failure_rate") or 0.2), 6),
+        "rollback_safety_stop_count": _as_int(gate_thresholds.get("rollback_safety_stop_count") or 1),
+        "rollback_negative_net_savings_usd": round(_as_float(gate_thresholds.get("rollback_negative_net_savings_usd")), 8),
+    }
+
+
+def _new_old_context_summary_quality_bucket(row: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+    return {
+        "candidate_id": meta.get("candidate_id"),
+        "rule_id": meta.get("rule_id"),
+        "policy_source": meta.get("policy_source"),
+        "summary_model": meta.get("model"),
+        "canary_fraction": canary.get("fraction"),
+        "canary_unit": canary.get("unit"),
+        "canary_enabled": bool(canary.get("enabled")),
+        "last_decision_at": row.get("created_at"),
+        "enabled_rows": 0,
+        "disabled_rows": 0,
+        "matched_metadata_row_count": 0,
+        "canary_applied_count": 0,
+        "canary_holdout_count": 0,
+        "bypassed_or_disabled_count": 0,
+        "unknown_cohort_count": 0,
+        "summary_failure_count": 0,
+        "safety_stop_count": 0,
+        "error_count": 0,
+        "retry_count": 0,
+        "actual_tokens_saved_est": 0,
+        "actual_gross_savings_usd": 0.0,
+        "actual_summary_model_cost_usd": 0.0,
+        "actual_net_savings_usd": 0.0,
+        "cohorts": {
+            "canary_applied": {"count": 0, "error_count": 0, "retry_count": 0, "summary_failure_count": 0, "safety_stop_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "canary_holdout": {"count": 0, "error_count": 0, "retry_count": 0, "summary_failure_count": 0, "safety_stop_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "bypassed_or_disabled": {"count": 0, "error_count": 0, "retry_count": 0, "summary_failure_count": 0, "safety_stop_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+            "unknown": {"count": 0, "error_count": 0, "retry_count": 0, "summary_failure_count": 0, "safety_stop_count": 0, "latency_ms_total": 0, "latency_sample_count": 0},
+        },
+        "thresholds": _old_context_summary_quality_thresholds(meta),
+    }
+
+
+def _finalize_old_context_summary_quality_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    matched = _as_int(bucket.get("matched_metadata_row_count"))
+    applied = _as_int(bucket.get("canary_applied_count"))
+    holdout = _as_int(bucket.get("canary_holdout_count"))
+    disabled_rows = _as_int(bucket.get("disabled_rows"))
+    gross = _as_float(bucket.get("actual_gross_savings_usd"))
+    summary_cost = _as_float(bucket.get("actual_summary_model_cost_usd"))
+    net = _as_float(bucket.get("actual_net_savings_usd"))
+    thresholds = bucket["thresholds"]
+
+    cohorts: dict[str, Any] = {}
+    for name, cohort in bucket["cohorts"].items():
+        count = _as_int(cohort.get("count"))
+        latency_samples = _as_int(cohort.get("latency_sample_count"))
+        latency_avg = (
+            round(_as_int(cohort.get("latency_ms_total")) / latency_samples, 2)
+            if latency_samples
+            else None
+        )
+        cohorts[name] = {
+            "count": count,
+            "error_count": _as_int(cohort.get("error_count")),
+            "retry_count": _as_int(cohort.get("retry_count")),
+            "summary_failure_count": _as_int(cohort.get("summary_failure_count")),
+            "safety_stop_count": _as_int(cohort.get("safety_stop_count")),
+            "error_rate": round(_as_int(cohort.get("error_count")) / count, 6) if count else 0.0,
+            "retry_rate": round(_as_int(cohort.get("retry_count")) / count, 6) if count else 0.0,
+            "summary_failure_rate": round(_as_int(cohort.get("summary_failure_count")) / count, 6) if count else 0.0,
+            "latency_avg_ms": latency_avg,
+        }
+
+    applied_cohort = cohorts["canary_applied"]
+    holdout_cohort = cohorts["canary_holdout"]
+    latency_delta = None
+    if applied_cohort["latency_avg_ms"] is not None and holdout_cohort["latency_avg_ms"] is not None:
+        latency_delta = round(_as_float(applied_cohort["latency_avg_ms"]) - _as_float(holdout_cohort["latency_avg_ms"]), 2)
+    error_delta = round(_as_float(applied_cohort["error_rate"]) - _as_float(holdout_cohort["error_rate"]), 6)
+    retry_delta = round(_as_float(applied_cohort["retry_rate"]) - _as_float(holdout_cohort["retry_rate"]), 6)
+    payback_ratio = round(gross / summary_cost, 6) if summary_cost > 0 else None
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    rollback_reasons: list[str] = []
+    if matched <= 0:
+        blockers.append("no-observed-rows")
+    if matched < _as_int(thresholds["min_matched_samples"]):
+        blockers.append("insufficient-matched-samples")
+    if applied < _as_int(thresholds["min_canary_applied_samples"]):
+        blockers.append("insufficient-canary-applied-samples")
+    if bucket.get("canary_enabled") and holdout < _as_int(thresholds["min_canary_holdout_samples"]):
+        blockers.append("insufficient-canary-holdout-samples")
+    if matched and net <= _as_float(thresholds["min_net_savings_usd"]):
+        blockers.append("non-positive-net-savings")
+    if payback_ratio is not None and payback_ratio < _as_float(thresholds["min_payback_ratio"]):
+        blockers.append("summary-cost-payback-below-threshold")
+    if _as_float(applied_cohort["error_rate"]) > _as_float(thresholds["max_error_rate"]):
+        blockers.append("applied-error-rate-above-threshold")
+    if error_delta > _as_float(thresholds["max_error_rate_delta"]):
+        blockers.append("applied-error-rate-regression")
+    if _as_float(applied_cohort["retry_rate"]) > _as_float(thresholds["max_retry_rate"]):
+        blockers.append("applied-retry-rate-above-threshold")
+    if retry_delta > _as_float(thresholds["max_retry_rate_delta"]):
+        blockers.append("applied-retry-rate-regression")
+    if applied and _as_float(applied_cohort["summary_failure_rate"]) > _as_float(thresholds["max_summary_failure_rate"]):
+        blockers.append("summary-failure-rate-above-threshold")
+    if _as_int(bucket.get("safety_stop_count")) > _as_int(thresholds["max_safety_stop_count"]):
+        blockers.append("safety-stop-events-present")
+    if latency_delta is not None and latency_delta > _as_int(thresholds["max_latency_regression_ms"]):
+        warnings.append("latency-regression-above-threshold")
+
+    if _as_float(applied_cohort["error_rate"]) >= _as_float(thresholds["rollback_error_rate"]):
+        rollback_reasons.append("rollback-error-rate")
+    if applied and _as_float(applied_cohort["summary_failure_rate"]) >= _as_float(thresholds["rollback_summary_failure_rate"]):
+        rollback_reasons.append("rollback-summary-failure-rate")
+    if _as_int(bucket.get("safety_stop_count")) >= _as_int(thresholds["rollback_safety_stop_count"]):
+        rollback_reasons.append("rollback-safety-stop")
+    if net < -abs(_as_float(thresholds["rollback_negative_net_savings_usd"])):
+        rollback_reasons.append("rollback-negative-net-savings")
+
+    if matched == 0 and disabled_rows:
+        verdict = "disabled"
+        reason_codes = ["old-context-summary-disabled"]
+    elif rollback_reasons:
+        verdict = "rollback"
+        reason_codes = rollback_reasons
+    elif any(code.startswith("insufficient-") for code in blockers) or "no-observed-rows" in blockers:
+        verdict = "insufficient-evidence"
+        reason_codes = blockers
+    elif blockers:
+        verdict = "hold"
+        reason_codes = blockers
+    else:
+        verdict = "promote"
+        reason_codes = ["quality-gate-passed"]
+
+    return {
+        "schema": "agentflow.old_context_summary_dashboard_quality_gate.v1",
+        "candidate_id": bucket.get("candidate_id"),
+        "rule_id": bucket.get("rule_id"),
+        "policy_source": bucket.get("policy_source"),
+        "summary_model": bucket.get("summary_model"),
+        "canary_fraction": bucket.get("canary_fraction"),
+        "canary_unit": bucket.get("canary_unit"),
+        "canary_enabled": bool(bucket.get("canary_enabled")),
+        "last_decision_at": bucket.get("last_decision_at"),
+        "verdict": verdict,
+        "reason_codes": reason_codes,
+        "warning_codes": warnings,
+        "thresholds": thresholds,
+        "metrics": {
+            "matched_metadata_row_count": matched,
+            "canary_applied_count": applied,
+            "canary_holdout_count": holdout,
+            "bypassed_or_disabled_count": _as_int(bucket.get("bypassed_or_disabled_count")),
+            "unknown_cohort_count": _as_int(bucket.get("unknown_cohort_count")),
+            "summary_failure_count": _as_int(bucket.get("summary_failure_count")),
+            "safety_stop_count": _as_int(bucket.get("safety_stop_count")),
+            "error_count": _as_int(bucket.get("error_count")),
+            "retry_count": _as_int(bucket.get("retry_count")),
+            "actual_tokens_saved_est": _as_int(bucket.get("actual_tokens_saved_est")),
+            "actual_gross_savings_usd": round(gross, 8),
+            "actual_summary_model_cost_usd": round(summary_cost, 8),
+            "actual_net_savings_usd": round(net, 8),
+            "payback_ratio": payback_ratio,
+            "applied_minus_holdout_error_rate": error_delta,
+            "applied_minus_holdout_retry_rate": retry_delta,
+            "applied_minus_holdout_latency_avg_ms": latency_delta,
+        },
+        "cohorts": cohorts,
+        "read_only": True,
+        "wrote_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
 async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
     today_start = _utc_today_start_iso()
@@ -1127,6 +1373,9 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
                    coalesce(routed_model, requested_model) as model,
                    coalesce(actual_input_tokens, input_tokens_est, 0) as input_tokens,
                    coalesce(cache_read_input_tokens, 0) as cache_read_tokens,
+                   status_code,
+                   latency_ms,
+                   retry_count,
                    crunch_json
             from calls
             where crunch_json is not null
@@ -1157,6 +1406,7 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     summary_output_tokens = 0
     summary_cost_usd = 0.0
     today_summary_cost_usd = 0.0
+    quality_gate_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     for row in rows:
         crunch = _json_obj(row.get("crunch_json"))
@@ -1222,6 +1472,64 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
             today_gross_savings_usd += gross_savings
             today_summary_cost_usd += summary_cost
 
+        canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+        quality_key = (
+            str(meta.get("candidate_id") or "local-old-context-summary"),
+            str(meta.get("rule_id") or "unknown"),
+            str(meta.get("policy_source") or "unknown"),
+        )
+        quality_bucket = quality_gate_rows.setdefault(quality_key, _new_old_context_summary_quality_bucket(row, meta))
+        if str(row.get("created_at") or "") > str(quality_bucket.get("last_decision_at") or ""):
+            quality_bucket["last_decision_at"] = row.get("created_at")
+        if quality_bucket.get("candidate_id") is None and meta.get("candidate_id") is not None:
+            quality_bucket["candidate_id"] = meta.get("candidate_id")
+        if quality_bucket.get("rule_id") is None and meta.get("rule_id") is not None:
+            quality_bucket["rule_id"] = meta.get("rule_id")
+        if quality_bucket.get("policy_source") is None and meta.get("policy_source") is not None:
+            quality_bucket["policy_source"] = meta.get("policy_source")
+        if quality_bucket.get("summary_model") is None and meta.get("model") is not None:
+            quality_bucket["summary_model"] = meta.get("model")
+        if quality_bucket.get("canary_fraction") is None and canary.get("fraction") is not None:
+            quality_bucket["canary_fraction"] = canary.get("fraction")
+        if quality_bucket.get("canary_unit") is None and canary.get("unit") is not None:
+            quality_bucket["canary_unit"] = canary.get("unit")
+        quality_bucket["canary_enabled"] = bool(quality_bucket.get("canary_enabled") or canary.get("enabled"))
+        quality_bucket["enabled_rows"] += int(bool(meta.get("enabled")))
+        quality_bucket["disabled_rows"] += int(not bool(meta.get("enabled")))
+        cohort = _old_context_summary_quality_cohort(meta)
+        if bool(meta.get("enabled")):
+            quality_bucket["matched_metadata_row_count"] += 1
+        if cohort == "canary_applied":
+            quality_bucket["canary_applied_count"] += 1
+        elif cohort == "canary_holdout":
+            quality_bucket["canary_holdout_count"] += 1
+        elif cohort == "bypassed_or_disabled":
+            quality_bucket["bypassed_or_disabled_count"] += 1
+        else:
+            quality_bucket["unknown_cohort_count"] += 1
+        failed = _old_context_summary_failed(meta)
+        safety_stopped = _old_context_summary_safety_stopped(meta)
+        errored = _as_int(row.get("status_code")) >= 400
+        retried = _as_int(row.get("retry_count")) > 0
+        quality_bucket["summary_failure_count"] += int(failed)
+        quality_bucket["safety_stop_count"] += int(safety_stopped)
+        quality_bucket["error_count"] += int(errored)
+        quality_bucket["retry_count"] += int(retried)
+        quality_bucket["actual_tokens_saved_est"] += tokens_saved
+        quality_bucket["actual_gross_savings_usd"] += gross_savings
+        quality_bucket["actual_summary_model_cost_usd"] += summary_cost
+        quality_bucket["actual_net_savings_usd"] += _as_float(meta.get("estimated_net_savings_usd") or (gross_savings - summary_cost))
+        cohort_bucket = quality_bucket["cohorts"].get(cohort, quality_bucket["cohorts"]["unknown"])
+        cohort_bucket["count"] += 1
+        cohort_bucket["error_count"] += int(errored)
+        cohort_bucket["retry_count"] += int(retried)
+        cohort_bucket["summary_failure_count"] += int(failed)
+        cohort_bucket["safety_stop_count"] += int(safety_stopped)
+        latency = _as_int(row.get("latency_ms"))
+        if latency > 0:
+            cohort_bucket["latency_ms_total"] += latency
+            cohort_bucket["latency_sample_count"] += 1
+
         model_key = (provider, model)
         model_bucket = model_rows.setdefault(model_key, {
             "provider": provider,
@@ -1253,6 +1561,29 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         bucket["net_savings_usd"] = round(float(bucket["net_savings_usd"]), 6)
         model_breakdown.append(bucket)
     model_breakdown.sort(key=lambda item: (item["net_savings_usd"], item["eligible_rows"]), reverse=True)
+    quality_gates = [_finalize_old_context_summary_quality_bucket(bucket) for bucket in quality_gate_rows.values()]
+    quality_gates.sort(key=lambda item: (str(item.get("last_decision_at") or ""), item["metrics"]["matched_metadata_row_count"]), reverse=True)
+    verdict_counts: dict[str, int] = {}
+    reason_code_counts: dict[str, int] = {}
+    warning_code_counts: dict[str, int] = {}
+    for gate in quality_gates:
+        verdict_counts[str(gate.get("verdict") or "unknown")] = verdict_counts.get(str(gate.get("verdict") or "unknown"), 0) + 1
+        for code in gate.get("reason_codes") or []:
+            reason_code_counts[str(code or "unknown")] = reason_code_counts.get(str(code or "unknown"), 0) + 1
+        for code in gate.get("warning_codes") or []:
+            warning_code_counts[str(code or "unknown")] = warning_code_counts.get(str(code or "unknown"), 0) + 1
+    quality_gate_summary = {
+        "status": "observed" if quality_gates else "no-observed-rows",
+        "decision_count": len(quality_gates),
+        "promote_count": verdict_counts.get("promote", 0),
+        "hold_count": verdict_counts.get("hold", 0),
+        "rollback_count": verdict_counts.get("rollback", 0),
+        "insufficient_evidence_count": verdict_counts.get("insufficient-evidence", 0),
+        "disabled_count": verdict_counts.get("disabled", 0),
+        "verdict_breakdown": _count_breakdown(verdict_counts),
+        "reason_code_breakdown": _count_breakdown(reason_code_counts),
+        "warning_code_breakdown": _count_breakdown(warning_code_counts),
+    }
 
     return {
         "schema": "agentflow.old_context_summarization_opportunity.v1",
@@ -1290,6 +1621,8 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         "status_breakdown": _count_breakdown(status_counts),
         "skip_reason_breakdown": _count_breakdown(reason_counts),
         "model_breakdown": model_breakdown,
+        "quality_gate_summary": quality_gate_summary,
+        "quality_gates": quality_gates,
         "privacy": {
             "metadata_only": True,
             "raw_old_context_included": False,
@@ -1298,6 +1631,10 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
             "raw_request_bodies_included": False,
             "raw_responses_included": False,
             "file_contents_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
         },
     }
 
@@ -7773,6 +8110,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Old-context summary quality gates</h2>
+  <table class="activity-table" data-table-id="old-context-summary-quality" data-filter-label="Filter old-context summary quality gates">
+    <thead><tr>
+      <th data-sort-type="time">Decision</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Policy</th><th data-sort-type="number">Canary</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Bypass</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="number">Summary failures</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Net savings</th><th data-sort-type="number">Payback</th><th data-sort-type="text">Blocking reasons</th><th data-sort-type="text">Warnings</th><th data-sort-type="text">Thresholds</th>
+    </tr></thead>
+    <tbody id="old-context-summary-quality-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Old-context summarization by model</h2>
   <table data-table-id="old-context-summary-models" data-filter-label="Filter old-context summary model buckets">
     <thead><tr>
@@ -8667,6 +9013,28 @@ function recBadge(status){
   if(status==='skipped'||status==='missing')return'miss';
   return'provider';
 }
+function gateBadge(verdict){
+  if(verdict==='promote')return'hit';
+  if(verdict==='rollback')return'err';
+  if(verdict==='hold')return'routed';
+  if(verdict==='insufficient-evidence'||verdict==='disabled')return'miss';
+  return'provider';
+}
+function fmtPctValue(n){
+  if(n==null)return'—';
+  return (n*100).toFixed(1)+'%';
+}
+function gateThresholdBadges(t){
+  t=t||{};
+  const parts=[
+    `min ${t.min_matched_samples??'—'}`,
+    `applied ${t.min_canary_applied_samples??'—'}`,
+    `holdout ${t.min_canary_holdout_samples??'—'}`,
+    `err ${(Number(t.max_error_rate||0)*100).toFixed(1)}%`,
+    `retry ${(Number(t.max_retry_rate||0)*100).toFixed(1)}%`
+  ];
+  return parts.map(p=>`<span class="badge miss">${esc(p)}</span>`).join(' ');
+}
 function managedLastError(summary){
   const parts=[];
   if(summary.last_feedback_error_class)parts.push(`<span class="badge err">feedback ${esc(summary.last_feedback_error_class)}</span>`);
@@ -8866,6 +9234,7 @@ async function refreshSessions(){
     const tb=document.getElementById('sess-tbody');
     const pb=document.getElementById('plateau-tbody');
     const ob=document.getElementById('old-context-summary-tbody');
+    const oqb=document.getElementById('old-context-summary-quality-tbody');
     const omb=document.getElementById('old-context-summary-models-tbody');
     const rows=d.sessions||[];
     tb.innerHTML=rows.map(row=>`<tr>
@@ -8925,6 +9294,33 @@ async function refreshSessions(){
       <td class="flags">${skipBadges}</td>
       <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">raw context omitted</span> <span class="badge hit">summaries omitted</span></td>
     </tr>`;
+    const qualityRows=oldContext.quality_gates||[];
+    oqb.innerHTML=qualityRows.map(row=>{
+      const m=row.metrics||{};
+      const reasons=(row.reason_codes||[]).map(code=>`<span class="badge ${row.verdict==='rollback'?'err':'miss'}">${esc(code)}</span>`).join(' ')||'<span class="badge hit">none</span>';
+      const warnings=(row.warning_codes||[]).map(code=>`<span class="badge routed">${esc(code)}</span>`).join(' ')||'<span class="badge hit">none</span>';
+      return `<tr>
+        <td class="ts">${ago(row.last_decision_at)}</td>
+        <td><span class="badge ${gateBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.candidate_id||'local-old-context-summary')}</td>
+        <td class="model">${esc(row.rule_id||'unknown')}</td>
+        <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+        <td class="tokens">${row.canary_enabled?fmtPctValue(Number(row.canary_fraction||0)):'<span class="badge miss">off</span>'}</td>
+        <td class="tokens">${(m.canary_applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(m.canary_holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(m.bypassed_or_disabled_count||0).toLocaleString()}</td>
+        <td class="${(m.applied_minus_holdout_error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(m.applied_minus_holdout_error_rate||0)}</td>
+        <td class="${(m.applied_minus_holdout_retry_rate||0)>0?'cost':'tokens'}">${fmtPctValue(m.applied_minus_holdout_retry_rate||0)}</td>
+        <td class="latency">${fmtMs(m.applied_minus_holdout_latency_avg_ms)}</td>
+        <td class="tokens">${(m.summary_failure_count||0).toLocaleString()}</td>
+        <td class="tokens">${(m.safety_stop_count||0).toLocaleString()}</td>
+        <td class="${(m.actual_net_savings_usd||0)>=0?'savings':'cost'}">${fmt(m.actual_net_savings_usd||0,6)}</td>
+        <td class="tokens">${fmtRatio(m.payback_ratio)}</td>
+        <td class="flags">${reasons}</td>
+        <td class="flags">${warnings}</td>
+        <td class="flags">${gateThresholdBadges(row.thresholds)}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="19" style="color:#8b949e">No old-context summary quality-gate decisions observed yet</td></tr>';
     const modelRows=oldContext.model_breakdown||[];
     omb.innerHTML=modelRows.map(row=>`<tr>
       <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span></td>

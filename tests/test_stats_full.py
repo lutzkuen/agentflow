@@ -1993,7 +1993,197 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("raw context omitted", html)
         rendered = json.dumps(payload) + html
         self.assertNotIn(secret, rendered)
+
+    def _log_old_context_summary_quality_row(
+        self,
+        *,
+        candidate_id: str,
+        suffix: str,
+        cohort: str,
+        status_code: int = 200,
+        retry_count: int = 0,
+        latency_ms: int = 1000,
+        secret: str = "raw quality gate secret must stay out",
+    ):
+        applied = cohort == "canary_applied"
+        meta = {
+            "enabled": True,
+            "status": "applied" if applied else "skipped",
+            "reason": "summary-created" if applied else "canary_holdout",
+            "rule_id": f"rule-{candidate_id}",
+            "candidate_id": candidate_id,
+            "policy_source": "managed-recommended",
+            "model": "claude-haiku-4-5-20251001",
+            "category": "chat",
+            "eligible_chars": 32_000,
+            "eligible_turns": 3,
+            "debug_context": secret,
+            "canary": {
+                "enabled": True,
+                "cohort": cohort,
+                "selected": applied,
+                "fraction": 0.5,
+                "unit": "source_hash",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 4,
+                "min_canary_applied_samples": 2,
+                "min_canary_holdout_samples": 2,
+                "max_error_rate": 0.05,
+                "max_error_rate_delta": 0.0,
+                "max_retry_rate": 0.25,
+                "max_summary_failure_rate": 0.02,
+                "rollback_error_rate": 0.4,
+                "rollback_summary_failure_rate": 0.2,
+            },
+        }
+        if applied:
+            meta.update({
+                "before_chars": 40_000,
+                "saved_chars": 4_000,
+                "tokens_saved_est": 1_000,
+                "estimated_gross_savings_usd": 0.003,
+                "summary_cost_est_usd": 0.001,
+                "estimated_net_savings_usd": 0.002,
+                "summary_status_code": 200 if status_code < 400 else status_code,
+                "summary_cache_hit": False,
+            })
+        if status_code >= 400:
+            meta["summary_error"] = "summary failure bucket"
+        server.store.log_call(
+            id=f"dashboard-quality-{candidate_id}-{suffix}",
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            input_tokens_est=10_000,
+            output_tokens_est=200,
+            actual_input_tokens=9_000,
+            actual_output_tokens=180,
+            cost_est_usd=0.03,
+            cost_baseline_usd=0.04,
+            crunch_json=stable_json({
+                "changed": applied,
+                "old_context_summarization": meta,
+            }),
+            routing_json=stable_json({"category": "chat", "text_chars": 40_000}),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            error="raw quality error must not leak" if status_code >= 400 else None,
+            request_json=stable_json({"messages": [{"content": "raw quality request must not leak"}]}),
+            response_json=stable_json({"content": "generated quality summary must not leak"}),
+            session_id="quality-gate-session-secret",
+            category="chat",
+            retry_count=retry_count,
+            provider="anthropic",
+        )
+
+    def test_old_context_summary_quality_gate_dashboard_reports_verdicts_and_cohort_deltas(self):
+        for suffix, cohort, status_code, retry_count, latency in (
+            ("a0", "canary_applied", 200, 0, 1000),
+            ("a1", "canary_applied", 200, 0, 1100),
+            ("h0", "canary_holdout", 200, 0, 1000),
+            ("h1", "canary_holdout", 200, 0, 1100),
+        ):
+            self._log_old_context_summary_quality_row(
+                candidate_id="candidate-promote",
+                suffix=suffix,
+                cohort=cohort,
+                status_code=status_code,
+                retry_count=retry_count,
+                latency_ms=latency,
+            )
+        for suffix, cohort, retry_count in (
+            ("a0", "canary_applied", 1),
+            ("a1", "canary_applied", 1),
+            ("h0", "canary_holdout", 0),
+            ("h1", "canary_holdout", 0),
+        ):
+            self._log_old_context_summary_quality_row(
+                candidate_id="candidate-hold",
+                suffix=suffix,
+                cohort=cohort,
+                retry_count=retry_count,
+            )
+        for suffix, cohort, status_code in (
+            ("a0", "canary_applied", 500),
+            ("a1", "canary_applied", 200),
+            ("h0", "canary_holdout", 200),
+            ("h1", "canary_holdout", 200),
+        ):
+            self._log_old_context_summary_quality_row(
+                candidate_id="candidate-rollback",
+                suffix=suffix,
+                cohort=cohort,
+                status_code=status_code,
+            )
+        self._log_old_context_summary_quality_row(
+            candidate_id="candidate-insufficient",
+            suffix="a0",
+            cohort="canary_applied",
+        )
+
+        payload = asyncio.run(stats_views.stats_old_context_summary(server.store))
+        by_candidate = {row["candidate_id"]: row for row in payload["quality_gates"]}
+
+        self.assertEqual(by_candidate["candidate-promote"]["verdict"], "promote")
+        self.assertIn("quality-gate-passed", by_candidate["candidate-promote"]["reason_codes"])
+        self.assertEqual(by_candidate["candidate-promote"]["metrics"]["canary_applied_count"], 2)
+        self.assertEqual(by_candidate["candidate-promote"]["metrics"]["canary_holdout_count"], 2)
+        self.assertEqual(by_candidate["candidate-promote"]["metrics"]["applied_minus_holdout_error_rate"], 0.0)
+        self.assertEqual(by_candidate["candidate-promote"]["metrics"]["applied_minus_holdout_retry_rate"], 0.0)
+        self.assertEqual(by_candidate["candidate-promote"]["metrics"]["applied_minus_holdout_latency_avg_ms"], 0.0)
+        self.assertGreater(by_candidate["candidate-promote"]["metrics"]["actual_net_savings_usd"], 0)
+        self.assertGreater(by_candidate["candidate-promote"]["metrics"]["payback_ratio"], 1)
+
+        self.assertEqual(by_candidate["candidate-hold"]["verdict"], "hold")
+        self.assertIn("applied-retry-rate-above-threshold", by_candidate["candidate-hold"]["reason_codes"])
+        self.assertGreater(by_candidate["candidate-hold"]["metrics"]["applied_minus_holdout_retry_rate"], 0)
+
+        self.assertEqual(by_candidate["candidate-rollback"]["verdict"], "rollback")
+        self.assertIn("rollback-error-rate", by_candidate["candidate-rollback"]["reason_codes"])
+        self.assertEqual(by_candidate["candidate-rollback"]["metrics"]["summary_failure_count"], 1)
+
+        self.assertEqual(by_candidate["candidate-insufficient"]["verdict"], "insufficient-evidence")
+        self.assertIn("insufficient-matched-samples", by_candidate["candidate-insufficient"]["reason_codes"])
+
+        summary = payload["quality_gate_summary"]
+        self.assertEqual(summary["promote_count"], 1)
+        self.assertEqual(summary["hold_count"], 1)
+        self.assertEqual(summary["rollback_count"], 1)
+        self.assertEqual(summary["insufficient_evidence_count"], 1)
+        self.assertIn("reason_code_breakdown", summary)
+        self.assertFalse(payload["privacy"]["raw_old_context_included"])
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(payload["privacy"]["local_session_ids_included"])
+
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw quality request", rendered)
+        self.assertNotIn("generated quality summary", rendered)
+        self.assertNotIn("quality-gate-session-secret", rendered)
+        self.assertNotIn("raw quality error", rendered)
+        self.assertNotIn("raw quality gate secret", rendered)
+
+    def test_old_context_summary_quality_gate_dashboard_html_is_read_only_metadata(self):
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=server.store.path,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        with TestClient(app) as client:
+            html = client.get("/agentflow/dashboard").text
+
+        self.assertIn("Old-context summary quality gates", html)
+        self.assertIn("old-context-summary-quality-tbody", html)
+        self.assertIn("Blocking reasons", html)
+        self.assertNotIn("textarea", html.lower())
+        self.assertNotIn("form method", html.lower())
 
     def test_cache_decision_breakdown_groups_status_reason_and_hit_type(self):
         rows = [
