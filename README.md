@@ -164,9 +164,9 @@ Common policy commands:
 | `agentflow-policy-apply proposed.json --config-dir ~/.agentflow` | Apply reviewed local policy files |
 | `agentflow-policy-rollback --config-dir ~/.agentflow --dry-run --pretty` | Preview rollback to the newest backup |
 | `agentflow-policy-reload` | Reload changed policies in a running local proxy |
-| `agentflow-managed-feedback-status --pretty` | Inspect the local managed outcome feedback queue without printing payloads |
-| `agentflow-managed-feedback-flush --limit 5 --dry-run --pretty` | Preview a bounded retry batch for due managed outcome feedback |
-| `agentflow-managed-feedback-flush --limit 5 --pretty` | Flush due managed outcome feedback when managed recommendations are enabled |
+| `agentflow-managed-feedback-status --pretty` | Inspect the local managed feedback queue without printing payloads |
+| `agentflow-managed-feedback-flush --limit 5 --dry-run --pretty` | Preview a bounded retry batch for due managed feedback |
+| `agentflow-managed-feedback-flush --limit 5 --pretty` | Flush due managed feedback when managed recommendations are enabled |
 | `agentflow-managed-pattern-rollups --limit 500 --pretty` | Export metadata-only managed pattern canary cohort outcome rollups for review |
 | `agentflow-managed-rollout-actions-review --url http://127.0.0.1:4100/v1/pattern-rollout-actions --allow-unauthenticated --pretty` | Review managed pattern rollout actions against local crunch/cache rule files |
 | `agentflow-managed-rollout-actions-dry-run actions.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Estimate rollout action impact against recent local traffic metadata without writing policy files |
@@ -186,8 +186,9 @@ If `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET` or
 include matching HMAC provenance before `agentflow-policy-apply` writes local YAML files.
 Managed rollout action bundles use the same verification secrets when configured.
 Unsigned local-default/local-manual bundles remain valid for offline use.
-Managed outcome feedback retries are also disabled unless `AGENTFLOW_RECOMMENDATION_ENABLED=1`.
-Status and flush output is metadata-only; queued feedback payload JSON is not printed.
+Managed outcome and rollout-action lifecycle feedback retries are disabled unless
+`AGENTFLOW_RECOMMENDATION_ENABLED=1`. Status and flush output is metadata-only; queued
+feedback payload JSON is not printed.
 Pattern rollup output is aggregate-only and omits raw prompts, messages, responses,
 transcripts, tool payloads, cache keys, file paths, request IDs, and local session IDs.
 

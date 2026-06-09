@@ -18,12 +18,14 @@ from agentflow_proxy.store import stable_json, utc_now
 
 RECOMMENDATION_PATH = "/v1/recommendation"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
+POLICY_EVENTS_PATH = "/v1/policy-events"
 FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
 MANAGED_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 RECOMMENDATION_SERVER_URL_ENV = "AGENTFLOW_RECOMMENDATION_SERVER_URL"
 RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
 RECOMMENDATION_FAILURE_MODE_ENV = "AGENTFLOW_RECOMMENDATION_FAILURE_MODE"
 DEFAULT_RECOMMENDATION_SERVER_URL = "http://127.0.0.1:4100"
+ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE = "rollout_action_lifecycle"
 
 RAW_FEATURE_KEYS = {
     "account_id",
@@ -1467,6 +1469,55 @@ async def send_outcome_feedback(recommendation_meta: dict[str, Any], outcome_fea
     return await _send_outcome_payload(endpoint=endpoint, payload=payload, unit_id=unit_id)
 
 
+async def _send_policy_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    meta = {
+        "enabled": recommendations_enabled(),
+        "server_url": recommendation_server_url(),
+        "endpoint": POLICY_EVENTS_PATH,
+        "timeout_seconds": recommendation_timeout_seconds(),
+        "failure_mode": recommendation_failure_mode(),
+        "auth_configured": managed_auth_configured(),
+        "api_key_value_included": False,
+    }
+    if not recommendations_enabled():
+        meta.update({"status": "disabled", "reason": "disabled"})
+        return meta
+    if not recommendation_server_configured():
+        meta.update({"status": "skipped", "reason": "server-url-not-configured"})
+        return meta
+
+    started = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+            response = await client.post(
+                recommendation_server_url() + POLICY_EVENTS_PATH,
+                json=_sanitize_features(payload),
+                headers=_managed_headers(),
+            )
+        meta["latency_ms"] = int((time.time() - started) * 1000)
+        meta["status_code"] = response.status_code
+        if response.status_code >= 400:
+            meta.update({
+                "status": "error",
+                "reason": "server-error",
+                "error": response.text[:500],
+            })
+            return meta
+        meta.update({
+            "status": "sent",
+            "reason": "accepted",
+        })
+        return meta
+    except Exception as exc:
+        meta.update({
+            "latency_ms": int((time.time() - started) * 1000),
+            "status": "error",
+            "reason": "request-failed",
+            "error": repr(exc),
+        })
+        return meta
+
+
 def _queue_error_status(meta: dict[str, Any], attempts: int) -> str:
     if attempts >= outcome_feedback_queue_max_attempts():
         return "dropped-after-limit"
@@ -1516,7 +1567,10 @@ async def _flush_claimed_outcome_feedback(store_obj: Any, row: dict[str, Any]) -
             "error": error,
         }
 
-    meta = await _send_outcome_payload(endpoint=endpoint, payload=_sanitize_features(payload), unit_id=int(unit_id))
+    if endpoint == POLICY_EVENTS_PATH:
+        meta = await _send_policy_event_payload(_sanitize_features(payload))
+    else:
+        meta = await _send_outcome_payload(endpoint=endpoint, payload=_sanitize_features(payload), unit_id=int(unit_id))
     if meta.get("status") == "sent":
         if hasattr(store_obj, "mark_managed_outcome_feedback_sent"):
             store_obj.mark_managed_outcome_feedback_sent(queue_id, status_code=meta.get("status_code"))
@@ -1623,6 +1677,43 @@ async def queue_outcome_feedback(
 
     meta = await _flush_claimed_outcome_feedback(store_obj, claimed)
     return meta
+
+
+async def queue_policy_event_feedback(store_obj: Any, event_payload: dict[str, Any]) -> dict[str, Any]:
+    if not recommendations_enabled():
+        return {
+            **disabled_outcome_feedback_meta(),
+            "endpoint": POLICY_EVENTS_PATH,
+            "status": "disabled",
+        }
+    if not hasattr(store_obj, "enqueue_managed_outcome_feedback"):
+        return await _send_policy_event_payload(event_payload)
+
+    payload = _sanitize_features(event_payload)
+    queue_id = str(uuid.uuid4())
+    now = utc_now()
+    row = {
+        "id": queue_id,
+        "created_at": now,
+        "updated_at": now,
+        "source_surface": ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE,
+        "endpoint": POLICY_EVENTS_PATH,
+        "optimization_unit_id": 0,
+        "payload_json": stable_json(payload),
+        "status": "queued",
+        "attempts": 0,
+        "next_attempt_at": now,
+    }
+    store_obj.enqueue_managed_outcome_feedback(**row)
+    claimed = (
+        store_obj.claim_managed_outcome_feedback(queue_id, now=utc_now())
+        if hasattr(store_obj, "claim_managed_outcome_feedback")
+        else None
+    )
+    if not claimed:
+        stored = store_obj.get_managed_outcome_feedback(queue_id) if hasattr(store_obj, "get_managed_outcome_feedback") else row
+        return _queued_meta(stored or row)
+    return await _flush_claimed_outcome_feedback(store_obj, claimed)
 
 
 async def queue_codex_outcome_feedback(

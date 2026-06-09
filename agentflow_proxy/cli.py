@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import hashlib
 import ipaddress
 import json
 import os
@@ -1100,6 +1101,11 @@ def managed_rollout_actions_review_cli(
         help="Directory for local rule files, default: ~/.agentflow",
     )
     parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
         "--section",
         action="append",
         choices=["crunch", "cache"],
@@ -1160,6 +1166,7 @@ def managed_rollout_actions_review_cli(
             "exit_code": 0 if review["ok"] else 1,
         },
     )
+    _attach_rollout_lifecycle_feedback(review, command="review", db_path=str(args.db))
     _write_rollout_actions_result(stdout if review["ok"] else stderr, review, pretty=args.pretty)
     return 0 if review["ok"] else 1
 
@@ -1181,6 +1188,11 @@ def managed_rollout_actions_apply_cli(
         "--config-dir",
         default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
         help="Directory for local rule files, default: ~/.agentflow",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
     )
     parser.add_argument(
         "--section",
@@ -1238,6 +1250,7 @@ def managed_rollout_actions_apply_cli(
             "exit_code": 0 if result["ok"] else 1,
         },
     )
+    _attach_rollout_lifecycle_feedback(result, command="apply", db_path=str(args.db))
     _write_rollout_actions_result(stdout, result, pretty=args.pretty)
     return 0 if result["ok"] else 1
 
@@ -1325,6 +1338,7 @@ def managed_rollout_actions_dry_run_cli(
             "exit_code": 0 if result["ok"] else 1,
         },
     )
+    _attach_rollout_lifecycle_feedback(result, command="dry-run", db_path=str(args.db))
     _write_rollout_actions_result(stdout, result, pretty=args.pretty)
     return 0 if result["ok"] else 1
 
@@ -1415,13 +1429,16 @@ def _breakdown_from_counts(counts: dict[str, int]) -> list[dict[str, Any]]:
 
 
 def _public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    optimization_unit_id = row.get("optimization_unit_id")
+    if optimization_unit_id in (0, "0"):
+        optimization_unit_id = None
     return {
         "queue_id": row.get("id"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
         "source_surface": row.get("source_surface"),
         "endpoint": row.get("endpoint"),
-        "optimization_unit_id": row.get("optimization_unit_id"),
+        "optimization_unit_id": optimization_unit_id,
         "status": row.get("status"),
         "attempts": row.get("attempts") or 0,
         "next_attempt_at": row.get("next_attempt_at"),
@@ -1759,6 +1776,209 @@ def _write_rollout_actions_result(stream: Any, payload: dict[str, Any], *, prett
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stream, payload)
+
+
+def _rollout_lifecycle_counts(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _rollout_action_id(action: dict[str, Any]) -> str:
+    basis = {
+        "policy_section": action.get("policy_section"),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
+        "pattern_hash": action.get("pattern_hash"),
+        "action_type": action.get("action_type"),
+    }
+    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"rollout-action:{digest[:24]}"
+
+
+def _rollout_action_snapshot(action: dict[str, Any]) -> dict[str, Any]:
+    edit = action.get("proposed_edit") if isinstance(action.get("proposed_edit"), dict) else {}
+    current_rule = action.get("current_rule") if isinstance(action.get("current_rule"), dict) else {}
+    snapshot = {
+        "action_id": _rollout_action_id(action),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
+        "policy_section": action.get("policy_section"),
+        "policy_source": current_rule.get("policy_source"),
+        "pattern_hash": action.get("pattern_hash"),
+        "action_type": action.get("action_type"),
+        "current_fraction": edit.get("current_fraction") if edit else action.get("current_fraction"),
+        "recommended_fraction": edit.get("recommended_fraction") if edit else action.get("projected_fraction"),
+        "confidence": action.get("confidence"),
+        "blockers": action.get("blockers") if isinstance(action.get("blockers"), list) else [],
+        "required_local_review": True,
+        "managed_enforced": False,
+    }
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _rollout_lifecycle_event_type(command: str, result: dict[str, Any]) -> str:
+    if not result.get("ok"):
+        return "rejected"
+    if command == "review":
+        return "reviewed"
+    if command == "dry-run" or result.get("dry_run"):
+        return "dry-run"
+    actions = [item for item in result.get("actions", []) if isinstance(item, dict)]
+    action_types = {str(item.get("action_type") or "") for item in actions}
+    if action_types & {"rollback", "retire", "disable"}:
+        return "rollback"
+    return "applied"
+
+
+def _rollout_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any]:
+    from agentflow_proxy import __version__
+
+    actions = [item for item in result.get("actions", []) if isinstance(item, dict)]
+    snapshots = [_rollout_action_snapshot(item) for item in actions]
+    action_ids = sorted({str(item["action_id"]) for item in snapshots if item.get("action_id")})
+    candidate_ids = sorted({str(item.get("target_candidate_id")) for item in snapshots if item.get("target_candidate_id")})
+    rule_ids = sorted({str(item.get("target_rule_id")) for item in snapshots if item.get("target_rule_id")})
+    pattern_hashes = sorted({str(item.get("pattern_hash")) for item in snapshots if str(item.get("pattern_hash") or "").startswith("sha256:")})
+    validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
+    review = result.get("review") if isinstance(result.get("review"), dict) else {}
+    provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    files = [item for item in result.get("files", []) if isinstance(item, dict)]
+    event_type = _rollout_lifecycle_event_type(command, result)
+    metadata: dict[str, Any] = {
+        "schema": "agentflow.rollout_action_lifecycle_metadata.v1",
+        "lifecycle_kind": "pattern_rollout_actions",
+        "command": f"rollout-actions-{command}",
+        "local_result_status": "ok" if result.get("ok") else "error",
+        "dry_run": bool(result.get("dry_run")),
+        "read_only": bool(result.get("read_only")),
+        "action_count": len(actions) or result.get("action_count") or validation.get("action_count") or 0,
+        "planned_action_count": result.get("planned_action_count") or review.get("planned_action_count") or 0,
+        "changed_action_count": result.get("changed_action_count") or review.get("changed_action_count") or 0,
+        "rejected_action_count": result.get("rejected_action_count") or review.get("rejected_action_count") or 0,
+        "action_type_counts": _rollout_lifecycle_counts(actions, "action_type"),
+        "policy_section_counts": _rollout_lifecycle_counts(actions, "policy_section"),
+        "local_status_counts": _rollout_lifecycle_counts(actions, "status"),
+        "action_ids": action_ids,
+        "candidate_ids": candidate_ids,
+        "rule_ids": rule_ids,
+        "pattern_hashes": pattern_hashes,
+        "rollout_action_snapshots": snapshots,
+        "validation_error_count": len(validation.get("errors", []) if isinstance(validation.get("errors"), list) else []),
+        "validation_warning_count": len(validation.get("warnings", []) if isinstance(validation.get("warnings"), list) else []),
+        "review_error_count": len(review.get("errors", []) if isinstance(review.get("errors"), list) else []),
+        "review_warning_count": len(review.get("warnings", []) if isinstance(review.get("warnings"), list) else []),
+        "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+        "provenance_status": provenance.get("status"),
+        "provenance_bundle_hash": provenance.get("bundle_hash"),
+        "computed_bundle_hash": provenance.get("computed_bundle_hash"),
+        "changed_file_count": sum(1 for item in files if item.get("changed")),
+        "changed_sections": sorted({str(item.get("section")) for item in files if item.get("changed") and item.get("section")}),
+        "affected_metadata_row_count": summary.get("affected_metadata_row_count"),
+        "affected_provider_call_count": summary.get("affected_provider_call_count"),
+        "affected_codex_turn_count": summary.get("affected_codex_turn_count"),
+        "projected_additional_applied_count": summary.get("projected_additional_applied_count"),
+        "projected_local_bypass_or_disable_count": summary.get("projected_local_bypass_or_disable_count"),
+        "historical_tokens_saved_est": summary.get("historical_tokens_saved_est"),
+        "historical_estimated_cost_savings_usd": summary.get("historical_estimated_cost_savings_usd"),
+        "safety_stop_reason_counts": _rollout_lifecycle_counts(
+            [
+                reason
+                for action in actions
+                for reason in (action.get("local_bypass_reasons") or [])
+                if isinstance(reason, dict)
+            ],
+            "value",
+        ),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "raw_params_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "local_session_ids_included": False,
+            "file_paths_included": False,
+            "yaml_contents_included": False,
+        },
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+    return {
+        "event_type": event_type,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "recommendation_id": action_ids[0] if len(action_ids) == 1 else None,
+        "bundle_hash": provenance.get("computed_bundle_hash") or provenance.get("bundle_hash"),
+        "policy_sections": sorted(_rollout_lifecycle_counts(actions, "policy_section")),
+        "validation_warning_count": metadata.get("validation_warning_count", 0),
+        "review_warning_count": metadata.get("review_warning_count", 0),
+        "applied_files": [],
+        "local_tool_version": __version__,
+        "metadata": metadata,
+    }
+
+
+def _public_lifecycle_feedback_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "enabled": meta.get("enabled"),
+            "server_url": _redact_url(meta.get("server_url")),
+            "endpoint": meta.get("endpoint"),
+            "status": meta.get("status"),
+            "reason": meta.get("reason"),
+            "queue_id": meta.get("queue_id"),
+            "attempts": meta.get("attempts"),
+            "status_code": meta.get("status_code"),
+            "latency_ms": meta.get("latency_ms"),
+            "auth_configured": meta.get("auth_configured"),
+            "api_key_value_included": False,
+            "payload_included": False,
+        }.items()
+        if value is not None
+    }
+
+
+def _attach_rollout_lifecycle_feedback(result: dict[str, Any], *, command: str, db_path: str) -> None:
+    from agentflow_proxy import recommendations
+
+    payload = _rollout_lifecycle_payload(command, result)
+    if not recommendations.recommendations_enabled():
+        result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta({
+            **recommendations.disabled_outcome_feedback_meta(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "disabled",
+        })
+        return
+
+    store = _open_store_for_db(str(db_path))
+    try:
+        meta = asyncio.run(recommendations.queue_policy_event_feedback(store, payload))
+    except Exception as exc:
+        meta = {
+            "enabled": True,
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+        }
+    finally:
+        store.conn.close()
+
+    public_meta = _public_lifecycle_feedback_meta(meta)
+    result["managed_lifecycle_feedback"] = public_meta
+    if command == "dry-run" and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+        result["managed_server_calls_made"] = True
 
 
 def _write_policy_rollback_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:

@@ -31,9 +31,16 @@ class ManagedFeedbackFlushClient:
         self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
         return httpx.Response(self.status_code, text=self.text)
 
+    async def post(self, url, json, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
+        return httpx.Response(self.status_code, text=self.text)
+
 
 class PolicyReloadCliTests(unittest.TestCase):
     def setUp(self):
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 200
+        ManagedFeedbackFlushClient.text = '{"ok":true}'
         self.tmp = TemporaryDirectory()
         self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
@@ -1060,6 +1067,47 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(edit["rollout"]["canary_fraction"], 0.25)
         self.assertEqual(payload["provenance"]["status"], "not-configured")
 
+    def test_managed_rollout_actions_review_sends_metadata_only_lifecycle_feedback(self):
+        bundle = self._rollout_action_bundle(action_type="widen", raw_like=False)
+        ManagedFeedbackFlushClient.calls = []
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_rollout_crunch_rule(tmp)
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_rollout_actions_review_cli(
+                        ["--config-dir", tmp, "--db", db_path, "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=stdout,
+                        stderr=io.StringIO(),
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "reviewed")
+        self.assertEqual(sent_payload["policy_sections"], ["crunch"])
+        self.assertTrue(str(sent_payload["bundle_hash"]).startswith("sha256:"))
+        metadata = sent_payload["metadata"]
+        self.assertEqual(metadata["action_type_counts"]["widen"], 1)
+        self.assertEqual(metadata["policy_section_counts"]["crunch"], 1)
+        self.assertFalse(metadata["privacy"]["file_paths_included"])
+        rendered_payload = json.dumps(sent_payload)
+        self.assertNotIn("crunch_rules.yaml", rendered_payload)
+        self.assertNotIn("raw_request", rendered_payload)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "sent")
+        self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
+
     def test_managed_rollout_actions_apply_dry_run_reports_without_writing(self):
         bundle = self._rollout_action_bundle(action_type="widen")
 
@@ -1083,6 +1131,51 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIsNone(payload["files"][0]["backup_path"])
         self.assertEqual(before, after)
         self.assertEqual(payload["actions"][0]["proposed_edit"]["rollout"]["canary_fraction"], 0.25)
+
+    def test_managed_rollout_actions_apply_dry_run_queues_lifecycle_feedback_when_server_unavailable(self):
+        bundle = self._rollout_action_bundle(action_type="widen")
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 503
+        ManagedFeedbackFlushClient.text = "managed unavailable"
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_rollout_crunch_rule(tmp)
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_rollout_actions_apply_cli(
+                        ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=stdout,
+                    )
+            status_stdout = io.StringIO()
+            cli.managed_feedback_status_cli(
+                ["--db", db_path, "--source-surface", "rollout_action_lifecycle"],
+                stdout=status_stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "retryable-error")
+        self.assertEqual(payload["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
+        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+        status_payload = json.loads(status_stdout.getvalue())
+        self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        self.assertEqual(status_payload["oldest_pending"]["source_surface"], "rollout_action_lifecycle")
+        self.assertIsNone(status_payload["oldest_pending"]["optimization_unit_id"])
+        rendered_status = status_stdout.getvalue()
+        self.assertNotIn("crunch_rules.yaml", rendered_status)
+        self.assertNotIn("raw_request", rendered_status)
+        self.assertFalse(status_payload["privacy"]["payload_json_included"])
 
     def test_signed_managed_rollout_actions_apply_disables_rule_and_creates_backup(self):
         from agentflow_proxy.rollout_actions import attach_rollout_action_provenance
