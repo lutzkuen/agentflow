@@ -11,7 +11,8 @@ import yaml
 import agentflow_proxy.cache as cache_module
 from agentflow_proxy import cli
 from agentflow_proxy.policy_bundle import apply_policy_bundle, validate_policy_bundle
-from agentflow_proxy.store import Store
+from agentflow_proxy.policy_events import recent_policy_events
+from agentflow_proxy.store import Store, stable_json
 
 
 class CacheDecisionMetaTest(unittest.TestCase):
@@ -28,6 +29,10 @@ class CacheDecisionMetaTest(unittest.TestCase):
         "AGENTFLOW_CACHE_FILE_WATCH",
         "AGENTFLOW_CACHE_WATCH_ROOT",
         "AGENTFLOW_CACHE_WATCH_MAX_PATHS",
+        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
+        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+        "AGENTFLOW_POLICY_EVENTS",
+        "AGENTFLOW_POLICY_EVENTS_LOG",
         "HOME",
     )
 
@@ -374,6 +379,136 @@ pattern_rules:
             can_exact_default, _, default_meta = default.cache_lookup_meta(has_tool_blocks=True, pattern_features=features)
             self.assertFalse(can_exact_default)
             self.assertEqual(default_meta["pattern_rules"]["configured_count"], 0)
+
+    def test_cache_pattern_safety_stop_bypasses_failed_canary(self):
+        pattern_hash = "sha256:" + "9" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
+            (config / "cache_rules.yaml").write_text(
+                f"""
+exact_cache:
+  enabled: true
+  cache_tool_calls: false
+pattern_rules:
+  - id: reviewed-cache-safety-stop
+    enabled: true
+    policy_source: managed-recommended
+    candidate_id: cache-candidate-safety-stop
+    conditions:
+      pattern_hashes:
+        - {pattern_hash}
+      source_surface: anthropic_messages
+      app_family: claude_code
+      category: tool-result
+      workflow_phase: tool-result
+      has_tools: true
+      stream: false
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: 1.0
+      canary_salt: local-cache-safety-stop-test
+      canary_unit: request_fingerprint
+      min_outcome_samples: 2
+      rollback_threshold: 0.5
+    action:
+      type: exact_cache_pattern
+      allow_tool_calls: true
+      safe_invalidation: true
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(cache_module)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            features = {
+                "pattern_hashes": [pattern_hash],
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-result",
+                "workflow_phase": "tool-result",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "1k_4k_tokens",
+                "has_tools": True,
+                "stream": False,
+                "raw_pattern_strings_included": False,
+            }
+
+            can_exact, _, healthy_meta = manual.cache_lookup_meta(
+                has_tool_blocks=True,
+                pattern_features=features,
+                store_obj=store,
+            )
+            self.assertTrue(can_exact)
+            self.assertEqual(healthy_meta["pattern_rule"]["rule_id"], "reviewed-cache-safety-stop")
+
+            for index in range(2):
+                store.log_call(
+                    id=f"failed-cache-canary-{index}",
+                    created_at=f"2026-06-09T00:1{index}:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=500,
+                    latency_ms=100,
+                    input_tokens_est=1000,
+                    output_tokens_est=0,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=0,
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=0.0,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"category": "tool-result"}),
+                    cache_json=stable_json({
+                        "status": "miss",
+                        "reason": "exact-pattern-miss",
+                        "policy_source": "local-default",
+                        "pattern_rule": {
+                            "rule_id": "reviewed-cache-safety-stop",
+                            "candidate_id": "cache-candidate-safety-stop",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": [pattern_hash],
+                            "canary": {
+                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "enabled": True,
+                                "selected": True,
+                                "status": "applied",
+                                "cohort": "canary_applied",
+                            },
+                        },
+                    }),
+                    error="upstream failed",
+                    request_json=None,
+                    response_json=None,
+                    session_id="cache-safety-stop",
+                    category="tool-result",
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    retry_count=0,
+                    provider="anthropic",
+                )
+
+            stopped_exact, _, stopped_meta = manual.cache_lookup_meta(
+                has_tool_blocks=True,
+                pattern_features=features,
+                store_obj=store,
+            )
+            self.assertFalse(stopped_exact)
+            reasons = stopped_meta["pattern_rules"]["skip_reasons"]
+            safety_reason = next(item for item in reasons if item["reason"] == "local-canary-safety-stop")
+            self.assertEqual(safety_reason["candidate_id"], "cache-candidate-safety-stop")
+            self.assertEqual(safety_reason["safety_stop"]["sample_count"], 2)
+            self.assertEqual(safety_reason["safety_stop"]["error_count"], 2)
+            self.assertEqual(safety_reason["canary"]["status"], "applied")
+            events = recent_policy_events(limit=5)["events"]
+            self.assertEqual(events[0]["action"], "pattern-canary-safety-stop")
+            self.assertEqual(events[0]["details"]["policy_section"], "cache")
 
     def test_cache_pattern_validation_rejects_unsafe_tool_rule(self):
         exported = io.StringIO()

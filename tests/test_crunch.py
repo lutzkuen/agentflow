@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,6 +8,8 @@ import unittest
 from unittest.mock import patch
 
 import agentflow_proxy.crunch as crunch_module
+from agentflow_proxy.policy_events import recent_policy_events
+from agentflow_proxy.store import Store, stable_json
 
 
 class CrunchRulesTest(unittest.TestCase):
@@ -24,6 +27,10 @@ class CrunchRulesTest(unittest.TestCase):
         "AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS",
         "AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
         "AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
+        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
+        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+        "AGENTFLOW_POLICY_EVENTS",
+        "AGENTFLOW_POLICY_EVENTS_LOG",
         "HOME",
     )
 
@@ -244,6 +251,129 @@ pattern_rules:
             no_rule = importlib.reload(crunch_module)
             _, default_meta = no_rule.crunch_body(body)
             self.assertEqual(default_meta["pattern_rules"]["configured_count"], 0)
+
+    def test_managed_pattern_rule_safety_stop_bypasses_failed_canary(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(tmp_path / "policy_events.jsonl")
+            scaffold = (
+                "Reviewed risky canary scaffold section.\n"
+                + "\n".join(f"risky canary instruction line {i}" for i in range(80))
+            )
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+pattern_rules:
+  - id: reviewed-safety-stop
+    enabled: true
+    policy_source: managed-recommended
+    candidate_id: candidate-safety-stop
+    conditions:
+      pattern_hashes:
+        - {pattern_hash}
+      min_repeated_count: 1
+      keep_recent_matches: 0
+      min_text_chars: 1000
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: 1.0
+      canary_salt: local-safety-stop-test
+      canary_unit: request_fingerprint
+      min_outcome_samples: 2
+      rollback_threshold: 0.5
+    action:
+      type: shorten
+      head_chars: 80
+      tail_chars: 70
+      max_replacement_chars: 260
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": scaffold}],
+            }
+
+            crunched, healthy_meta = manual.crunch_body(body, store_obj=store)
+            self.assertTrue(healthy_meta["changed"])
+            self.assertIn("reviewed crunch pattern applied", crunched["messages"][0]["content"])
+
+            for index in range(2):
+                store.log_call(
+                    id=f"failed-canary-{index}",
+                    created_at=f"2026-06-09T00:0{index}:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=500,
+                    latency_ms=100,
+                    input_tokens_est=1000,
+                    output_tokens_est=0,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=0,
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=0.0,
+                    crunch_json=stable_json({
+                        "changed": True,
+                        "policy_source": "managed-recommended",
+                        "pattern_rules": {
+                            "configured_count": 1,
+                            "policy_source": "managed-recommended",
+                            "rules": [
+                                {
+                                    "rule_id": "reviewed-safety-stop",
+                                    "candidate_id": "candidate-safety-stop",
+                                    "policy_source": "managed-recommended",
+                                    "matched_hashes": [pattern_hash],
+                                    "applied_count": 1,
+                                    "saved_chars": 1200,
+                                    "canary": {
+                                        "schema": "agentflow.pattern_canary_decision.v1",
+                                        "enabled": True,
+                                        "selected": True,
+                                        "status": "applied",
+                                        "cohort": "canary_applied",
+                                    },
+                                }
+                            ],
+                        },
+                    }),
+                    routing_json=stable_json({"category": "chat"}),
+                    cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                    error="upstream failed",
+                    request_json=None,
+                    response_json=None,
+                    session_id="safety-stop",
+                    category="chat",
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    retry_count=0,
+                    provider="anthropic",
+                )
+
+            stopped, stopped_meta = manual.crunch_body(body, store_obj=store)
+            rule_meta = stopped_meta["pattern_rules"]["rules"][0]
+            self.assertEqual(stopped, body)
+            self.assertFalse(stopped_meta["changed"])
+            self.assertEqual(rule_meta["status"], "bypass")
+            self.assertEqual(rule_meta["reason"], "local-canary-safety-stop")
+            self.assertEqual(rule_meta["safety_stop"]["sample_count"], 2)
+            self.assertEqual(rule_meta["safety_stop"]["error_count"], 2)
+            self.assertEqual(rule_meta["safety_stop"]["regression_rate"], 1.0)
+            self.assertIn("local-canary-safety-stop", json.dumps(stopped_meta))
+            events = recent_policy_events(limit=5)["events"]
+            self.assertEqual(events[0]["action"], "pattern-canary-safety-stop")
+            self.assertEqual(events[0]["details"]["rule_id"], "reviewed-safety-stop")
 
     def test_pattern_rules_skip_tool_bearing_payloads_with_reason(self):
         with TemporaryDirectory() as tmp:

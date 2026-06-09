@@ -14,6 +14,11 @@ from agentflow_proxy.pattern_rollout import (
     pattern_canary_decision,
     pattern_rollout_public_meta,
 )
+from agentflow_proxy.pattern_safety import (
+    LOCAL_CANARY_SAFETY_STOP_REASON,
+    evaluate_pattern_canary_safety_stop,
+    log_pattern_canary_safety_stop,
+)
 from agentflow_proxy.store import stable_json
 
 TOKEN_CHARS = 4  # rough estimator only
@@ -614,7 +619,7 @@ def _build_pattern_replacement(entry: dict[str, Any], rule: dict[str, Any]) -> s
     return replacement if len(replacement) < len(original) else None
 
 
-def _apply_pattern_rules(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _apply_pattern_rules(body: dict[str, Any], *, store_obj: Any | None = None) -> tuple[int, dict[str, Any]]:
     meta = _pattern_rule_base_meta()
     before_chars = len(stable_json(body))
     if not PATTERN_RULES:
@@ -703,6 +708,29 @@ def _apply_pattern_rules(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
                     "count": holdout_count,
                     "canary": canary,
                 })
+                continue
+            safety_stop = evaluate_pattern_canary_safety_stop(
+                store_obj=store_obj,
+                policy_section="crunch",
+                rule_id=rule_id,
+                candidate_id=rule.get("candidate_id"),
+                pattern_hash=pattern_hash,
+                rollout=rule.get("rollout"),
+            )
+            if safety_stop:
+                holdout_count = len(occurrences)
+                rule_meta["status"] = "bypass"
+                rule_meta["reason"] = LOCAL_CANARY_SAFETY_STOP_REASON
+                rule_meta["safety_stop"] = safety_stop
+                rule_meta["holdout_count"] += holdout_count
+                _pattern_rule_skip(skip_counts, rule_id, LOCAL_CANARY_SAFETY_STOP_REASON, holdout_count)
+                rule_meta["skip_reasons"].append({
+                    "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+                    "pattern_hash": pattern_hash,
+                    "count": holdout_count,
+                    "safety_stop": safety_stop,
+                })
+                log_pattern_canary_safety_stop(safety_stop)
                 continue
             protected_start = max(0, len(occurrences) - keep_recent_matches)
             for occurrence_index, entry in enumerate(occurrences):
@@ -1259,7 +1287,7 @@ async def maybe_summarize_old_context(
     return summarized, meta
 
 
-def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def crunch_body(body: dict[str, Any], *, store_obj: Any | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Conservative request cruncher.
 
     It deliberately does NOT summarize with another model. For agent use this is safer.
@@ -1278,7 +1306,7 @@ def crunch_body(body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
-    _pattern_saved_chars, pattern_rules_meta = _apply_pattern_rules(new_body)
+    _pattern_saved_chars, pattern_rules_meta = _apply_pattern_rules(new_body, store_obj=store_obj)
     seen: dict[str, int] = {}
     seen_shingles: list[tuple[frozenset, int]] = []
     replacements = 0

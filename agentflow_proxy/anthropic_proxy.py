@@ -464,7 +464,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 f"placement={summary_meta.get('placement')}",
                 file=sys.stderr,
             )
-        crunched, crunch_meta = crunch_body(raw_body)
+        crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
         crunch_meta["old_context_summarization"] = summary_meta
         crunched, prompt_cached = inject_prompt_cache(crunched)
         if STRIP_THINKING_HISTORY and category == "tool-result" and not _has_top_level_thinking(crunched):
@@ -531,6 +531,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             can_stream_cache, cache_meta = streaming_cache_lookup_meta(
                 has_tool_blocks,
                 pattern_features=routing_meta.get("managed_pattern_features"),
+                store_obj=context.store,
             )
             key = cache_key_for(
                 crunched,
@@ -803,6 +804,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(
             has_tool_blocks,
             pattern_features=routing_meta.get("managed_pattern_features"),
+            store_obj=context.store,
         )
         key = cache_key_for(
             crunched,

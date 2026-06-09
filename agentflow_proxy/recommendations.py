@@ -1009,6 +1009,9 @@ def pattern_decision_summaries(
                 base["skip_reasons"] = skip_reasons
                 if not applied:
                     base["reason"] = str(skip_reasons[0].get("reason") or "skipped")
+                    if base["reason"] == "local-canary-safety-stop":
+                        base["status"] = "bypass"
+                        base["outcome"] = "bypassed"
             rows.append(base)
 
         for item in pattern_rules.get("skip_reasons") or []:
@@ -1107,8 +1110,9 @@ def pattern_decision_summaries(
                 rows[-1]["cohort"] = _pattern_canary_cohort(pattern_rule)
 
         for item in pattern_rules.get("skip_reasons") or []:
-            if not isinstance(item, dict) or item.get("reason") != "canary_holdout":
+            if not isinstance(item, dict) or item.get("reason") not in {"canary_holdout", "local-canary-safety-stop"}:
                 continue
+            safety_stopped = item.get("reason") == "local-canary-safety-stop"
             canary_meta = _copy_canary_meta(item)
             rows.append({
                 "schema": "agentflow.pattern_decision_summary.v1",
@@ -1122,9 +1126,9 @@ def pattern_decision_summaries(
                 "pattern_hash": item.get("matched_hashes", [None])[0] if isinstance(item.get("matched_hashes"), list) and item.get("matched_hashes") else _pattern_hash(descriptor),
                 "pattern_hashes": item.get("matched_hashes") if isinstance(item.get("matched_hashes"), list) else None,
                 "policy_source": item.get("policy_source") or cache_meta.get("policy_source"),
-                "status": "holdout",
-                "reason": "canary_holdout",
-                "outcome": "holdout",
+                "status": "bypass" if safety_stopped else "holdout",
+                "reason": "local-canary-safety-stop" if safety_stopped else "canary_holdout",
+                "outcome": "bypassed" if safety_stopped else "holdout",
                 "hit_type": cache_meta.get("hit_type"),
                 "applied_count": 0,
                 "saved_chars": 0,
@@ -1132,6 +1136,7 @@ def pattern_decision_summaries(
                 "estimated_cost_savings_usd": 0.0,
                 "canary": canary_meta,
                 "cohort": _pattern_canary_cohort(item),
+                "safety_stop": item.get("safety_stop") if isinstance(item.get("safety_stop"), dict) else None,
                 "safety_gates": {
                     "exact_enabled": bool(cache_meta.get("exact_enabled")),
                     "semantic_enabled": bool(cache_meta.get("semantic_enabled")),

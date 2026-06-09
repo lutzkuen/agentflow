@@ -13,6 +13,11 @@ from agentflow_proxy.pattern_rollout import (
     pattern_canary_decision,
     pattern_rollout_public_meta,
 )
+from agentflow_proxy.pattern_safety import (
+    LOCAL_CANARY_SAFETY_STOP_REASON,
+    evaluate_pattern_canary_safety_stop,
+    log_pattern_canary_safety_stop,
+)
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import stable_json
 
@@ -273,6 +278,7 @@ def _cache_pattern_rule_match(
     stream: bool,
     pattern_features: dict[str, Any] | None,
     local_replayability_level: str,
+    store_obj: Any | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     feature_hashes = set(_feature_hashes(pattern_features))
     skip_reasons: list[dict[str, Any]] = []
@@ -354,6 +360,31 @@ def _cache_pattern_rule_match(
                     "matched_hashes": matched_hashes,
                     "canary": canary,
                 })
+                continue
+            safety_stop = None
+            for pattern_hash in matched_hashes:
+                safety_stop = evaluate_pattern_canary_safety_stop(
+                    store_obj=store_obj,
+                    policy_section="cache",
+                    rule_id=rule_id,
+                    candidate_id=rule.get("candidate_id"),
+                    pattern_hash=pattern_hash,
+                    rollout=rule.get("rollout"),
+                )
+                if safety_stop:
+                    break
+            if safety_stop:
+                skip_reasons.append({
+                    "rule_id": rule_id,
+                    "candidate_id": rule.get("candidate_id"),
+                    "policy_source": rule.get("policy_source") or "managed-recommended",
+                    "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+                    "matched_hashes": matched_hashes,
+                    "rollout": pattern_rollout_public_meta(rule.get("rollout")),
+                    "canary": canary if canary.get("enabled") else None,
+                    "safety_stop": safety_stop,
+                })
+                log_pattern_canary_safety_stop(safety_stop)
                 continue
             return {
                 "rule_id": rule_id,
@@ -529,6 +560,7 @@ def cache_lookup_meta(
     has_tool_blocks: bool,
     *,
     pattern_features: dict[str, Any] | None = None,
+    store_obj: Any | None = None,
 ) -> tuple[bool, bool, dict[str, Any]]:
     exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
     semantic_enabled = SEMANTIC_CACHE_ENABLED and not has_tool_blocks
@@ -538,6 +570,7 @@ def cache_lookup_meta(
         stream=False,
         pattern_features=pattern_features,
         local_replayability_level=local_replayability_level,
+        store_obj=store_obj,
     )
     if pattern_rule and CACHE_ENABLED:
         exact_enabled = True
@@ -568,6 +601,7 @@ def streaming_cache_lookup_meta(
     has_tool_blocks: bool,
     *,
     pattern_features: dict[str, Any] | None = None,
+    store_obj: Any | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     exact_enabled = CACHE_ENABLED and (CACHE_TOOL_CALLS or not has_tool_blocks)
     pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
@@ -575,6 +609,7 @@ def streaming_cache_lookup_meta(
         stream=True,
         pattern_features=pattern_features,
         local_replayability_level="local-exact-response" if CACHE_ENABLED else "features_only",
+        store_obj=store_obj,
     )
     if pattern_rule and CACHE_ENABLED:
         exact_enabled = True

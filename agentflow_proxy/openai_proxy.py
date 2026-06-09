@@ -348,7 +348,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
     net_retries = 0
 
     try:
-        crunched, crunch_meta = crunch_body(raw_body)
+        crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
         routed_model, routing_meta = route_openai_model(crunched)
         resolved_requested_model = str(crunched.get("model") or requested_model)
         crunched["model"] = routed_model
@@ -528,6 +528,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(
             has_tool_blocks,
             pattern_features=routing_meta.get("managed_pattern_features"),
+            store_obj=context.store,
         )
         key = cache_key_for(
             crunched,
