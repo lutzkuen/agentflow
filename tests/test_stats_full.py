@@ -2185,6 +2185,70 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("textarea", html.lower())
         self.assertNotIn("form method", html.lower())
 
+    def test_old_context_summary_rollout_health_reports_canary_safety_and_queue(self):
+        for suffix, cohort in (
+            ("a0", "canary_applied"),
+            ("a1", "canary_applied"),
+            ("h0", "canary_holdout"),
+            ("h1", "canary_holdout"),
+        ):
+            self._log_old_context_summary_quality_row(
+                candidate_id="candidate-rollout-health",
+                suffix=suffix,
+                cohort=cohort,
+            )
+        server.store.enqueue_managed_outcome_feedback(
+            id="summary-feedback-health",
+            source_surface="old_context_summary_outcome",
+            endpoint="policy-events",
+            optimization_unit_id=123,
+            payload_json=stable_json({"raw_payload": "raw rollout queue secret must not leak"}),
+            status="queued",
+        )
+
+        payload = asyncio.run(stats_views.stats_old_context_summary(server.store))
+        health = payload["rollout_health"]
+
+        self.assertEqual(health["schema"], "agentflow.old_context_summary_rollout_health.v1")
+        self.assertEqual(health["status"], "canary-observed")
+        self.assertEqual(health["latest"]["candidate_id"], "candidate-rollout-health")
+        self.assertEqual(health["rollout_counts"]["canary_applied_rows"], 2)
+        self.assertEqual(health["rollout_counts"]["canary_holdout_rows"], 2)
+        self.assertEqual(health["rollout_counts"]["safety_stop_rows"], 0)
+        self.assertGreater(health["economics"]["net_savings_usd"], 0)
+        self.assertGreater(health["economics"]["payback_ratio"], 1)
+        self.assertEqual(health["managed_feedback_queue"]["summary"]["queued"], 1)
+        self.assertEqual(health["managed_feedback_queue"]["summary"]["due"], 1)
+        self.assertFalse(health["managed_feedback_queue"]["privacy"]["payload_json_included"])
+        self.assertFalse(health["privacy"]["raw_old_context_included"])
+        self.assertFalse(health["privacy"]["local_session_ids_included"])
+
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw rollout queue secret", rendered)
+        self.assertNotIn("quality-gate-session-secret", rendered)
+
+    def test_old_context_summary_rollout_health_dashboard_tab_is_metadata_only(self):
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=server.store.path,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        with TestClient(app) as client:
+            dashboard = client.get("/agentflow/dashboard")
+
+        html = dashboard.text
+        self.assertIn("Old-context summary", html)
+        self.assertIn("Old-context summarization rollout health", html)
+        self.assertIn("old-context-summary-rollout-tbody", html)
+        self.assertIn("old-context-summary-feedback-tbody", html)
+        self.assertIn("rollout_health", html)
+        self.assertIn("raw context omitted", html)
+        self.assertIn("payload omitted", html)
+        self.assertNotIn("textarea", html.lower())
+        self.assertNotIn("form method", html.lower())
+
     def test_cache_decision_breakdown_groups_status_reason_and_hit_type(self):
         rows = [
             {"status": "skipped", "reason": "streaming", "policy_source": "local-default"},
@@ -4251,7 +4315,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','sessions']", html)
+        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','oldcontext','sessions']", html)
 
     def test_dashboard_exposes_codex_quota_token_usage_panel(self):
         html = stats_views.dashboard_html()

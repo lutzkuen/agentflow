@@ -25,7 +25,7 @@ from agentflow_proxy.quality import (
     derive_provider_quality_signals,
     summarize_quality_signals,
 )
-from agentflow_proxy.recommendations import pattern_decision_summaries
+from agentflow_proxy.recommendations import OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE, pattern_decision_summaries
 from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
 from agentflow_proxy.store import utc_now
 
@@ -224,7 +224,12 @@ def _public_managed_feedback_row(row: dict[str, Any] | None, *, now: datetime) -
     }
 
 
-def _managed_feedback_queue_health(store_obj: Any | None, *, sample_limit: int = 5) -> dict[str, Any]:
+def _managed_feedback_queue_health(
+    store_obj: Any | None,
+    *,
+    sample_limit: int = 5,
+    source_surface: str | None = None,
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     if store_obj is None or not hasattr(store_obj, "managed_outcome_feedback_rows"):
         return {
@@ -253,7 +258,7 @@ def _managed_feedback_queue_health(store_obj: Any | None, *, sample_limit: int =
         }
 
     try:
-        rows = store_obj.managed_outcome_feedback_rows(limit=10000)
+        rows = store_obj.managed_outcome_feedback_rows(source_surface=source_surface, limit=10000)
     except Exception:
         rows = []
 
@@ -1362,6 +1367,73 @@ def _finalize_old_context_summary_quality_bucket(bucket: dict[str, Any]) -> dict
     }
 
 
+def _old_context_summary_rollout_status(
+    *,
+    summary: dict[str, Any],
+    policy: dict[str, Any],
+    quality_gate_summary: dict[str, Any],
+    canary_applied_rows: int,
+    canary_holdout_rows: int,
+    safety_stop_rows: int,
+) -> str:
+    observed = _as_int(summary.get("observed_rows"))
+    if not bool(policy.get("enabled")) and observed <= 0:
+        return "disabled"
+    if observed <= 0:
+        return "not-deployed-yet"
+    if safety_stop_rows > 0 or _as_int(quality_gate_summary.get("rollback_count")) > 0:
+        return "safety-stopped"
+    if _as_int(summary.get("applied_rows")) <= 0 and canary_holdout_rows > 0:
+        return "no-applied-canary-rows"
+    if canary_applied_rows > 0 and canary_holdout_rows > 0:
+        return "canary-observed"
+    if _as_int(summary.get("applied_rows")) > 0:
+        return "applied-observed"
+    if _as_int(summary.get("planned_rows")) > 0:
+        return "planned-only"
+    return "observed-no-rollout"
+
+
+def _old_context_summary_policy_health(policy_state: dict[str, Any]) -> dict[str, Any]:
+    crunch_state = policy_state.get("crunch") if isinstance(policy_state.get("crunch"), dict) else {}
+    policy = crunch_state.get("old_context_summarization")
+    if not isinstance(policy, dict):
+        policy = {}
+    file_state = crunch_state.get("file") if isinstance(crunch_state.get("file"), dict) else {}
+    canary = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
+    safety_stop = policy.get("safety_stop") if isinstance(policy.get("safety_stop"), dict) else {}
+    return {
+        "enabled": bool(policy.get("enabled")),
+        "policy_source": policy.get("policy_source") or crunch_state.get("policy_source"),
+        "rule_id": policy.get("rule_id"),
+        "candidate_id": policy.get("candidate_id"),
+        "summary_model": policy.get("model"),
+        "rule_path": crunch_state.get("rule_path"),
+        "reload_required": bool(file_state.get("reload_required")),
+        "loaded_at": file_state.get("loaded_at"),
+        "canary": {
+            "enabled": bool(canary.get("enabled")),
+            "fraction": _as_float(canary.get("fraction")),
+            "unit": canary.get("unit"),
+        },
+        "safety_stop": {
+            "enabled": bool(safety_stop.get("enabled")),
+            "window": _as_int(safety_stop.get("window")),
+            "min_outcome_samples": _as_int(safety_stop.get("min_outcome_samples")),
+            "max_error_rate": _as_float(safety_stop.get("max_error_rate")),
+            "max_retry_rate": _as_float(safety_stop.get("max_retry_rate")),
+            "max_summary_failure_rate": _as_float(safety_stop.get("max_summary_failure_rate")),
+        },
+    }
+
+
+def _breakdown_count(rows: list[dict[str, Any]], value: str) -> int:
+    for row in rows:
+        if str(row.get("value") or "") == value:
+            return _as_int(row.get("count"))
+    return 0
+
+
 async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
     today_start = _utc_today_start_iso()
@@ -1584,42 +1656,129 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         "reason_code_breakdown": _count_breakdown(reason_code_counts),
         "warning_code_breakdown": _count_breakdown(warning_code_counts),
     }
+    summary = {
+        "observed_rows": observed_rows,
+        "today_observed_rows": today_observed_rows,
+        "eligible_rows": eligible_count,
+        "today_eligible_rows": today_eligible_count,
+        "ineligible_rows": ineligible_count,
+        "skipped_rows": skipped_count,
+        "planned_rows": planned_count,
+        "applied_rows": applied_count,
+        "today_applied_rows": today_applied_count,
+        "summary_created_rows": summary_created_count,
+        "cached_summary_hit_rows": summary_cache_hits,
+        "summary_empty_rows": summary_empty_count,
+        "error_rows": error_count,
+        "eligibility_rate": round(eligible_count / observed_rows, 4) if observed_rows else 0.0,
+        "applied_rate": round(applied_count / observed_rows, 4) if observed_rows else 0.0,
+        "summary_cache_hit_rate": round(summary_cache_hits / applied_count, 4) if applied_count else 0.0,
+        "gross_saved_tokens_est": int(gross_saved_tokens),
+        "today_gross_saved_tokens_est": int(today_gross_saved_tokens),
+        "summary_model_input_tokens_est": int(summary_input_tokens),
+        "summary_model_output_tokens_est": int(summary_output_tokens),
+        "gross_savings_usd": round(gross_savings_usd, 6),
+        "today_gross_savings_usd": round(today_gross_savings_usd, 6),
+        "summary_model_cost_usd": round(summary_cost_usd, 6),
+        "today_summary_model_cost_usd": round(today_summary_cost_usd, 6),
+        "net_savings_usd": round(net_savings_usd, 6),
+        "today_net_savings_usd": round(today_net_savings_usd, 6),
+        "payback_ratio": round(gross_savings_usd / summary_cost_usd, 4) if summary_cost_usd > 0 else None,
+        "today_payback_ratio": round(today_gross_savings_usd / today_summary_cost_usd, 4) if today_summary_cost_usd > 0 else None,
+    }
+    policy_state = await stats_policies()
+    policy_health = _old_context_summary_policy_health(policy_state)
+    canary_applied_rows = sum(_as_int((row.get("metrics") or {}).get("canary_applied_count")) for row in quality_gates)
+    canary_holdout_rows = sum(_as_int((row.get("metrics") or {}).get("canary_holdout_count")) for row in quality_gates)
+    bypassed_or_disabled_rows = sum(_as_int((row.get("metrics") or {}).get("bypassed_or_disabled_count")) for row in quality_gates)
+    safety_stop_rows = sum(_as_int((row.get("metrics") or {}).get("safety_stop_count")) for row in quality_gates)
+    rollout_status = _old_context_summary_rollout_status(
+        summary=summary,
+        policy=policy_health,
+        quality_gate_summary=quality_gate_summary,
+        canary_applied_rows=canary_applied_rows,
+        canary_holdout_rows=canary_holdout_rows,
+        safety_stop_rows=safety_stop_rows,
+    )
+    latest_gate = quality_gates[0] if quality_gates else {}
+    managed_feedback_queue = _managed_feedback_queue_health(
+        store_obj,
+        sample_limit=5,
+        source_surface=OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+    )
+    skip_breakdown = _count_breakdown(reason_counts)
+    rollout_health = {
+        "schema": "agentflow.old_context_summary_rollout_health.v1",
+        "status": rollout_status,
+        "state_flags": {
+            "disabled": rollout_status == "disabled",
+            "not_deployed_yet": rollout_status == "not-deployed-yet",
+            "no_observed_rows": observed_rows <= 0,
+            "no_applied_canary_rows": canary_holdout_rows > 0 and canary_applied_rows <= 0,
+            "safety_stopped": rollout_status == "safety-stopped",
+            "read_only": True,
+        },
+        "policy": policy_health,
+        "latest": {
+            "candidate_id": latest_gate.get("candidate_id") or policy_health.get("candidate_id"),
+            "rule_id": latest_gate.get("rule_id") or policy_health.get("rule_id"),
+            "policy_source": latest_gate.get("policy_source") or policy_health.get("policy_source"),
+            "summary_model": latest_gate.get("summary_model") or policy_health.get("summary_model"),
+            "last_decision_at": latest_gate.get("last_decision_at"),
+            "quality_gate_verdict": latest_gate.get("verdict"),
+        },
+        "rollout_counts": {
+            "observed_rows": observed_rows,
+            "today_observed_rows": today_observed_rows,
+            "disabled_rows": _breakdown_count(skip_breakdown, "disabled"),
+            "planned_rows": planned_count,
+            "applied_rows": applied_count,
+            "today_applied_rows": today_applied_count,
+            "canary_applied_rows": canary_applied_rows,
+            "canary_holdout_rows": canary_holdout_rows,
+            "bypassed_or_disabled_rows": bypassed_or_disabled_rows,
+            "safety_stop_rows": safety_stop_rows,
+            "summary_failure_rows": sum(_as_int((row.get("metrics") or {}).get("summary_failure_count")) for row in quality_gates),
+        },
+        "economics": {
+            "gross_saved_tokens_est": summary["gross_saved_tokens_est"],
+            "today_gross_saved_tokens_est": summary["today_gross_saved_tokens_est"],
+            "summary_model_input_tokens_est": summary["summary_model_input_tokens_est"],
+            "summary_model_output_tokens_est": summary["summary_model_output_tokens_est"],
+            "summary_cache_hit_rate": summary["summary_cache_hit_rate"],
+            "gross_savings_usd": summary["gross_savings_usd"],
+            "today_gross_savings_usd": summary["today_gross_savings_usd"],
+            "summary_model_cost_usd": summary["summary_model_cost_usd"],
+            "today_summary_model_cost_usd": summary["today_summary_model_cost_usd"],
+            "net_savings_usd": summary["net_savings_usd"],
+            "today_net_savings_usd": summary["today_net_savings_usd"],
+            "payback_ratio": summary["payback_ratio"],
+            "today_payback_ratio": summary["today_payback_ratio"],
+        },
+        "managed_feedback_queue": managed_feedback_queue,
+        "privacy": {
+            "metadata_only": True,
+            "payload_json_included": False,
+            "raw_old_context_included": False,
+            "generated_summaries_included": False,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+        },
+    }
 
     return {
         "schema": "agentflow.old_context_summarization_opportunity.v1",
         "generated_at": utc_now(),
-        "summary": {
-            "observed_rows": observed_rows,
-            "today_observed_rows": today_observed_rows,
-            "eligible_rows": eligible_count,
-            "today_eligible_rows": today_eligible_count,
-            "ineligible_rows": ineligible_count,
-            "skipped_rows": skipped_count,
-            "planned_rows": planned_count,
-            "applied_rows": applied_count,
-            "today_applied_rows": today_applied_count,
-            "summary_created_rows": summary_created_count,
-            "cached_summary_hit_rows": summary_cache_hits,
-            "summary_empty_rows": summary_empty_count,
-            "error_rows": error_count,
-            "eligibility_rate": round(eligible_count / observed_rows, 4) if observed_rows else 0.0,
-            "applied_rate": round(applied_count / observed_rows, 4) if observed_rows else 0.0,
-            "summary_cache_hit_rate": round(summary_cache_hits / applied_count, 4) if applied_count else 0.0,
-            "gross_saved_tokens_est": int(gross_saved_tokens),
-            "today_gross_saved_tokens_est": int(today_gross_saved_tokens),
-            "summary_model_input_tokens_est": int(summary_input_tokens),
-            "summary_model_output_tokens_est": int(summary_output_tokens),
-            "gross_savings_usd": round(gross_savings_usd, 6),
-            "today_gross_savings_usd": round(today_gross_savings_usd, 6),
-            "summary_model_cost_usd": round(summary_cost_usd, 6),
-            "today_summary_model_cost_usd": round(today_summary_cost_usd, 6),
-            "net_savings_usd": round(net_savings_usd, 6),
-            "today_net_savings_usd": round(today_net_savings_usd, 6),
-            "payback_ratio": round(gross_savings_usd / summary_cost_usd, 4) if summary_cost_usd > 0 else None,
-            "today_payback_ratio": round(today_gross_savings_usd / today_summary_cost_usd, 4) if today_summary_cost_usd > 0 else None,
-        },
+        "summary": summary,
+        "rollout_health": rollout_health,
         "status_breakdown": _count_breakdown(status_counts),
-        "skip_reason_breakdown": _count_breakdown(reason_counts),
+        "skip_reason_breakdown": skip_breakdown,
         "model_breakdown": model_breakdown,
         "quality_gate_summary": quality_gate_summary,
         "quality_gates": quality_gates,
@@ -7744,6 +7903,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
+  <button class="tab-btn" onclick="showTab('oldcontext')">Old-context summary</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
 
@@ -8090,14 +8250,14 @@ def dashboard_html() -> str:
 </div>
 </div>
 
-<div class="tab-panel" id="tab-sessions">
+<div class="tab-panel" id="tab-oldcontext">
 <div class="section">
-  <h2>Sessions today</h2>
-  <table data-table-id="sessions" data-filter-label="Filter sessions">
+  <h2>Old-context summarization rollout health</h2>
+  <table class="activity-table" data-table-id="old-context-summary-rollout" data-filter-label="Filter old-context rollout health">
     <thead><tr>
-      <th data-sort-type="text">Surface</th><th data-sort-type="text">App</th><th data-sort-type="text">Session</th><th data-sort-type="number">Units</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Codex input</th><th data-sort-type="number">Codex output</th><th data-sort-type="text">Codex opt</th><th data-sort-type="number">Thinking</th><th data-sort-type="money">Thinking cost</th><th data-sort-type="number">Cache write</th><th data-sort-type="number">Cache read</th><th data-sort-type="number">Write/read</th><th data-sort-type="money">Write cost</th><th data-sort-type="money">Read saved</th><th data-sort-type="number">Payback</th><th data-sort-type="number">tool-result</th><th data-sort-type="number">tool-heavy</th><th data-sort-type="number">short-comp</th><th data-sort-type="number">code-gen</th><th data-sort-type="number">chat</th><th data-sort-type="number">other</th>
+      <th data-sort-type="text">Status</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Canary</th><th data-sort-type="text">Safety stop</th><th data-sort-type="text">Rule reload</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Bypassed</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Net savings</th><th data-sort-type="number">Payback</th><th data-sort-type="text">Queue</th><th data-sort-type="text">No-data states</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
-    <tbody id="sess-tbody"></tbody>
+    <tbody id="old-context-summary-rollout-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -8125,6 +8285,27 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Provider</th><th data-sort-type="text">Model</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Gross saved tokens</th><th data-sort-type="money">Gross savings</th><th data-sort-type="money">Summary cost</th><th data-sort-type="money">Net savings</th>
     </tr></thead>
     <tbody id="old-context-summary-models-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Old-context summary lifecycle feedback</h2>
+  <table data-table-id="old-context-summary-feedback" data-filter-label="Filter old-context summary feedback">
+    <thead><tr>
+      <th data-sort-type="number">Queued</th><th data-sort-type="number">Due</th><th data-sort-type="number">Retryable errors</th><th data-sort-type="number">Dropped</th><th data-sort-type="number">Sent</th><th data-sort-type="time">Oldest due</th><th data-sort-type="time">Last sent</th><th data-sort-type="text">Payload</th>
+    </tr></thead>
+    <tbody id="old-context-summary-feedback-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-sessions">
+<div class="section">
+  <h2>Sessions today</h2>
+  <table data-table-id="sessions" data-filter-label="Filter sessions">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">App</th><th data-sort-type="text">Session</th><th data-sort-type="number">Units</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="money">Cost</th><th data-sort-type="number">Codex input</th><th data-sort-type="number">Codex output</th><th data-sort-type="text">Codex opt</th><th data-sort-type="number">Thinking</th><th data-sort-type="money">Thinking cost</th><th data-sort-type="number">Cache write</th><th data-sort-type="number">Cache read</th><th data-sort-type="number">Write/read</th><th data-sort-type="money">Write cost</th><th data-sort-type="money">Read saved</th><th data-sort-type="number">Payback</th><th data-sort-type="number">tool-result</th><th data-sort-type="number">tool-heavy</th><th data-sort-type="number">short-comp</th><th data-sort-type="number">code-gen</th><th data-sort-type="number">chat</th><th data-sort-type="number">other</th>
+    </tr></thead>
+    <tbody id="sess-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -8408,7 +8589,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','sessions'];
+  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -9020,6 +9201,13 @@ function gateBadge(verdict){
   if(verdict==='insufficient-evidence'||verdict==='disabled')return'miss';
   return'provider';
 }
+function rolloutBadge(status){
+  if(status==='canary-observed'||status==='applied-observed')return'hit';
+  if(status==='safety-stopped')return'err';
+  if(status==='planned-only'||status==='no-applied-canary-rows')return'routed';
+  if(status==='disabled'||status==='not-deployed-yet'||status==='observed-no-rollout')return'miss';
+  return'provider';
+}
 function fmtPctValue(n){
   if(n==null)return'—';
   return (n*100).toFixed(1)+'%';
@@ -9236,6 +9424,8 @@ async function refreshSessions(){
     const ob=document.getElementById('old-context-summary-tbody');
     const oqb=document.getElementById('old-context-summary-quality-tbody');
     const omb=document.getElementById('old-context-summary-models-tbody');
+    const orb=document.getElementById('old-context-summary-rollout-tbody');
+    const ofb=document.getElementById('old-context-summary-feedback-tbody');
     const rows=d.sessions||[];
     tb.innerHTML=rows.map(row=>`<tr>
       <td class="flags"><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
@@ -9278,6 +9468,54 @@ async function refreshSessions(){
     </tr>`).join('')||'<tr><td colspan="10" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
     const oldContext=full.old_context_summary_opportunity||{};
     const oldSummary=oldContext.summary||{};
+    const rollout=oldContext.rollout_health||{};
+    const policy=rollout.policy||{};
+    const latest=rollout.latest||{};
+    const counts=rollout.rollout_counts||{};
+    const econ=rollout.economics||{};
+    const flags=rollout.state_flags||{};
+    const queue=rollout.managed_feedback_queue||{};
+    const queueSummary=queue.summary||{};
+    const qLast=queue.last_successful_flush||{};
+    const qPrivacy=queue.privacy||{};
+    const canary=policy.canary||{};
+    const safetyStop=policy.safety_stop||{};
+    const noDataBadges=[
+      flags.disabled?'<span class="badge miss">disabled</span>':'',
+      flags.not_deployed_yet?'<span class="badge routed">not deployed yet</span>':'',
+      flags.no_observed_rows?'<span class="badge miss">no observed rows</span>':'',
+      flags.no_applied_canary_rows?'<span class="badge routed">no applied canary rows</span>':'',
+      flags.safety_stopped?'<span class="badge err">safety stopped</span>':''
+    ].filter(Boolean).join(' ')||'<span class="badge hit">observed</span>';
+    orb.innerHTML=`<tr>
+      <td><span class="badge ${rolloutBadge(rollout.status)}">${esc(rollout.status||'unknown')}</span></td>
+      <td class="flags">${policy.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">disabled</span>'} <span class="badge provider">${esc(policy.policy_source||'unknown')}</span> <span class="badge provider">${esc(shortModel(policy.summary_model||latest.summary_model))}</span></td>
+      <td class="model">${esc(latest.candidate_id||'local-old-context-summary')}</td>
+      <td class="model" title="${esc(policy.rule_path||'')}">${esc(latest.rule_id||'unknown')}</td>
+      <td class="flags">${canary.enabled?`<span class="badge hit">on</span> <span class="badge provider">${fmtPctValue(Number(canary.fraction||0))}</span> <span class="badge miss">${esc(canary.unit||'unit')}</span>`:'<span class="badge miss">off</span>'}</td>
+      <td class="flags">${safetyStop.enabled?`<span class="badge hit">on</span> <span class="badge miss">min ${(safetyStop.min_outcome_samples||0).toLocaleString()}</span> <span class="badge miss">fail ${fmtPctValue(Number(safetyStop.max_summary_failure_rate||0))}</span>`:'<span class="badge miss">off</span>'}</td>
+      <td>${policy.reload_required?'<span class="badge err">reload required</span>':'<span class="badge hit">loaded</span>'}</td>
+      <td class="tokens">${(counts.observed_rows||0).toLocaleString()} <span class="badge miss">today ${(counts.today_observed_rows||0).toLocaleString()}</span></td>
+      <td class="tokens">${(counts.canary_applied_rows||counts.applied_rows||0).toLocaleString()} <span class="badge miss">today ${(counts.today_applied_rows||0).toLocaleString()}</span></td>
+      <td class="tokens">${(counts.canary_holdout_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(counts.bypassed_or_disabled_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(counts.safety_stop_rows||0).toLocaleString()}</td>
+      <td class="${(econ.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(econ.net_savings_usd||0,6)} <span class="badge miss">today ${fmt(econ.today_net_savings_usd||0,6)}</span></td>
+      <td class="tokens">${fmtRatio(econ.payback_ratio)}</td>
+      <td class="flags"><span class="badge provider">${(queueSummary.queued||0).toLocaleString()} queued</span> <span class="${queueSummary.due?'badge routed':'badge hit'}">${(queueSummary.due||0).toLocaleString()} due</span> <span class="${queueSummary.retryable_error?'badge err':'badge hit'}">${(queueSummary.retryable_error||0).toLocaleString()} retryable</span></td>
+      <td class="flags">${noDataBadges}</td>
+      <td class="flags">${(rollout.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">raw context omitted</span> <span class="badge hit">payload omitted</span></td>
+    </tr>`;
+    ofb.innerHTML=`<tr>
+      <td class="tokens">${(queueSummary.queued||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.due||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.retryable_error||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.dropped_after_limit||0).toLocaleString()}</td>
+      <td class="tokens">${(queueSummary.sent||0).toLocaleString()}</td>
+      <td class="latency">${fmtSec(queueSummary.oldest_due_age_seconds)}</td>
+      <td class="ts">${qLast.sent_at?ago(qLast.sent_at):'—'}</td>
+      <td class="flags">${qPrivacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">payload omitted</span> <span class="badge hit">raw prompts omitted</span></td>
+    </tr>`;
     const skipBadges=compactBreakdown(oldContext.skip_reason_breakdown,'none');
     const privacy=oldContext.privacy||{};
     ob.innerHTML=`<tr>
