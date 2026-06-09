@@ -1796,6 +1796,495 @@ def _managed_breakdown(grouped: dict[str, int]) -> list[dict[str, Any]]:
     return rows
 
 
+MANAGED_PATTERN_ADOPTION_STAGES = (
+    "received",
+    "reviewed",
+    "dry_run",
+    "applied",
+    "canary_applied",
+    "canary_holdout",
+    "bypassed",
+    "errored",
+    "rolled_back",
+    "rejected",
+)
+
+
+def _day_key(raw: Any) -> str:
+    text = str(raw or "")
+    return text[:10] if len(text) >= 10 else "unknown"
+
+
+def _managed_policy_event_sections(details: dict[str, Any], action: str) -> list[str]:
+    values: list[str] = []
+    for key in ("applied_sections", "restored_sections", "changed_sections", "policy_sections"):
+        raw = details.get(key)
+        if isinstance(raw, list):
+            values.extend(str(item) for item in raw if item)
+        elif raw:
+            values.append(str(raw))
+    if not values and action.startswith("rollout-actions"):
+        values.extend(["crunch", "cache"])
+    if not values:
+        values.append("unknown")
+    return sorted(set(values))
+
+
+def _managed_policy_event_stage(event: dict[str, Any]) -> str | None:
+    action = str(event.get("action") or "")
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    ok = bool(event.get("ok"))
+    if action in {"fetch-review", "review", "rollout-actions-review"}:
+        if ok:
+            return "reviewed"
+        return "errored" if details.get("status_code") else "rejected"
+    if action in {"apply", "rollout-actions-apply"}:
+        if bool(details.get("dry_run")):
+            return "dry_run" if ok else "rejected"
+        return "applied" if ok else "rejected"
+    if action == "rollback":
+        return "rolled_back" if ok else "errored"
+    if action == "pattern-canary-safety-stop":
+        return "rolled_back"
+    return None
+
+
+def _managed_policy_lifecycle_rows(policy_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in policy_events:
+        if not isinstance(event, dict):
+            continue
+        stage = _managed_policy_event_stage(event)
+        if stage is None:
+            continue
+        action = str(event.get("action") or "unknown")
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        candidate_ids = details.get("candidate_ids") if isinstance(details.get("candidate_ids"), list) else []
+        for section in _managed_policy_event_sections(details, action):
+            rows.append({
+                "schema": "agentflow.managed_pattern_lifecycle_event.v1",
+                "day": _day_key(event.get("created_at")),
+                "created_at": event.get("created_at"),
+                "lifecycle_stage": stage,
+                "action": action,
+                "ok": bool(event.get("ok")),
+                "policy_section": section,
+                "candidate_count": _as_int(details.get("candidate_count")) or len(candidate_ids),
+                "candidate_ids": [str(item) for item in candidate_ids[:5]],
+                "dry_run": bool(details.get("dry_run")),
+                "changed_action_count": _as_int(details.get("changed_action_count")),
+                "changed_file_count": len(details.get("changed_files") or []) if isinstance(details.get("changed_files"), list) else 0,
+                "error_type": details.get("error_type"),
+                "status_code": details.get("status_code"),
+                "raw_payload_included": False,
+            })
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    return rows
+
+
+def _managed_pattern_summary_stage(summary: dict[str, Any], status_code: Any) -> str:
+    status = str(summary.get("status") or "")
+    outcome = str(summary.get("outcome") or "")
+    reason = str(summary.get("reason") or "")
+    cohort = str(summary.get("cohort") or "")
+    canary = summary.get("canary") if isinstance(summary.get("canary"), dict) else {}
+    if _as_int(status_code) >= 400 or outcome == "errored" or status == "error":
+        return "errored"
+    if outcome == "holdout" or status == "holdout" or cohort == "canary_holdout" or canary.get("status") == "holdout":
+        return "canary_holdout"
+    if _managed_pattern_is_bypass(summary):
+        return "bypassed"
+    if _as_int(summary.get("applied_count")) > 0 and (canary.get("enabled") or cohort == "canary_applied"):
+        return "canary_applied"
+    if _as_int(summary.get("applied_count")) > 0 or outcome == "applied" or status == "applied":
+        return "applied"
+    if "reject" in reason:
+        return "rejected"
+    if "rollback" in reason:
+        return "rolled_back"
+    return "received"
+
+
+def _managed_pattern_blocker_reasons(summary: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    reason = summary.get("reason")
+    if reason and str(reason) not in {"unknown", "ok", "applied"}:
+        reasons.append(str(reason))
+    for item in summary.get("skip_reasons") or []:
+        if isinstance(item, dict) and item.get("reason"):
+            reasons.append(str(item.get("reason")))
+    safety_stop = summary.get("safety_stop")
+    if isinstance(safety_stop, dict) and safety_stop.get("reason"):
+        reasons.append(str(safety_stop.get("reason")))
+    return sorted(set(reasons))
+
+
+def _managed_pattern_add_adoption_row(
+    grouped: dict[tuple[str, ...], dict[str, Any]],
+    *,
+    summary: dict[str, Any],
+    created_at: Any,
+    status_code: Any,
+    cost_est_usd: Any,
+) -> None:
+    pattern_hash = str(summary.get("pattern_hash") or "")
+    if not pattern_hash.startswith("sha256:"):
+        return
+    policy_source = str(summary.get("policy_source") or "")
+    if (
+        not policy_source.startswith("managed-")
+        and summary.get("candidate_id") is None
+        and not isinstance(summary.get("canary"), dict)
+    ):
+        return
+    stage = _managed_pattern_summary_stage(summary, status_code)
+    key = (
+        _day_key(created_at),
+        stage,
+        str(summary.get("decision_type") or "unknown"),
+        str(summary.get("source_surface") or "unknown"),
+        str(summary.get("app_family") or "unknown"),
+        str(summary.get("workflow_phase") or summary.get("category") or "unknown"),
+        str(summary.get("category") or "unknown"),
+        policy_source or "unknown",
+        str(summary.get("candidate_id") or "unknown"),
+        str(summary.get("rule_id") or "unknown"),
+        pattern_hash,
+    )
+    bucket = grouped.setdefault(
+        key,
+        {
+            "schema": "agentflow.managed_pattern_adoption_bucket.v1",
+            "day": key[0],
+            "lifecycle_stage": key[1],
+            "policy_section": key[2],
+            "source_surface": key[3],
+            "app_family": key[4],
+            "workflow_phase": key[5],
+            "category": key[6],
+            "policy_source": key[7],
+            "candidate_id": None if key[8] == "unknown" else key[8],
+            "rule_id": None if key[9] == "unknown" else key[9],
+            "pattern_hash": key[10],
+            "affected_calls": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "applied_count": 0,
+            "holdout_count": 0,
+            "bypassed_count": 0,
+            "saved_chars": 0,
+            "tokens_saved_est": 0,
+            "estimated_cost_savings_usd": 0.0,
+            "cost_est_usd": 0.0,
+            "status_code_counts": {},
+            "safety_blocker_reasons": {},
+            "raw_payload_included": False,
+        },
+    )
+    bucket["affected_calls"] += 1
+    status = _as_int(status_code)
+    if status >= 400:
+        bucket["error_count"] += 1
+    elif status:
+        bucket["success_count"] += 1
+    bucket["applied_count"] += _as_int(summary.get("applied_count"))
+    if stage == "canary_holdout":
+        bucket["holdout_count"] += 1
+    if stage == "bypassed":
+        bucket["bypassed_count"] += 1
+    bucket["saved_chars"] += _as_int(summary.get("saved_chars"))
+    bucket["tokens_saved_est"] += _as_int(summary.get("tokens_saved_est"))
+    bucket["estimated_cost_savings_usd"] += _as_float(summary.get("estimated_cost_savings_usd"))
+    bucket["cost_est_usd"] += _as_float(cost_est_usd)
+    status_bucket = _status_code_bucket(status_code)
+    bucket["status_code_counts"][status_bucket] = bucket["status_code_counts"].get(status_bucket, 0) + 1
+    for reason in _managed_pattern_blocker_reasons(summary):
+        bucket["safety_blocker_reasons"][reason] = bucket["safety_blocker_reasons"].get(reason, 0) + 1
+
+
+def _managed_pattern_finalize_adoption_rows(grouped: dict[tuple[str, ...], dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        affected = _as_int(bucket.get("affected_calls"))
+        errors = _as_int(bucket.get("error_count"))
+        bucket["error_rate"] = round(errors / affected, 4) if affected else 0.0
+        bucket["estimated_cost_savings_usd"] = round(_as_float(bucket.get("estimated_cost_savings_usd")), 8)
+        bucket["cost_est_usd"] = round(_as_float(bucket.get("cost_est_usd")), 8)
+        bucket["status_code_counts"] = _count_breakdown(bucket.get("status_code_counts") or {})
+        bucket["safety_blocker_reasons"] = _count_breakdown(bucket.get("safety_blocker_reasons") or {})
+        rows.append(bucket)
+    rows.sort(
+        key=lambda row: (
+            row.get("day") or "",
+            _as_int(row.get("affected_calls")),
+            _as_float(row.get("estimated_cost_savings_usd")),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _managed_pattern_holdout_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    for row in rows:
+        stage = str(row.get("lifecycle_stage") or "")
+        if stage not in {"canary_applied", "canary_holdout", "bypassed", "errored"}:
+            continue
+        key = (
+            str(row.get("policy_section") or "unknown"),
+            str(row.get("candidate_id") or "unknown"),
+            str(row.get("rule_id") or "unknown"),
+            str(row.get("pattern_hash") or ""),
+            str(row.get("source_surface") or "unknown"),
+            str(row.get("app_family") or "unknown"),
+            str(row.get("workflow_phase") or row.get("category") or "unknown"),
+            str(row.get("category") or "unknown"),
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                "schema": "agentflow.managed_pattern_holdout_comparison.v1",
+                "policy_section": key[0],
+                "candidate_id": None if key[1] == "unknown" else key[1],
+                "rule_id": None if key[2] == "unknown" else key[2],
+                "pattern_hash": key[3],
+                "source_surface": key[4],
+                "app_family": key[5],
+                "workflow_phase": key[6],
+                "category": key[7],
+                "canary_applied_count": 0,
+                "canary_holdout_count": 0,
+                "bypassed_count": 0,
+                "errored_count": 0,
+                "applied_error_count": 0,
+                "holdout_error_count": 0,
+                "estimated_cost_savings_usd": 0.0,
+                "raw_payload_included": False,
+            },
+        )
+        affected = _as_int(row.get("affected_calls"))
+        errors = _as_int(row.get("error_count"))
+        if stage == "canary_applied":
+            bucket["canary_applied_count"] += affected
+            bucket["applied_error_count"] += errors
+            bucket["estimated_cost_savings_usd"] += _as_float(row.get("estimated_cost_savings_usd"))
+        elif stage == "canary_holdout":
+            bucket["canary_holdout_count"] += affected
+            bucket["holdout_error_count"] += errors
+        elif stage == "bypassed":
+            bucket["bypassed_count"] += affected
+        elif stage == "errored":
+            bucket["errored_count"] += affected
+    comparisons: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        applied = _as_int(bucket.get("canary_applied_count"))
+        holdout = _as_int(bucket.get("canary_holdout_count"))
+        bucket["applied_error_rate"] = round(_as_int(bucket.get("applied_error_count")) / applied, 4) if applied else None
+        bucket["holdout_error_rate"] = round(_as_int(bucket.get("holdout_error_count")) / holdout, 4) if holdout else None
+        bucket["estimated_cost_savings_usd"] = round(_as_float(bucket.get("estimated_cost_savings_usd")), 8)
+        if applied or holdout:
+            comparisons.append(bucket)
+    comparisons.sort(
+        key=lambda row: (
+            _as_int(row.get("canary_applied_count")) + _as_int(row.get("canary_holdout_count")),
+            _as_float(row.get("estimated_cost_savings_usd")),
+        ),
+        reverse=True,
+    )
+    return comparisons
+
+
+def _managed_pattern_adoption_from_store(
+    store_obj: Any,
+    *,
+    limit: int,
+    policy_events: list[dict[str, Any]],
+    managed_summary: dict[str, Any],
+) -> dict[str, Any]:
+    conn = store_obj.conn
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    capped_limit = max(1, min(int(limit or 500), 5000))
+
+    provider_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+                   requested_model, routed_model, status_code, latency_ms,
+                   cost_est_usd, cost_baseline_usd, crunch_json, routing_json, cache_json, category
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+    for row in provider_rows:
+        routing = _json_obj(row.get("routing_json"))
+        for summary in pattern_decision_summaries(
+            provider=str(row.get("provider") or "anthropic"),
+            path=str(row.get("path") or ""),
+            requested_model=row.get("requested_model"),
+            routed_model=row.get("routed_model"),
+            status_code=_as_int(row.get("status_code")) if row.get("status_code") is not None else None,
+            cost_est_usd=_as_float(row.get("cost_est_usd")) if row.get("cost_est_usd") is not None else None,
+            cost_baseline_usd=_as_float(row.get("cost_baseline_usd")) if row.get("cost_baseline_usd") is not None else None,
+            cache_meta=_json_obj(row.get("cache_json")),
+            crunch_meta=_json_obj(row.get("crunch_json")),
+            routing_meta=routing,
+            category=row.get("category") or routing.get("category"),
+        ):
+            if isinstance(summary, dict):
+                _managed_pattern_add_adoption_row(
+                    grouped,
+                    summary=summary,
+                    created_at=row.get("created_at"),
+                    status_code=row.get("status_code"),
+                    cost_est_usd=row.get("cost_est_usd"),
+                )
+
+    codex_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select s.id as start_event_id,
+                   s.created_at,
+                   s.request_id,
+                   s.session_id,
+                   s.input_text_chars,
+                   s.routing_json,
+                   s.crunch_json,
+                   s.cache_json,
+                   (
+                       select r.id from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_event_id,
+                   (
+                       select r.result_chars from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_result_chars,
+                   (
+                       select r.error_code from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_error_code,
+                   (
+                       select r.latency_ms from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_latency_ms
+            from codex_app_events s
+            where s.direction = 'client_to_server'
+              and s.method = 'turn/start'
+            order by s.created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+    for row in codex_rows:
+        routing = _json_obj(row.get("routing_json"))
+        cache_meta = _json_obj(row.get("cache_json"))
+        estimates = _codex_estimates_with_cache(row.get("input_text_chars"), row.get("response_result_chars"), cache_meta)
+        status_code = 500 if row.get("response_error_code") is not None else (200 if row.get("response_event_id") else None)
+        for summary in pattern_decision_summaries(
+            provider="openai",
+            path="codex-app://turn/start",
+            requested_model=routing.get("requested_model") or CODEX_APP_MODEL,
+            routed_model=routing.get("routed_model") or routing.get("requested_model") or CODEX_APP_MODEL,
+            status_code=status_code,
+            cost_est_usd=_as_float(estimates.get("cost_est_usd")) if estimates.get("cost_est_usd") is not None else None,
+            cost_baseline_usd=_as_float(estimates.get("baseline_cost_est_usd")) if estimates.get("baseline_cost_est_usd") is not None else None,
+            cache_meta=cache_meta,
+            crunch_meta=_json_obj(row.get("crunch_json")),
+            routing_meta=routing,
+            category=routing.get("category") or "codex_turn",
+        ):
+            if not isinstance(summary, dict):
+                continue
+            summary = dict(summary)
+            summary["source_surface"] = CODEX_APP_SOURCE_SURFACE
+            summary["app_family"] = "codex"
+            summary["category"] = routing.get("category") or summary.get("category") or "codex_turn"
+            summary["workflow_phase"] = routing.get("workflow_phase") or summary.get("workflow_phase") or summary["category"]
+            _managed_pattern_add_adoption_row(
+                grouped,
+                summary=summary,
+                created_at=row.get("created_at"),
+                status_code=status_code,
+                cost_est_usd=estimates.get("cost_est_usd"),
+            )
+
+    outcome_rows = _managed_pattern_finalize_adoption_rows(grouped)
+    lifecycle_rows = _managed_policy_lifecycle_rows(policy_events)
+    funnel_counts = {stage: 0 for stage in MANAGED_PATTERN_ADOPTION_STAGES}
+    funnel_counts["received"] += _as_int(managed_summary.get("received_count"))
+    funnel_counts["applied"] += _as_int(managed_summary.get("applied_count"))
+    funnel_counts["errored"] += _as_int(managed_summary.get("server_error_count")) + _as_int(managed_summary.get("invalid_count"))
+    for row in outcome_rows:
+        stage = str(row.get("lifecycle_stage") or "")
+        if stage in funnel_counts:
+            funnel_counts[stage] += _as_int(row.get("affected_calls"))
+    for row in lifecycle_rows:
+        stage = str(row.get("lifecycle_stage") or "")
+        if stage in funnel_counts:
+            funnel_counts[stage] += 1
+
+    blocker_counts: dict[str, int] = {}
+    for row in outcome_rows:
+        for item in row.get("safety_blocker_reasons") or []:
+            blocker_counts[str(item.get("value") or "unknown")] = blocker_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
+
+    return {
+        "schema": "agentflow.managed_pattern_adoption.v1",
+        "summary": {
+            "lifecycle_event_count": len(lifecycle_rows),
+            "pattern_outcome_bucket_count": len(outcome_rows),
+            "holdout_comparison_count": len(_managed_pattern_holdout_comparisons(outcome_rows)),
+            "affected_calls": sum(_as_int(row.get("affected_calls")) for row in outcome_rows),
+            "estimated_cost_savings_usd": round(sum(_as_float(row.get("estimated_cost_savings_usd")) for row in outcome_rows), 8),
+            "error_count": sum(_as_int(row.get("error_count")) for row in outcome_rows),
+            "raw_payload_included": False,
+        },
+        "funnel": [
+            {"stage": stage, "count": funnel_counts.get(stage, 0)}
+            for stage in MANAGED_PATTERN_ADOPTION_STAGES
+        ],
+        "pattern_outcomes_by_day": outcome_rows[:100],
+        "holdout_comparisons": _managed_pattern_holdout_comparisons(outcome_rows)[:50],
+        "lifecycle_events": lifecycle_rows[:50],
+        "top_safety_blockers": _managed_breakdown(blocker_counts)[:20],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "file_contents_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "request_ids_included": False,
+            "basis": "local policy events plus stored pattern decision metadata, hashes, status codes, latency, cost, and size-derived savings only",
+        },
+    }
+
+
 async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.recommendations import (
         managed_auth_configured,
@@ -1963,8 +2452,9 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
                 "feedback_error_class": feedback_error_class,
             })
 
+    policy_events = recent_policy_events(limit=500).get("events", [])
     latest_fetch_review_health: dict[str, Any] | None = None
-    for event in recent_policy_events(limit=100).get("events", []):
+    for event in policy_events:
         if not isinstance(event, dict) or event.get("action") != "fetch-review":
             continue
         details = event.get("details") if isinstance(event.get("details"), dict) else {}
@@ -1976,6 +2466,30 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
                 "event_ok": bool(event.get("ok")),
             }
             break
+
+    summary_payload = {
+        "window_calls": len(rows),
+        "metadata_rows": metadata_rows,
+        "historical_null_rows": historical_null_rows,
+        "enabled_count": enabled_count,
+        "disabled_count": disabled_count,
+        "received_count": received_count,
+        "applied_count": applied_count,
+        "changed_model_count": changed_model_count,
+        "server_error_count": server_error_count,
+        "invalid_count": invalid_count,
+        "fallback_count": sum(fallback_counts.values()),
+        "avg_recommendation_latency_ms": _avg_or_none(latency_values),
+        "feedback_present_count": feedback_present_count,
+        "feedback_sent_count": feedback_sent_count,
+        "feedback_skipped_count": feedback_skipped_count,
+        "feedback_failed_count": feedback_failed_count,
+        "feedback_sanitized_count": feedback_sanitized_count,
+        "avg_feedback_latency_ms": _avg_or_none(feedback_latency_values),
+        "last_recommendation_error_class": last_recommendation_error_class,
+        "last_feedback_error_class": last_feedback_error_class,
+        "policy_id_count": len(policy_counts),
+    }
 
     return {
         "schema": "agentflow.managed_recommendations.v1",
@@ -1997,33 +2511,24 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             ),
         },
         "privacy": {
+            "metadata_only": True,
             "raw_prompts_included": False,
+            "raw_messages_included": False,
             "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
             "basis": "stored recommendation and outcome-feedback metadata only",
         },
-        "summary": {
-            "window_calls": len(rows),
-            "metadata_rows": metadata_rows,
-            "historical_null_rows": historical_null_rows,
-            "enabled_count": enabled_count,
-            "disabled_count": disabled_count,
-            "received_count": received_count,
-            "applied_count": applied_count,
-            "changed_model_count": changed_model_count,
-            "server_error_count": server_error_count,
-            "invalid_count": invalid_count,
-            "fallback_count": sum(fallback_counts.values()),
-            "avg_recommendation_latency_ms": _avg_or_none(latency_values),
-            "feedback_present_count": feedback_present_count,
-            "feedback_sent_count": feedback_sent_count,
-            "feedback_skipped_count": feedback_skipped_count,
-            "feedback_failed_count": feedback_failed_count,
-            "feedback_sanitized_count": feedback_sanitized_count,
-            "avg_feedback_latency_ms": _avg_or_none(feedback_latency_values),
-            "last_recommendation_error_class": last_recommendation_error_class,
-            "last_feedback_error_class": last_feedback_error_class,
-            "policy_id_count": len(policy_counts),
-        },
+        "summary": summary_payload,
+        "adoption": _managed_pattern_adoption_from_store(
+            store_obj,
+            limit=capped_limit,
+            policy_events=policy_events,
+            managed_summary=summary_payload,
+        ),
         "status_breakdown": _managed_breakdown(status_counts),
         "reason_breakdown": _managed_breakdown(reason_counts),
         "fallback_breakdown": _managed_breakdown(fallback_counts),
@@ -6566,6 +7071,42 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Managed pattern adoption funnel</h2>
+  <table data-table-id="managed-pattern-funnel" data-filter-label="Filter managed pattern funnel">
+    <thead><tr>
+      <th data-sort-type="text">Stage</th><th data-sort-type="number">Count</th>
+    </tr></thead>
+    <tbody id="managed-pattern-funnel-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Managed pattern outcomes by day</h2>
+  <table class="activity-table" data-table-id="managed-pattern-outcomes" data-filter-label="Filter managed pattern outcomes">
+    <thead><tr>
+      <th data-sort-type="timestamp">Day</th><th data-sort-type="text">Stage</th><th data-sort-type="text">Section</th><th data-sort-type="text">Surface</th><th data-sort-type="text">App</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Category</th><th data-sort-type="text">Policy source</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Pattern</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Errors</th><th data-sort-type="percent">Error rate</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Safety blockers</th>
+    </tr></thead>
+    <tbody id="managed-pattern-outcomes-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Managed pattern holdout comparison</h2>
+  <table class="activity-table" data-table-id="managed-pattern-holdouts" data-filter-label="Filter managed pattern holdouts">
+    <thead><tr>
+      <th data-sort-type="text">Section</th><th data-sort-type="text">Surface</th><th data-sort-type="text">App</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Pattern</th><th data-sort-type="number">Canary applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Bypassed</th><th data-sort-type="number">Errored</th><th data-sort-type="percent">Applied error</th><th data-sort-type="percent">Holdout error</th><th data-sort-type="money">Savings</th>
+    </tr></thead>
+    <tbody id="managed-pattern-holdouts-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Managed pattern lifecycle events</h2>
+  <table data-table-id="managed-pattern-lifecycle" data-filter-label="Filter managed pattern lifecycle events">
+    <thead><tr>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Stage</th><th data-sort-type="text">Action</th><th data-sort-type="text">Section</th><th data-sort-type="text">Status</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Changed actions</th><th data-sort-type="number">Changed files</th><th data-sort-type="text">Error</th>
+    </tr></thead>
+    <tbody id="managed-pattern-lifecycle-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Recent managed recommendation rows</h2>
   <table class="activity-table" data-table-id="managed-recent" data-filter-label="Filter managed recommendation rows">
     <thead><tr>
@@ -7486,6 +8027,22 @@ function managedHealthDetails(row){
   });
   return parts.map(p=>`<span class="badge miss">${esc(p)}</span>`).join(' ')||'<span class="badge miss">metadata only</span>';
 }
+function stageBadge(stage){
+  if(stage==='applied'||stage==='canary_applied'||stage==='received'||stage==='reviewed')return'hit';
+  if(stage==='errored'||stage==='rolled_back'||stage==='rejected')return'err';
+  if(stage==='canary_holdout'||stage==='bypassed'||stage==='dry_run')return'routed';
+  return'provider';
+}
+function shortHash(value){
+  if(!value)return'—';
+  const text=String(value);
+  return text.startsWith('sha256:')?'sha256:'+text.slice(7,15):text;
+}
+function blockerBadges(rows){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge hit">none</span>';
+  return rows.slice(0,3).map(row=>`<span class="badge err">${esc(row.value)} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
 async function refreshManaged(){
   try{
     const [managedResponse,safetyResponse]=await Promise.all([
@@ -7531,6 +8088,61 @@ async function refreshManaged(){
       <td class="ts">${lastSent.sent_at?ago(lastSent.sent_at):'—'}</td>
       <td class="flags">${compactBreakdown(queue.source_surface_breakdown,'none')} <span class="badge hit">payload omitted</span></td>
     </tr>`;
+    const adoption=d.adoption||{};
+    const funnel=adoption.funnel||[];
+    document.getElementById('managed-pattern-funnel-tbody').innerHTML=funnel.map(row=>`<tr>
+      <td><span class="badge ${stageBadge(row.stage)}">${esc(row.stage)}</span></td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="2" style="color:#8b949e">No managed pattern adoption rows yet</td></tr>';
+    const outcomeRows=adoption.pattern_outcomes_by_day||[];
+    document.getElementById('managed-pattern-outcomes-tbody').innerHTML=outcomeRows.map(row=>`<tr>
+      <td class="ts">${esc(row.day||'unknown')}</td>
+      <td><span class="badge ${stageBadge(row.lifecycle_stage)}">${esc(row.lifecycle_stage||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(row.policy_section||'unknown')}</span></td>
+      <td>${esc(shortSurface(row.source_surface))}</td>
+      <td>${esc(row.app_family||'unknown')}</td>
+      <td>${esc(row.workflow_phase||'unknown')}</td>
+      <td>${esc(row.category||'unknown')}</td>
+      <td><span class="badge stream">${esc(row.policy_source||'unknown')}</span></td>
+      <td class="model">${esc(row.candidate_id||'—')}</td>
+      <td class="model">${esc(row.rule_id||'—')}</td>
+      <td class="model" title="${esc(row.pattern_hash||'')}">${esc(shortHash(row.pattern_hash))}</td>
+      <td class="tokens">${(row.affected_calls||0).toLocaleString()}</td>
+      <td class="tokens">${(row.error_count||0).toLocaleString()}</td>
+      <td class="tokens">${Math.round((row.error_rate||0)*1000)/10}%</td>
+      <td class="tokens">${fmtTok(row.tokens_saved_est||0)}</td>
+      <td class="savings">${fmt(row.estimated_cost_savings_usd||0,5)}</td>
+      <td class="flags">${blockerBadges(row.safety_blocker_reasons)}</td>
+    </tr>`).join('')||'<tr><td colspan="17" style="color:#8b949e">No managed pattern outcome buckets yet</td></tr>';
+    const holdouts=adoption.holdout_comparisons||[];
+    document.getElementById('managed-pattern-holdouts-tbody').innerHTML=holdouts.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.policy_section||'unknown')}</span></td>
+      <td>${esc(shortSurface(row.source_surface))}</td>
+      <td>${esc(row.app_family||'unknown')}</td>
+      <td>${esc(row.workflow_phase||'unknown')}</td>
+      <td class="model">${esc(row.candidate_id||'—')}</td>
+      <td class="model">${esc(row.rule_id||'—')}</td>
+      <td class="model" title="${esc(row.pattern_hash||'')}">${esc(shortHash(row.pattern_hash))}</td>
+      <td class="tokens">${(row.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.canary_holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.bypassed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.errored_count||0).toLocaleString()}</td>
+      <td class="tokens">${row.applied_error_rate==null?'—':Math.round(row.applied_error_rate*1000)/10+'%'}</td>
+      <td class="tokens">${row.holdout_error_rate==null?'—':Math.round(row.holdout_error_rate*1000)/10+'%'}</td>
+      <td class="savings">${fmt(row.estimated_cost_savings_usd||0,5)}</td>
+    </tr>`).join('')||'<tr><td colspan="14" style="color:#8b949e">No canary holdout comparisons yet</td></tr>';
+    const lifecycle=adoption.lifecycle_events||[];
+    document.getElementById('managed-pattern-lifecycle-tbody').innerHTML=lifecycle.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge ${stageBadge(row.lifecycle_stage)}">${esc(row.lifecycle_stage||'unknown')}</span></td>
+      <td>${esc(row.action||'unknown')}</td>
+      <td>${esc(row.policy_section||'unknown')}</td>
+      <td>${row.ok?'<span class="badge hit">ok</span>':'<span class="badge err">failed</span>'}</td>
+      <td class="tokens">${(row.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.changed_action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.changed_file_count||0).toLocaleString()}</td>
+      <td class="flags">${row.error_type?`<span class="badge err">${esc(row.error_type)}</span>`:'<span class="badge hit">none</span>'}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No managed pattern lifecycle events yet</td></tr>';
     const health=(d.recommendation_health||{}).latest_fetch_review||{};
     const healthRows=(d.recommendation_health||{}).rows||[];
     document.getElementById('managed-health-tbody').innerHTML=healthRows.map(row=>`<tr>

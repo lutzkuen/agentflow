@@ -579,6 +579,177 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("managed-summary-tbody", html.text)
             self.assertIn("managed-health-tbody", html.text)
 
+    def test_managed_pattern_adoption_funnel_covers_outcomes_and_lifecycle(self):
+        pattern_hash = "sha256:" + ("a" * 64)
+
+        def log_pattern_call(created_at, *, status_code=200, rules=None):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=created_at,
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=10,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.003,
+                crunch_json=stable_json({
+                    "changed": True,
+                    "policy_source": "managed-recommended",
+                    "pattern_rules": {
+                        "configured_count": 1,
+                        "policy_source": "managed-recommended",
+                        "category": "tool-result",
+                        "rules": rules or [],
+                    },
+                }),
+                routing_json=stable_json({
+                    "category": "tool-result",
+                    "managed_recommendation": {
+                        "enabled": True,
+                        "status": "received",
+                        "reason": "candidate matched",
+                        "policy_source": "managed-recommended",
+                        "policy_id": "candidate-crunch-pattern",
+                        "applied": False,
+                    },
+                }),
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="private-session-id",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+
+        applied_rule = {
+            "rule_id": "managed-crunch-pattern-candidate-crunch",
+            "candidate_id": "candidate-crunch-pattern",
+            "policy_source": "managed-recommended",
+            "applied_count": 1,
+            "saved_chars": 800,
+            "matched_hashes": [pattern_hash],
+            "canary": {"enabled": True, "status": "applied", "cohort": "canary_applied", "fraction": 0.1},
+        }
+        holdout_rule = {
+            **applied_rule,
+            "applied_count": 0,
+            "saved_chars": 0,
+            "canary": {"enabled": True, "status": "holdout", "cohort": "canary_holdout", "fraction": 0.1},
+        }
+        bypass_rule = {
+            **applied_rule,
+            "applied_count": 0,
+            "saved_chars": 0,
+            "skip_reasons": [{"reason": "local-canary-safety-stop", "count": 1, "pattern_hash": pattern_hash}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"AGENTFLOW_POLICY_EVENTS_LOG": os.path.join(tmp, "policy_events.jsonl")},
+            clear=False,
+        ):
+            from agentflow_proxy.policy_events import log_policy_event
+
+            log_policy_event(
+                "fetch-review",
+                ok=True,
+                details={"source": "cli", "candidate_ids": ["candidate-crunch-pattern"], "candidate_count": 1},
+            )
+            log_policy_event(
+                "apply",
+                ok=True,
+                details={"source": "cli", "dry_run": True, "applied_sections": ["crunch"], "changed_files": []},
+            )
+            log_policy_event(
+                "rollout-actions-apply",
+                ok=True,
+                details={"source": "cli", "dry_run": False, "applied_sections": ["crunch"], "changed_action_count": 1},
+            )
+            log_policy_event(
+                "rollback",
+                ok=True,
+                details={"source": "cli", "restored_sections": ["crunch"], "changed_files": ["crunch_rules.yaml"]},
+            )
+            log_policy_event(
+                "rollout-actions-review",
+                ok=False,
+                details={"source": "cli", "error_type": "unsafe-rule-source", "action_count": 1},
+            )
+
+            log_pattern_call("2026-06-08T10:00:00+00:00", rules=[applied_rule])
+            log_pattern_call("2026-06-08T10:01:00+00:00", rules=[holdout_rule])
+            log_pattern_call("2026-06-08T10:02:00+00:00", rules=[bypass_rule])
+            log_pattern_call("2026-06-08T10:03:00+00:00", status_code=500, rules=[applied_rule])
+
+            result = asyncio.run(stats_views.stats_managed_recommendations(server.store, limit=20))
+
+        adoption = result["adoption"]
+        funnel = {row["stage"]: row["count"] for row in adoption["funnel"]}
+        self.assertEqual(adoption["schema"], "agentflow.managed_pattern_adoption.v1")
+        self.assertGreaterEqual(funnel["received"], 4)
+        self.assertEqual(funnel["reviewed"], 1)
+        self.assertEqual(funnel["dry_run"], 1)
+        self.assertGreaterEqual(funnel["canary_applied"], 1)
+        self.assertEqual(funnel["canary_holdout"], 1)
+        self.assertEqual(funnel["bypassed"], 1)
+        self.assertGreaterEqual(funnel["errored"], 1)
+        self.assertEqual(funnel["rolled_back"], 1)
+        self.assertEqual(funnel["rejected"], 2)
+        self.assertFalse(adoption["privacy"]["raw_prompts_included"])
+        self.assertFalse(adoption["privacy"]["tool_payloads_included"])
+        self.assertFalse(adoption["privacy"]["local_session_ids_included"])
+
+        outcome = next(row for row in adoption["pattern_outcomes_by_day"] if row["lifecycle_stage"] == "canary_applied")
+        self.assertEqual(outcome["day"], "2026-06-08")
+        self.assertEqual(outcome["policy_section"], "crunch")
+        self.assertEqual(outcome["source_surface"], "anthropic_messages")
+        self.assertEqual(outcome["app_family"], "claude_code")
+        self.assertEqual(outcome["workflow_phase"], "tool-result")
+        self.assertEqual(outcome["category"], "tool-result")
+        self.assertEqual(outcome["policy_source"], "managed-recommended")
+        self.assertEqual(outcome["candidate_id"], "candidate-crunch-pattern")
+        self.assertEqual(outcome["rule_id"], "managed-crunch-pattern-candidate-crunch")
+        self.assertEqual(outcome["pattern_hash"], pattern_hash)
+        self.assertEqual(outcome["tokens_saved_est"], 200)
+
+        blockers = {row["value"]: row["count"] for row in adoption["top_safety_blockers"]}
+        self.assertEqual(blockers["local-canary-safety-stop"], 1)
+        comparison = adoption["holdout_comparisons"][0]
+        self.assertEqual(comparison["canary_applied_count"], 1)
+        self.assertEqual(comparison["canary_holdout_count"], 1)
+        self.assertEqual(comparison["bypassed_count"], 1)
+        self.assertEqual(comparison["errored_count"], 1)
+        lifecycle_stages = {row["lifecycle_stage"] for row in adoption["lifecycle_events"]}
+        self.assertIn("reviewed", lifecycle_stages)
+        self.assertIn("dry_run", lifecycle_stages)
+        self.assertIn("applied", lifecycle_stages)
+        json.dumps(result)
+
+    def test_dashboard_managed_tab_renders_pattern_adoption_tables(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn("Managed pattern adoption funnel", html)
+        self.assertIn("Managed pattern outcomes by day", html)
+        self.assertIn("Managed pattern holdout comparison", html)
+        self.assertIn("Managed pattern lifecycle events", html)
+        self.assertIn("managed-pattern-funnel-tbody", html)
+        self.assertIn("managed-pattern-outcomes-tbody", html)
+        self.assertIn("managed-pattern-holdouts-tbody", html)
+        self.assertIn("managed-pattern-lifecycle-tbody", html)
+        self.assertIn("adoption.pattern_outcomes_by_day", html)
+
     def test_full_stats_unifies_source_surface_accounting_for_mixed_traffic(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
