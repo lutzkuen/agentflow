@@ -1070,6 +1070,238 @@ def estimate_tokens_from_text_chars(chars: Any) -> int:
     return max(1, int(char_count / TOKEN_CHARS))
 
 
+def _old_context_summary_skip_reason(meta: dict[str, Any]) -> str:
+    reason = str(meta.get("reason") or "unknown")
+    if reason == "eligible-context-too-small" and _as_int(meta.get("eligible_turns")) <= 0:
+        return "tool/protocol-context-only"
+    return reason
+
+
+def _old_context_summary_tokens_saved(meta: dict[str, Any], *, planned: bool) -> int:
+    tokens = _as_int(meta.get("tokens_saved_est"))
+    if tokens > 0:
+        return tokens
+    if not planned:
+        return 0
+    try:
+        from agentflow_proxy import crunch
+
+        max_summary_chars = _as_int(getattr(crunch, "OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS", 4000))
+    except Exception:
+        max_summary_chars = 4000
+    eligible_chars = _as_int(meta.get("eligible_chars"))
+    if eligible_chars <= max_summary_chars:
+        return 0
+    return max(0, (eligible_chars - max_summary_chars) // TOKEN_CHARS)
+
+
+def _old_context_summary_call_cost(meta: dict[str, Any], *, planned: bool) -> tuple[int, int, float]:
+    recorded_cost = _as_float(meta.get("summary_cost_est_usd"))
+    recorded_input = _as_int(meta.get("summary_input_tokens"))
+    recorded_output = _as_int(meta.get("summary_output_tokens"))
+    if recorded_cost > 0 or recorded_input > 0 or recorded_output > 0:
+        return recorded_input, recorded_output, recorded_cost
+    if not planned:
+        return 0, 0, 0.0
+    try:
+        from agentflow_proxy import crunch
+
+        model = str(getattr(crunch, "OLD_CONTEXT_SUMMARY_MODEL", "claude-haiku-4-5-20251001"))
+        max_summary_chars = _as_int(getattr(crunch, "OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS", 4000))
+    except Exception:
+        model = "claude-haiku-4-5-20251001"
+        max_summary_chars = 4000
+    input_tokens = estimate_tokens_from_text_chars(meta.get("eligible_chars"))
+    output_tokens = max(256, max_summary_chars // TOKEN_CHARS)
+    return input_tokens, output_tokens, estimate_cost(model, input_tokens, output_tokens, provider="anthropic") or 0.0
+
+
+async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
+    conn = store_obj.conn
+    today_start = _utc_today_start_iso()
+    rows = [
+        dict(row)
+        for row in conn.execute("""
+            select created_at,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(routed_model, requested_model) as model,
+                   coalesce(actual_input_tokens, input_tokens_est, 0) as input_tokens,
+                   coalesce(cache_read_input_tokens, 0) as cache_read_tokens,
+                   crunch_json
+            from calls
+            where crunch_json is not null
+        """).fetchall()
+    ]
+
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    model_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    observed_rows = 0
+    today_observed_rows = 0
+    eligible_count = 0
+    today_eligible_count = 0
+    ineligible_count = 0
+    skipped_count = 0
+    planned_count = 0
+    applied_count = 0
+    today_applied_count = 0
+    summary_created_count = 0
+    summary_cache_hits = 0
+    summary_empty_count = 0
+    error_count = 0
+    gross_saved_tokens = 0
+    today_gross_saved_tokens = 0
+    gross_savings_usd = 0.0
+    today_gross_savings_usd = 0.0
+    summary_input_tokens = 0
+    summary_output_tokens = 0
+    summary_cost_usd = 0.0
+    today_summary_cost_usd = 0.0
+
+    for row in rows:
+        crunch = _json_obj(row.get("crunch_json"))
+        meta = crunch.get("old_context_summarization")
+        if not isinstance(meta, dict) or not meta.get("status"):
+            continue
+        observed_rows += 1
+        is_today = str(row.get("created_at") or "") >= today_start
+        if is_today:
+            today_observed_rows += 1
+        status = str(meta.get("status") or "unknown")
+        reason = str(meta.get("reason") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status == "skipped":
+            skipped_count += 1
+            normalized_reason = _old_context_summary_skip_reason(meta)
+            reason_counts[normalized_reason] = reason_counts.get(normalized_reason, 0) + 1
+        elif reason and reason != "eligible":
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+        is_planned = status == "planned"
+        is_applied = status == "applied"
+        is_eligible = is_planned or is_applied
+        if is_eligible:
+            eligible_count += 1
+            if is_today:
+                today_eligible_count += 1
+        else:
+            ineligible_count += 1
+        if is_planned:
+            planned_count += 1
+        if is_applied:
+            applied_count += 1
+            if is_today:
+                today_applied_count += 1
+        if reason == "summary-created":
+            summary_created_count += 1
+        if bool(meta.get("summary_cache_hit")):
+            summary_cache_hits += 1
+        if reason == "summary-empty":
+            summary_empty_count += 1
+        if _as_int(meta.get("summary_status_code")) >= 400 or meta.get("summary_error"):
+            error_count += 1
+
+        tokens_saved = _old_context_summary_tokens_saved(meta, planned=is_planned)
+        input_tokens, output_tokens, summary_cost = _old_context_summary_call_cost(meta, planned=is_planned)
+        provider = str(row.get("provider") or "anthropic")
+        model = str(row.get("model") or "unknown")
+        gross_savings = estimate_blended_input_savings(
+            model,
+            tokens_saved=tokens_saved,
+            input_tokens=_as_int(row.get("input_tokens")),
+            cache_read_tokens=_as_int(row.get("cache_read_tokens")),
+            provider=provider,
+        ) or 0.0
+        gross_saved_tokens += tokens_saved
+        gross_savings_usd += gross_savings
+        summary_input_tokens += input_tokens
+        summary_output_tokens += output_tokens
+        summary_cost_usd += summary_cost
+        if is_today:
+            today_gross_saved_tokens += tokens_saved
+            today_gross_savings_usd += gross_savings
+            today_summary_cost_usd += summary_cost
+
+        model_key = (provider, model)
+        model_bucket = model_rows.setdefault(model_key, {
+            "provider": provider,
+            "model": model,
+            "observed_rows": 0,
+            "eligible_rows": 0,
+            "applied_rows": 0,
+            "gross_saved_tokens": 0,
+            "gross_savings_usd": 0.0,
+            "summary_cost_usd": 0.0,
+            "net_savings_usd": 0.0,
+        })
+        model_bucket["observed_rows"] += 1
+        if is_eligible:
+            model_bucket["eligible_rows"] += 1
+        if is_applied:
+            model_bucket["applied_rows"] += 1
+        model_bucket["gross_saved_tokens"] += tokens_saved
+        model_bucket["gross_savings_usd"] += gross_savings
+        model_bucket["summary_cost_usd"] += summary_cost
+        model_bucket["net_savings_usd"] += gross_savings - summary_cost
+
+    net_savings_usd = gross_savings_usd - summary_cost_usd
+    today_net_savings_usd = today_gross_savings_usd - today_summary_cost_usd
+    model_breakdown = []
+    for bucket in model_rows.values():
+        bucket["gross_savings_usd"] = round(float(bucket["gross_savings_usd"]), 6)
+        bucket["summary_cost_usd"] = round(float(bucket["summary_cost_usd"]), 6)
+        bucket["net_savings_usd"] = round(float(bucket["net_savings_usd"]), 6)
+        model_breakdown.append(bucket)
+    model_breakdown.sort(key=lambda item: (item["net_savings_usd"], item["eligible_rows"]), reverse=True)
+
+    return {
+        "schema": "agentflow.old_context_summarization_opportunity.v1",
+        "generated_at": utc_now(),
+        "summary": {
+            "observed_rows": observed_rows,
+            "today_observed_rows": today_observed_rows,
+            "eligible_rows": eligible_count,
+            "today_eligible_rows": today_eligible_count,
+            "ineligible_rows": ineligible_count,
+            "skipped_rows": skipped_count,
+            "planned_rows": planned_count,
+            "applied_rows": applied_count,
+            "today_applied_rows": today_applied_count,
+            "summary_created_rows": summary_created_count,
+            "cached_summary_hit_rows": summary_cache_hits,
+            "summary_empty_rows": summary_empty_count,
+            "error_rows": error_count,
+            "eligibility_rate": round(eligible_count / observed_rows, 4) if observed_rows else 0.0,
+            "applied_rate": round(applied_count / observed_rows, 4) if observed_rows else 0.0,
+            "summary_cache_hit_rate": round(summary_cache_hits / applied_count, 4) if applied_count else 0.0,
+            "gross_saved_tokens_est": int(gross_saved_tokens),
+            "today_gross_saved_tokens_est": int(today_gross_saved_tokens),
+            "summary_model_input_tokens_est": int(summary_input_tokens),
+            "summary_model_output_tokens_est": int(summary_output_tokens),
+            "gross_savings_usd": round(gross_savings_usd, 6),
+            "today_gross_savings_usd": round(today_gross_savings_usd, 6),
+            "summary_model_cost_usd": round(summary_cost_usd, 6),
+            "today_summary_model_cost_usd": round(today_summary_cost_usd, 6),
+            "net_savings_usd": round(net_savings_usd, 6),
+            "today_net_savings_usd": round(today_net_savings_usd, 6),
+            "payback_ratio": round(gross_savings_usd / summary_cost_usd, 4) if summary_cost_usd > 0 else None,
+            "today_payback_ratio": round(today_gross_savings_usd / today_summary_cost_usd, 4) if today_summary_cost_usd > 0 else None,
+        },
+        "status_breakdown": _count_breakdown(status_counts),
+        "skip_reason_breakdown": _count_breakdown(reason_counts),
+        "model_breakdown": model_breakdown,
+        "privacy": {
+            "metadata_only": True,
+            "raw_old_context_included": False,
+            "generated_summaries_included": False,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "file_contents_included": False,
+        },
+    }
+
+
 def _codex_turn_estimates(input_text_chars: Any, result_chars: Any) -> dict[str, Any]:
     input_tokens = estimate_tokens_from_text_chars(input_text_chars)
     output_tokens = estimate_tokens_from_text_chars(result_chars)
@@ -5652,6 +5884,7 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
 async def stats_full(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
     today_start = _utc_today_start_iso()
+    old_context_summary_opportunity = await stats_old_context_summary(store_obj)
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -6329,6 +6562,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
         "cache_replayability": cache_replayability,
+        "old_context_summary_opportunity": old_context_summary_opportunity,
         "pattern_decision_breakdown": pattern_decision_breakdown,
         "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
         "error_breakdown": error_breakdown,
@@ -7530,6 +7764,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Old-context summarization opportunity</h2>
+  <table data-table-id="old-context-summary" data-filter-label="Filter old-context summarization opportunity">
+    <thead><tr>
+      <th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Cache hits</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Gross saved tokens</th><th data-sort-type="money">Gross savings</th><th data-sort-type="money">Summary cost</th><th data-sort-type="money">Net savings</th><th data-sort-type="number">Payback</th><th data-sort-type="text">Top skips</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="old-context-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Old-context summarization by model</h2>
+  <table data-table-id="old-context-summary-models" data-filter-label="Filter old-context summary model buckets">
+    <thead><tr>
+      <th data-sort-type="text">Provider</th><th data-sort-type="text">Model</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Gross saved tokens</th><th data-sort-type="money">Gross savings</th><th data-sort-type="money">Summary cost</th><th data-sort-type="money">Net savings</th>
+    </tr></thead>
+    <tbody id="old-context-summary-models-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Context plateaus today</h2>
   <table data-table-id="context-plateaus" data-filter-label="Filter context plateaus">
     <thead><tr>
@@ -8609,10 +8861,12 @@ async function refreshManaged(){
 
 async function refreshSessions(){
   try{
-    const r=await fetch('/agentflow/stats/sessions');
+    const [r,full]=await Promise.all([fetch('/agentflow/stats/sessions'),loadFullStats()]);
     const d=await r.json();
     const tb=document.getElementById('sess-tbody');
     const pb=document.getElementById('plateau-tbody');
+    const ob=document.getElementById('old-context-summary-tbody');
+    const omb=document.getElementById('old-context-summary-models-tbody');
     const rows=d.sessions||[];
     tb.innerHTML=rows.map(row=>`<tr>
       <td class="flags"><span class="badge provider">${esc(shortSurface(row.source_surface))}</span></td>
@@ -8653,6 +8907,36 @@ async function refreshSessions(){
       <td class="tokens">${fmtTok(row.crunch_saved_chars||0)}</td>
       <td>${row.flagged?'<span class="badge err">flagged</span>':'<span class="badge miss">watch</span>'}</td>
     </tr>`).join('')||'<tr><td colspan="10" style="color:#8b949e">No repeated large-context plateaus today</td></tr>';
+    const oldContext=full.old_context_summary_opportunity||{};
+    const oldSummary=oldContext.summary||{};
+    const skipBadges=compactBreakdown(oldContext.skip_reason_breakdown,'none');
+    const privacy=oldContext.privacy||{};
+    ob.innerHTML=`<tr>
+      <td class="tokens">${(oldSummary.observed_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(oldSummary.eligible_rows||0).toLocaleString()} <span class="badge miss">${Math.round((oldSummary.eligibility_rate||0)*100)}%</span></td>
+      <td class="tokens">${(oldSummary.applied_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(oldSummary.cached_summary_hit_rows||0).toLocaleString()}</td>
+      <td>${oldSummary.error_rows?`<span class="badge err">${oldSummary.error_rows.toLocaleString()}</span>`:'<span class="badge hit">0</span>'}</td>
+      <td class="tokens">${fmtTok(oldSummary.gross_saved_tokens_est||0)}</td>
+      <td class="savings">${fmt(oldSummary.gross_savings_usd||0,6)}</td>
+      <td class="cost">${fmt(oldSummary.summary_model_cost_usd||0,6)}</td>
+      <td class="${(oldSummary.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(oldSummary.net_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtRatio(oldSummary.payback_ratio)}</td>
+      <td class="flags">${skipBadges}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">raw context omitted</span> <span class="badge hit">summaries omitted</span></td>
+    </tr>`;
+    const modelRows=oldContext.model_breakdown||[];
+    omb.innerHTML=modelRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span></td>
+      <td class="model">${esc(shortModel(row.model||'unknown'))}</td>
+      <td class="tokens">${(row.observed_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.eligible_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.applied_rows||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.gross_saved_tokens||0)}</td>
+      <td class="savings">${fmt(row.gross_savings_usd||0,6)}</td>
+      <td class="cost">${fmt(row.summary_cost_usd||0,6)}</td>
+      <td class="${(row.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.net_savings_usd||0,6)}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No old-context summarization metadata recorded yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }

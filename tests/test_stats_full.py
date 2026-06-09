@@ -1854,6 +1854,147 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(summary["old_context_summary_savings_usd"], 0.003, places=6)
         self.assertAlmostEqual(summary["today_old_context_summary_net_usd"], 0.0028, places=6)
 
+    def test_old_context_summary_opportunity_counts_eligible_skips_and_net_projection(self):
+        rows = [
+            {
+                "status": "planned",
+                "reason": "eligible",
+                "eligible_turns": 4,
+                "eligible_chars": 24_000,
+            },
+            {
+                "status": "applied",
+                "reason": "summary-created",
+                "summary_cache_hit": False,
+                "summary_input_tokens": 1_000,
+                "summary_output_tokens": 120,
+                "summary_cost_est_usd": 0.0004,
+                "tokens_saved_est": 2_000,
+            },
+            {
+                "status": "skipped",
+                "reason": "disabled",
+            },
+            {
+                "status": "skipped",
+                "reason": "eligible-context-too-small",
+                "eligible_turns": 0,
+                "eligible_chars": 0,
+            },
+        ]
+        for meta in rows:
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=8_000,
+                output_tokens_est=0,
+                actual_input_tokens=8_000,
+                actual_output_tokens=0,
+                cost_est_usd=0.0,
+                cost_baseline_usd=0.0,
+                crunch_json=stable_json({
+                    "changed": False,
+                    "old_context_summarization": meta,
+                }),
+                routing_json=None,
+                cache_json=None,
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="session-summary-opportunity",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(stats_views.stats_old_context_summary(server.store))
+        full = asyncio.run(stats_views.stats_full(server.store))
+        summary = result["summary"]
+
+        self.assertEqual(summary["observed_rows"], 4)
+        self.assertEqual(summary["eligible_rows"], 2)
+        self.assertEqual(summary["ineligible_rows"], 2)
+        self.assertEqual(summary["planned_rows"], 1)
+        self.assertEqual(summary["applied_rows"], 1)
+        self.assertEqual(summary["summary_created_rows"], 1)
+        self.assertGreater(summary["gross_saved_tokens_est"], 0)
+        self.assertGreater(summary["gross_savings_usd"], 0)
+        self.assertGreater(summary["summary_model_cost_usd"], 0)
+        self.assertGreater(summary["net_savings_usd"], 0)
+        self.assertGreater(summary["payback_ratio"], 1)
+        self.assertIn("old_context_summary_opportunity", full)
+        self.assertFalse(result["privacy"]["raw_old_context_included"])
+        self.assertFalse(result["privacy"]["generated_summaries_included"])
+        reasons = {row["value"]: row["count"] for row in result["skip_reason_breakdown"]}
+        self.assertEqual(reasons["disabled"], 1)
+        self.assertEqual(reasons["tool/protocol-context-only"], 1)
+
+    def test_old_context_summary_endpoint_and_dashboard_panel_are_read_only_metadata(self):
+        secret = "raw old context must stay out"
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=8_000,
+            output_tokens_est=0,
+            actual_input_tokens=8_000,
+            actual_output_tokens=0,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({
+                "changed": False,
+                "old_context_summarization": {
+                    "status": "skipped",
+                    "reason": "disabled",
+                    "debug_context": secret,
+                },
+            }),
+            routing_json=None,
+            cache_json=None,
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-summary-route",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=server.store.path,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        with TestClient(app) as client:
+            payload = client.get("/agentflow/stats/old-context-summary").json()
+            html = client.get("/agentflow/dashboard").text
+
+        self.assertEqual(payload["summary"]["skipped_rows"], 1)
+        self.assertIn("Old-context summarization opportunity", html)
+        self.assertIn("old-context-summary-tbody", html)
+        self.assertIn("raw context omitted", html)
+        rendered = json.dumps(payload) + html
+        self.assertNotIn(secret, rendered)
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+
     def test_cache_decision_breakdown_groups_status_reason_and_hit_type(self):
         rows = [
             {"status": "skipped", "reason": "streaming", "policy_source": "local-default"},
