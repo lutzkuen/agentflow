@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import agentflow_proxy.router as router_module
-from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, route_model
+from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
 
 
 class RouterTest(unittest.TestCase):
@@ -25,6 +25,8 @@ class RouterTest(unittest.TestCase):
 
         self.assertEqual(routed, HAIKU_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
+        self.assertEqual(meta["workflow_phase"], "tool-execution")
+        self.assertEqual(meta["workflow_phase_reason"], "last-user-tool-result")
         self.assertEqual(meta["policy_source"], "local-default")
 
     def test_thinking_tool_result_keeps_requested_model(self):
@@ -43,6 +45,8 @@ class RouterTest(unittest.TestCase):
 
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
+        self.assertEqual(meta["workflow_phase"], "thinking")
+        self.assertEqual(meta["workflow_phase_reason"], "thinking-flag-or-history")
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
         self.assertEqual(meta["policy_source"], "local-default")
 
@@ -68,7 +72,80 @@ class RouterTest(unittest.TestCase):
 
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
+        self.assertEqual(meta["workflow_phase"], "thinking")
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
+
+    def test_workflow_phase_classifier_identifies_planning_turn(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "Inspect the project and plan the fix."}],
+        }
+
+        phase = classify_workflow_phase(body, "tool-light")
+
+        self.assertEqual(phase["workflow_phase"], "planning")
+        self.assertEqual(phase["workflow_phase_reason"], "early-tool-capable-user-turn")
+        self.assertEqual(phase["workflow_phase_confidence"], "medium")
+
+    def test_workflow_phase_classifier_identifies_verification_followup(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [
+                {"role": "user", "content": "Implement the parser."},
+                {"role": "assistant", "content": "Done."},
+                {"role": "user", "content": "Run the tests and verify the failure is fixed."},
+            ],
+        }
+
+        phase = classify_workflow_phase(body, "chat")
+
+        self.assertEqual(phase["workflow_phase"], "verification")
+        self.assertEqual(phase["workflow_phase_reason"], "verification-intent-text")
+
+    def test_workflow_phase_classifier_identifies_short_summary(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [
+                {"role": "user", "content": "Make the change."},
+                {"role": "assistant", "content": "Changed the files."},
+                {"role": "user", "content": "Summarize the result."},
+            ],
+        }
+
+        phase = classify_workflow_phase(body, "short-completion")
+
+        self.assertEqual(phase["workflow_phase"], "summary")
+        self.assertEqual(phase["workflow_phase_reason"], "summary-intent-text")
+
+    def test_workflow_phase_classifier_keeps_simple_chat_distinct(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "What does this setting do?"}],
+        }
+
+        phase = classify_workflow_phase(body, "chat")
+
+        self.assertEqual(phase["workflow_phase"], "chat")
+        self.assertEqual(phase["workflow_phase_reason"], "non-tool-chat-category")
+
+    def test_workflow_phase_classifier_returns_unknown_without_messages(self):
+        phase = classify_workflow_phase({"model": SONNET_DEFAULT}, None)
+
+        self.assertEqual(phase["workflow_phase"], "unknown")
+        self.assertEqual(phase["workflow_phase_reason"], "missing-messages")
+
+    def test_phase_metadata_does_not_change_existing_routing_decision(self):
+        body = {
+            "model": SONNET_DEFAULT,
+            "messages": [{"role": "user", "content": "a" * 10000}],
+        }
+
+        routed, meta = route_model(body)
+
+        self.assertEqual(routed, SONNET_DEFAULT)
+        self.assertEqual(meta["reason"], "keep requested model")
+        self.assertEqual(meta["workflow_phase"], "chat")
 
     def test_manual_routing_source_reported_for_thinking_keep(self):
         with TemporaryDirectory() as tmp:

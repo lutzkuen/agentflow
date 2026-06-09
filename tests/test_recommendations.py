@@ -149,6 +149,9 @@ class RecommendationTest(unittest.TestCase):
             "text_chars": 1200,
             "has_tools": False,
             "category": "chat",
+            "workflow_phase": "verification",
+            "workflow_phase_reason": "verification-intent-text",
+            "workflow_phase_confidence": "medium",
             "policy_source": "local-default",
             "command": "raw command text",
             "tenant_id": "tenant-secret",
@@ -192,6 +195,13 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(pattern_features["hash_basis"], "normalized-structure-and-size-buckets")
         self.assertEqual(pattern_features["text_bucket"], "lt_2k_chars")
         self.assertEqual(pattern_features["token_bucket"], "lt_1k_tokens")
+        self.assertEqual(pattern_features["workflow_phase"], "verification")
+        self.assertEqual(FakeAsyncClient.last_json["input_features"]["workflow_phase"], "verification")
+        self.assertEqual(
+            FakeAsyncClient.last_json["input_features"]["workflow_phase_reason"],
+            "verification-intent-text",
+        )
+        self.assertEqual(FakeAsyncClient.last_json["tool_features"]["workflow_phase"], "verification")
         self.assertEqual(pattern_features["local_decision_status"], "routing:skipped|crunch:skipped|cache:miss")
         self.assertTrue(pattern_features["pattern_hash"].startswith("sha256:"))
         self.assertEqual(pattern_features["pattern_hash"], pattern_features["normalized_pattern_hash"])

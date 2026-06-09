@@ -79,6 +79,120 @@ def categorize_request(body: dict[str, Any]) -> str:
     return "chat"
 
 
+def _message_content_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    content = message.get("content")
+    if isinstance(content, list):
+        return [block for block in content if isinstance(block, dict)]
+    return []
+
+
+def _last_user_message(messages: list[Any]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            return message
+    return None
+
+
+def _last_user_text(message: dict[str, Any] | None) -> str:
+    if not isinstance(message, dict):
+        return ""
+    return extract_text(message.get("content"))
+
+
+def _assistant_tool_use_seen(messages: list[Any]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if any(block.get("type") == "tool_use" for block in _message_content_blocks(message)):
+            return True
+    return False
+
+
+def classify_workflow_phase(body: dict[str, Any], category: str | None = None) -> dict[str, str]:
+    """Classify Anthropic workflow phase using metadata-only request shape signals."""
+    messages = body.get("messages") or []
+    if not isinstance(messages, list) or not messages:
+        return {
+            "workflow_phase": "unknown",
+            "workflow_phase_reason": "missing-messages",
+            "workflow_phase_confidence": "low",
+        }
+
+    category = category or categorize_request(body)
+    text_chars = len(extract_text(body))
+    msg_count = len([message for message in messages if isinstance(message, dict)])
+    last_user = _last_user_message(messages)
+    last_user_blocks = _message_content_blocks(last_user or {})
+    last_user_text = _last_user_text(last_user).lower()
+    last_user_block_types = {
+        str(block.get("type") or "")
+        for block in last_user_blocks
+        if isinstance(block.get("type"), str)
+    }
+
+    if uses_thinking(body):
+        return {
+            "workflow_phase": "thinking",
+            "workflow_phase_reason": "thinking-flag-or-history",
+            "workflow_phase_confidence": "high",
+        }
+
+    if "tool_result" in last_user_block_types:
+        return {
+            "workflow_phase": "tool-execution",
+            "workflow_phase_reason": "last-user-tool-result",
+            "workflow_phase_confidence": "high",
+        }
+
+    summary_terms = ("summary", "summarize", "summarise", "recap", "final answer", "report back")
+    if any(term in last_user_text for term in summary_terms):
+        return {
+            "workflow_phase": "summary",
+            "workflow_phase_reason": "summary-intent-text",
+            "workflow_phase_confidence": "medium",
+        }
+    if category == "short-completion" and msg_count > 2 and text_chars < 2000:
+        return {
+            "workflow_phase": "summary",
+            "workflow_phase_reason": "short-late-conversation",
+            "workflow_phase_confidence": "medium",
+        }
+
+    verification_terms = ("verify", "verification", "test", "tests", "failing", "failure", "error", "regression")
+    if any(term in last_user_text for term in verification_terms):
+        return {
+            "workflow_phase": "verification",
+            "workflow_phase_reason": "verification-intent-text",
+            "workflow_phase_confidence": "medium",
+        }
+    if category == "code-gen":
+        return {
+            "workflow_phase": "verification",
+            "workflow_phase_reason": "code-context",
+            "workflow_phase_confidence": "low",
+        }
+
+    if has_tools(body) and msg_count <= 2 and not _assistant_tool_use_seen(messages):
+        return {
+            "workflow_phase": "planning",
+            "workflow_phase_reason": "early-tool-capable-user-turn",
+            "workflow_phase_confidence": "medium",
+        }
+
+    if category == "chat":
+        return {
+            "workflow_phase": "chat",
+            "workflow_phase_reason": "non-tool-chat-category",
+            "workflow_phase_confidence": "medium",
+        }
+
+    return {
+        "workflow_phase": "unknown",
+        "workflow_phase_reason": f"category-{category or 'unknown'}",
+        "workflow_phase_confidence": "low",
+    }
+
+
 def uses_thinking(body: dict[str, Any]) -> bool:
     if body.get("effort"):
         return True
@@ -150,14 +264,25 @@ _TIER_MAP = {"haiku": HAIKU_DEFAULT, "sonnet": SONNET_DEFAULT, "opus": OPUS_DEFA
 
 def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
-    if not ROUTING_ENABLED:
-        return requested, {"enabled": False, "requested_model": requested, "routed_model": requested, "reason": "routing disabled", "policy_source": "local-default"}
-
-    requested_l = requested.lower()
     text_chars = len(extract_text(body))
     tools = has_tools(body)
     max_tokens = body.get("max_tokens")  # None when caller didn't set it
     category = categorize_request(body)
+    phase_meta = classify_workflow_phase(body, category)
+    if not ROUTING_ENABLED:
+        return requested, {
+            "enabled": False,
+            "requested_model": requested,
+            "routed_model": requested,
+            "reason": "routing disabled",
+            "text_chars": text_chars,
+            "has_tools": tools,
+            "category": category,
+            **phase_meta,
+            "policy_source": "local-default",
+        }
+
+    requested_l = requested.lower()
 
     if uses_thinking(body):
         return requested, {
@@ -168,6 +293,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "text_chars": text_chars,
             "has_tools": tools,
             "category": category,
+            **phase_meta,
             "policy_source": ROUTING_RULES_SOURCE,
         }
 
@@ -212,6 +338,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "text_chars": text_chars,
             "has_tools": tools,
             "category": category,
+            **phase_meta,
             "policy_source": ROUTING_RULES_SOURCE,
         }
 
@@ -223,6 +350,7 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "text_chars": text_chars,
         "has_tools": tools,
         "category": category,
+        **phase_meta,
         "policy_source": ROUTING_RULES_SOURCE,
     }
 

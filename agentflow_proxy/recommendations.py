@@ -506,6 +506,8 @@ def build_optimization_unit(
     app_family = _app_family(provider, requested_model, path)
     candidate_target_model = routed_model if routed_model else None
     replayability_level = "features_only"
+    workflow_phase = routing_meta.get("workflow_phase") or category or routing_meta.get("category")
+    workflow_phase_reason = routing_meta.get("workflow_phase_reason")
     pattern_features = _pattern_features(
         source_surface=source_surface,
         granularity=granularity,
@@ -513,7 +515,7 @@ def build_optimization_unit(
         requested_model=requested_model,
         candidate_target_model=candidate_target_model,
         category=category or routing_meta.get("category"),
-        workflow_phase=category or routing_meta.get("category"),
+        workflow_phase=workflow_phase,
         text_chars=text_chars,
         input_tokens_est=input_tokens_est,
         has_tools=has_tools,
@@ -534,6 +536,9 @@ def build_optimization_unit(
             "path": path,
             "stream": bool(stream),
             "category": category or routing_meta.get("category"),
+            "workflow_phase": workflow_phase,
+            "workflow_phase_reason": workflow_phase_reason,
+            "workflow_phase_confidence": routing_meta.get("workflow_phase_confidence"),
             "text_bucket": pattern_features["text_bucket"],
             "input_token_bucket": pattern_features["token_bucket"],
             "text_chars": text_chars,
@@ -554,6 +559,7 @@ def build_optimization_unit(
         "tool_features": {
             "has_tools": has_tools,
             "category": category or routing_meta.get("category"),
+            "workflow_phase": workflow_phase,
             "thinking_history_stripped": routing_meta.get("thinking_history_stripped"),
             "stripped_params": routing_meta.get("stripped_params") or [],
         },
