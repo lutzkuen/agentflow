@@ -43,6 +43,65 @@ _POLICY_SECTION_FILES = {
     "cache": "cache_rules.yaml",
 }
 _SAFE_POLICY_SOURCES = {"managed-recommended"}
+_PATTERN_ACTION_VALIDATION_DETAIL_SCHEMA = "agentflow.pattern_rollout_action_family_validation.v1"
+_PATTERN_FAMILY_ALIASES = {
+    "tool-result": "tool_results",
+    "tool_results": "tool_results",
+    "tool_result": "tool_results",
+    "tool-results": "tool_results",
+    "diff": "diffs",
+    "diffs": "diffs",
+    "generated-artifact": "generated_artifacts",
+    "generated-artifacts": "generated_artifacts",
+    "generated_artifact": "generated_artifacts",
+    "generated_artifacts": "generated_artifacts",
+    "tabular": "tabular_data",
+    "tabular-data": "tabular_data",
+    "tabular_data": "tabular_data",
+    "terminal-log": "terminal_logs",
+    "terminal-logs": "terminal_logs",
+    "terminal_log": "terminal_logs",
+    "terminal_logs": "terminal_logs",
+    "cacheability": "cacheability",
+    "cacheable": "cacheability",
+}
+_PATTERN_FAMILY_SECTIONS = {
+    "tool_results": {"crunch", "cache"},
+    "diffs": {"crunch", "cache"},
+    "generated_artifacts": {"crunch", "cache"},
+    "tabular_data": {"crunch", "cache"},
+    "terminal_logs": {"crunch"},
+    "cacheability": {"cache"},
+}
+_PATTERN_HOLDOUT_UNITS = {
+    "request_fingerprint",
+    "source_hash",
+    "pattern_hash",
+    "session_id_hash",
+    "traffic_fingerprint",
+    "optimization_unit_id",
+}
+_LOSSY_PATTERN_PROFILES = {
+    "aggressive",
+    "drop",
+    "drop-middle",
+    "lossy",
+    "omit",
+    "semantic",
+    "truncate",
+    "truncation",
+}
+_UNSAFE_CACHE_REPLAYABILITY_LEVELS = {
+    "current-state",
+    "current_state",
+    "live",
+    "local-state",
+    "local_state",
+    "user-specific",
+    "user_specific",
+    "workspace-state",
+    "workspace_state",
+}
 _RAW_LIKE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -375,6 +434,244 @@ def _find_rule(rules: list[Any], action: dict[str, Any]) -> tuple[int | None, di
         if rule_id_match and candidate_id_match and hash_match:
             return index, rule
     return None, None
+
+
+def _norm_text(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "-")
+
+
+def _first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalize_pattern_family(value: Any) -> str | None:
+    text = _norm_text(value).replace("_", "-")
+    if not text:
+        return None
+    if text in _PATTERN_FAMILY_ALIASES:
+        return _PATTERN_FAMILY_ALIASES[text]
+    for alias, family in _PATTERN_FAMILY_ALIASES.items():
+        if alias in text:
+            return family
+    return None
+
+
+def _pattern_family_from(*sources: Any) -> str | None:
+    keys = (
+        "module_family",
+        "pattern_family",
+        "candidate_family",
+        "family",
+        "action_family",
+        "score_family",
+    )
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            family = _normalize_pattern_family(source.get(key))
+            if family:
+                return family
+    return None
+
+
+def _rollout_action_rule_family(action: dict[str, Any], rule: dict[str, Any]) -> tuple[str | None, str | None]:
+    action_block = action.get("action") if isinstance(action.get("action"), dict) else {}
+    rule_action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+    action_family = _pattern_family_from(action, action_block)
+    rule_family = _pattern_family_from(rule, conditions, rule_action, managed)
+    return action_family or rule_family, rule_family
+
+
+def _profile_from_action(action: dict[str, Any], rule: dict[str, Any]) -> str | None:
+    action_block = action.get("action") if isinstance(action.get("action"), dict) else {}
+    rule_action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+    return _first_string(
+        action.get("policy_profile"),
+        action.get("profile"),
+        action.get("crunch_profile"),
+        action.get("cache_profile"),
+        action.get("action_profile"),
+        action_block.get("policy_profile"),
+        action_block.get("profile"),
+        rule.get("policy_profile"),
+        rule.get("profile"),
+        rule_action.get("policy_profile"),
+        rule_action.get("profile"),
+        managed.get("policy_profile"),
+        managed.get("profile"),
+    )
+
+
+def _as_string_set(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    values = value if isinstance(value, list) else [value]
+    return {_norm_text(item) for item in values if str(item or "").strip()}
+
+
+def _rule_replayability_levels(rule: dict[str, Any], action: dict[str, Any]) -> set[str]:
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    action_block = action.get("action") if isinstance(action.get("action"), dict) else {}
+    values: set[str] = set()
+    for source in (action, action_block, conditions, rule):
+        if not isinstance(source, dict):
+            continue
+        values.update(_as_string_set(source.get("replayability_level")))
+        values.update(_as_string_set(source.get("replayability_levels")))
+    return values
+
+
+def _bool_field(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _validate_rollout_thresholds(rollout: Any, *, path: str) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    if rollout is None:
+        return errors
+    if not isinstance(rollout, dict):
+        _add_error(errors, path, "expected rollout object")
+        return errors
+    unit = str(rollout.get("canary_unit") or "request_fingerprint")
+    if unit not in _PATTERN_HOLDOUT_UNITS:
+        _add_error(errors, f"{path}.canary_unit", "unsupported canary holdout unit")
+    for key in ("canary_fraction", "widening_threshold", "rollback_threshold"):
+        if key not in rollout:
+            continue
+        try:
+            number = float(rollout.get(key))
+        except (TypeError, ValueError):
+            _add_error(errors, f"{path}.{key}", "expected numeric value")
+            continue
+        if number < 0 or number > 1:
+            _add_error(errors, f"{path}.{key}", "expected number between 0 and 1")
+    if "min_outcome_samples" in rollout:
+        try:
+            samples = int(rollout.get("min_outcome_samples"))
+        except (TypeError, ValueError):
+            _add_error(errors, f"{path}.min_outcome_samples", "expected integer value")
+        else:
+            if samples < 0:
+                _add_error(errors, f"{path}.min_outcome_samples", "expected integer >= 0")
+    fields = rollout.get("local_feedback_fields")
+    if fields is not None:
+        if not isinstance(fields, list):
+            _add_error(errors, f"{path}.local_feedback_fields", "expected list")
+        else:
+            for index, item in enumerate(fields):
+                if not isinstance(item, str) or not item.strip():
+                    _add_error(errors, f"{path}.local_feedback_fields[{index}]", "expected non-empty string")
+    return errors
+
+
+def _has_marker(action: dict[str, Any]) -> bool:
+    return isinstance(action.get("marker"), str) and bool(action["marker"].strip())
+
+
+def _exactness_marker_ok(action: dict[str, Any], *, require_generated_marker: bool = False) -> bool:
+    marker = str(action.get("marker") or "")
+    if not marker.strip():
+        return False
+    exactness = _bool_field(action.get("exactness_preserving_marker"))
+    if exactness is True:
+        return True
+    if require_generated_marker:
+        return "generated" in marker.lower() or "artifact" in marker.lower()
+    return True
+
+
+def _validate_family_specific_action(
+    *,
+    action: dict[str, Any],
+    rule: dict[str, Any],
+    section: str,
+    path: str,
+) -> dict[str, Any]:
+    rule_action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    action_family, rule_family = _rollout_action_rule_family(action, rule)
+    profile = _profile_from_action(action, rule)
+    profile_key = _norm_text(profile)
+    action_type = _norm_text(rule_action.get("type") or action.get("local_action") or action.get("action_family"))
+    if not action_type:
+        action_type = "exact_cache" if section == "cache" else "shorten"
+    replayability_levels = _rule_replayability_levels(rule, action)
+    errors: list[dict[str, str]] = []
+
+    if action_family and rule_family and action_family != rule_family:
+        _add_error(errors, f"{path}.module_family", "rollout action family does not match target local rule family")
+    family = action_family or rule_family
+    if family and section not in _PATTERN_FAMILY_SECTIONS.get(family, set()):
+        _add_error(errors, f"{path}.policy_section", f"{family} actions are not supported for {section} rules")
+
+    for error in _validate_rollout_thresholds(rule.get("rollout"), path=f"{path}.target_rule.rollout"):
+        errors.append(error)
+
+    if family and profile_key in _LOSSY_PATTERN_PROFILES:
+        _add_error(errors, f"{path}.policy_profile", "lossy, semantic, or aggressive pattern profiles are not safe for local YAML rollout")
+
+    if section == "crunch":
+        if action_type not in {"shorten", "head-tail", "head_tail"}:
+            _add_error(errors, f"{path}.target_rule.action.type", "family-specific crunch rules must use a bounded shorten action")
+        if family in {"diffs", "generated_artifacts", "tabular_data", "terminal_logs"} and not _has_marker(rule_action):
+            _add_error(errors, f"{path}.target_rule.action.marker", "family-specific crunch rules require an explicit local replacement marker")
+        if family == "diffs":
+            if action_type == "omit":
+                _add_error(errors, f"{path}.target_rule.action.type", "diff crunching may not omit matched content")
+            if _bool_field(rule_action.get("preserve_diff_headers")) is False or _bool_field(rule_action.get("preserve_hunk_boundaries")) is False:
+                _add_error(errors, f"{path}.target_rule.action", "diff crunching must preserve diff headers and hunk boundaries")
+        elif family == "generated_artifacts":
+            if not _exactness_marker_ok(rule_action, require_generated_marker=True):
+                _add_error(errors, f"{path}.target_rule.action.marker", "generated artifact crunching requires an exactness-preserving generated-artifact marker")
+        elif family == "tool_results":
+            if _bool_field(rule_action.get("preserve_tool_protocol")) is False:
+                _add_error(errors, f"{path}.target_rule.action.preserve_tool_protocol", "tool-result crunching must preserve tool protocol boundaries")
+        elif family == "cacheability":
+            _add_error(errors, f"{path}.policy_section", "cacheability pattern actions can only write cache rules")
+    elif section == "cache":
+        if action_type not in {"exact_cache", "exact_cache_pattern"}:
+            _add_error(errors, f"{path}.target_rule.action.type", "family-specific cache rules must use exact cache actions")
+        if profile_key == "semantic":
+            _add_error(errors, f"{path}.policy_profile", "semantic cache profiles are not accepted for managed pattern YAML rollout")
+        if replayability_levels & _UNSAFE_CACHE_REPLAYABILITY_LEVELS:
+            _add_error(errors, f"{path}.target_rule.conditions.replayability_levels", "current-state and user-specific patterns cannot be cache-enabled by managed rollout")
+        if family == "tool_results":
+            allow_tools = _bool_field(rule_action.get("allow_tool_calls")) is True
+            safe_invalidation = _bool_field(rule_action.get("safe_invalidation")) is True or _bool_field(rule_action.get("safe_invalidation_evidence")) is True
+            if allow_tools and not safe_invalidation:
+                _add_error(errors, f"{path}.target_rule.action.safe_invalidation", "tool-result cache rules require safe invalidation evidence")
+        if family == "terminal_logs":
+            _add_error(errors, f"{path}.policy_section", "terminal-log pattern actions are not supported for cache rules")
+
+    detail = {
+        "schema": _PATTERN_ACTION_VALIDATION_DETAIL_SCHEMA,
+        "status": "rejected" if errors else "accepted",
+        "family": family,
+        "target_rule_family": rule_family,
+        "policy_section": section,
+        "policy_profile": profile,
+        "action_type": action_type,
+        "replayability_levels": sorted(replayability_levels),
+        "rollout": normalize_pattern_rollout(rule.get("rollout")),
+        "errors": errors,
+    }
+    return detail
 
 
 def _rule_rollout(rule: dict[str, Any]) -> dict[str, Any]:
@@ -1209,6 +1506,28 @@ def plan_rollout_actions(
                     "policy_source": policy_source,
                 })
                 continue
+            family_validation = _validate_family_specific_action(
+                action=action,
+                rule=rule,
+                section=section,
+                path=f"$.actions[{index}]",
+            )
+            if family_validation.get("errors"):
+                for error in family_validation.get("errors", []):
+                    if isinstance(error, dict):
+                        _add_error(errors, str(error.get("path") or f"$.actions[{index}]"), str(error.get("message") or "family-specific rollout action is invalid"))
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "rejected",
+                    "reason": "family-specific-validation-failed",
+                    "policy_section": section,
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                    "rule_id": rule.get("id") or rule.get("rule_id"),
+                    "pattern_hash": action.get("pattern_hash"),
+                    "family_validation": family_validation,
+                })
+                continue
             edit = _plan_rule_edit(rule, action)
             actions.append({
                 "path": f"$.actions[{index}]",
@@ -1228,6 +1547,7 @@ def plan_rollout_actions(
                     "policy_source": policy_source,
                     "rollout": normalize_pattern_rollout(rule.get("rollout")),
                 },
+                "family_validation": family_validation,
                 "proposed_edit": {
                     "changed": edit["changed"],
                     "disable": edit["disable"],
@@ -1337,6 +1657,14 @@ def apply_rollout_actions(
                 "confidence": planned.get("confidence"),
                 "blockers": planned.get("blockers", []),
                 "rationale": planned.get("rationale"),
+                "current_fraction": edit.get("current_fraction"),
+                "recommended_fraction": edit.get("recommended_fraction"),
+                "family_validation": {
+                    key: value
+                    for key, value in (planned.get("family_validation") or {}).items()
+                    if key in {"schema", "status", "family", "policy_section", "policy_profile", "action_type", "replayability_levels"}
+                    and value not in (None, "", [], {})
+                },
                 "reviewed_at": utc_now(),
             }
         text = yaml.safe_dump(data, sort_keys=False)

@@ -2236,6 +2236,30 @@ def _rollout_lifecycle_counts(items: list[dict[str, Any]], key: str) -> dict[str
     return dict(sorted(counts.items()))
 
 
+def _rollout_lifecycle_nested_counts(items: list[dict[str, Any]], object_key: str, key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        nested = item.get(object_key) if isinstance(item.get(object_key), dict) else {}
+        value = nested.get(key)
+        if isinstance(value, str) and value:
+            counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _rollout_lifecycle_rejection_counts(actions: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for action in actions:
+        reason = str(action.get("reason") or "")
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+        family_validation = action.get("family_validation") if isinstance(action.get("family_validation"), dict) else {}
+        for error in family_validation.get("errors") or []:
+            if isinstance(error, dict):
+                message = str(error.get("message") or "family-specific-validation-failed")
+                counts[message] = counts.get(message, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _rollout_action_id(action: dict[str, Any]) -> str:
     basis = {
         "policy_section": action.get("policy_section"),
@@ -2251,12 +2275,18 @@ def _rollout_action_id(action: dict[str, Any]) -> str:
 def _rollout_action_snapshot(action: dict[str, Any]) -> dict[str, Any]:
     edit = action.get("proposed_edit") if isinstance(action.get("proposed_edit"), dict) else {}
     current_rule = action.get("current_rule") if isinstance(action.get("current_rule"), dict) else {}
+    family_validation = action.get("family_validation") if isinstance(action.get("family_validation"), dict) else {}
     snapshot = {
         "action_id": _rollout_action_id(action),
+        "status": action.get("status"),
+        "reason": action.get("reason"),
         "target_candidate_id": action.get("target_candidate_id"),
         "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
         "policy_section": action.get("policy_section"),
         "policy_source": current_rule.get("policy_source"),
+        "pattern_family": family_validation.get("family"),
+        "policy_profile": family_validation.get("policy_profile"),
+        "family_validation_status": family_validation.get("status"),
         "pattern_hash": action.get("pattern_hash"),
         "action_type": action.get("action_type"),
         "current_fraction": edit.get("current_fraction") if edit else action.get("current_fraction"),
@@ -2316,6 +2346,9 @@ def _rollout_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str
         "action_type_counts": _rollout_lifecycle_counts(actions, "action_type"),
         "policy_section_counts": _rollout_lifecycle_counts(actions, "policy_section"),
         "local_status_counts": _rollout_lifecycle_counts(actions, "status"),
+        "pattern_family_counts": _rollout_lifecycle_nested_counts(actions, "family_validation", "family"),
+        "family_validation_status_counts": _rollout_lifecycle_nested_counts(actions, "family_validation", "status"),
+        "rejection_reason_counts": _rollout_lifecycle_rejection_counts(actions),
         "action_ids": action_ids,
         "candidate_ids": candidate_ids,
         "rule_ids": rule_ids,

@@ -2292,6 +2292,149 @@ class PolicyReloadCliTests(unittest.TestCase):
     def _pattern_hash(self):
         return "sha256:" + ("a" * 64)
 
+    def _pattern_hash_char(self, char: str):
+        return "sha256:" + (char * 64)
+
+    def _rollout_action_for_rule(
+        self,
+        *,
+        section: str,
+        rule_id: str,
+        candidate_id: str,
+        pattern_hash: str,
+        module_family: str,
+        recommended_fraction: float = 0.4,
+        policy_profile: str | None = "conservative",
+    ) -> dict:
+        action = {
+            "schema": "agentflow.pattern_rollout_action.v1",
+            "action_type": "widen",
+            "target_candidate_id": candidate_id,
+            "target_rule_id": rule_id,
+            "policy_section": section,
+            "module_family": module_family,
+            "pattern_hash": pattern_hash,
+            "current_fraction": 0.1,
+            "recommended_fraction": recommended_fraction,
+            "confidence": 0.91,
+            "rationale": "Family-specific canary outcomes are positive.",
+            "blockers": [],
+            "required_local_review": True,
+            "managed_enforced": False,
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_payloads_returned": False,
+            },
+        }
+        if policy_profile is not None:
+            action["policy_profile"] = policy_profile
+        return action
+
+    def _rollout_bundle_for_actions(self, actions: list[dict]) -> dict:
+        return {
+            "schema": "agentflow.pattern_rollout_actions.v1",
+            "generated_at": "2026-06-09T03:10:00+00:00",
+            "tenant_scope": "local-dev",
+            "filters": {"min_samples": 3},
+            "thresholds": {"min_samples": 3, "max_error_rate": 0.05},
+            "summary": {
+                "candidate_count": len(actions),
+                "action_count": len(actions),
+                "action_counts": {"widen": len(actions)},
+                "managed_enforced": False,
+                "required_local_review": True,
+            },
+            "actions": actions,
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_payloads_returned": False,
+            },
+        }
+
+    def _write_rollout_pattern_files(
+        self,
+        tmp: str,
+        *,
+        crunch_rules: list[dict] | None = None,
+        cache_rules: list[dict] | None = None,
+    ) -> dict[str, Path]:
+        paths: dict[str, Path] = {}
+        if crunch_rules is not None:
+            path = Path(tmp) / "crunch_rules.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "enabled": True,
+                        "threshold_chars": 24000,
+                        "pattern_rules": crunch_rules,
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            paths["crunch"] = path
+        if cache_rules is not None:
+            path = Path(tmp) / "cache_rules.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "exact_cache": {"enabled": True, "cache_tool_calls": False},
+                        "semantic_cache": {"enabled": False, "threshold": 0.95},
+                        "file_watch": {"enabled": True, "root": ".", "max_paths": 128},
+                        "pattern_rules": cache_rules,
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            paths["cache"] = path
+        return paths
+
+    def _family_pattern_rule(
+        self,
+        *,
+        section: str,
+        module_family: str,
+        rule_id: str,
+        candidate_id: str,
+        pattern_hash: str,
+        action: dict,
+        policy_profile: str = "conservative",
+        replayability_levels: list[str] | None = None,
+    ) -> dict:
+        conditions = {
+            "pattern_hashes": [pattern_hash],
+            "module_family": module_family,
+        }
+        if section == "crunch":
+            conditions.update({
+                "min_repeated_count": 2,
+                "keep_recent_matches": 1,
+            })
+        if replayability_levels is not None:
+            conditions["replayability_levels"] = replayability_levels
+        return {
+            "id": rule_id,
+            "enabled": True,
+            "policy_source": "managed-recommended",
+            "candidate_id": candidate_id,
+            "module_family": module_family,
+            "policy_profile": policy_profile,
+            "conditions": conditions,
+            "action": action,
+            "rollout": {
+                "schema": "agentflow.pattern_policy_rollout.v1",
+                "recommendation_mode": "canary",
+                "canary_enabled": True,
+                "canary_fraction": 0.1,
+                "canary_salt": "local-dev",
+                "canary_unit": "request_fingerprint",
+                "rollback_threshold": 0.2,
+                "widening_threshold": 0.8,
+                "min_outcome_samples": 5,
+            },
+        }
+
     def _rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False):
         action = {
             "schema": "agentflow.pattern_rollout_action.v1",
@@ -2469,6 +2612,203 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIsNone(payload["files"][0]["backup_path"])
         self.assertEqual(before, after)
         self.assertEqual(payload["actions"][0]["proposed_edit"]["rollout"]["canary_fraction"], 0.25)
+
+    def test_managed_rollout_actions_accept_family_specific_safe_actions(self):
+        specs = [
+            ("crunch", "tool_results", "b", {"type": "shorten", "head_chars": 900, "tail_chars": 700, "max_replacement_chars": 2200, "preserve_tool_protocol": True}),
+            ("crunch", "diffs", "c", {"type": "shorten", "head_chars": 1200, "tail_chars": 800, "max_replacement_chars": 2600, "marker": "[AgentFlow: diff headers and hunks preserved]", "preserve_diff_headers": True, "preserve_hunk_boundaries": True}),
+            ("crunch", "generated_artifacts", "d", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[AgentFlow: generated artifact marker preserved]", "exactness_preserving_marker": True}),
+            ("crunch", "tabular_data", "e", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[AgentFlow: tabular sample preserved]"}),
+            ("crunch", "terminal_logs", "f", {"type": "shorten", "head_chars": 800, "tail_chars": 800, "max_replacement_chars": 2200, "marker": "[AgentFlow: terminal log errors preserved]"}),
+            ("cache", "cacheability", "1", {"type": "exact_cache", "allow_tool_calls": False, "safe_invalidation": False}),
+        ]
+        actions = []
+        crunch_rules = []
+        cache_rules = []
+        for section, family, hash_char, local_action in specs:
+            pattern_hash = self._pattern_hash_char(hash_char)
+            rule_id = f"managed-{section}-{family}"
+            candidate_id = f"candidate-{section}-{family}"
+            actions.append(
+                self._rollout_action_for_rule(
+                    section=section,
+                    rule_id=rule_id,
+                    candidate_id=candidate_id,
+                    pattern_hash=pattern_hash,
+                    module_family=family,
+                    recommended_fraction=0.4,
+                )
+            )
+            rule = self._family_pattern_rule(
+                section=section,
+                module_family=family,
+                rule_id=rule_id,
+                candidate_id=candidate_id,
+                pattern_hash=pattern_hash,
+                action=local_action,
+                replayability_levels=["static_information"] if section == "cache" else None,
+            )
+            if section == "cache":
+                cache_rules.append(rule)
+            else:
+                crunch_rules.append(rule)
+        bundle = self._rollout_bundle_for_actions(actions)
+
+        with TemporaryDirectory() as tmp:
+            paths = self._write_rollout_pattern_files(tmp, crunch_rules=crunch_rules, cache_rules=cache_rules)
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+            crunch_written = yaml.safe_load(paths["crunch"].read_text(encoding="utf-8"))
+            cache_written = yaml.safe_load(paths["cache"].read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["review"]["planned_action_count"], 6)
+        self.assertEqual(payload["applied_sections"], ["cache", "crunch"])
+        self.assertEqual({action["family_validation"]["status"] for action in payload["actions"]}, {"accepted"})
+        self.assertEqual({action["family_validation"]["family"] for action in payload["actions"]}, {
+            "cacheability",
+            "diffs",
+            "generated_artifacts",
+            "tabular_data",
+            "terminal_logs",
+            "tool_results",
+        })
+        generated_rule = next(rule for rule in crunch_written["pattern_rules"] if rule["module_family"] == "generated_artifacts")
+        self.assertEqual(generated_rule["rollout"]["canary_fraction"], 0.4)
+        self.assertEqual(generated_rule["rollout"]["canary_unit"], "request_fingerprint")
+        self.assertEqual(generated_rule["rollout_action"]["family_validation"]["family"], "generated_artifacts")
+        cache_rule = cache_written["pattern_rules"][0]
+        self.assertEqual(cache_rule["rollout"]["canary_fraction"], 0.4)
+        self.assertEqual(cache_rule["rollout_action"]["family_validation"]["family"], "cacheability")
+
+    def test_managed_rollout_actions_reject_family_specific_unsafe_actions_before_writing(self):
+        ManagedFeedbackFlushClient.calls = []
+        unsafe_specs = [
+            (
+                "cache",
+                "tool_results",
+                "2",
+                {"type": "semantic_cache", "allow_tool_calls": True, "safe_invalidation": False},
+                "semantic",
+                ["current_state"],
+            ),
+            (
+                "crunch",
+                "diffs",
+                "3",
+                {"type": "omit", "head_chars": 0, "tail_chars": 0, "max_replacement_chars": 200},
+                "lossy",
+                None,
+            ),
+            (
+                "crunch",
+                "generated_artifacts",
+                "4",
+                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500},
+                "conservative",
+                None,
+            ),
+            (
+                "crunch",
+                "tabular_data",
+                "5",
+                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500, "marker": "[AgentFlow: table sample]"},
+                "aggressive",
+                None,
+            ),
+            (
+                "crunch",
+                "cacheability",
+                "6",
+                {"type": "shorten", "head_chars": 100, "tail_chars": 100, "max_replacement_chars": 500, "marker": "[AgentFlow: cacheability]"},
+                "conservative",
+                None,
+            ),
+        ]
+        actions = []
+        crunch_rules = []
+        cache_rules = []
+        for section, family, hash_char, local_action, profile, replayability in unsafe_specs:
+            pattern_hash = self._pattern_hash_char(hash_char)
+            rule_id = f"managed-unsafe-{section}-{family}"
+            candidate_id = f"candidate-unsafe-{section}-{family}"
+            actions.append(
+                self._rollout_action_for_rule(
+                    section=section,
+                    rule_id=rule_id,
+                    candidate_id=candidate_id,
+                    pattern_hash=pattern_hash,
+                    module_family=family,
+                    policy_profile=profile,
+                )
+            )
+            rule = self._family_pattern_rule(
+                section=section,
+                module_family=family,
+                rule_id=rule_id,
+                candidate_id=candidate_id,
+                pattern_hash=pattern_hash,
+                action=local_action,
+                policy_profile=profile,
+                replayability_levels=replayability,
+            )
+            if section == "cache":
+                cache_rules.append(rule)
+            else:
+                crunch_rules.append(rule)
+        bundle = self._rollout_bundle_for_actions(actions)
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            paths = self._write_rollout_pattern_files(tmp, crunch_rules=crunch_rules, cache_rules=cache_rules)
+            before = {section: path.read_text(encoding="utf-8") for section, path in paths.items()}
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_rollout_actions_apply_cli(
+                        ["--config-dir", tmp, "--db", db_path, "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=stdout,
+                    )
+            after = {section: path.read_text(encoding="utf-8") for section, path in paths.items()}
+
+        self.assertEqual(code, 1)
+        self.assertEqual(after, before)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "validation_failed")
+        self.assertEqual({action["status"] for action in payload["actions"]}, {"rejected"})
+        self.assertEqual({action["reason"] for action in payload["actions"]}, {"family-specific-validation-failed"})
+        messages = {error["message"] for error in payload["review"]["errors"]}
+        self.assertIn("semantic cache profiles are not accepted for managed pattern YAML rollout", messages)
+        self.assertIn("diff crunching may not omit matched content", messages)
+        self.assertIn("generated artifact crunching requires an exactness-preserving generated-artifact marker", messages)
+        self.assertIn("cacheability pattern actions can only write cache rules", messages)
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "rejected")
+        metadata = sent_payload["metadata"]
+        self.assertEqual(metadata["local_status_counts"]["rejected"], 5)
+        self.assertEqual(metadata["rejection_reason_counts"]["family-specific-validation-failed"], 5)
+        self.assertEqual(metadata["family_validation_status_counts"]["rejected"], 5)
+        self.assertFalse(metadata["privacy"]["file_paths_included"])
+        rendered = json.dumps(sent_payload)
+        self.assertNotIn("crunch_rules.yaml", rendered)
+        self.assertNotIn("cache_rules.yaml", rendered)
+        self.assertNotIn("raw_request", rendered)
 
     def test_managed_rollout_actions_apply_dry_run_queues_lifecycle_feedback_when_server_unavailable(self):
         bundle = self._rollout_action_bundle(action_type="widen")
