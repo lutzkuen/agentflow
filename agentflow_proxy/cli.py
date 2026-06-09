@@ -2198,6 +2198,127 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
     return 0
 
 
+def _phase_routing_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    if command != "dry-run" or not isinstance(result, dict) or result.get("schema") != "agentflow.phase_routing_dry_run.v1":
+        return None
+    from agentflow_proxy import __version__
+
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    rules = [item for item in result.get("rules", []) if isinstance(item, dict)]
+    candidate_ids = [
+        str(item.get("candidate_id") or item.get("rule_id"))
+        for item in rules
+        if item.get("candidate_id") or item.get("rule_id")
+    ]
+    basis = {
+        "command": command,
+        "candidate_ids": candidate_ids,
+        "matched_count": summary.get("matched_count"),
+        "projected_candidate_count": summary.get("projected_candidate_count"),
+        "projected_savings_usd": summary.get("projected_savings_usd"),
+    }
+    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    excluded: dict[str, int] = {}
+    for item in summary.get("excluded_count_by_reason") or []:
+        if isinstance(item, dict):
+            reason = str(item.get("reason") or "unknown")
+            excluded[reason] = excluded.get(reason, 0) + int(item.get("count") or 0)
+    metadata = {
+        "schema": "agentflow.phase_routing_lifecycle_metadata.v1",
+        "lifecycle_kind": "phase_routing",
+        "command": "phase-routing-dry-run",
+        "local_result_status": "ok",
+        "dry_run": True,
+        "read_only": True,
+        "wrote_local_files": bool(result.get("wrote_local_files")),
+        "altered_provider_routing": bool(result.get("altered_provider_routing")),
+        "policy_source": result.get("policy_source"),
+        "sampled_call_count": result.get("sampled_call_count"),
+        "rule_count": result.get("rule_count"),
+        "matched_count": summary.get("matched_count"),
+        "projected_candidate_count": summary.get("projected_candidate_count"),
+        "excluded_count": summary.get("excluded_count"),
+        "projected_savings_usd": summary.get("projected_savings_usd"),
+        "projected_target_cost_usd": summary.get("projected_target_cost_usd"),
+        "risk_warning_count": summary.get("risk_warning_count"),
+        "candidate_rule_ids": candidate_ids,
+        "excluded_count_by_reason": excluded,
+        "settings": result.get("settings") if isinstance(result.get("settings"), dict) else {},
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "file_paths_included": False,
+            "db_path_included": False,
+            "policy_file_contents_included": False,
+            "secrets_included": False,
+        },
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+    return {
+        "event_type": "dry-run" if result.get("ok", True) else "rejected",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "recommendation_id": f"phase-routing:{digest}",
+        "bundle_hash": None,
+        "policy_sections": ["routing"],
+        "validation_warning_count": 0,
+        "review_warning_count": int(summary.get("risk_warning_count") or 0),
+        "applied_files": [],
+        "local_tool_version": __version__,
+        "metadata": metadata,
+    }
+
+
+def _attach_phase_routing_lifecycle_feedback(result: dict[str, Any], *, command: str, db_path: str) -> None:
+    from agentflow_proxy import recommendations
+
+    payload = _phase_routing_lifecycle_payload(command, result)
+    if payload is None:
+        return
+    if not recommendations.recommendations_enabled():
+        result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta({
+            **recommendations.disabled_outcome_feedback_meta(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "disabled",
+        })
+        return
+
+    store = None
+    try:
+        store = _open_store_for_db(str(db_path))
+        meta = asyncio.run(
+            recommendations.queue_policy_event_feedback(
+                store,
+                payload,
+                source_surface=recommendations.PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": True,
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+        }
+    finally:
+        if store is not None:
+            store.conn.close()
+
+    public_meta = _public_lifecycle_feedback_meta(meta)
+    result["managed_lifecycle_feedback"] = public_meta
+    if public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+        result["managed_server_calls_made"] = True
+
+
 def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report Codex app-server routing, crunching, and cache effectiveness from local metadata")
     parser.add_argument(
@@ -2306,6 +2427,8 @@ def phase_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any =
             result = build_phase_routing_report(store, limit=args.limit)
     finally:
         store.conn.close()
+    if args.dry_run_policy:
+        _attach_phase_routing_lifecycle_feedback(result, command="dry-run", db_path=str(args.db))
     if args.pretty:
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:

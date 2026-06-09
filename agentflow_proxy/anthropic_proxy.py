@@ -58,9 +58,12 @@ from agentflow_proxy.recommendations import (
     build_old_context_summary_outcome_event,
     build_old_context_summary_outcome_feedback,
     build_outcome_feedback,
+    build_phase_routing_outcome_event,
+    build_phase_routing_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
     OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+    PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
     pattern_feature_diagnostics,
     queue_policy_event_feedback,
     queue_outcome_feedback,
@@ -129,6 +132,57 @@ async def _record_managed_outcome_feedback(
             "status_code": meta.get("status_code"),
             "latency_ms": meta.get("latency_ms"),
             "source_surface": OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+            "payload_included": False,
+        }
+        dirty_routing_meta = True
+
+    phase_feedback = build_phase_routing_outcome_feedback(
+        provider="anthropic",
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        input_tokens_est=input_tokens_est,
+        output_tokens_est=output_tokens_est,
+        actual_input_tokens=actual_input_tokens,
+        actual_output_tokens=actual_output_tokens,
+        thinking_output_tokens=thinking_output_tokens,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        cache_meta=cache_meta,
+        crunch_meta=crunch_meta,
+        routing_meta=routing_meta,
+        category=category,
+        error=error,
+    )
+    if phase_feedback is not None:
+        try:
+            event = build_phase_routing_outcome_event(phase_feedback)
+            meta = await queue_policy_event_feedback(
+                context.store,
+                event,
+                source_surface=PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
+            )
+        except Exception as exc:
+            meta = {
+                "enabled": True,
+                "status": "error",
+                "reason": "queue-failed",
+                "endpoint": "/v1/policy-events",
+                "error": repr(exc),
+            }
+        routing_meta["phase_routing_feedback"] = {
+            "enabled": bool(meta.get("enabled")),
+            "status": meta.get("status"),
+            "reason": meta.get("reason"),
+            "endpoint": meta.get("endpoint"),
+            "queue_id": meta.get("queue_id"),
+            "attempts": meta.get("attempts"),
+            "status_code": meta.get("status_code"),
+            "latency_ms": meta.get("latency_ms"),
+            "source_surface": PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
             "payload_included": False,
         }
         dirty_routing_meta = True

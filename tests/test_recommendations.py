@@ -660,6 +660,101 @@ class RecommendationTest(unittest.TestCase):
         )
         self.assertNotIn("payload_json", str(FakeAsyncClient.last_json))
 
+    def test_phase_routing_outcome_event_is_metadata_only_and_queue_safe(self):
+        from agentflow_proxy.store import Store
+
+        outcome = recommendations.build_phase_routing_outcome_feedback(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            status_code=200,
+            latency_ms=1450,
+            retry_count=0,
+            input_tokens_est=900,
+            output_tokens_est=120,
+            actual_input_tokens=880,
+            actual_output_tokens=110,
+            thinking_output_tokens=None,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.006,
+            cache_meta={"status": "miss", "reason": "exact-miss", "raw_request": "must stay local"},
+            crunch_meta={"changed": False, "raw_response": "raw provider response"},
+            routing_meta={
+                "workflow_phase": "tool-execution",
+                "workflow_phase_confidence": "high",
+                "category": "tool-result",
+                "has_tools": True,
+                "policy_source": "local-manual",
+                "messages": [{"content": "raw prompt text"}],
+                "phase_canary": {
+                    "enabled": True,
+                    "policy_id": "phase-canary-1",
+                    "status": "applied",
+                    "cohort": "applied",
+                    "reason": "selected-canary",
+                    "target_model": "claude-haiku-4-5-20251001",
+                    "policy_source": "local-manual",
+                    "workflow_phase": "tool-execution",
+                    "workflow_phase_confidence": "high",
+                    "category": "tool-result",
+                    "text_bucket": "2k-8k",
+                    "has_tools": True,
+                    "canary_fraction": 0.25,
+                    "holdout_fraction": 0.25,
+                    "cohort_hash": "sha256:" + "1" * 64,
+                    "cohort_features": {"content": "raw canary content"},
+                },
+            },
+            category="tool-result",
+            error=None,
+        )
+
+        self.assertEqual(outcome["schema"], "agentflow.phase_routing_outcome_feedback.v1")
+        self.assertEqual(outcome["outcome"], "applied")
+        self.assertEqual(outcome["policy_id"], "phase-canary-1")
+        self.assertEqual(outcome["cohort"], "applied")
+        self.assertEqual(outcome["quality_signals"]["status"], "success")
+        self.assertTrue(outcome["privacy"]["metadata_only"])
+        rendered = str(outcome)
+        self.assertNotIn("raw prompt text", rendered)
+        self.assertNotIn("raw canary content", rendered)
+        self.assertNotIn("must stay local", rendered)
+        self.assertNotIn("raw provider response", rendered)
+        self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(self._keys_in(outcome)))
+
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        os.environ["AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS"] = "3"
+        FakeAsyncClient.error = RuntimeError("managed unavailable")
+        event = recommendations.build_phase_routing_outcome_event(outcome)
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+                    meta = asyncio.run(
+                        recommendations.queue_policy_event_feedback(
+                            store,
+                            event,
+                            source_surface=recommendations.PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
+                        )
+                    )
+                row = store.conn.execute(
+                    "select source_surface, endpoint, status, attempts, payload_json "
+                    "from managed_outcome_feedback_queue"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "retryable-error")
+        self.assertEqual(row["source_surface"], recommendations.PHASE_ROUTING_OUTCOME_SOURCE_SURFACE)
+        self.assertEqual(row["endpoint"], "/v1/policy-events")
+        self.assertEqual(row["attempts"], 1)
+        self.assertNotIn("raw prompt text", row["payload_json"])
+        self.assertNotIn("raw canary content", row["payload_json"])
+        self.assertIn("phase-canary-1", row["payload_json"])
+
     def test_pattern_decision_summaries_cover_bypassed_and_errored_outcomes(self):
         bypassed = recommendations.pattern_decision_summaries(
             provider="anthropic",

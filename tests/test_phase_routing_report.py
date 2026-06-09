@@ -1,12 +1,35 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agentflow_proxy import cli
 from agentflow_proxy.phase_routing_report import build_phase_routing_dry_run, build_phase_routing_report
 from agentflow_proxy.store import Store, stable_json
+
+
+class FailingManagedFeedbackClient:
+    calls = []
+
+    def __init__(self, *, timeout=None):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
+        raise RuntimeError("managed unavailable with raw dry-run secret")
+
+    async def patch(self, url, json, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
+        raise RuntimeError("managed unavailable with raw dry-run secret")
 
 
 def _log_call(store, suffix, *, requested_model, routed_model, category, routing=None, **overrides):
@@ -335,3 +358,94 @@ rules:
         self.assertEqual(rule["policy_source"], "managed-recommended")
         exclusions = {item["reason"]: item["count"] for item in rule["excluded_count_by_reason"]}
         self.assertEqual(exclusions["streaming_shadow_unsupported"], 1)
+
+    def test_dry_run_queues_phase_routing_lifecycle_feedback_metadata_only(self):
+        policy_text = """
+rules:
+  - id: phase-dry-run-rule
+    conditions:
+      model_pattern: sonnet
+      workflow_phase: tool-execution
+    action:
+      route_to: haiku
+      reason: phase dry-run route
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            policy_path = Path(tmp) / "routing.yaml"
+            policy_path.write_text(policy_text, encoding="utf-8")
+            store = Store(db_path)
+            try:
+                _log_call(
+                    store,
+                    "1",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    routing={"workflow_phase": "tool-execution", "text_chars": 4000},
+                    stream=0,
+                    session_id="raw-dry-run-session-secret",
+                    cost_est_usd=0.01,
+                    cost_baseline_usd=0.01,
+                )
+            finally:
+                store.conn.close()
+
+            FailingManagedFeedbackClient.calls = []
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS": "3",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", FailingManagedFeedbackClient):
+                    code = cli.phase_routing_report_cli(
+                        [
+                            "--db",
+                            db_path,
+                            "--dry-run-policy",
+                            str(policy_path),
+                            "--stale-hours",
+                            "999999",
+                            "--pretty",
+                        ],
+                        stdout=stdout,
+                    )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "agentflow.phase_routing_dry_run.v1")
+            self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "retryable-error")
+            self.assertEqual(payload["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
+            self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+            self.assertTrue(payload["managed_server_calls_made"])
+            self.assertEqual(FailingManagedFeedbackClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+            sent = FailingManagedFeedbackClient.calls[0]["json"]
+            self.assertEqual(sent["metadata"]["schema"], "agentflow.phase_routing_lifecycle_metadata.v1")
+            self.assertEqual(sent["metadata"]["lifecycle_kind"], "phase_routing")
+            self.assertEqual(sent["metadata"]["candidate_rule_ids"], ["phase-dry-run-rule"])
+            self.assertFalse(sent["metadata"]["privacy"]["raw_prompts_included"])
+            rendered = stdout.getvalue() + json.dumps(sent)
+            self.assertNotIn("raw-dry-run-session-secret", rendered)
+            self.assertNotIn("raw dry-run secret", rendered)
+
+            status_out = io.StringIO()
+            cli.managed_feedback_status_cli(
+                [
+                    "--db",
+                    db_path,
+                    "--source-surface",
+                    "phase_routing_lifecycle",
+                    "--pretty",
+                ],
+                stdout=status_out,
+            )
+            status = json.loads(status_out.getvalue())
+            self.assertEqual(status["source_surface"], "phase_routing_lifecycle")
+            self.assertEqual(status["summary"]["retryable_error"], 1)
+            self.assertEqual(status["summary"]["due"], 0)
+            self.assertFalse(status["privacy"]["payload_json_included"])

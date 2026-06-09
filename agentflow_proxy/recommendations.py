@@ -28,6 +28,8 @@ DEFAULT_RECOMMENDATION_SERVER_URL = "http://127.0.0.1:4100"
 ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE = "rollout_action_lifecycle"
 OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE = "old_context_summary_lifecycle"
 OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE = "old_context_summary_outcome"
+PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE = "phase_routing_lifecycle"
+PHASE_ROUTING_OUTCOME_SOURCE_SURFACE = "phase_routing_outcome"
 
 RAW_FEATURE_KEYS = {
     "account_id",
@@ -1528,6 +1530,207 @@ def build_old_context_summary_outcome_event(
                 "request_ids_included": False,
                 "local_session_ids_included": False,
                 "file_paths_included": False,
+            },
+        },
+    })
+
+
+def _phase_canary_outcome(canary: dict[str, Any], status_code: int | None) -> str:
+    if status_code is not None and int(status_code) >= 400:
+        return "errored"
+    status = str(canary.get("status") or "")
+    reason = str(canary.get("reason") or "")
+    if status == "applied":
+        return "applied"
+    if status == "holdout":
+        return "holdout"
+    if status == "safety_stopped" or reason == "safety-stop-tripped":
+        return "safety_stopped"
+    if reason == "rate_limited":
+        return "fallback"
+    if status in {"ineligible", "not_selected"}:
+        return "skipped"
+    return status or "unknown"
+
+
+def _phase_savings_bucket(cost_est_usd: float | None, cost_baseline_usd: float | None) -> str:
+    if cost_est_usd is None or cost_baseline_usd is None:
+        return "unknown"
+    return _net_savings_bucket(float(cost_baseline_usd) - float(cost_est_usd))
+
+
+def build_phase_routing_outcome_feedback(
+    *,
+    provider: str,
+    path: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    input_tokens_est: int | None,
+    output_tokens_est: int | None,
+    actual_input_tokens: int | None,
+    actual_output_tokens: int | None,
+    thinking_output_tokens: int | None,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    cache_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    routing_meta: dict[str, Any],
+    category: str | None,
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    canary = routing_meta.get("phase_canary") if isinstance(routing_meta, dict) else None
+    if not isinstance(canary, dict) or not canary.get("enabled"):
+        return None
+    status = str(canary.get("status") or "")
+    reason = str(canary.get("reason") or "")
+    if status not in {"applied", "holdout", "safety_stopped"} and reason not in {"selected-canary", "selected-holdout", "safety-stop-tripped"}:
+        return None
+
+    source_surface = _source_surface(provider, path)
+    quality_signals = derive_provider_quality_signals(
+        source_surface=source_surface,
+        status_code=status_code,
+        retry_count=retry_count,
+        latency_ms=latency_ms,
+        error=error,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        cache_hit=cache_meta.get("status") == "hit",
+        routing_meta=routing_meta,
+        crunch_meta=crunch_meta,
+        cache_meta=cache_meta,
+    )
+    safety_stop = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
+    feedback = {
+        "schema": "agentflow.phase_routing_outcome_feedback.v1",
+        "source_surface": source_surface,
+        "app_family": _app_family(provider, requested_model or "", path),
+        "category": category or routing_meta.get("category") or canary.get("category") or "unknown",
+        "workflow_phase": routing_meta.get("workflow_phase") or canary.get("workflow_phase") or "unknown",
+        "workflow_phase_confidence": routing_meta.get("workflow_phase_confidence") or canary.get("workflow_phase_confidence"),
+        "status": status or "unknown",
+        "reason": reason or None,
+        "outcome": _phase_canary_outcome(canary, status_code),
+        "requested_model_tier": _model_family(requested_model),
+        "routed_model_tier": _model_family(routed_model),
+        "target_model_tier": _model_family(canary.get("target_model")),
+        "policy_id": canary.get("policy_id"),
+        "policy_source": canary.get("policy_source") or routing_meta.get("policy_source"),
+        "cohort": canary.get("cohort"),
+        "canary": {
+            "enabled": bool(canary.get("enabled")),
+            "status": status or None,
+            "cohort": canary.get("cohort"),
+            "fraction": canary.get("canary_fraction"),
+            "holdout_fraction": canary.get("holdout_fraction"),
+            "cohort_hash": canary.get("cohort_hash"),
+        },
+        "dimensions": {
+            "text_bucket": canary.get("text_bucket") or _text_bucket(routing_meta.get("text_chars")),
+            "input_token_bucket": _token_bucket(actual_input_tokens if actual_input_tokens is not None else input_tokens_est),
+            "output_token_bucket": _token_bucket(actual_output_tokens if actual_output_tokens is not None else output_tokens_est),
+            "has_tools": bool(canary.get("has_tools") if canary.get("has_tools") is not None else routing_meta.get("has_tools")),
+            "thinking": bool(thinking_output_tokens or routing_meta.get("workflow_phase") == "thinking"),
+            "stream": None,
+        },
+        "provider_outcome": {
+            "status_code": status_code,
+            "status_bucket": "ok" if status_code is not None and int(status_code) < 400 else ("unknown" if status_code is None else f"http_{int(status_code)}"),
+            "latency_bucket": _latency_bucket(latency_ms),
+            "retry_bucket": _retry_bucket(retry_count),
+            "fallback_reason": routing_meta.get("fallback_reason") or canary.get("fallback_reason"),
+            "cache_status": cache_meta.get("status"),
+            "crunch_changed": bool(crunch_meta.get("changed")),
+        },
+        "cost": {
+            "input_tokens_bucket": _token_bucket(actual_input_tokens if actual_input_tokens is not None else input_tokens_est),
+            "output_tokens_bucket": _token_bucket(actual_output_tokens if actual_output_tokens is not None else output_tokens_est),
+            "cost_bucket": _net_savings_bucket(cost_est_usd),
+            "baseline_cost_bucket": _net_savings_bucket(cost_baseline_usd),
+            "savings_bucket": _phase_savings_bucket(cost_est_usd, cost_baseline_usd),
+        },
+        "quality_signals": {
+            "schema": quality_signals.get("schema"),
+            "status": quality_signals.get("status"),
+            "optimized": bool(quality_signals.get("optimized")),
+            "signal_codes": quality_signals.get("signal_codes") or [],
+            "risk_level": quality_signals.get("risk_level"),
+        },
+        "safety_stop": {
+            "enabled": bool(safety_stop.get("enabled")),
+            "status": safety_stop.get("status"),
+            "tripped": bool(safety_stop.get("tripped")),
+            "reason_codes": safety_stop.get("reason_codes") or [],
+            "sample_count": safety_stop.get("sample_count"),
+            "holdout_sample_count": safety_stop.get("holdout_sample_count"),
+        } if safety_stop else None,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "local_session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "secrets_included": False,
+        },
+    }
+    error_class = _compact_error(error, status_code).get("error_class") if error else None
+    if error_class:
+        feedback["provider_outcome"]["error_class"] = error_class
+    return _sanitize_features({key: value for key, value in feedback.items() if value not in (None, "", [], {})})
+
+
+def build_phase_routing_outcome_event(
+    outcome_feedback: dict[str, Any],
+    *,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    from agentflow_proxy import __version__
+
+    basis = {
+        "policy_id": outcome_feedback.get("policy_id"),
+        "workflow_phase": outcome_feedback.get("workflow_phase"),
+        "category": outcome_feedback.get("category"),
+        "cohort": outcome_feedback.get("cohort"),
+        "outcome": outcome_feedback.get("outcome"),
+    }
+    digest = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:24]
+    return _sanitize_features({
+        "event_type": "outcome",
+        "occurred_at": occurred_at or utc_now(),
+        "recommendation_id": f"phase-routing:{digest}",
+        "bundle_hash": None,
+        "policy_sections": ["routing"],
+        "validation_warning_count": 0,
+        "review_warning_count": 0,
+        "applied_files": [],
+        "local_tool_version": __version__,
+        "metadata": {
+            "schema": "agentflow.phase_routing_outcome_event_metadata.v1",
+            "lifecycle_kind": "phase_routing",
+            "outcome": outcome_feedback,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "raw_responses_included": False,
+                "raw_transcripts_included": False,
+                "tool_payloads_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "tenant_ids_included": False,
+                "local_session_ids_included": False,
+                "file_paths_included": False,
+                "cache_keys_included": False,
             },
         },
     })
