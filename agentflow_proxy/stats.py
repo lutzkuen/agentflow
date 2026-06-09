@@ -4088,6 +4088,371 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
     }
 
 
+def _openai_recommendation_state(managed: dict[str, Any]) -> tuple[str, str]:
+    if not managed:
+        return "skipped", "no-recommendation-metadata"
+    mode = str(managed.get("mode") or "").strip().lower()
+    status = str(managed.get("status") or "").strip().lower()
+    lifecycle = str(managed.get("lifecycle_event") or "").strip().lower()
+    apply_reason = str(managed.get("apply_reason") or managed.get("reason") or "").strip()
+    if mode == "observe-only":
+        return "observed-only", apply_reason or "observe-only-local-policy"
+    if lifecycle == "dry_run" or status == "dry-run":
+        return "dry-run", apply_reason or "dry-run-local-fallback"
+    if lifecycle == "canary_applied" or status == "applied" or managed.get("applied") is True:
+        return "canary-applied", apply_reason or "canary-selected"
+    if lifecycle == "holdout" or status == "holdout":
+        return "holdout", apply_reason or "canary-holdout"
+    if lifecycle == "fallback" or managed.get("fallback"):
+        return "fallback", apply_reason or str(managed.get("fallback") or "local-policy")
+    if status in {"skipped", "noop", "missing"}:
+        return "skipped", apply_reason or status
+    return status or "skipped", apply_reason or "unknown"
+
+
+def _openai_candidate_id(managed: dict[str, Any], requested_model: Any, routed_model: Any) -> str:
+    for key in ("policy_id", "recommendation_id", "candidate_id"):
+        value = managed.get(key)
+        if value:
+            return str(value)
+    target = managed.get("target_model") or managed.get("would_route_model")
+    if target:
+        return f"target:{target}"
+    if requested_model or routed_model:
+        return f"local:{requested_model or 'unknown'}->{routed_model or requested_model or 'unknown'}"
+    return "uncategorized"
+
+
+def _openai_quality_gate_outcome(managed: dict[str, Any], state: str) -> str:
+    if not managed:
+        return "not-evaluated"
+    if state == "observed-only":
+        return "observe-only"
+    reason = str(managed.get("apply_reason") or managed.get("reason") or "")
+    if reason in {"provider-mismatch", "unsupported-openai-target-model", "missing-target-model"}:
+        return "failed-provider-target"
+    if reason == "prompt-shaping-not-locally-representable":
+        return "failed-local-representability"
+    projection = managed.get("projection") if isinstance(managed.get("projection"), dict) else {}
+    risk = projection.get("risk") if isinstance(projection.get("risk"), dict) else {}
+    if risk.get("missing_fields"):
+        return "missing-risk-metadata"
+    if _as_float(risk.get("error_rate")) > 0.05:
+        return "failed-error-rate"
+    if _as_float(risk.get("retry_rate")) > 0.10:
+        return "failed-retry-rate"
+    if _as_float(risk.get("fallback_rate")) > 0.10:
+        return "failed-fallback-rate"
+    latency_regression = _as_float(risk.get("latency_regression_ratio"))
+    if latency_regression and latency_regression > 1.25:
+        return "failed-latency-regression"
+    if state in {"dry-run", "holdout", "canary-applied"}:
+        return "passed-local-gates"
+    if state == "fallback":
+        return "fallback-local-policy"
+    return "not-evaluated"
+
+
+def _new_openai_scoreboard_bucket(candidate_id: str, source_surface: str) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "source_surface": source_surface,
+        "calls": 0,
+        "state_counts": {},
+        "quality_gate_counts": {},
+        "requested_model_counts": {},
+        "target_model_counts": {},
+        "actual_cost_usd": 0.0,
+        "baseline_cost_usd": 0.0,
+        "observed_cost_savings_usd": 0.0,
+        "projected_cost_savings_usd": 0.0,
+        "tokens_saved_est": 0,
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "cache_hit_count": 0,
+        "latency_values": [],
+        "canary_applied_latency_values": [],
+        "holdout_latency_values": [],
+    }
+
+
+def _finalize_openai_scoreboard_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    calls = _as_int(bucket.get("calls"))
+    applied_latency = bucket.pop("canary_applied_latency_values", [])
+    holdout_latency = bucket.pop("holdout_latency_values", [])
+    latency_values = bucket.pop("latency_values", [])
+    applied_avg = _avg_or_none(applied_latency)
+    holdout_avg = _avg_or_none(holdout_latency)
+    bucket["actual_cost_usd"] = round(_as_float(bucket.get("actual_cost_usd")), 6)
+    bucket["baseline_cost_usd"] = round(_as_float(bucket.get("baseline_cost_usd")), 6)
+    bucket["observed_cost_savings_usd"] = round(_as_float(bucket.get("observed_cost_savings_usd")), 6)
+    bucket["projected_cost_savings_usd"] = round(_as_float(bucket.get("projected_cost_savings_usd")), 6)
+    bucket["error_rate"] = round(_as_int(bucket.get("error_count")) / calls, 4) if calls else 0
+    bucket["retry_rate"] = round(_as_int(bucket.get("retry_count")) / calls, 4) if calls else 0
+    bucket["fallback_rate"] = round(_as_int(bucket.get("fallback_count")) / calls, 4) if calls else 0
+    bucket["cache_hit_rate"] = round(_as_int(bucket.get("cache_hit_count")) / calls, 4) if calls else 0
+    bucket["avg_latency_ms"] = _avg_or_none(latency_values)
+    bucket["canary_applied_avg_latency_ms"] = applied_avg
+    bucket["holdout_avg_latency_ms"] = holdout_avg
+    bucket["observed_latency_delta_ms"] = (
+        applied_avg - holdout_avg if applied_avg is not None and holdout_avg is not None else None
+    )
+    bucket["state_breakdown"] = _managed_breakdown(bucket.pop("state_counts", {}))
+    bucket["quality_gate_breakdown"] = _managed_breakdown(bucket.pop("quality_gate_counts", {}))
+    bucket["requested_models"] = _managed_breakdown(bucket.pop("requested_model_counts", {}))
+    bucket["target_models"] = _managed_breakdown(bucket.pop("target_model_counts", {}))
+    return bucket
+
+
+async def stats_openai_scoreboard(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    conn = store_obj.conn
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+                   source_surface, requested_model, routed_model, status_code, latency_ms,
+                   input_tokens_est, output_tokens_est, actual_input_tokens, actual_output_tokens,
+                   cost_est_usd, cost_baseline_usd, cache_hit, retry_count,
+                   routing_json, crunch_json, cache_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+
+    state_counts: dict[str, int] = {}
+    quality_gate_counts: dict[str, int] = {}
+    cache_status_counts: dict[str, int] = {}
+    fallback_reason_counts: dict[str, int] = {}
+    source_surface_counts: dict[str, int] = {}
+    candidate_buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    recent: list[dict[str, Any]] = []
+    latency_values: list[int] = []
+    applied_latency_values: list[int] = []
+    holdout_latency_values: list[int] = []
+
+    openai_rows = 0
+    anthropic_rows = 0
+    error_count = 0
+    retry_count = 0
+    fallback_count = 0
+    cache_hit_count = 0
+    actual_cost = 0.0
+    baseline_cost = 0.0
+    observed_savings = 0.0
+    projected_savings = 0.0
+    tokens_saved = 0
+    input_tokens = 0
+    output_tokens = 0
+
+    for row in rows:
+        provider = str(row.get("provider") or "anthropic").lower()
+        if provider == "anthropic":
+            anthropic_rows += 1
+            continue
+        if provider != "openai":
+            continue
+
+        openai_rows += 1
+        source_surface = str(row.get("source_surface") or _source_surface(provider, str(row.get("path") or "")))
+        _increment_count(source_surface_counts, source_surface)
+        routing = _json_obj(row.get("routing_json"))
+        crunch = _json_obj(row.get("crunch_json"))
+        cache = _json_obj(row.get("cache_json"))
+        managed = routing.get("managed_recommendation") if isinstance(routing.get("managed_recommendation"), dict) else {}
+        state, state_reason = _openai_recommendation_state(managed)
+        quality_gate = _openai_quality_gate_outcome(managed, state)
+        candidate_id = _openai_candidate_id(managed, row.get("requested_model"), row.get("routed_model"))
+        bucket = candidate_buckets.setdefault(
+            (candidate_id, source_surface),
+            _new_openai_scoreboard_bucket(candidate_id, source_surface),
+        )
+
+        row_actual_cost = _as_float(row.get("cost_est_usd"))
+        row_baseline_cost = _as_float(row.get("cost_baseline_usd"))
+        row_observed_savings = max(0.0, row_baseline_cost - row_actual_cost)
+        projection = managed.get("projection") if isinstance(managed.get("projection"), dict) else {}
+        row_projected_savings = max(0.0, _as_float(projection.get("projected_input_savings_usd")))
+        row_tokens_saved = _as_int(crunch.get("tokens_saved_est"))
+        status_code = _as_int(row.get("status_code"))
+        errored = status_code >= 400
+        retried = _as_int(row.get("retry_count")) > 0
+        fallback = state == "fallback"
+        cache_status = str(cache.get("status") or ("hit" if _as_int(row.get("cache_hit")) else "missing"))
+        cache_hit = bool(_as_int(row.get("cache_hit")) or cache_status == "hit")
+        latency = _as_int(row.get("latency_ms"))
+
+        _increment_count(state_counts, state)
+        _increment_count(quality_gate_counts, quality_gate)
+        _increment_count(cache_status_counts, cache_status)
+        if fallback:
+            fallback_count += 1
+            _increment_count(fallback_reason_counts, state_reason)
+        if errored:
+            error_count += 1
+        if retried:
+            retry_count += 1
+        if cache_hit:
+            cache_hit_count += 1
+        if latency > 0:
+            latency_values.append(latency)
+            if state == "canary-applied":
+                applied_latency_values.append(latency)
+            elif state == "holdout":
+                holdout_latency_values.append(latency)
+
+        actual_cost += row_actual_cost
+        baseline_cost += row_baseline_cost
+        observed_savings += row_observed_savings
+        projected_savings += row_projected_savings
+        tokens_saved += row_tokens_saved
+        input_tokens += _as_int(row.get("actual_input_tokens")) or _as_int(row.get("input_tokens_est"))
+        output_tokens += _as_int(row.get("actual_output_tokens")) or _as_int(row.get("output_tokens_est"))
+
+        bucket["calls"] += 1
+        _increment_count(bucket["state_counts"], state)
+        _increment_count(bucket["quality_gate_counts"], quality_gate)
+        _increment_count(bucket["requested_model_counts"], row.get("requested_model") or "unknown")
+        _increment_count(
+            bucket["target_model_counts"],
+            managed.get("target_model") or managed.get("would_route_model") or row.get("routed_model") or "unknown",
+        )
+        bucket["actual_cost_usd"] += row_actual_cost
+        bucket["baseline_cost_usd"] += row_baseline_cost
+        bucket["observed_cost_savings_usd"] += row_observed_savings
+        bucket["projected_cost_savings_usd"] += row_projected_savings
+        bucket["tokens_saved_est"] += row_tokens_saved
+        bucket["error_count"] += int(errored)
+        bucket["retry_count"] += int(retried)
+        bucket["fallback_count"] += int(fallback)
+        bucket["cache_hit_count"] += int(cache_hit)
+        if latency > 0:
+            bucket["latency_values"].append(latency)
+            if state == "canary-applied":
+                bucket["canary_applied_latency_values"].append(latency)
+            elif state == "holdout":
+                bucket["holdout_latency_values"].append(latency)
+
+        if len(recent) < 50:
+            recent.append({
+                "created_at": row.get("created_at"),
+                "source_surface": source_surface,
+                "requested_model": row.get("requested_model"),
+                "routed_model": row.get("routed_model"),
+                "status_code": status_code,
+                "latency_ms": latency or None,
+                "state": state,
+                "state_reason": state_reason,
+                "candidate_id": candidate_id,
+                "quality_gate_outcome": quality_gate,
+                "observed_cost_savings_usd": round(row_observed_savings, 6),
+                "projected_cost_savings_usd": round(row_projected_savings, 6),
+                "tokens_saved_est": row_tokens_saved,
+                "cache_status": cache_status,
+                "retry_count": _as_int(row.get("retry_count")),
+                "raw_payload_included": False,
+            })
+
+    applied_avg = _avg_or_none(applied_latency_values)
+    holdout_avg = _avg_or_none(holdout_latency_values)
+    verdict = "no-openai-traffic"
+    if openai_rows:
+        if error_count:
+            verdict = "watch-errors"
+        elif fallback_count and fallback_count == openai_rows:
+            verdict = "not-helping-all-fallback"
+        elif observed_savings > 0 or projected_savings > 0:
+            verdict = "helping"
+        else:
+            verdict = "insufficient-evidence"
+
+    candidate_rows = [_finalize_openai_scoreboard_bucket(bucket) for bucket in candidate_buckets.values()]
+    candidate_rows.sort(
+        key=lambda item: (
+            _as_float(item.get("observed_cost_savings_usd")) + _as_float(item.get("projected_cost_savings_usd")),
+            _as_int(item.get("calls")),
+        ),
+        reverse=True,
+    )
+
+    return {
+        "schema": "agentflow.openai_optimization_scoreboard.v1",
+        "generated_at": utc_now(),
+        "limit": capped_limit,
+        "question": "Are OpenAI optimizations helping?",
+        "answer": verdict,
+        "summary": {
+            "openai_call_count": openai_rows,
+            "actual_cost_usd": round(actual_cost, 6),
+            "baseline_cost_usd": round(baseline_cost, 6),
+            "observed_cost_savings_usd": round(observed_savings, 6),
+            "projected_cost_savings_usd": round(projected_savings, 6),
+            "tokens_saved_est": tokens_saved,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "error_count": error_count,
+            "error_rate": round(error_count / openai_rows, 4) if openai_rows else 0,
+            "retry_count": retry_count,
+            "retry_rate": round(retry_count / openai_rows, 4) if openai_rows else 0,
+            "fallback_count": fallback_count,
+            "fallback_rate": round(fallback_count / openai_rows, 4) if openai_rows else 0,
+            "cache_hit_count": cache_hit_count,
+            "cache_hit_rate": round(cache_hit_count / openai_rows, 4) if openai_rows else 0,
+            "avg_latency_ms": _avg_or_none(latency_values),
+            "canary_applied_avg_latency_ms": applied_avg,
+            "holdout_avg_latency_ms": holdout_avg,
+            "observed_latency_delta_ms": (
+                applied_avg - holdout_avg if applied_avg is not None and holdout_avg is not None else None
+            ),
+        },
+        "state_breakdown": _managed_breakdown(state_counts),
+        "source_surface_breakdown": _managed_breakdown(source_surface_counts),
+        "quality_gate_breakdown": _managed_breakdown(quality_gate_counts),
+        "cache_status_breakdown": _managed_breakdown(cache_status_counts),
+        "fallback_reason_breakdown": _managed_breakdown(fallback_reason_counts),
+        "candidates": candidate_rows,
+        "recent": recent,
+        "companion_sections": {
+            "anthropic_recommendations": {
+                "status": "no-traffic" if anthropic_rows == 0 else "has-traffic",
+                "sample_count": anthropic_rows,
+                "display": "suppressed" if anthropic_rows == 0 else "available",
+                "reason": (
+                    "No Claude / Anthropic samples were found in this local report window."
+                    if anthropic_rows == 0
+                    else "Claude / Anthropic samples exist; use phase-routing reports for Claude-specific evidence."
+                ),
+            }
+        },
+        "quality_gate_policy": {
+            "max_error_rate": 0.05,
+            "max_retry_rate": 0.10,
+            "max_fallback_rate": 0.10,
+            "max_latency_regression_ratio": 1.25,
+            "basis": "metadata fields stored in managed recommendation projection risk blocks",
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "tool_bodies_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "secrets_included": False,
+            "cache_keys_included": False,
+            "local_session_ids_included": False,
+            "provider_calls_made": False,
+            "basis": "local calls table metrics plus sanitized routing/crunch/cache decision metadata only",
+        },
+    }
+
+
 def _increment_count(grouped: dict[str, int], key: Any) -> None:
     label = str(key or "unknown")
     grouped[label] = grouped.get(label, 0) + 1
@@ -8338,6 +8703,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('errors')">Errors</button>
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
+  <button class="tab-btn" onclick="showTab('openai')">OpenAI optimization</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
   <button class="tab-btn" onclick="showTab('phaserouting')">Phase routing</button>
   <button class="tab-btn" onclick="showTab('oldcontext')">Old-context summary</button>
@@ -8581,6 +8947,45 @@ def dashboard_html() -> str:
       <th data-sort-type="time">Time</th><th data-sort-type="text">Action</th><th data-sort-type="text">Status</th><th data-sort-type="text">Source</th><th data-sort-type="text">Details</th>
     </tr></thead>
     <tbody id="policy-events-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-openai">
+<div class="section">
+  <h2>OpenAI optimization scoreboard</h2>
+  <table data-table-id="openai-scoreboard-summary" data-filter-label="Filter OpenAI scoreboard summary">
+    <thead><tr>
+      <th data-sort-type="text">Answer</th><th data-sort-type="number">Calls</th><th data-sort-type="money">Actual cost</th><th data-sort-type="money">Baseline</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="percent">Errors</th><th data-sort-type="percent">Retries</th><th data-sort-type="percent">Fallbacks</th><th data-sort-type="percent">Cache hits</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-scoreboard-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI candidate breakdown</h2>
+  <table class="activity-table" data-table-id="openai-scoreboard-candidates" data-filter-label="Filter OpenAI candidates">
+    <thead><tr>
+      <th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="number">Calls</th><th data-sort-type="text">States</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="percent">Errors</th><th data-sort-type="percent">Retries</th><th data-sort-type="percent">Fallbacks</th><th data-sort-type="percent">Cache hits</th><th data-sort-type="latency">Avg latency</th><th data-sort-type="latency">Applied vs holdout</th><th data-sort-type="text">Quality gates</th><th data-sort-type="text">Targets</th>
+    </tr></thead>
+    <tbody id="openai-scoreboard-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Claude recommendation traffic state</h2>
+  <table data-table-id="openai-scoreboard-claude-state" data-filter-label="Filter Claude traffic state">
+    <thead><tr>
+      <th data-sort-type="text">Section</th><th data-sort-type="text">Status</th><th data-sort-type="number">Samples</th><th data-sort-type="text">Display</th><th data-sort-type="text">Reason</th>
+    </tr></thead>
+    <tbody id="openai-scoreboard-claude-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Recent OpenAI optimization decisions</h2>
+  <table class="activity-table" data-table-id="openai-scoreboard-recent" data-filter-label="Filter recent OpenAI decisions">
+    <thead><tr>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Requested</th><th data-sort-type="text">Routed</th><th data-sort-type="number">Status</th><th data-sort-type="text">State</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Quality gate</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="text">Cache</th><th data-sort-type="number">Retries</th>
+    </tr></thead>
+    <tbody id="openai-scoreboard-recent-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -9729,6 +10134,100 @@ function blockerBadges(rows){
   if(!rows.length)return'<span class="badge hit">none</span>';
   return rows.slice(0,3).map(row=>`<span class="badge err">${esc(row.value)} ${(row.count||0).toLocaleString()}</span>`).join(' ');
 }
+function openaiAnswerBadge(answer){
+  if(answer==='helping')return'hit';
+  if(answer==='watch-errors'||answer==='not-helping-all-fallback')return'err';
+  if(answer==='insufficient-evidence')return'routed';
+  return'miss';
+}
+function openaiStateBadge(state){
+  if(state==='canary-applied')return'hit';
+  if(state==='fallback')return'err';
+  if(state==='dry-run'||state==='holdout')return'routed';
+  if(state==='observed-only'||state==='skipped')return'miss';
+  return'provider';
+}
+function openaiGateBadge(gate){
+  if(gate==='passed-local-gates')return'hit';
+  if(String(gate||'').startsWith('failed-'))return'err';
+  if(gate==='fallback-local-policy'||gate==='missing-risk-metadata')return'routed';
+  return'miss';
+}
+function openaiBreakdownBadges(rows,kind){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge miss">none</span>';
+  return rows.slice(0,5).map(row=>{
+    const value=String(row.value||'unknown');
+    const cls=kind==='state'?openaiStateBadge(value):kind==='gate'?openaiGateBadge(value):'provider';
+    return `<span class="badge ${cls}">${esc(value)} ${(row.count||0).toLocaleString()}</span>`;
+  }).join(' ');
+}
+async function refreshOpenAIScoreboard(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-scoreboard?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('openai-scoreboard-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${openaiAnswerBadge(d.answer)}">${esc(d.answer||'unknown')}</span></td>
+      <td class="tokens">${(s.openai_call_count||0).toLocaleString()}</td>
+      <td class="cost">${fmt(s.actual_cost_usd||0,6)}</td>
+      <td class="baseline">${fmt(s.baseline_cost_usd||0,6)}</td>
+      <td class="savings">${fmt(s.observed_cost_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(s.projected_cost_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtTok(s.tokens_saved_est||0)}</td>
+      <td class="tokens">${fmtPctValue(s.error_rate||0)}</td>
+      <td class="tokens">${fmtPctValue(s.retry_rate||0)}</td>
+      <td class="tokens">${fmtPctValue(s.fallback_rate||0)}</td>
+      <td class="tokens">${fmtPctValue(s.cache_hit_rate||0)}</td>
+      <td class="latency">${s.observed_latency_delta_ms==null?'—':fmtMs(s.observed_latency_delta_ms)}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${privacy.provider_calls_made?'<span class="badge err">provider call</span>':'<span class="badge hit">offline</span>'}</td>
+    </tr>`;
+    const candidates=d.candidates||[];
+    document.getElementById('openai-scoreboard-candidates-tbody').innerHTML=candidates.map(row=>`<tr>
+      <td class="model">${esc(row.candidate_id||'uncategorized')}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td class="tokens">${(row.calls||0).toLocaleString()}</td>
+      <td class="flags">${openaiBreakdownBadges(row.state_breakdown,'state')}</td>
+      <td class="savings">${fmt(row.observed_cost_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(row.projected_cost_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtTok(row.tokens_saved_est||0)}</td>
+      <td class="tokens">${fmtPctValue(row.error_rate||0)}</td>
+      <td class="tokens">${fmtPctValue(row.retry_rate||0)}</td>
+      <td class="tokens">${fmtPctValue(row.fallback_rate||0)}</td>
+      <td class="tokens">${fmtPctValue(row.cache_hit_rate||0)}</td>
+      <td class="latency">${fmtMs(row.avg_latency_ms)}</td>
+      <td class="latency">${row.observed_latency_delta_ms==null?'—':fmtMs(row.observed_latency_delta_ms)}</td>
+      <td class="flags">${openaiBreakdownBadges(row.quality_gate_breakdown,'gate')}</td>
+      <td class="flags">${compactBreakdown(row.target_models,'unknown')}</td>
+    </tr>`).join('')||'<tr><td colspan="15" style="color:#8b949e">No OpenAI optimization metadata in this local window</td></tr>';
+    const claude=(((d.companion_sections||{}).anthropic_recommendations)||{});
+    document.getElementById('openai-scoreboard-claude-tbody').innerHTML=`<tr>
+      <td><span class="badge provider">Claude recommendations</span></td>
+      <td><span class="badge ${claude.status==='no-traffic'?'miss':'provider'}">${esc(claude.status||'unknown')}</span></td>
+      <td class="tokens">${(claude.sample_count||0).toLocaleString()}</td>
+      <td><span class="badge ${claude.display==='suppressed'?'miss':'provider'}">${esc(claude.display||'unknown')}</span></td>
+      <td class="flags">${esc(claude.reason||'—')}</td>
+    </tr>`;
+    const recent=d.recent||[];
+    document.getElementById('openai-scoreboard-recent-tbody').innerHTML=recent.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td class="model">${esc(shortModel(row.requested_model||'—'))}</td>
+      <td class="model">${esc(shortModel(row.routed_model||'—'))}</td>
+      <td class="tokens">${row.status_code??'—'}</td>
+      <td><span class="badge ${openaiStateBadge(row.state)}">${esc(row.state||'unknown')}</span></td>
+      <td class="model">${esc(row.candidate_id||'uncategorized')}</td>
+      <td><span class="badge ${openaiGateBadge(row.quality_gate_outcome)}">${esc(row.quality_gate_outcome||'unknown')}</span></td>
+      <td class="savings">${fmt(row.observed_cost_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(row.projected_cost_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtTok(row.tokens_saved_est||0)}</td>
+      <td><span class="badge ${row.cache_status==='hit'?'hit':'miss'}">${esc(row.cache_status||'missing')}</span></td>
+      <td class="tokens">${(row.retry_count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="13" style="color:#8b949e">No recent OpenAI decisions</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshManaged(){
   try{
     const [managedResponse,safetyResponse,rolloutResponse]=await Promise.all([
@@ -10148,6 +10647,7 @@ refreshErrors();
 refreshLimiter();
 refreshSafety();
 refreshPolicies();
+refreshOpenAIScoreboard();
 refreshManaged();
 refreshPhaseRouting();
 refreshSessions();
@@ -10162,6 +10662,7 @@ setInterval(refreshCache,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
+setInterval(refreshOpenAIScoreboard,30000);
 setInterval(refreshManaged,30000);
 setInterval(refreshPhaseRouting,30000);
 setInterval(refreshSessions,30000);

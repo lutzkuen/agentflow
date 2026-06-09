@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -578,6 +579,261 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("/agentflow/stats/managed-recommendations", html.text)
             self.assertIn("managed-summary-tbody", html.text)
             self.assertIn("managed-health-tbody", html.text)
+
+    def test_openai_scoreboard_answers_go_no_go_from_metadata_and_suppresses_claude_no_traffic(self):
+        def log_openai_call(created_at, *, routing, status_code=200, latency_ms=100, retry_count=0, cache=None, crunch=None, actual=0.02, baseline=0.02):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=created_at,
+                path="/v1/responses",
+                requested_model="gpt-5-codex",
+                routed_model=routing.get("routed_model", "gpt-5-codex"),
+                stream=0,
+                cache_hit=1 if (cache or {}).get("status") == "hit" else 0,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                input_tokens_est=1000,
+                output_tokens_est=100,
+                actual_input_tokens=900,
+                actual_output_tokens=90,
+                cost_est_usd=actual,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json(crunch or {"changed": False, "tokens_saved_est": 0}),
+                routing_json=stable_json(routing),
+                cache_json=stable_json(cache or {"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="openai-secret-session",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                thinking_output_tokens=0,
+                provider="openai",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model_family="gpt-5-codex",
+                routed_model_family="gpt-5-codex",
+            )
+
+        risk = {
+            "error_rate": 0.01,
+            "retry_rate": 0.02,
+            "fallback_rate": 0.01,
+            "latency_regression_ratio": 0.9,
+            "missing_fields": [],
+        }
+        log_openai_call(
+            "2026-06-09T10:00:00+00:00",
+            routing={
+                "routed_model": "gpt-5-codex",
+                "managed_recommendation": {
+                    "mode": "observe-only",
+                    "status": "skipped",
+                    "enabled": False,
+                    "applied": False,
+                    "raw_payload_included": False,
+                },
+            },
+        )
+        log_openai_call(
+            "2026-06-09T10:01:00+00:00",
+            routing={
+                "routed_model": "gpt-5-codex",
+                "managed_recommendation": {
+                    "mode": "dry-run",
+                    "status": "dry-run",
+                    "lifecycle_event": "dry_run",
+                    "policy_id": "openai-mini-candidate",
+                    "target_model": "gpt-5-mini",
+                    "would_route_model": "gpt-5-mini",
+                    "projection": {"projected_input_savings_usd": 0.01, "risk": risk},
+                },
+            },
+            retry_count=1,
+            crunch={"changed": True, "tokens_saved_est": 25},
+        )
+        log_openai_call(
+            "2026-06-09T10:02:00+00:00",
+            routing={
+                "routed_model": "gpt-5-mini",
+                "managed_recommendation": {
+                    "mode": "canary",
+                    "status": "applied",
+                    "lifecycle_event": "canary_applied",
+                    "policy_id": "openai-mini-candidate",
+                    "target_model": "gpt-5-mini",
+                    "applied": True,
+                    "changed_model": True,
+                    "projection": {"projected_input_savings_usd": 0.01, "risk": risk},
+                },
+            },
+            latency_ms=90,
+            cache={"status": "hit", "reason": "exact-hit", "policy_source": "local-default"},
+            actual=0.01,
+            baseline=0.03,
+        )
+        log_openai_call(
+            "2026-06-09T10:03:00+00:00",
+            routing={
+                "routed_model": "gpt-5-codex",
+                "managed_recommendation": {
+                    "mode": "canary",
+                    "status": "holdout",
+                    "lifecycle_event": "holdout",
+                    "policy_id": "openai-mini-candidate",
+                    "target_model": "gpt-5-mini",
+                    "would_route_model": "gpt-5-mini",
+                    "projection": {"projected_input_savings_usd": 0.01, "risk": risk},
+                },
+            },
+            latency_ms=110,
+        )
+        log_openai_call(
+            "2026-06-09T10:04:00+00:00",
+            routing={
+                "routed_model": "gpt-5-codex",
+                "managed_recommendation": {
+                    "mode": "canary",
+                    "status": "skipped",
+                    "lifecycle_event": "fallback",
+                    "fallback": "local-policy",
+                    "apply_reason": "provider-mismatch",
+                    "policy_id": "wrong-provider-candidate",
+                    "target_model": "claude-haiku-4-5-20251001",
+                    "projection": {"projected_input_savings_usd": 0.0, "risk": risk},
+                },
+            },
+        )
+
+        result = asyncio.run(stats_views.stats_openai_scoreboard(server.store, limit=20))
+
+        self.assertEqual(result["schema"], "agentflow.openai_optimization_scoreboard.v1")
+        self.assertEqual(result["answer"], "helping")
+        self.assertEqual(result["summary"]["openai_call_count"], 5)
+        self.assertEqual(result["summary"]["retry_count"], 1)
+        self.assertEqual(result["summary"]["fallback_count"], 1)
+        self.assertEqual(result["summary"]["cache_hit_count"], 1)
+        self.assertEqual(result["summary"]["tokens_saved_est"], 25)
+        self.assertAlmostEqual(result["summary"]["observed_cost_savings_usd"], 0.02, places=6)
+        self.assertAlmostEqual(result["summary"]["projected_cost_savings_usd"], 0.03, places=6)
+        self.assertEqual(result["summary"]["observed_latency_delta_ms"], -20)
+        self.assertEqual(
+            result["companion_sections"]["anthropic_recommendations"]["status"],
+            "no-traffic",
+        )
+        self.assertEqual(
+            result["companion_sections"]["anthropic_recommendations"]["display"],
+            "suppressed",
+        )
+        states = {row["value"]: row["count"] for row in result["state_breakdown"]}
+        self.assertEqual(states["observed-only"], 1)
+        self.assertEqual(states["dry-run"], 1)
+        self.assertEqual(states["canary-applied"], 1)
+        self.assertEqual(states["holdout"], 1)
+        self.assertEqual(states["fallback"], 1)
+        gates = {row["value"]: row["count"] for row in result["quality_gate_breakdown"]}
+        self.assertEqual(gates["passed-local-gates"], 3)
+        self.assertEqual(gates["failed-provider-target"], 1)
+        candidate = next(row for row in result["candidates"] if row["candidate_id"] == "openai-mini-candidate")
+        self.assertEqual(candidate["calls"], 3)
+        self.assertEqual(candidate["observed_latency_delta_ms"], -20)
+        rendered = json.dumps(result)
+        self.assertNotIn("openai-secret-session", rendered)
+        for key in ("raw_prompts_included", "raw_responses_included", "tool_bodies_included", "request_ids_included", "tenant_ids_included", "secrets_included"):
+            self.assertFalse(result["privacy"][key])
+        self.assertFalse(result["privacy"]["provider_calls_made"])
+        json.dumps(result)
+
+    def test_openai_scoreboard_dashboard_endpoint_panel_and_cli_are_metadata_only(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routed_model="gpt-5-mini",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=50,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+            routing_json=stable_json({
+                "managed_recommendation": {
+                    "mode": "canary",
+                    "status": "applied",
+                    "lifecycle_event": "canary_applied",
+                    "policy_id": "openai-mini-candidate",
+                    "target_model": "gpt-5-mini",
+                    "applied": True,
+                    "projection": {
+                        "projected_input_savings_usd": 0.002,
+                        "risk": {
+                            "error_rate": 0.0,
+                            "retry_rate": 0.0,
+                            "fallback_rate": 0.0,
+                            "latency_regression_ratio": 0.8,
+                            "missing_fields": [],
+                        },
+                    },
+                }
+            }),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="hidden-session",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="openai",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model_family="gpt-5-codex",
+            routed_model_family="gpt-5-mini",
+        )
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.openai.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        client = TestClient(app)
+
+        stats_response = client.get("/agentflow/stats/openai-scoreboard")
+        self.assertEqual(stats_response.status_code, 200)
+        payload = stats_response.json()
+        self.assertEqual(payload["schema"], "agentflow.openai_optimization_scoreboard.v1")
+        self.assertEqual(payload["summary"]["openai_call_count"], 1)
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+
+        html = client.get("/agentflow/dashboard")
+        self.assertEqual(html.status_code, 200)
+        self.assertIn("OpenAI optimization scoreboard", html.text)
+        self.assertIn("/agentflow/stats/openai-scoreboard", html.text)
+        self.assertIn("openai-scoreboard-summary-tbody", html.text)
+        self.assertIn("openai-scoreboard-candidates-tbody", html.text)
+        self.assertIn("Claude recommendation traffic state", html.text)
+
+        from agentflow_proxy import cli
+
+        output = io.StringIO()
+        exit_code = cli.openai_scoreboard_cli(["--db", self.tmp.name, "--limit", "10"], stdout=output)
+        self.assertEqual(exit_code, 0)
+        cli_payload = json.loads(output.getvalue())
+        self.assertEqual(cli_payload["schema"], "agentflow.openai_optimization_scoreboard.v1")
+        self.assertEqual(cli_payload["summary"]["openai_call_count"], 1)
+        self.assertNotIn("hidden-session", output.getvalue())
 
     def test_managed_pattern_adoption_funnel_covers_outcomes_and_lifecycle(self):
         pattern_hash = "sha256:" + ("a" * 64)
