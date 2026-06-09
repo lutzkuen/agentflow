@@ -1227,6 +1227,123 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
         self.assertTrue(output["managed_server_calls_made"])
 
+    def test_old_context_summary_quality_gate_feedback_queues_and_flushes_metadata_only_verdict(self):
+        from agentflow_proxy import recommendations
+        from agentflow_proxy.store import Store
+
+        dry_run = self._old_context_summary_quality_gate_dry_run()
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 503
+        ManagedFeedbackFlushClient.text = "managed unavailable with raw quality secret"
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_quality_gate_rows(db_path, scenario="promote")
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.old_context_summary_impact_cli(
+                        ["-", "--db", db_path, "--limit", "10"],
+                        stdin=io.StringIO(json.dumps(dry_run)),
+                        stdout=stdout,
+                    )
+
+                    output = json.loads(stdout.getvalue())
+                    self.assertEqual(code, 0)
+                    self.assertEqual(output["quality_gate"]["verdict"], "promote")
+                    self.assertEqual(output["managed_lifecycle_feedback"]["status"], "retryable-error")
+                    queue_id = output["managed_lifecycle_feedback"]["queue_id"]
+
+                    store = Store(db_path)
+                    try:
+                        row = store.get_managed_outcome_feedback(queue_id)
+                        self.assertIsNotNone(row)
+                        queued_payload = json.loads(row["payload_json"])
+                    finally:
+                        store.conn.close()
+
+                    metadata = queued_payload["metadata"]
+                    gate = metadata["old_context_summary_quality_gate"]
+                    self.assertEqual(gate["schema"], "agentflow.old_context_summary_quality_gate_feedback.v1")
+                    self.assertEqual(gate["quality_gate_schema"], "agentflow.old_context_summary_quality_gate.v1")
+                    self.assertEqual(gate["candidate_id"], "candidate-old-context-quality-gate")
+                    self.assertEqual(gate["rule_id"], "test-old-context-quality-gate")
+                    self.assertEqual(gate["policy_source"], "managed-recommended")
+                    self.assertEqual(gate["verdict"], "promote")
+                    self.assertEqual(gate["reason_codes"], ["quality-gate-passed"])
+                    self.assertEqual(gate["cohort_counts"]["matched"], 4)
+                    self.assertEqual(gate["cohort_counts"]["canary_applied"], 2)
+                    self.assertEqual(gate["cohort_counts"]["canary_holdout"], 2)
+                    self.assertEqual(gate["safety"]["summary_failure_count"], 0)
+                    self.assertEqual(gate["safety"]["safety_stop_count"], 0)
+                    self.assertEqual(gate["aggregate_deltas"]["applied_minus_holdout_error_rate"], 0.0)
+                    self.assertEqual(gate["aggregate_deltas"]["applied_minus_holdout_retry_rate"], 0.0)
+                    self.assertEqual(gate["aggregate_deltas"]["applied_minus_holdout_latency_avg_ms"], 0.0)
+                    self.assertGreater(gate["savings"]["net_savings_usd"], 0)
+                    self.assertGreater(gate["savings"]["payback_ratio"], 1.0)
+                    self.assertFalse(gate["privacy"]["raw_old_context_included"])
+                    self.assertFalse(gate["privacy"]["generated_summaries_included"])
+                    self.assertFalse(gate["privacy"]["summary_prompts_included"])
+                    self.assertFalse(gate["privacy"]["file_contents_included"])
+                    self.assertFalse(gate["privacy"]["request_ids_included"])
+                    self.assertFalse(gate["privacy"]["tenant_ids_included"])
+                    self.assertFalse(gate["privacy"]["local_session_ids_included"])
+                    self.assertFalse(gate["privacy"]["cache_keys_included"])
+                    def keys_in(value):
+                        if isinstance(value, dict):
+                            keys = set(value)
+                            for child in value.values():
+                                keys.update(keys_in(child))
+                            return keys
+                        if isinstance(value, list):
+                            keys = set()
+                            for child in value:
+                                keys.update(keys_in(child))
+                            return keys
+                        return set()
+
+                    self.assertTrue(recommendations.RAW_FEATURE_KEYS.isdisjoint(keys_in(queued_payload) - {"command"}))
+                    rendered = json.dumps(queued_payload, sort_keys=True)
+                    self.assertNotIn("raw quality secret", rendered)
+                    self.assertNotIn("generated quality summary", rendered)
+                    self.assertNotIn("quality-gate-session-secret", rendered)
+                    self.assertNotIn("raw quality error", rendered)
+
+                    ManagedFeedbackFlushClient.status_code = 200
+                    ManagedFeedbackFlushClient.text = '{"ok":true}'
+                    flush_stdout = io.StringIO()
+                    flush_code = cli.managed_feedback_flush_cli(
+                        [
+                            "--db",
+                            db_path,
+                            "--source-surface",
+                            recommendations.OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE,
+                        ],
+                        stdout=flush_stdout,
+                    )
+
+            self.assertEqual(flush_code, 0)
+            flush_payload = json.loads(flush_stdout.getvalue())
+            self.assertEqual(flush_payload["flush"]["sent"], 1)
+            self.assertEqual(ManagedFeedbackFlushClient.calls[-1]["url"], "http://managed.test/v1/policy-events")
+            self.assertEqual(
+                ManagedFeedbackFlushClient.calls[-1]["json"]["metadata"]["old_context_summary_quality_gate"]["verdict"],
+                "promote",
+            )
+            store = Store(db_path)
+            try:
+                flushed = store.get_managed_outcome_feedback(queue_id)
+                self.assertEqual(flushed["status"], "sent")
+            finally:
+                store.conn.close()
+
     def _summary_rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False, verdict: str = "promote") -> dict:
         action = {
             "schema": "agentflow.old_context_summary_rollout_action.v1",

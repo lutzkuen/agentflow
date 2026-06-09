@@ -2534,6 +2534,99 @@ def _old_context_summary_lifecycle_event_type(command: str, result: dict[str, An
     return "dry-run"
 
 
+def _old_context_summary_quality_gate_feedback(
+    *,
+    quality_gate: dict[str, Any],
+    policy: dict[str, Any],
+    summary: dict[str, Any],
+    actual: dict[str, Any],
+    delta: dict[str, Any],
+    local_tool_version: str,
+) -> dict[str, Any] | None:
+    if not isinstance(quality_gate, dict) or not quality_gate:
+        return None
+
+    metrics = quality_gate.get("metrics") if isinstance(quality_gate.get("metrics"), dict) else {}
+    cohorts = quality_gate.get("cohorts") if isinstance(quality_gate.get("cohorts"), dict) else {}
+    applied = cohorts.get("canary_applied") if isinstance(cohorts.get("canary_applied"), dict) else {}
+    holdout = cohorts.get("canary_holdout") if isinstance(cohorts.get("canary_holdout"), dict) else {}
+    bypassed = cohorts.get("bypassed_or_disabled") if isinstance(cohorts.get("bypassed_or_disabled"), dict) else {}
+    matched_count = int(metrics.get("matched_metadata_row_count") or summary.get("actual_matched_metadata_row_count") or 0)
+    summary_failure_count = int(metrics.get("summary_failure_count") or summary.get("summary_failure_count") or 0)
+    safety_stop_count = int(applied.get("safety_stop_count") or 0) + int(bypassed.get("safety_stop_count") or 0)
+    latency = actual.get("latency") if isinstance(actual.get("latency"), dict) else {}
+    privacy = quality_gate.get("privacy") if isinstance(quality_gate.get("privacy"), dict) else {}
+
+    return {
+        "schema": "agentflow.old_context_summary_quality_gate_feedback.v1",
+        "quality_gate_schema": quality_gate.get("schema"),
+        "candidate_id": policy.get("candidate_id"),
+        "rule_id": policy.get("rule_id"),
+        "policy_source": policy.get("policy_source"),
+        "local_tool_version": local_tool_version,
+        "verdict": quality_gate.get("verdict"),
+        "reason_codes": quality_gate.get("reason_codes") or [],
+        "warning_codes": quality_gate.get("warning_codes") or [],
+        "thresholds": quality_gate.get("thresholds") if isinstance(quality_gate.get("thresholds"), dict) else {},
+        "cohorts": {
+            "canary_applied": applied,
+            "canary_holdout": holdout,
+            "bypassed_or_disabled": bypassed,
+        },
+        "cohort_counts": {
+            "matched": matched_count,
+            "canary_applied": int(metrics.get("canary_applied_count") or summary.get("actual_canary_applied_count") or 0),
+            "canary_holdout": int(metrics.get("canary_holdout_count") or summary.get("actual_canary_holdout_count") or 0),
+            "bypassed_or_disabled": int(metrics.get("bypassed_or_disabled_count") or summary.get("actual_bypassed_or_disabled_count") or 0),
+        },
+        "aggregate_rates": {
+            "error_rate": summary.get("error_rate"),
+            "retry_rate": summary.get("retry_rate"),
+            "summary_failure_rate": round(summary_failure_count / matched_count, 6) if matched_count else 0.0,
+        },
+        "aggregate_deltas": {
+            "applied_minus_holdout_error_rate": metrics.get("applied_minus_holdout_error_rate"),
+            "applied_minus_holdout_retry_rate": metrics.get("applied_minus_holdout_retry_rate"),
+            "applied_minus_holdout_latency_avg_ms": metrics.get("applied_minus_holdout_latency_avg_ms"),
+            "latency_applied_minus_holdout_avg_ms": latency.get("applied_minus_holdout_avg_ms"),
+            "matched_vs_projected_affected_delta": delta.get("matched_vs_projected_affected_delta"),
+            "applied_vs_projected_delta": delta.get("applied_vs_projected_delta"),
+            "holdout_vs_projected_delta": delta.get("holdout_vs_projected_delta"),
+            "bypass_or_disabled_vs_projected_delta": delta.get("bypass_or_disabled_vs_projected_delta"),
+            "net_savings_vs_projection_delta_usd": delta.get("net_savings_vs_projection_delta_usd") or summary.get("net_savings_vs_projection_delta_usd"),
+        },
+        "savings": {
+            "net_savings_usd": metrics.get("net_savings_usd") or summary.get("actual_net_savings_usd"),
+            "gross_savings_usd": metrics.get("gross_savings_usd") or summary.get("actual_gross_savings_usd"),
+            "summary_model_cost_usd": metrics.get("summary_model_cost_usd") or summary.get("actual_summary_model_cost_usd"),
+            "payback_ratio": metrics.get("payback_ratio"),
+            "projection_realization_ratio": metrics.get("projection_realization_ratio"),
+        },
+        "safety": {
+            "summary_failure_count": summary_failure_count,
+            "summary_failure_rate": round(summary_failure_count / matched_count, 6) if matched_count else 0.0,
+            "safety_stop_count": safety_stop_count,
+            "applied_safety_stop_count": int(applied.get("safety_stop_count") or 0),
+            "bypassed_safety_stop_count": int(bypassed.get("safety_stop_count") or 0),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_old_context_included": bool(privacy.get("raw_old_context_included", False)),
+            "generated_summaries_included": bool(privacy.get("generated_summaries_included", False)),
+            "summary_prompts_included": False,
+            "raw_messages_included": bool(privacy.get("raw_messages_included", False)),
+            "raw_transcripts_included": bool(privacy.get("raw_transcripts_included", False)),
+            "provider_bodies_included": bool(privacy.get("provider_bodies_included", False)),
+            "file_contents_included": False,
+            "request_ids_included": bool(privacy.get("request_ids_included", False)),
+            "tenant_ids_included": bool(privacy.get("tenant_ids_included", False)),
+            "local_session_ids_included": bool(privacy.get("local_session_ids_included", False)),
+            "cache_keys_included": bool(privacy.get("cache_keys_included", False)),
+            "raw_payload_strings_included": False,
+        },
+    }
+
+
 def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any] | None:
     from agentflow_proxy import __version__
 
@@ -2548,6 +2641,14 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         actual = dry_run.get("actual") if isinstance(dry_run.get("actual"), dict) else {}
         delta = dry_run.get("delta") if isinstance(dry_run.get("delta"), dict) else {}
         quality_gate = dry_run.get("quality_gate") if isinstance(dry_run.get("quality_gate"), dict) else {}
+        quality_gate_feedback = _old_context_summary_quality_gate_feedback(
+            quality_gate=quality_gate,
+            policy=policy,
+            summary=summary,
+            actual=actual,
+            delta=delta,
+            local_tool_version=__version__,
+        )
         basis = {
             "command": command,
             "rule_id": policy.get("rule_id"),
@@ -2594,6 +2695,7 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
             "summary_cache_buckets": actual.get("summary_cache_buckets"),
             "safety_stop_buckets": actual.get("safety_stop_buckets"),
             "delta": delta,
+            "old_context_summary_quality_gate": quality_gate_feedback,
             "quality_gate": {
                 "schema": quality_gate.get("schema"),
                 "verdict": quality_gate.get("verdict"),
