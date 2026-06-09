@@ -75,6 +75,9 @@ terminal_log_boilerplate:
   min_repeated_lines: 4
   max_annotations: 12
 pattern_modules:
+  cacheability:
+    enabled: true
+    local_crunch_enabled: false
   diffs:
     enabled: true
     local_crunch_enabled: true
@@ -85,6 +88,9 @@ pattern_modules:
     enabled: true
     local_crunch_enabled: false
   prompt_role:
+    enabled: true
+    local_crunch_enabled: false
+  tabular_data:
     enabled: true
     local_crunch_enabled: false
   tool_results:

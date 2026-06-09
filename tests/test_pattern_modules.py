@@ -9,6 +9,7 @@ import unittest
 import agentflow_proxy.crunch as crunch_module
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.pattern_modules import (
+    CacheabilityPatternModule,
     DiffPatternModule,
     GeneratedArtifactPatternModule,
     LocalPatternModule,
@@ -17,6 +18,7 @@ from agentflow_proxy.pattern_modules import (
     PatternModuleContext,
     PatternModuleRegistry,
     PromptRolePatternModule,
+    TabularDataPatternModule,
     TerminalLogPatternModule,
     ToolResultPatternModule,
     evaluate_pattern_modules,
@@ -92,8 +94,10 @@ class PatternModuleTests(unittest.TestCase):
         modules = registered_pattern_modules()
 
         families = {module["family"] for module in modules}
+        self.assertIn("cacheability", families)
         self.assertIn("diffs", families)
         self.assertIn("generated_artifacts", families)
+        self.assertIn("tabular_data", families)
         self.assertIn("terminal_logs", families)
         self.assertIn("prompt_role", families)
         self.assertIn("tool_results", families)
@@ -117,8 +121,11 @@ class PatternModuleTests(unittest.TestCase):
         rendered = json.dumps(meta["server_features"], sort_keys=True)
         self.assertEqual(crunched, body)
         self.assertEqual(managed_egress_violations(meta["server_features"]), [])
-        self.assertEqual(meta["features_emitted_count"], 2)
-        self.assertEqual({item["family"] for item in meta["server_features"]["features"]}, {"prompt_role", "terminal_logs"})
+        self.assertEqual(meta["features_emitted_count"], 3)
+        self.assertEqual(
+            {item["family"] for item in meta["server_features"]["features"]},
+            {"cacheability", "prompt_role", "terminal_logs"},
+        )
         self.assertNotIn("secret-app", rendered)
         self.assertNotIn("voucher 12345", rendered)
 
@@ -253,6 +260,26 @@ pattern_modules:
                 }
             },
             category="long-context",
+        )
+        feature = meta["server_features"]["features"][0]
+        return crunched, meta, feature["features"]
+
+    def _tabular_feature(self, body):
+        crunched, meta = evaluate_pattern_modules(
+            body,
+            registry=PatternModuleRegistry([TabularDataPatternModule()]),
+            module_settings={"tabular_data": {"enabled": True, "local_crunch_enabled": True}},
+            category="long-context",
+        )
+        feature = meta["server_features"]["features"][0]
+        return crunched, meta, feature["features"]
+
+    def _cacheability_feature(self, body, *, category="chat"):
+        crunched, meta = evaluate_pattern_modules(
+            body,
+            registry=PatternModuleRegistry([CacheabilityPatternModule()]),
+            module_settings={"cacheability": {"enabled": True}},
+            category=category,
         )
         feature = meta["server_features"]["features"][0]
         return crunched, meta, feature["features"]
@@ -497,6 +524,147 @@ pattern_modules:
         self.assertEqual(crunched_text.count(generated_line), 1)
         self.assertIn("generated/minified bulk omitted", crunched_text)
         self.assertNotIn("privatepb", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_tabular_module_detects_markdown_tables_without_raw_rows(self):
+        table = "\n".join([
+            "Summarize the total by status.",
+            "| customer | status | amount |",
+            "| --- | --- | --- |",
+            "| SecretCo | pending | 10 |",
+            "| PrivateLLC | done | 20 |",
+            "| HiddenInc | pending | 30 |",
+        ])
+        body = {"messages": [{"role": "user", "content": table}]}
+
+        crunched, meta, features = self._tabular_feature(body)
+        rendered = json.dumps(meta["server_features"], sort_keys=True)
+
+        self.assertEqual(crunched, body)
+        self.assertTrue(features["table_present"])
+        self.assertEqual(features["table_shape"], "markdown_table")
+        self.assertEqual(features["row_count_bucket"], "two_three")
+        self.assertEqual(features["column_count_bucket"], "two_three")
+        self.assertEqual(features["schema_repetition_bucket"], "gte_75pct")
+        self.assertTrue(features["aggregation_requested_hint"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("SecretCo", rendered)
+        self.assertNotIn("PrivateLLC", rendered)
+
+    def test_tabular_module_detects_csv_blocks(self):
+        csv_text = "\n".join([
+            "Please summarize this export.",
+            "name,status,amount",
+            "SecretCo,pending,10",
+            "PrivateLLC,done,20",
+            "HiddenInc,pending,30",
+        ])
+        body = {"messages": [{"role": "user", "content": csv_text}]}
+
+        _, meta, features = self._tabular_feature(body)
+
+        self.assertEqual(features["table_shape"], "csv_block")
+        self.assertEqual(features["row_count_bucket"], "two_three")
+        self.assertEqual(features["column_count_bucket"], "two_three")
+        self.assertTrue(features["aggregation_requested_hint"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("SecretCo", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_tabular_module_detects_sql_result_rows(self):
+        sql_rows = "\n".join([
+            "SELECT id, status FROM private_orders;",
+            "+----+---------+",
+            "| id | status  |",
+            "+----+---------+",
+            "| 41 | pending |",
+            "| 42 | done    |",
+            "+----+---------+",
+        ])
+        body = {"messages": [{"role": "user", "content": sql_rows}]}
+
+        _, meta, features = self._tabular_feature(body)
+
+        self.assertEqual(features["table_shape"], "sql_result_rows")
+        self.assertTrue(features["time_sensitive_hint"])
+        self.assertTrue(features["exact_rows_preserved_by_default"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("private_orders", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_tabular_module_detects_json_arrays_by_shape_only(self):
+        json_rows = (
+            "Count statuses in this JSON array: "
+            '[{"id": 1, "name": "SecretCo", "status": "pending"}, '
+            '{"id": 2, "name": "PrivateLLC", "status": "done"}, '
+            '{"id": 3, "name": "HiddenInc", "status": "pending"}]'
+        )
+        body = {"messages": [{"role": "user", "content": json_rows}]}
+
+        _, meta, features = self._tabular_feature(body)
+
+        self.assertEqual(features["table_shape"], "json_object_array")
+        self.assertEqual(features["row_count_bucket"], "two_three")
+        self.assertEqual(features["column_count_bucket"], "two_three")
+        self.assertEqual(features["schema_repetition_bucket"], "gte_75pct")
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("SecretCo", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_tabular_module_preserves_exact_lookup_and_reconciliation(self):
+        exact_lookup = "\n".join([
+            "Find the exact row for invoice #4242.",
+            "invoice,status,total",
+            "4241,paid,12",
+            "4242,open,99",
+            "4243,paid,44",
+        ])
+        reconciliation = "\n".join([
+            "Reconcile these rows and identify mismatches.",
+            "| id | ledger | bank |",
+            "| --- | --- | --- |",
+            "| 1 | 10 | 10 |",
+            "| 2 | 15 | 14 |",
+        ])
+
+        for text, expected_hint in ((exact_lookup, "exact_lookup_requested_hint"), (reconciliation, "reconciliation_requested_hint")):
+            with self.subTest(expected_hint=expected_hint):
+                crunched, meta, features = self._tabular_feature({"messages": [{"role": "user", "content": text}]})
+                self.assertEqual(crunched["messages"][0]["content"], text)
+                self.assertTrue(features[expected_hint])
+                self.assertTrue(features["exact_rows_preserved_by_default"])
+                self.assertEqual(features["sample_sufficient_likelihood_bucket"], "low")
+                self.assertEqual(meta["modules"][0]["status"], "skipped")
+                self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+
+    def test_cacheability_module_marks_static_qa_high_cacheability(self):
+        body = {"messages": [{"role": "user", "content": "What is the capital of France?"}]}
+
+        _, meta, features = self._cacheability_feature(body)
+
+        self.assertEqual(features["cacheability_bucket"], "high")
+        self.assertEqual(features["deterministic_answer_likelihood_bucket"], "high")
+        self.assertTrue(features["static_information_hint"])
+        self.assertTrue(features["exact_cache_candidate_hint"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+
+    def test_cacheability_module_marks_current_state_low_cacheability(self):
+        body = {"messages": [{"role": "user", "content": "What are the latest open issues today?"}]}
+
+        _, meta, features = self._cacheability_feature(body)
+
+        self.assertEqual(features["cacheability_bucket"], "low")
+        self.assertEqual(features["deterministic_answer_likelihood_bucket"], "low")
+        self.assertTrue(features["time_sensitive_hint"])
+        self.assertFalse(features["exact_cache_candidate_hint"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+
+    def test_cacheability_module_marks_user_specific_low_cacheability(self):
+        body = {"messages": [{"role": "user", "content": "Explain my account's current billing status."}]}
+
+        _, meta, features = self._cacheability_feature(body)
+
+        self.assertEqual(features["cacheability_bucket"], "low")
+        self.assertTrue(features["user_specific_hint"])
+        self.assertTrue(features["time_sensitive_hint"])
+        self.assertFalse(features["exact_cache_candidate_hint"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
 
 
 if __name__ == "__main__":

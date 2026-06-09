@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,8 @@ PATTERN_MODULE_FEATURES_SCHEMA = "agentflow.local_pattern_module_features.v1"
 TOOL_RESULT_FEATURE_SCHEMA = "agentflow.tool_result_features.v1"
 DIFF_FEATURE_SCHEMA = "agentflow.diff_features.v1"
 GENERATED_ARTIFACT_FEATURE_SCHEMA = "agentflow.generated_artifact_features.v1"
+TABULAR_DATA_FEATURE_SCHEMA = "agentflow.tabular_data_features.v1"
+CACHEABILITY_FEATURE_SCHEMA = "agentflow.cacheability_features.v1"
 TOKEN_CHARS = 4
 
 
@@ -61,6 +64,40 @@ _TOOL_FRAMING_RE = re.compile(
     r"|(?:tool|function)\s+results?\s*:?"
     r"|(?:[-=]{2,})\s*(?:tool|function)\s+results?\s*(?:[-=]{2,})"
     r")\s*$",
+    re.IGNORECASE,
+)
+_PIPE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_SQL_BORDER_LINE_RE = re.compile(r"^\s*\+[-=+]+\+\s*$")
+_JSON_ARRAY_START_RE = re.compile(r"\[")
+_EXACT_LOOKUP_RE = re.compile(
+    r"\b(?:exact(?:ly)?|specific|lookup|look up|find|which row|what row|row id|record id|id\s*[=:]?\s*\d+|"
+    r"order\s+#?\d+|invoice\s+#?\d+|ticket\s+#?\d+|voucher\s+#?\d+|verbatim|full row|full record)\b",
+    re.IGNORECASE,
+)
+_AGGREGATION_RE = re.compile(
+    r"\b(?:count|counts|sum|total|average|avg|median|min|max|group by|aggregate|aggregation|distribution|"
+    r"histogram|top\s+\d+|percent|percentage|rate|trend|summari[sz]e|sample|representative)\b",
+    re.IGNORECASE,
+)
+_RECONCILIATION_RE = re.compile(
+    r"\b(?:reconcile|reconciliation|mismatch|mismatches|discrepanc|compare|cross-check|audit|balance|"
+    r"tie out|diff|delta|missing row|duplicate|duplicates|validate every|verify every)\b",
+    re.IGNORECASE,
+)
+_CURRENT_STATE_RE = re.compile(
+    r"\b(?:current|currently|latest|today|tonight|now|right now|real[- ]time|live|recent|as of|up to date|"
+    r"up-to-date|weather|stock price|exchange rate|news|availability|status page|open issues?|local files?|"
+    r"workspace|repository|repo|database|production|prod)\b",
+    re.IGNORECASE,
+)
+_USER_SPECIFIC_RE = re.compile(
+    r"\b(?:my|mine|me|I|I'm|I've|we|our|ours|us|account|profile|subscription|invoice|billing|private|"
+    r"customer|user-specific|personal|local|workspace|repository|repo|project|company|tenant)\b",
+    re.IGNORECASE,
+)
+_STATIC_INFORMATION_RE = re.compile(
+    r"\b(?:what is|what are|who is|who was|where is|where are|define|definition of|explain|describe|"
+    r"how does|why does|capital of|convert|syntax for|meaning of|overview of)\b",
     re.IGNORECASE,
 )
 
@@ -879,10 +916,303 @@ class GeneratedArtifactPatternModule(LocalPatternModule):
         )
 
 
+def _split_pipe_cells(line: str) -> list[str]:
+    stripped = line.strip().strip("|")
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _table_sample_sufficient_bucket(
+    *,
+    row_count: int,
+    aggregation: bool,
+    exact_lookup: bool,
+    reconciliation: bool,
+    current_state: bool,
+    user_specific: bool,
+) -> str:
+    if exact_lookup or reconciliation or current_state:
+        return "low"
+    if aggregation and row_count >= 25 and not user_specific:
+        return "high"
+    if aggregation and row_count >= 10:
+        return "medium"
+    if row_count >= 50 and not user_specific:
+        return "medium"
+    return "low"
+
+
+def _tabular_shapes_from_text(text: str) -> list[dict[str, int | str]]:
+    shapes: list[dict[str, int | str]] = []
+    lines = [line for line in text.splitlines() if line.strip()]
+
+    pipe_rows: list[list[str]] = []
+    pipe_separator = False
+    sql_border = False
+    for line in lines:
+        if _SQL_BORDER_LINE_RE.match(line):
+            sql_border = True
+            continue
+        if "|" not in line:
+            continue
+        if _PIPE_SEPARATOR_RE.match(line):
+            pipe_separator = True
+            continue
+        cells = _split_pipe_cells(line)
+        if len(cells) >= 2:
+            pipe_rows.append(cells)
+    if len(pipe_rows) >= 2 and (pipe_separator or sql_border):
+        column_counts = [len(row) for row in pipe_rows]
+        mode_columns = max(set(column_counts), key=column_counts.count)
+        shapes.append({
+            "shape": "sql_result_rows" if sql_border else "markdown_table",
+            "rows": max(0, len(pipe_rows) - 1),
+            "columns": mode_columns,
+            "schema_repeated": column_counts.count(mode_columns),
+            "schema_total": len(column_counts),
+        })
+
+    for delimiter, shape_name in ((",", "csv_block"), ("\t", "tsv_block")):
+        best_rows = 0
+        best_columns = 0
+        best_repeated = 0
+        current_columns: list[int] = []
+        for line in lines + [""]:
+            if delimiter in line and not line.lstrip().startswith(("{", "[")):
+                columns = [cell.strip() for cell in line.split(delimiter)]
+                if len(columns) >= 2 and any(cell for cell in columns):
+                    current_columns.append(len(columns))
+                    continue
+            if len(current_columns) >= 3:
+                mode_columns = max(set(current_columns), key=current_columns.count)
+                if current_columns.count(mode_columns) > best_repeated:
+                    best_rows = len(current_columns)
+                    best_columns = mode_columns
+                    best_repeated = current_columns.count(mode_columns)
+            current_columns = []
+        if best_rows >= 3 and best_columns >= 2:
+            shapes.append({
+                "shape": shape_name,
+                "rows": max(0, best_rows - 1),
+                "columns": best_columns,
+                "schema_repeated": best_repeated,
+                "schema_total": best_rows,
+            })
+
+    decoder = json.JSONDecoder()
+    for match in _JSON_ARRAY_START_RE.finditer(text):
+        try:
+            value, _end = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if not (
+            isinstance(value, list)
+            and len(value) >= 2
+            and all(isinstance(item, dict) for item in value)
+        ):
+            continue
+        key_sets = [tuple(sorted(str(key) for key in item.keys())) for item in value if isinstance(item, dict)]
+        if not key_sets:
+            continue
+        mode_schema = max(set(key_sets), key=key_sets.count)
+        shapes.append({
+            "shape": "json_object_array",
+            "rows": len(key_sets),
+            "columns": len(mode_schema),
+            "schema_repeated": key_sets.count(mode_schema),
+            "schema_total": len(key_sets),
+        })
+        break
+    return shapes
+
+
+def _primary_tabular_shape(shapes: list[dict[str, int | str]]) -> dict[str, int | str] | None:
+    if not shapes:
+        return None
+    return sorted(shapes, key=lambda item: (-int(item.get("rows") or 0), str(item.get("shape") or "")))[0]
+
+
+class TabularDataPatternModule(LocalPatternModule):
+    family = "tabular_data"
+    version = "2026-06-10.1"
+    feature_schema = TABULAR_DATA_FEATURE_SCHEMA
+    supports_local_crunch = False
+
+    def detect(self, context: PatternModuleContext) -> PatternDetection:
+        detected = bool(_tabular_shapes_from_text(context.text))
+        return PatternDetection(
+            detected=detected,
+            reason="tabular-data-signals-detected" if detected else "no-tabular-data-signals",
+            confidence="high" if detected else "none",
+        )
+
+    def features(self, context: PatternModuleContext, detection: PatternDetection) -> dict[str, Any]:
+        shapes = _tabular_shapes_from_text(context.text)
+        primary = _primary_tabular_shape(shapes) or {}
+        primary_shape = str(primary.get("shape") or "unknown")
+        rows = int(primary.get("rows") or 0)
+        columns = int(primary.get("columns") or 0)
+        schema_repeated = int(primary.get("schema_repeated") or 0)
+        schema_total = int(primary.get("schema_total") or 0)
+        exact_lookup = bool(_EXACT_LOOKUP_RE.search(context.text))
+        aggregation = bool(_AGGREGATION_RE.search(context.text))
+        reconciliation = bool(_RECONCILIATION_RE.search(context.text))
+        current_state = bool(_CURRENT_STATE_RE.search(context.text) or primary_shape == "sql_result_rows")
+        user_specific = bool(_USER_SPECIFIC_RE.search(context.text))
+        preserve_exact = bool(exact_lookup or reconciliation or current_state)
+        return {
+            "schema": self.feature_schema,
+            "module_family": self.family,
+            "module_version": self.version,
+            "detected": detection.detected,
+            "table_present": bool(shapes),
+            "table_shape": primary_shape,
+            "table_count_bucket": _count_bucket(len(shapes)),
+            "row_count_bucket": _count_bucket(rows),
+            "column_count_bucket": _count_bucket(columns),
+            "schema_repetition_bucket": _fraction_bucket(schema_repeated, schema_total),
+            "exact_lookup_requested_hint": exact_lookup,
+            "aggregation_requested_hint": aggregation,
+            "reconciliation_requested_hint": reconciliation,
+            "time_sensitive_hint": current_state,
+            "user_specific_hint": user_specific,
+            "sample_sufficient_likelihood_bucket": _table_sample_sufficient_bucket(
+                row_count=rows,
+                aggregation=aggregation,
+                exact_lookup=exact_lookup,
+                reconciliation=reconciliation,
+                current_state=current_state,
+                user_specific=user_specific,
+            ),
+            "exact_rows_preserved_by_default": preserve_exact,
+            "safe_local_crunch_hint": bool(aggregation and not preserve_exact and rows >= 10),
+            "privacy": {
+                "metadata_only": True,
+                "raw_table_rows_included": False,
+                "row_values_included": False,
+                "column_names_included": False,
+                "user_values_included": False,
+            },
+        }
+
+
+def _deterministic_answer_bucket(
+    *,
+    static_information: bool,
+    time_sensitive: bool,
+    user_specific: bool,
+    exact_lookup: bool,
+    reconciliation: bool,
+) -> str:
+    if time_sensitive or user_specific or reconciliation:
+        return "low"
+    if static_information and not exact_lookup:
+        return "high"
+    if static_information or exact_lookup:
+        return "medium"
+    return "low"
+
+
+def _cacheability_bucket(
+    *,
+    deterministic_bucket: str,
+    time_sensitive: bool,
+    user_specific: bool,
+    exact_lookup: bool,
+    reconciliation: bool,
+    has_tools: bool,
+) -> str:
+    if time_sensitive or user_specific or reconciliation or has_tools:
+        return "low"
+    if deterministic_bucket == "high" and not exact_lookup:
+        return "high"
+    if deterministic_bucket in {"high", "medium"}:
+        return "medium"
+    return "low"
+
+
+class CacheabilityPatternModule(LocalPatternModule):
+    family = "cacheability"
+    version = "2026-06-10.1"
+    feature_schema = CACHEABILITY_FEATURE_SCHEMA
+    supports_local_crunch = False
+
+    def detect(self, context: PatternModuleContext) -> PatternDetection:
+        text = context.text.strip()
+        static_information = bool(_STATIC_INFORMATION_RE.search(text))
+        time_sensitive = bool(_CURRENT_STATE_RE.search(text))
+        user_specific = bool(_USER_SPECIFIC_RE.search(text))
+        exact_lookup = bool(_EXACT_LOOKUP_RE.search(text))
+        reconciliation = bool(_RECONCILIATION_RE.search(text))
+        detected = bool(text and (static_information or time_sensitive or user_specific or exact_lookup or reconciliation))
+        return PatternDetection(
+            detected=detected,
+            reason="cacheability-signals-detected" if detected else "no-cacheability-signals",
+            confidence="medium" if detected else "none",
+        )
+
+    def features(self, context: PatternModuleContext, detection: PatternDetection) -> dict[str, Any]:
+        text = context.text.strip()
+        static_information = bool(_STATIC_INFORMATION_RE.search(text))
+        time_sensitive = bool(_CURRENT_STATE_RE.search(text))
+        user_specific = bool(_USER_SPECIFIC_RE.search(text))
+        exact_lookup = bool(_EXACT_LOOKUP_RE.search(text))
+        aggregation = bool(_AGGREGATION_RE.search(text))
+        reconciliation = bool(_RECONCILIATION_RE.search(text))
+        has_tools = "tool" in str(context.category or "").lower()
+        deterministic_bucket = _deterministic_answer_bucket(
+            static_information=static_information,
+            time_sensitive=time_sensitive,
+            user_specific=user_specific,
+            exact_lookup=exact_lookup,
+            reconciliation=reconciliation,
+        )
+        cache_bucket = _cacheability_bucket(
+            deterministic_bucket=deterministic_bucket,
+            time_sensitive=time_sensitive,
+            user_specific=user_specific,
+            exact_lookup=exact_lookup,
+            reconciliation=reconciliation,
+            has_tools=has_tools,
+        )
+        return {
+            "schema": self.feature_schema,
+            "module_family": self.family,
+            "module_version": self.version,
+            "detected": detection.detected,
+            "cacheability_bucket": cache_bucket,
+            "deterministic_answer_likelihood_bucket": deterministic_bucket,
+            "static_information_hint": static_information,
+            "time_sensitive_hint": time_sensitive,
+            "user_specific_hint": user_specific,
+            "exact_lookup_requested_hint": exact_lookup,
+            "aggregation_requested_hint": aggregation,
+            "reconciliation_requested_hint": reconciliation,
+            "provider_tool_context_hint": has_tools,
+            "exact_cache_candidate_hint": bool(cache_bucket in {"high", "medium"} and not has_tools),
+            "cache_preserved_by_default_reason": (
+                "time-sensitive" if time_sensitive else
+                "user-specific" if user_specific else
+                "reconciliation" if reconciliation else
+                "tool-context" if has_tools else
+                "exact-lookup" if exact_lookup else
+                "none"
+            ),
+            "privacy": {
+                "metadata_only": True,
+                "raw_text_included": False,
+                "user_values_included": False,
+                "identifiers_included": False,
+                "current_state_values_included": False,
+            },
+        }
+
+
 DEFAULT_PATTERN_MODULE_REGISTRY = PatternModuleRegistry([
+    CacheabilityPatternModule(),
     DiffPatternModule(),
     GeneratedArtifactPatternModule(),
     PromptRolePatternModule(),
+    TabularDataPatternModule(),
     TerminalLogPatternModule(),
     ToolResultPatternModule(),
 ])
