@@ -1282,6 +1282,74 @@ class PolicyReloadCliTests(unittest.TestCase):
         }
         return bundle
 
+    def _managed_old_context_summary_bundle(self, *, raw_like: bool = False):
+        bundle = self._managed_policy_bundle()
+        bundle["recommendation"]["candidate_ids"].append("candidate-old-context-summary")
+        bundle["recommendation"]["candidate_count"] = 2
+        bundle["policies"]["crunch"]["policy_source"] = "managed-recommended"
+        candidate = {
+            "candidate_id": "candidate-old-context-summary",
+            "candidate_family": "old-context-summarization-policy-rule",
+            "policy_source": "managed-recommended",
+            "confidence": 0.84,
+            "sample_count": 42,
+            "source_model": "claude-sonnet-4-6",
+            "summary_model": "claude-haiku-4-5-20251001",
+            "conditions": {
+                "min_request_chars": 1,
+                "min_summarized_chars": 10,
+                "max_source_chars": 10000,
+            },
+            "action": {
+                "max_turns": 3,
+                "keep_recent_turns": 1,
+                "max_summary_chars": 80,
+                "max_summary_cost_usd": 1.0,
+            },
+            "canary": {
+                "enabled": True,
+                "fraction": 0.25,
+                "salt": "summary-canary-test",
+                "unit": "source_hash",
+                "holdout_sample_count": 9,
+                "widening_threshold": 0.8,
+                "rollback_threshold": 0.2,
+            },
+            "safety_gates": {
+                "min_outcome_samples": 5,
+                "max_error_rate": 0.05,
+                "max_summary_failure_rate": 0.02,
+            },
+            "net_savings_evidence": {
+                "projected_net_savings_usd": 0.42,
+                "projected_saved_tokens": 1200,
+                "estimated_summary_cost_usd": 0.01,
+            },
+            "quality_evidence": {
+                "holdout_success_count": 9,
+                "eval_pass_rate": 0.98,
+            },
+            "blocker_reason_codes": ["quality-gate-passed"],
+            "local_action_requirements": {
+                "expected_policy_section": "crunch",
+                "actionability_status": "review-only-local-action",
+            },
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_body_storage": False,
+                "aggregate_only": False,
+            },
+            "rationale": "raw-secret-old-context should not be copied to events",
+        }
+        if raw_like:
+            candidate["prompt"] = "raw-secret-old-context must stay out of policy events"
+        bundle["policies"]["crunch"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 1,
+            "candidates": [candidate],
+        }
+        return bundle
+
     def _pattern_hash(self):
         return "sha256:" + ("a" * 64)
 
@@ -2382,6 +2450,171 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
             self.assertTrue(any(file["section"] == "cache" and file["changed"] for file in payload["files"]))
             self.assertTrue(any(file["section"] == "codex_app" for file in payload["files"]))
+
+    def test_policy_apply_cli_dry_run_shows_old_context_summary_canary_yaml_diff(self):
+        proposed = self._managed_old_context_summary_bundle()
+
+        with TemporaryDirectory() as tmp:
+            crunch_path = Path(tmp) / "crunch_rules.yaml"
+            crunch_path.write_text("enabled: true\nthreshold_chars: 24000\n", encoding="utf-8")
+            stdout = io.StringIO()
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "crunch", "--dry-run", "--pretty", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["applied_sections"], ["crunch"])
+            self.assertEqual(payload["old_context_summarization"]["status"], "dry-run")
+            self.assertEqual(payload["old_context_summarization"]["selected_candidate_id"], "candidate-old-context-summary")
+            self.assertEqual(payload["old_context_summarization"]["canary_fraction"], 0.25)
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), "enabled: true\nthreshold_chars: 24000\n")
+            self.assertEqual(len(payload["files"]), 1)
+            self.assertEqual(payload["files"][0]["section"], "crunch")
+            diff = payload["files"][0]["diff"]
+            self.assertIn("+  candidate_id: candidate-old-context-summary", diff)
+            self.assertIn("+    fraction: 0.25", diff)
+            self.assertIn("+  policy_source: managed-recommended", diff)
+            self.assertNotIn("recommendation:", diff)
+            self.assertNotIn("raw-secret-old-context", stdout.getvalue())
+
+    def test_policy_apply_cli_writes_managed_old_context_summary_canary_and_rollback_finds_backup(self):
+        proposed = self._managed_old_context_summary_bundle()
+
+        with TemporaryDirectory() as tmp:
+            crunch_path = Path(tmp) / "crunch_rules.yaml"
+            previous = "enabled: true\nthreshold_chars: 24000\n"
+            crunch_path.write_text(previous, encoding="utf-8")
+            apply_stdout = io.StringIO()
+            apply_code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "crunch", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=apply_stdout,
+            )
+            apply_payload = json.loads(apply_stdout.getvalue())
+
+            self.assertEqual(apply_code, 0)
+            self.assertEqual(apply_payload["old_context_summarization"]["status"], "applied")
+            applied = yaml.safe_load(crunch_path.read_text(encoding="utf-8"))
+            rule = applied["old_context_summarization"]
+            self.assertTrue(rule["enabled"])
+            self.assertEqual(rule["candidate_id"], "candidate-old-context-summary")
+            self.assertEqual(rule["policy_source"], "managed-recommended")
+            self.assertEqual(rule["model"], "claude-haiku-4-5-20251001")
+            self.assertEqual(rule["source_model"], "claude-sonnet-4-6")
+            self.assertEqual(rule["min_summarized_chars"], 10)
+            self.assertEqual(rule["max_turns"], 3)
+            self.assertTrue(rule["canary"]["enabled"])
+            self.assertEqual(rule["canary"]["fraction"], 0.25)
+            self.assertEqual(rule["canary"]["salt"], "summary-canary-test")
+            self.assertEqual(rule["canary"]["widening_threshold"], 0.8)
+            self.assertEqual(rule["canary"]["rollback_threshold"], 0.2)
+            self.assertTrue(rule["safety_stop"]["enabled"])
+            self.assertEqual(rule["safety_stop"]["max_error_rate"], 0.05)
+            self.assertEqual(rule["safety_stop"]["max_summary_failure_rate"], 0.02)
+            backups = list(Path(tmp).glob("crunch_rules.yaml.bak-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), previous)
+
+            rollback_stdout = io.StringIO()
+            rollback_code = cli.policy_rollback_cli(
+                ["--config-dir", tmp, "--section", "crunch", "--dry-run"],
+                stdout=rollback_stdout,
+            )
+            rollback_payload = json.loads(rollback_stdout.getvalue())
+
+            self.assertEqual(rollback_code, 0)
+            self.assertEqual(rollback_payload["old_context_summarization"]["status"], "rollback-dry-run")
+            self.assertEqual(rollback_payload["restored_sections"], ["crunch"])
+            self.assertEqual(rollback_payload["files"][0]["restored_from"], str(backups[0]))
+            self.assertNotEqual(crunch_path.read_text(encoding="utf-8"), previous)
+
+    def test_policy_apply_cli_normalizes_managed_enforced_old_context_summary_to_recommended_canary(self):
+        proposed = self._managed_policy_bundle()
+        proposed["policies"]["crunch"]["policy_source"] = "managed-recommended"
+        proposed["policies"]["crunch"]["old_context_summarization"] = {
+            "enabled": True,
+            "rule_id": "managed-enforced-summary-rule",
+            "candidate_id": "candidate-old-context-enforced",
+            "policy_source": "managed-enforced",
+            "model": "claude-haiku-4-5-20251001",
+            "min_request_chars": 100,
+            "min_summarized_chars": 50,
+            "canary": {
+                "enabled": True,
+                "fraction": 0.1,
+                "salt": "direct-canary",
+                "unit": "source_hash",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "max_error_rate": 0.05,
+            },
+        }
+
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "crunch", "--allow-risky", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            applied = yaml.safe_load((Path(tmp) / "crunch_rules.yaml").read_text(encoding="utf-8"))
+            rule = applied["old_context_summarization"]
+            self.assertEqual(rule["candidate_id"], "candidate-old-context-enforced")
+            self.assertEqual(rule["policy_source"], "managed-recommended")
+
+    def test_policy_apply_cli_records_old_context_summary_events_without_raw_payloads(self):
+        proposed = self._managed_old_context_summary_bundle()
+
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "crunch_rules.yaml").write_text("enabled: true\n", encoding="utf-8")
+            cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "crunch", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=io.StringIO(),
+            )
+            cli.policy_rollback_cli(["--config-dir", tmp, "--section", "crunch"], stdout=io.StringIO())
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        events = recent_policy_events(limit=5)["events"]
+        event_text = json.dumps(events)
+        self.assertEqual(events[0]["action"], "rollback")
+        self.assertEqual(events[0]["details"]["old_context_summarization"]["status"], "rolled-back")
+        self.assertEqual(events[1]["action"], "apply")
+        self.assertEqual(events[1]["details"]["old_context_summarization"]["status"], "applied")
+        self.assertEqual(events[1]["details"]["old_context_summarization"]["selected_candidate_id"], "candidate-old-context-summary")
+        self.assertNotIn("raw-secret-old-context", event_text)
+        for forbidden in ("prompt", "summary_text", "messages", "transcript", "provider_body", "cache_key"):
+            self.assertNotIn(forbidden, event_text)
+
+    def test_policy_apply_cli_rejected_old_context_summary_event_omits_raw_payloads(self):
+        proposed = self._managed_old_context_summary_bundle(raw_like=True)
+
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "crunch", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["old_context_summarization"]["status"], "rejected")
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        event_text = json.dumps(recent_policy_events(limit=5)["events"])
+        self.assertIn("candidate-old-context-summary", event_text)
+        self.assertNotIn("raw-secret-old-context", event_text)
 
     def test_policy_apply_cli_writes_selected_section_and_creates_backup(self):
         exported = io.StringIO()

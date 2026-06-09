@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import copy
+import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -3111,6 +3112,183 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+_SUMMARY_APPLY_CONDITION_KEYS = (
+    "min_request_chars",
+    "min_summarized_chars",
+    "max_source_chars",
+    "excluded_categories",
+    "block_tool_protocol",
+    "block_thinking",
+)
+_SUMMARY_APPLY_ACTION_KEYS = (
+    "max_turns",
+    "keep_recent_turns",
+    "max_summary_chars",
+    "max_summary_cost_usd",
+)
+_SUMMARY_APPLY_SAFETY_KEYS = (
+    "min_outcome_samples",
+    "window",
+    "max_error_rate",
+    "max_retry_rate",
+    "max_negative_net_savings_rate",
+    "max_summary_failure_rate",
+    "max_error_rate_delta",
+)
+
+
+def _summary_rule_id(candidate_id: str, candidate: dict[str, Any], fallback: dict[str, Any]) -> str:
+    raw = _summary_first(candidate.get("rule_id"), candidate.get("policy_id"), fallback.get("rule_id"))
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in candidate_id.strip())[:96]
+    return f"managed-old-context-summary-{safe or 'candidate'}"
+
+
+def _old_context_summary_candidate_to_local_rule(entry: dict[str, Any], *, policy: dict[str, Any]) -> dict[str, Any] | None:
+    candidate = entry.get("candidate")
+    if not isinstance(candidate, dict):
+        return None
+    fallback = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
+    candidate_id = _summary_first(
+        candidate.get("candidate_id"),
+        candidate.get("policy_id"),
+        candidate.get("recommendation_id"),
+        fallback.get("candidate_id"),
+    )
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        return None
+
+    canary = _summary_canary(candidate, fallback)
+    fraction = _as_float(canary.get("fraction"), -1.0)
+    if not _enabled(canary.get("enabled")) or not (0.0 < fraction < 1.0):
+        return None
+
+    action = _first_mapping(candidate.get("action"), candidate.get("recommended_action"))
+    conditions = _summary_conditions(candidate, fallback)
+    rule: dict[str, Any] = {
+        "enabled": True,
+        "rule_id": _summary_rule_id(candidate_id, candidate, fallback),
+        "candidate_id": candidate_id.strip(),
+        "policy_source": "managed-recommended",
+        "placement": "system",
+    }
+
+    source_model = _summary_first(candidate.get("source_model"), candidate.get("requested_model"), action.get("source_model"), fallback.get("source_model"))
+    if source_model not in (None, "", [], {}):
+        rule["source_model"] = str(source_model)
+    summary_model = _summary_first(
+        candidate.get("summary_model"),
+        candidate.get("model"),
+        action.get("summary_model"),
+        action.get("model"),
+        fallback.get("model"),
+    )
+    if summary_model not in (None, "", [], {}):
+        rule["model"] = str(summary_model)
+        rule["summary_model"] = str(summary_model)
+
+    for key in _SUMMARY_APPLY_CONDITION_KEYS:
+        value = conditions.get(key)
+        if value not in (None, "", [], {}):
+            rule[key] = _safe_pattern_value(value)
+    for key in _SUMMARY_APPLY_ACTION_KEYS:
+        value = action.get(key, candidate.get(key, fallback.get(key)))
+        if value not in (None, "", [], {}):
+            rule[key] = _safe_pattern_value(value)
+
+    normalized_canary: dict[str, Any] = {
+        "enabled": True,
+        "fraction": fraction,
+    }
+    for key in ("salt", "unit", "widening_threshold", "rollback_threshold", "holdout_sample_count"):
+        value = canary.get(key)
+        if value not in (None, "", [], {}):
+            normalized_canary[key] = _safe_pattern_value(value)
+    rule["canary"] = normalized_canary
+
+    gates = _summary_safety_gates(candidate, fallback)
+    safety_stop: dict[str, Any] = {"enabled": True}
+    for key in _SUMMARY_APPLY_SAFETY_KEYS:
+        value = gates.get(key)
+        if value not in (None, "", [], {}):
+            safety_stop[key] = _safe_pattern_value(value)
+    if len(safety_stop) == 1 and isinstance(fallback.get("safety_stop"), dict):
+        for key in _SUMMARY_APPLY_SAFETY_KEYS:
+            value = fallback["safety_stop"].get(key)
+            if value not in (None, "", [], {}):
+                safety_stop[key] = _safe_pattern_value(value)
+    rule["safety_stop"] = safety_stop
+
+    net_savings = _summary_net_savings(candidate)
+    quality = _summary_quality_evidence(candidate)
+    reasons = _summary_reason_codes(candidate)
+    if net_savings:
+        rule["net_savings_evidence"] = net_savings
+    if quality:
+        rule["quality_evidence"] = quality
+    if reasons:
+        rule["blocker_reason_codes"] = reasons
+    return rule
+
+
+def _managed_old_context_summary_local_rule(policy: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    entries = [
+        entry
+        for entry in _old_context_summary_raw_entries(policy)
+        if entry.get("candidate_status") != "omitted"
+    ]
+    skipped: list[dict[str, Any]] = []
+    for entry in entries:
+        rule = _old_context_summary_candidate_to_local_rule(entry, policy=policy)
+        candidate = entry.get("candidate") if isinstance(entry.get("candidate"), dict) else {}
+        candidate_id = _summary_first(
+            candidate.get("candidate_id"),
+            candidate.get("policy_id"),
+            candidate.get("recommendation_id"),
+        )
+        if rule is not None:
+            return rule, {
+                "status": "candidate-selected",
+                "candidate_id": rule.get("candidate_id"),
+                "rule_id": rule.get("rule_id"),
+                "policy_source": "managed-recommended",
+                "canary_enabled": True,
+                "canary_fraction": (rule.get("canary") or {}).get("fraction"),
+                "source_path": entry.get("path"),
+            }
+        skipped.append({
+            "candidate_id": candidate_id,
+            "path": entry.get("path"),
+            "reason": "missing-canary" if candidate_id else "missing-candidate-id",
+        })
+    return None, {
+        "status": "no-applicable-candidate" if entries else "none",
+        "candidate_count": len(entries),
+        "skipped_candidates": skipped[:10],
+    }
+
+
+def _old_context_summary_apply_metadata(bundle: Any) -> dict[str, Any]:
+    crunch = _section_policy(bundle, "crunch")
+    if not crunch:
+        return {"lifecycle_kind": "old_context_summarization", "status": "none", "candidate_count": 0, "candidate_ids": []}
+    review = old_context_summary_policy_review_summary(crunch)
+    _rule, selected = _managed_old_context_summary_local_rule(crunch)
+    return {
+        "lifecycle_kind": "old_context_summarization",
+        "status": selected.get("status", "none"),
+        "candidate_count": review.get("candidate_count", 0),
+        "candidate_ids": review.get("candidate_ids", []),
+        "selected_candidate_id": selected.get("candidate_id"),
+        "selected_rule_id": selected.get("rule_id"),
+        "policy_source": selected.get("policy_source"),
+        "canary_enabled": selected.get("canary_enabled"),
+        "canary_fraction": selected.get("canary_fraction"),
+        "skipped_candidates": selected.get("skipped_candidates", []),
+    }
+
+
 def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
     if section == "routing":
         return {"rules": policy.get("rules") if isinstance(policy.get("rules"), list) else []}
@@ -3120,9 +3298,17 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
             payload["enabled"] = policy.get("enabled")
         if "threshold_chars" in policy:
             payload["threshold_chars"] = policy.get("threshold_chars")
-        for key in ("prompt_cache", "old_context_summarization", "thinking_deduplication"):
+        local_summary_rule, _summary_meta = _managed_old_context_summary_local_rule(policy)
+        for key in ("prompt_cache", "thinking_deduplication"):
             if isinstance(policy.get(key), dict):
                 payload[key] = policy[key]
+        if local_summary_rule is not None:
+            payload["old_context_summarization"] = local_summary_rule
+        else:
+            summary = policy.get("old_context_summarization")
+            managed_summary = str(policy.get("policy_source") or "").startswith("managed-") and isinstance(summary, dict) and _old_context_summary_policy_present(summary, policy)
+            if isinstance(summary, dict) and not managed_summary:
+                payload["old_context_summarization"] = summary
         return payload
     if section == "cache":
         payload = {key: policy[key] for key in ("exact_cache", "semantic_cache", "file_watch") if isinstance(policy.get(key), dict)}
@@ -3180,6 +3366,17 @@ def _latest_policy_backup(path: Path) -> Path | None:
     return backups[-1] if backups else None
 
 
+def _policy_file_diff(path: Path, before: str | None, after: str) -> str:
+    before_lines = (before or "").splitlines(keepends=True)
+    after_lines = after.splitlines(keepends=True)
+    return "".join(difflib.unified_diff(
+        before_lines,
+        after_lines,
+        fromfile=f"{path}.before",
+        tofile=f"{path}.after",
+    ))
+
+
 def apply_policy_bundle(
     bundle: Any,
     *,
@@ -3205,6 +3402,7 @@ def apply_policy_bundle(
         "provenance": validation.get("provenance"),
         "safety_warning_count": len(warnings),
         "safety_warnings": warnings,
+        "old_context_summarization": _old_context_summary_apply_metadata(bundle),
         "error": None,
     }
 
@@ -3216,9 +3414,15 @@ def apply_policy_bundle(
         }
         return result
     if not validation["ok"]:
+        if result["old_context_summarization"].get("candidate_count"):
+            result["old_context_summarization"]["status"] = "rejected"
+            result["old_context_summarization"]["reason"] = "validation_failed"
         result["error"] = {"type": "validation_failed", "message": "policy bundle is invalid"}
         return result
     if warnings and not allow_risky:
+        if result["old_context_summarization"].get("candidate_count"):
+            result["old_context_summarization"]["status"] = "rejected"
+            result["old_context_summarization"]["reason"] = "risky_policy"
         result["error"] = {
             "type": "risky_policy",
             "message": "policy bundle has safety warnings; rerun with --allow-risky to apply explicitly",
@@ -3255,7 +3459,7 @@ def apply_policy_bundle(
         if changed and not dry_run:
             backup_path = _write_policy_file(path, text)
 
-        result["files"].append({
+        file_result = {
             "section": section,
             "path": str(path),
             "changed": bool(changed),
@@ -3263,8 +3467,18 @@ def apply_policy_bundle(
             "sha256_before": _sha256_text(old_text) if old_text is not None else None,
             "sha256_after": _sha256_text(text),
             "bytes_after": len(text.encode("utf-8")),
-        })
+        }
+        if dry_run and changed:
+            file_result["diff"] = _policy_file_diff(path, old_text, text)
+        result["files"].append(file_result)
         result["applied_sections"].append(section)
+        if section == "crunch" and result["old_context_summarization"].get("candidate_count"):
+            if result["old_context_summarization"].get("status") == "candidate-selected":
+                result["old_context_summarization"]["status"] = "dry-run" if dry_run else "applied"
+                result["old_context_summarization"]["changed"] = bool(changed)
+                result["old_context_summarization"]["path"] = str(path)
+            else:
+                result["old_context_summarization"]["status"] = "not-applied"
 
     result["ok"] = True
     return result
@@ -3287,6 +3501,11 @@ def rollback_policy_files(
         "restored_sections": [],
         "skipped_sections": [],
         "files": [],
+        "old_context_summarization": {
+            "lifecycle_kind": "old_context_summarization",
+            "status": "none",
+            "candidate_ids": [],
+        },
         "error": None,
     }
 
@@ -3343,6 +3562,9 @@ def rollback_policy_files(
         })
 
     if missing_sections:
+        if "crunch" in missing_sections:
+            result["old_context_summarization"]["status"] = "rollback-rejected"
+            result["old_context_summarization"]["reason"] = "missing_backup"
         result["error"] = {
             "type": "missing_backups",
             "message": "one or more requested policy sections have no backup file",
@@ -3350,6 +3572,9 @@ def rollback_policy_files(
         }
         return result
     if unreadable_backups:
+        if any(item.get("section") == "crunch" for item in unreadable_backups):
+            result["old_context_summarization"]["status"] = "rollback-rejected"
+            result["old_context_summarization"]["reason"] = "unreadable_backup"
         result["error"] = {
             "type": "unreadable_backups",
             "message": "one or more requested policy backups could not be read",
@@ -3377,6 +3602,10 @@ def rollback_policy_files(
             "bytes_after": len(backup_text.encode("utf-8")),
         })
         result["restored_sections"].append(plan["section"])
+        if plan["section"] == "crunch":
+            result["old_context_summarization"]["status"] = "rollback-dry-run" if dry_run else "rolled-back"
+            result["old_context_summarization"]["path"] = str(path)
+            result["old_context_summarization"]["restored_from"] = str(plan["backup"])
 
     result["ok"] = True
     return result

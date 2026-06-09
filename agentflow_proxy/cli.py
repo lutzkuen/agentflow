@@ -991,6 +991,7 @@ def policy_apply_cli(
             "safety_warning_count": result.get("safety_warning_count", 0),
             "provenance_status": (result.get("provenance") or {}).get("status"),
             "provenance_managed_bundle": (result.get("provenance") or {}).get("managed_bundle"),
+            "old_context_summarization": result.get("old_context_summarization"),
             "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
             "exit_code": 0 if result["ok"] else 1,
         },
@@ -1571,6 +1572,7 @@ def policy_rollback_cli(
                 for file in result.get("files", [])
                 if isinstance(file, dict) and file.get("changed")
             ],
+            "old_context_summarization": result.get("old_context_summarization"),
             "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
             "exit_code": 0 if result["ok"] else 1,
         },
