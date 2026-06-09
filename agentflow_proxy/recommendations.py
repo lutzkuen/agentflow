@@ -75,6 +75,11 @@ RAW_FEATURE_KEYS = {
     "transcripts",
 }
 
+LIFECYCLE_METADATA_COMMAND_SCHEMAS = {
+    "agentflow.old_context_summary_lifecycle_metadata.v1",
+    "agentflow.rollout_action_lifecycle_metadata.v1",
+}
+
 TOKEN_CHARS = 4
 CHAR_BUCKETS = (
     (2_000, "lt_2k_chars"),
@@ -424,10 +429,11 @@ def _future_iso(seconds: float) -> str:
 
 def _sanitize_features(value: Any) -> Any:
     if isinstance(value, dict):
+        allow_command = value.get("schema") in LIFECYCLE_METADATA_COMMAND_SCHEMAS
         return {
             str(key): _sanitize_features(item)
             for key, item in value.items()
-            if str(key).lower() not in RAW_FEATURE_KEYS
+            if str(key).lower() not in RAW_FEATURE_KEYS or (allow_command and str(key).lower() == "command")
         }
     if isinstance(value, list):
         return [_sanitize_features(item) for item in value]

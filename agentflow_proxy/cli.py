@@ -1430,6 +1430,103 @@ def old_context_summary_dry_run_cli(
     return 0 if result.get("ok") else 1
 
 
+def old_context_summary_impact_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Measure post-apply old-context summarization canary impact against a dry-run projection")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Old-context summary dry-run or policy review JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
+    parser.add_argument(
+        "--since",
+        help="Only count metadata at or after this ISO-8601 post-apply timestamp. Defaults to dry-run generated_at.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print impact JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    report, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        from agentflow_proxy.old_context_summary_impact import OLD_CONTEXT_SUMMARY_IMPACT_SCHEMA
+
+        result = {
+            "schema": OLD_CONTEXT_SUMMARY_IMPACT_SCHEMA,
+            "ok": False,
+            "read_only": True,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "old-context summary dry-run or review report could not be read"},
+            "summary": {},
+            "privacy": {
+                "metadata_only": True,
+                "raw_old_context_included": False,
+                "generated_summaries_included": False,
+                "raw_request_bodies_included": False,
+                "raw_responses_included": False,
+                "request_ids_included": False,
+                "tenant_ids_included": False,
+                "local_session_ids_included": False,
+                "cache_keys_included": False,
+            },
+        }
+    else:
+        from agentflow_proxy.old_context_summary_impact import measure_old_context_summary_impact
+
+        store = _open_store_for_db(args.db)
+        try:
+            result = measure_old_context_summary_impact(
+                report,
+                store_obj=store,
+                limit=args.limit,
+                since=args.since,
+            )
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "old-context-summary-impact",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "input_source": "stdin" if args.path == "-" else "file",
+            "db_configured": bool(args.db),
+            "since": args.since,
+            "projected_affected_metadata_row_count": summary.get("projected_affected_metadata_row_count"),
+            "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+            "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+            "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+            "actual_bypassed_or_disabled_count": summary.get("actual_bypassed_or_disabled_count"),
+            "summary_failure_count": summary.get("summary_failure_count"),
+            "actual_tokens_saved_est": summary.get("actual_tokens_saved_est"),
+            "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    _attach_old_context_summary_lifecycle_feedback(result, command="impact", db_path=str(args.db))
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 def managed_rollout_actions_impact_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -2159,7 +2256,7 @@ def _attach_rollout_lifecycle_feedback(result: dict[str, Any], *, command: str, 
 
     public_meta = _public_lifecycle_feedback_meta(meta)
     result["managed_lifecycle_feedback"] = public_meta
-    if command == "dry-run" and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+    if command in {"dry-run", "impact"} and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
         result["managed_server_calls_made"] = True
 
 
@@ -2176,6 +2273,8 @@ def _old_context_summary_lifecycle_result(command: str, result: dict[str, Any]) 
 def _old_context_summary_lifecycle_event_type(command: str, result: dict[str, Any]) -> str:
     if not result.get("ok"):
         return "rejected"
+    if command == "impact":
+        return "impact"
     if command == "review":
         return "reviewed"
     return "dry-run"
@@ -2187,6 +2286,88 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
     dry_run = _old_context_summary_lifecycle_result(command, result)
     if not isinstance(dry_run, dict):
         return None
+    if command == "impact":
+        dry_run_meta = dry_run.get("dry_run") if isinstance(dry_run.get("dry_run"), dict) else {}
+        policy = dry_run_meta.get("policy") if isinstance(dry_run_meta.get("policy"), dict) else {}
+        projection = dry_run_meta.get("projection") if isinstance(dry_run_meta.get("projection"), dict) else {}
+        summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
+        actual = dry_run.get("actual") if isinstance(dry_run.get("actual"), dict) else {}
+        delta = dry_run.get("delta") if isinstance(dry_run.get("delta"), dict) else {}
+        basis = {
+            "command": command,
+            "rule_id": policy.get("rule_id"),
+            "candidate_id": policy.get("candidate_id"),
+            "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+            "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
+        }
+        digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+        metadata = {
+            "schema": "agentflow.old_context_summary_lifecycle_metadata.v1",
+            "lifecycle_kind": "old_context_summarization",
+            "command": "old-context-summary-impact",
+            "local_result_status": "ok" if dry_run.get("ok") else "error",
+            "dry_run": False,
+            "read_only": bool(dry_run.get("read_only", True)),
+            "policy_source": policy.get("policy_source"),
+            "rule_id": policy.get("rule_id"),
+            "candidate_id": policy.get("candidate_id"),
+            "model": policy.get("model"),
+            "canary_enabled": ((policy.get("canary") or {}).get("enabled") if isinstance(policy.get("canary"), dict) else None),
+            "canary_fraction": ((policy.get("canary") or {}).get("fraction") if isinstance(policy.get("canary"), dict) else None),
+            "safety_stop_enabled": ((policy.get("safety_stop") or {}).get("enabled") if isinstance(policy.get("safety_stop"), dict) else None),
+            "projected_affected_metadata_row_count": projection.get("projected_affected_metadata_row_count"),
+            "projected_canary_applied_count": projection.get("projected_canary_applied_count"),
+            "projected_canary_holdout_count": projection.get("projected_canary_holdout_count"),
+            "projected_saved_tokens": projection.get("projected_saved_tokens"),
+            "projected_net_savings_usd": projection.get("projected_net_savings_usd"),
+            "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+            "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+            "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+            "actual_bypassed_or_disabled_count": summary.get("actual_bypassed_or_disabled_count"),
+            "summary_failure_count": summary.get("summary_failure_count"),
+            "error_rate": summary.get("error_rate"),
+            "retry_rate": summary.get("retry_rate"),
+            "actual_tokens_saved_est": summary.get("actual_tokens_saved_est"),
+            "actual_gross_savings_usd": summary.get("actual_gross_savings_usd"),
+            "actual_summary_model_cost_usd": summary.get("actual_summary_model_cost_usd"),
+            "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
+            "net_savings_vs_projection_delta_usd": summary.get("net_savings_vs_projection_delta_usd"),
+            "latency": actual.get("latency") if isinstance(actual.get("latency"), dict) else None,
+            "status_buckets": actual.get("status_buckets"),
+            "summary_decision_status_buckets": actual.get("summary_decision_status_buckets"),
+            "summary_reason_buckets": actual.get("summary_reason_buckets"),
+            "summary_cache_buckets": actual.get("summary_cache_buckets"),
+            "safety_stop_buckets": actual.get("safety_stop_buckets"),
+            "delta": delta,
+            "error_type": (dry_run.get("error") or {}).get("type") if isinstance(dry_run.get("error"), dict) else None,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_old_turns_included": False,
+                "raw_summaries_included": False,
+                "provider_bodies_included": False,
+                "raw_session_ids_included": False,
+                "request_ids_included": False,
+                "tenant_ids_included": False,
+                "cache_keys_included": False,
+                "file_paths_included": False,
+                "db_path_included": False,
+            },
+        }
+        metadata = {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+        return {
+            "event_type": _old_context_summary_lifecycle_event_type(command, dry_run),
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "recommendation_id": f"old-context-summary:{digest}",
+            "bundle_hash": None,
+            "policy_sections": ["crunch"],
+            "validation_warning_count": 0,
+            "review_warning_count": 0,
+            "applied_files": [],
+            "local_tool_version": __version__,
+            "metadata": metadata,
+        }
+
     policy = dry_run.get("policy") if isinstance(dry_run.get("policy"), dict) else {}
     summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
     groups = [item for item in dry_run.get("groups", []) if isinstance(item, dict)]
@@ -2303,7 +2484,7 @@ def _attach_old_context_summary_lifecycle_feedback(result: dict[str, Any], *, co
 
     public_meta = _public_lifecycle_feedback_meta(meta)
     result["managed_lifecycle_feedback"] = public_meta
-    if command == "dry-run" and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+    if command in {"dry-run", "impact"} and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
         result["managed_server_calls_made"] = True
 
 
@@ -2367,6 +2548,10 @@ def managed_rollout_actions_dry_run_main() -> None:
 
 def old_context_summary_dry_run_main() -> None:
     raise SystemExit(old_context_summary_dry_run_cli())
+
+
+def old_context_summary_impact_main() -> None:
+    raise SystemExit(old_context_summary_impact_cli())
 
 
 def managed_rollout_actions_impact_main() -> None:

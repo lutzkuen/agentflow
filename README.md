@@ -161,6 +161,7 @@ Common policy commands:
 | `agentflow-policy-review proposed.json --pretty` | Review changes and warnings before apply |
 | `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
+| `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
 | `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |
 | `agentflow-policy-apply proposed.json --config-dir ~/.agentflow` | Apply reviewed local policy files |
 | `agentflow-policy-rollback --config-dir ~/.agentflow --dry-run --pretty` | Preview rollback to the newest backup |

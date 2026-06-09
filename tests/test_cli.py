@@ -791,6 +791,273 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(output["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
         self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
 
+    def _old_context_summary_impact_dry_run(self) -> dict:
+        return {
+            "schema": "agentflow.old_context_summary_dry_run.v1",
+            "ok": True,
+            "dry_run": True,
+            "read_only": True,
+            "generated_at": "2026-06-08T09:00:00+00:00",
+            "policy": {
+                "policy_source": "managed-recommended",
+                "rule_id": "test-old-context-impact",
+                "candidate_id": "candidate-old-context-impact",
+                "model": "claude-haiku-4-5-20251001",
+                "canary": {"enabled": True, "fraction": 0.5, "unit": "source_hash"},
+                "safety_stop": {"enabled": True},
+            },
+            "summary": {
+                "eligible_call_count": 4,
+                "projected_saved_chars": 16000,
+                "projected_saved_tokens": 4000,
+                "estimated_summary_cost_usd": 0.001,
+                "projected_gross_savings_usd": 0.012,
+                "projected_net_savings_usd": 0.011,
+            },
+            "groups": [
+                {
+                    "source_surface": "anthropic_messages",
+                    "category": "chat",
+                    "model_tier": "sonnet",
+                    "stream": True,
+                    "blocker": "eligible",
+                    "call_count": 4,
+                    "eligible_call_count": 4,
+                }
+            ],
+            "privacy": {
+                "metadata_only_output": True,
+                "raw_prompts_included": False,
+                "raw_request_bodies_included": False,
+                "raw_session_ids_included": False,
+                "cache_keys_included": False,
+            },
+        }
+
+    def _write_old_context_summary_impact_rows(self, db_path: str) -> None:
+        from agentflow_proxy.store import Store, stable_json
+
+        store = Store(db_path)
+        try:
+            rows = [
+                (
+                    "impact-applied",
+                    "2026-06-08T10:00:00+00:00",
+                    200,
+                    2200,
+                    0,
+                    {
+                        "enabled": True,
+                        "status": "applied",
+                        "reason": "summary-created",
+                        "rule_id": "test-old-context-impact",
+                        "candidate_id": "candidate-old-context-impact",
+                        "policy_source": "managed-recommended",
+                        "category": "chat",
+                        "before_chars": 40000,
+                        "eligible_chars": 30000,
+                        "eligible_turns": 3,
+                        "saved_chars": 8000,
+                        "tokens_saved_est": 2000,
+                        "estimated_gross_savings_usd": 0.006,
+                        "summary_cost_est_usd": 0.0004,
+                        "estimated_net_savings_usd": 0.0056,
+                        "summary_cache_hit": False,
+                        "summary_status_code": 200,
+                        "canary": {"enabled": True, "cohort": "canary_applied", "selected": True, "fraction": 0.5, "unit": "source_hash"},
+                    },
+                ),
+                (
+                    "impact-holdout",
+                    "2026-06-08T10:01:00+00:00",
+                    200,
+                    1100,
+                    0,
+                    {
+                        "enabled": True,
+                        "status": "skipped",
+                        "reason": "canary_holdout",
+                        "rule_id": "test-old-context-impact",
+                        "candidate_id": "candidate-old-context-impact",
+                        "policy_source": "managed-recommended",
+                        "category": "chat",
+                        "eligible_chars": 31000,
+                        "eligible_turns": 3,
+                        "canary": {"enabled": True, "cohort": "canary_holdout", "selected": False, "fraction": 0.5, "unit": "source_hash"},
+                    },
+                ),
+                (
+                    "impact-bypass",
+                    "2026-06-08T10:02:00+00:00",
+                    500,
+                    900,
+                    2,
+                    {
+                        "enabled": True,
+                        "status": "bypass",
+                        "reason": "local-canary-safety-stop",
+                        "rule_id": "test-old-context-impact",
+                        "candidate_id": "candidate-old-context-impact",
+                        "policy_source": "managed-recommended",
+                        "category": "chat",
+                        "summary_status_code": 500,
+                        "summary_error": "redacted upstream error bucket only",
+                        "safety_stop_state": "stopped",
+                        "canary": {"enabled": True, "cohort": "bypassed", "selected": False, "fraction": 0.5, "unit": "source_hash"},
+                    },
+                ),
+                (
+                    "impact-other",
+                    "2026-06-08T10:03:00+00:00",
+                    200,
+                    800,
+                    0,
+                    {
+                        "enabled": True,
+                        "status": "applied",
+                        "reason": "summary-created",
+                        "rule_id": "different-rule",
+                        "candidate_id": "different-candidate",
+                        "category": "chat",
+                        "canary": {"enabled": True, "cohort": "canary_applied"},
+                    },
+                ),
+            ]
+            for call_id, created_at, status_code, latency_ms, retry_count, meta in rows:
+                store.log_call(
+                    id=call_id,
+                    created_at=created_at,
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    input_tokens_est=10000,
+                    output_tokens_est=200,
+                    actual_input_tokens=9000,
+                    actual_output_tokens=180,
+                    cost_est_usd=0.03,
+                    cost_baseline_usd=0.04,
+                    routing_json=stable_json({"category": "chat", "text_chars": 40000, "has_tools": False}),
+                    crunch_json=stable_json({
+                        "changed": meta.get("status") == "applied",
+                        "old_context_summarization": meta,
+                    }),
+                    cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                    request_json=stable_json({"messages": [{"content": "raw impact secret must not leak"}]}),
+                    response_json=stable_json({"content": "generated summary secret must not leak"}),
+                    session_id="impact-session-secret",
+                    category="chat",
+                    retry_count=retry_count,
+                    provider="anthropic",
+                    error="raw error secret must not leak" if status_code >= 400 else None,
+                )
+        finally:
+            store.conn.close()
+
+    def test_old_context_summary_impact_cli_reports_metadata_only_post_apply_evidence(self):
+        dry_run = self._old_context_summary_impact_dry_run()
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_impact_rows(db_path)
+            stdout = io.StringIO()
+
+            code = cli.old_context_summary_impact_cli(
+                ["-", "--db", db_path, "--limit", "10"],
+                stdin=io.StringIO(json.dumps(dry_run)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.old_context_summary_impact.v1")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["summary"]["projected_affected_metadata_row_count"], 4)
+        self.assertEqual(payload["summary"]["actual_matched_metadata_row_count"], 3)
+        self.assertEqual(payload["summary"]["actual_canary_applied_count"], 1)
+        self.assertEqual(payload["summary"]["actual_canary_holdout_count"], 1)
+        self.assertEqual(payload["summary"]["actual_bypassed_or_disabled_count"], 1)
+        self.assertEqual(payload["summary"]["summary_failure_count"], 1)
+        self.assertEqual(payload["summary"]["actual_tokens_saved_est"], 2000)
+        self.assertGreater(payload["summary"]["actual_net_savings_usd"], 0)
+        self.assertEqual(payload["actual"]["latency"]["applied_minus_holdout_avg_ms"], 1100.0)
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw impact secret", encoded)
+        self.assertNotIn("generated summary secret", encoded)
+        self.assertNotIn("impact-session-secret", encoded)
+        self.assertNotIn("raw error secret", encoded)
+        self.assertFalse(payload["privacy"]["raw_old_context_included"])
+        self.assertFalse(payload["privacy"]["generated_summaries_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+        self.assertFalse(payload["privacy"]["tenant_ids_included"])
+        self.assertFalse(payload["privacy"]["local_session_ids_included"])
+        self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "disabled")
+        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+
+    def test_old_context_summary_impact_cli_exits_nonzero_without_matches(self):
+        dry_run = self._old_context_summary_impact_dry_run()
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            stdout = io.StringIO()
+
+            code = cli.old_context_summary_impact_cli(
+                ["-", "--db", db_path, "--limit", "10"],
+                stdin=io.StringIO(json.dumps(dry_run)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "no-post-apply-matches")
+        self.assertEqual(payload["error"]["type"], "no_post_apply_matches")
+
+    def test_old_context_summary_impact_sends_metadata_only_lifecycle_feedback(self):
+        dry_run = self._old_context_summary_impact_dry_run()
+        ManagedFeedbackFlushClient.calls = []
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_impact_rows(db_path)
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.old_context_summary_impact_cli(
+                        ["-", "--db", db_path, "--limit", "10"],
+                        stdin=io.StringIO(json.dumps(dry_run)),
+                        stdout=stdout,
+                    )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "impact")
+        self.assertEqual(sent_payload["policy_sections"], ["crunch"])
+        metadata = sent_payload["metadata"]
+        self.assertEqual(metadata["lifecycle_kind"], "old_context_summarization")
+        self.assertEqual(metadata["command"], "old-context-summary-impact")
+        self.assertEqual(metadata["rule_id"], "test-old-context-impact")
+        self.assertEqual(metadata["candidate_id"], "candidate-old-context-impact")
+        self.assertEqual(metadata["actual_matched_metadata_row_count"], 3)
+        self.assertFalse(metadata["privacy"]["cache_keys_included"])
+        rendered_payload = json.dumps(sent_payload, sort_keys=True)
+        self.assertNotIn("raw impact secret", rendered_payload)
+        self.assertNotIn("generated summary secret", rendered_payload)
+        self.assertNotIn("impact-session-secret", rendered_payload)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "sent")
+        self.assertEqual(output["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
+        self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
+        self.assertTrue(output["managed_server_calls_made"])
+
     def test_policy_review_cli_includes_old_context_summary_dry_run(self):
         proposed = self._old_context_summary_bundle()
         with TemporaryDirectory() as tmp:
