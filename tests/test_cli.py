@@ -257,6 +257,77 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])
 
+    def test_managed_pattern_rollups_cli_exports_metadata_only_cohorts(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        pattern_hash = "sha256:" + "9" * 64
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="cli-pattern-call",
+                    created_at="2026-06-08T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.004,
+                    cost_baseline_usd=0.006,
+                    crunch_json=stable_json({
+                        "pattern_rules": {
+                            "configured_count": 1,
+                            "policy_source": "managed-recommended",
+                            "rules": [
+                                {
+                                    "rule_id": "cli-crunch-rule",
+                                    "candidate_id": "cli-crunch-candidate",
+                                    "policy_source": "managed-recommended",
+                                    "matched_hashes": [pattern_hash],
+                                    "applied_count": 1,
+                                    "saved_chars": 800,
+                                    "canary": {
+                                        "enabled": True,
+                                        "selected": True,
+                                        "status": "applied",
+                                        "cohort": "canary_applied",
+                                    },
+                                }
+                            ],
+                        }
+                    }),
+                    routing_json=stable_json({"category": "chat"}),
+                    cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                    request_json=stable_json({"prompt": "raw cli prompt must stay local"}),
+                    session_id="cli-session-secret",
+                    category="chat",
+                    retry_count=0,
+                    provider="anthropic",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.managed_pattern_rollups_cli(["--db", db_path, "--limit", "5", "--min-samples", "1"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.managed_pattern_canary_cohort_rollups.v1")
+        self.assertEqual(payload["summary"]["cohort_bucket_count"], 1)
+        crunch = next(row for row in payload["cohorts"] if row["candidate_id"] == "cli-crunch-candidate")
+        self.assertEqual(crunch["canary_cohort"], "canary_applied")
+        self.assertTrue(crunch["minimum_sample_readiness"]["ready"])
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw cli prompt must stay local", encoded)
+        self.assertNotIn("cli-session-secret", encoded)
+
     def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)

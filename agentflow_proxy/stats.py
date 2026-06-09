@@ -1065,6 +1065,399 @@ def _pattern_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool 
     return result
 
 
+def _status_code_bucket(status_code: Any) -> str:
+    if status_code is None:
+        return "unknown"
+    code = _as_int(status_code)
+    if code <= 0:
+        return "unknown"
+    if code < 200:
+        return "lt_2xx"
+    if code < 300:
+        return "2xx"
+    if code < 400:
+        return "3xx"
+    if code < 500:
+        return "4xx"
+    return "5xx"
+
+
+def _latency_bucket(latency_ms: Any) -> str:
+    latency = _as_int(latency_ms)
+    if latency <= 0:
+        return "unknown"
+    if latency < 1_000:
+        return "lt_1s"
+    if latency < 5_000:
+        return "1s_5s"
+    if latency < 15_000:
+        return "5s_15s"
+    return "gte_15s"
+
+
+def _usd_bucket(value: Any) -> str:
+    amount = _as_float(value)
+    if amount <= 0:
+        return "zero"
+    if amount < 0.001:
+        return "lt_0_001"
+    if amount < 0.01:
+        return "0_001_0_01"
+    if amount < 0.05:
+        return "0_01_0_05"
+    return "gte_0_05"
+
+
+def _managed_pattern_lifecycle_bucket(summary: dict[str, Any]) -> str | None:
+    text = " ".join(
+        str(summary.get(key) or "").lower()
+        for key in ("status", "outcome", "reason", "action")
+    )
+    if "rollback" in text or "rolled_back" in text or "rolled-back" in text:
+        return "rolled_back"
+    if "reject" in text:
+        return "rejected"
+    return None
+
+
+def _managed_pattern_is_bypass(summary: dict[str, Any]) -> bool:
+    outcome = str(summary.get("outcome") or "")
+    status = str(summary.get("status") or "")
+    reason = str(summary.get("reason") or "")
+    return outcome == "bypassed" or status in {"bypass", "bypassed"} or "bypass" in reason or "disabled" in reason
+
+
+def _managed_pattern_add_summary(
+    grouped: dict[tuple[str, str, str, str, str, str, str, str, str], dict[str, Any]],
+    *,
+    summary: dict[str, Any],
+    created_at: Any,
+    status_code: Any,
+    latency_ms: Any,
+    cost_est_usd: Any,
+    min_samples: int,
+) -> None:
+    pattern_hash = str(summary.get("pattern_hash") or "")
+    if not pattern_hash.startswith("sha256:"):
+        return
+    policy_source = str(summary.get("policy_source") or "")
+    if (
+        not policy_source.startswith("managed-")
+        and summary.get("candidate_id") is None
+        and not isinstance(summary.get("canary"), dict)
+    ):
+        return
+    cohort = str(summary.get("cohort") or "non_canary")
+    key = (
+        str(summary.get("decision_type") or "unknown"),
+        str(summary.get("candidate_id") or "unknown"),
+        str(summary.get("rule_id") or "unknown"),
+        pattern_hash,
+        str(summary.get("source_surface") or "unknown"),
+        str(summary.get("app_family") or "unknown"),
+        str(summary.get("workflow_phase") or summary.get("category") or "unknown"),
+        str(summary.get("category") or "unknown"),
+        cohort,
+    )
+    bucket = grouped.setdefault(
+        key,
+        {
+            "schema": "agentflow.managed_pattern_canary_cohort_bucket.v1",
+            "policy_section": key[0],
+            "candidate_id": None if key[1] == "unknown" else key[1],
+            "rule_id": None if key[2] == "unknown" else key[2],
+            "pattern_hash": key[3],
+            "source_surface": key[4],
+            "app_family": key[5],
+            "workflow_phase": key[6],
+            "category": key[7],
+            "canary_cohort": key[8],
+            "policy_source": summary.get("policy_source"),
+            "sample_count": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "holdout_count": 0,
+            "bypassed_count": 0,
+            "applied_count": 0,
+            "saved_chars": 0,
+            "tokens_saved_est": 0,
+            "estimated_cost_savings_usd": 0.0,
+            "cost_est_usd": 0.0,
+            "status_code_counts": {},
+            "latency_buckets": {},
+            "cost_buckets": {},
+            "savings_buckets": {},
+            "local_bypass_reasons": {},
+            "lifecycle_counts": {"rolled_back": 0, "rejected": 0},
+            "first_seen_at": None,
+            "last_seen_at": None,
+            "canary": None,
+            "raw_payload_included": False,
+        },
+    )
+    bucket["sample_count"] += 1
+    if _as_int(summary.get("applied_count")) > 0:
+        bucket["applied_count"] += _as_int(summary.get("applied_count"))
+    if str(summary.get("outcome") or "") == "holdout" or key[8] == "canary_holdout":
+        bucket["holdout_count"] += 1
+    if _managed_pattern_is_bypass(summary):
+        bucket["bypassed_count"] += 1
+        reason = str(summary.get("reason") or "unknown")
+        bucket["local_bypass_reasons"][reason] = bucket["local_bypass_reasons"].get(reason, 0) + 1
+    if status_code is not None and _as_int(status_code) >= 400:
+        bucket["error_count"] += 1
+    elif status_code is not None:
+        bucket["success_count"] += 1
+
+    bucket["saved_chars"] += _as_int(summary.get("saved_chars"))
+    bucket["tokens_saved_est"] += _as_int(summary.get("tokens_saved_est"))
+    bucket["estimated_cost_savings_usd"] += _as_float(summary.get("estimated_cost_savings_usd"))
+    bucket["cost_est_usd"] += _as_float(cost_est_usd)
+    for counts_key, counts_value in (
+        ("status_code_counts", _status_code_bucket(status_code)),
+        ("latency_buckets", _latency_bucket(latency_ms)),
+        ("cost_buckets", _usd_bucket(cost_est_usd)),
+        ("savings_buckets", _usd_bucket(summary.get("estimated_cost_savings_usd"))),
+    ):
+        counts = bucket[counts_key]
+        counts[counts_value] = counts.get(counts_value, 0) + 1
+
+    lifecycle = _managed_pattern_lifecycle_bucket(summary)
+    if lifecycle:
+        bucket["lifecycle_counts"][lifecycle] = bucket["lifecycle_counts"].get(lifecycle, 0) + 1
+
+    seen_at = str(created_at or "")
+    if seen_at:
+        if not bucket["first_seen_at"] or seen_at < bucket["first_seen_at"]:
+            bucket["first_seen_at"] = seen_at
+        if not bucket["last_seen_at"] or seen_at > bucket["last_seen_at"]:
+            bucket["last_seen_at"] = seen_at
+
+    canary = summary.get("canary")
+    if isinstance(canary, dict) and bucket["canary"] is None:
+        bucket["canary"] = {
+            key: canary.get(key)
+            for key in ("enabled", "status", "cohort", "fraction", "unit", "threshold")
+            if canary.get(key) is not None
+        }
+    bucket["minimum_sample_readiness"] = {
+        "min_samples": min_samples,
+        "ready": bucket["sample_count"] >= min_samples,
+        "remaining": max(0, min_samples - bucket["sample_count"]),
+    }
+
+
+def _managed_pattern_finalize_buckets(grouped: dict[tuple[str, str, str, str, str, str, str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        sample_count = _as_int(bucket.get("sample_count"))
+        error_count = _as_int(bucket.get("error_count"))
+        success_count = _as_int(bucket.get("success_count"))
+        bucket["estimated_cost_savings_usd"] = round(_as_float(bucket.get("estimated_cost_savings_usd")), 8)
+        bucket["cost_est_usd"] = round(_as_float(bucket.get("cost_est_usd")), 8)
+        bucket["error_rate"] = round(error_count / sample_count, 4) if sample_count else 0.0
+        bucket["success_rate"] = round(success_count / sample_count, 4) if sample_count else 0.0
+        for key in ("status_code_counts", "latency_buckets", "cost_buckets", "savings_buckets", "local_bypass_reasons", "lifecycle_counts"):
+            bucket[key] = _count_breakdown(bucket.get(key) or {})
+        rows.append(bucket)
+    rows.sort(
+        key=lambda item: (
+            _as_int(item.get("sample_count")),
+            _as_float(item.get("estimated_cost_savings_usd")),
+            _as_int(item.get("tokens_saved_est")),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+async def stats_managed_pattern_rollups(store_obj: Any, *, limit: int = 500, min_samples: int = 10) -> dict[str, Any]:
+    """Return metadata-only managed pattern canary cohort rollups for export/review."""
+    conn = store_obj.conn
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    sample_floor = max(1, min(int(min_samples or 10), 10_000))
+    grouped: dict[tuple[str, str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+
+    provider_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
+                   requested_model, routed_model, status_code, latency_ms,
+                   input_tokens_est, output_tokens_est, actual_input_tokens,
+                   actual_output_tokens, cost_est_usd, cost_baseline_usd,
+                   crunch_json, routing_json, cache_json, category
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+    for row in provider_rows:
+        routing = _json_obj(row.get("routing_json"))
+        summaries = pattern_decision_summaries(
+            provider=str(row.get("provider") or "anthropic"),
+            path=str(row.get("path") or ""),
+            requested_model=row.get("requested_model"),
+            routed_model=row.get("routed_model"),
+            status_code=_as_int(row.get("status_code")) if row.get("status_code") is not None else None,
+            cost_est_usd=_as_float(row.get("cost_est_usd")) if row.get("cost_est_usd") is not None else None,
+            cost_baseline_usd=_as_float(row.get("cost_baseline_usd")) if row.get("cost_baseline_usd") is not None else None,
+            cache_meta=_json_obj(row.get("cache_json")),
+            crunch_meta=_json_obj(row.get("crunch_json")),
+            routing_meta=routing,
+            category=row.get("category") or routing.get("category"),
+        )
+        for summary in summaries:
+            if isinstance(summary, dict):
+                _managed_pattern_add_summary(
+                    grouped,
+                    summary=summary,
+                    created_at=row.get("created_at"),
+                    status_code=row.get("status_code"),
+                    latency_ms=row.get("latency_ms"),
+                    cost_est_usd=row.get("cost_est_usd"),
+                    min_samples=sample_floor,
+                )
+
+    codex_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select s.id as start_event_id,
+                   s.created_at,
+                   s.request_id,
+                   s.thread_id,
+                   s.session_id,
+                   s.input_text_chars,
+                   s.routing_json,
+                   s.crunch_json,
+                   s.cache_json,
+                   (
+                       select r.id from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_event_id,
+                   (
+                       select r.result_chars from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_result_chars,
+                   (
+                       select r.error_code from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_error_code,
+                   (
+                       select r.latency_ms from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_latency_ms
+            from codex_app_events s
+            where s.direction = 'client_to_server'
+              and s.method = 'turn/start'
+            order by s.created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+    for row in codex_rows:
+        routing = _json_obj(row.get("routing_json"))
+        cache = _json_obj(row.get("cache_json"))
+        estimates = _codex_estimates_with_cache(row.get("input_text_chars"), row.get("response_result_chars"), cache)
+        status_code = 500 if row.get("response_error_code") is not None else (200 if row.get("response_event_id") else None)
+        summaries = pattern_decision_summaries(
+            provider="openai",
+            path="codex-app://turn/start",
+            requested_model=routing.get("requested_model") or CODEX_APP_MODEL,
+            routed_model=routing.get("routed_model") or routing.get("requested_model") or CODEX_APP_MODEL,
+            status_code=status_code,
+            cost_est_usd=_as_float(estimates.get("cost_est_usd")) if estimates.get("cost_est_usd") is not None else None,
+            cost_baseline_usd=_as_float(estimates.get("baseline_cost_est_usd")) if estimates.get("baseline_cost_est_usd") is not None else None,
+            cache_meta=cache,
+            crunch_meta=_json_obj(row.get("crunch_json")),
+            routing_meta=routing,
+            category=routing.get("category") or "codex_turn",
+        )
+        for summary in summaries:
+            if not isinstance(summary, dict):
+                continue
+            summary = dict(summary)
+            summary["source_surface"] = CODEX_APP_SOURCE_SURFACE
+            summary["app_family"] = "codex"
+            summary["category"] = routing.get("category") or summary.get("category") or "codex_turn"
+            summary["workflow_phase"] = routing.get("workflow_phase") or summary.get("workflow_phase") or summary["category"]
+            _managed_pattern_add_summary(
+                grouped,
+                summary=summary,
+                created_at=row.get("created_at"),
+                status_code=status_code,
+                latency_ms=row.get("response_latency_ms"),
+                cost_est_usd=estimates.get("cost_est_usd"),
+                min_samples=sample_floor,
+            )
+
+    cohorts = _managed_pattern_finalize_buckets(grouped)
+    return {
+        "schema": "agentflow.managed_pattern_canary_cohort_rollups.v1",
+        "generated_at": utc_now(),
+        "limit": capped_limit,
+        "min_samples": sample_floor,
+        "summary": {
+            "provider_rows_considered": len(provider_rows),
+            "codex_turn_rows_considered": len(codex_rows),
+            "cohort_bucket_count": len(cohorts),
+            "ready_bucket_count": sum(1 for row in cohorts if (row.get("minimum_sample_readiness") or {}).get("ready")),
+            "total_samples": sum(_as_int(row.get("sample_count")) for row in cohorts),
+            "error_samples": sum(_as_int(row.get("error_count")) for row in cohorts),
+            "holdout_samples": sum(_as_int(row.get("holdout_count")) for row in cohorts),
+            "bypassed_samples": sum(_as_int(row.get("bypassed_count")) for row in cohorts),
+            "rolled_back_events": sum(
+                _as_int(item.get("count"))
+                for row in cohorts
+                for item in row.get("lifecycle_counts", [])
+                if item.get("value") == "rolled_back"
+            ),
+            "rejected_events": sum(
+                _as_int(item.get("count"))
+                for row in cohorts
+                for item in row.get("lifecycle_counts", [])
+                if item.get("value") == "rejected"
+            ),
+        },
+        "cohorts": cohorts,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "tenant_ids_included": False,
+            "request_ids_included": False,
+            "local_session_ids_included": False,
+            "basis": "stored decision metadata, hashes, status codes, latency, cost, and size buckets only",
+        },
+    }
+
+
 def _size_bucket(value: Any) -> str:
     n = _as_int(value)
     if n <= 0:

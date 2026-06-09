@@ -167,6 +167,7 @@ Common policy commands:
 | `agentflow-managed-feedback-status --pretty` | Inspect the local managed outcome feedback queue without printing payloads |
 | `agentflow-managed-feedback-flush --limit 5 --dry-run --pretty` | Preview a bounded retry batch for due managed outcome feedback |
 | `agentflow-managed-feedback-flush --limit 5 --pretty` | Flush due managed outcome feedback when managed recommendations are enabled |
+| `agentflow-managed-pattern-rollups --limit 500 --pretty` | Export metadata-only managed pattern canary cohort outcome rollups for review |
 
 Policy operations can append compact local audit events under `~/.agentflow/policy_events.jsonl`. Set `AGENTFLOW_POLICY_EVENTS=0` to disable that audit log.
 Managed fetch/review is disabled unless a recommendation URL is supplied, and authenticated
@@ -179,6 +180,8 @@ include matching HMAC provenance before `agentflow-policy-apply` writes local YA
 Unsigned local-default/local-manual bundles remain valid for offline use.
 Managed outcome feedback retries are also disabled unless `AGENTFLOW_RECOMMENDATION_ENABLED=1`.
 Status and flush output is metadata-only; queued feedback payload JSON is not printed.
+Pattern rollup output is aggregate-only and omits raw prompts, messages, responses,
+transcripts, tool payloads, cache keys, file paths, request IDs, and local session IDs.
 
 The runtime managed recommendation bridge is also opt-in. With
 `AGENTFLOW_RECOMMENDATION_ENABLED=0`, AgentFlow runs in local-only mode and does not contact

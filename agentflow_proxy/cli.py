@@ -1344,6 +1344,48 @@ def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None)
     return 0
 
 
+def managed_pattern_rollups_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Export metadata-only managed pattern canary cohort outcome rollups")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider calls and Codex turn/start rows to inspect per surface, default: 500, max: 5000",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=10,
+        help="Minimum samples required before a cohort bucket is marked ready, default: 10",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.stats import stats_managed_pattern_rollups
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = asyncio.run(stats_managed_pattern_rollups(store, limit=args.limit, min_samples=args.min_samples))
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -1424,6 +1466,10 @@ def policy_rollback_main() -> None:
 
 def codex_diagnose_main() -> None:
     raise SystemExit(codex_diagnose_cli())
+
+
+def managed_pattern_rollups_main() -> None:
+    raise SystemExit(managed_pattern_rollups_cli())
 
 
 def managed_feedback_status_main() -> None:

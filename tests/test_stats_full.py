@@ -1863,6 +1863,321 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(result["today_pattern_decision_breakdown"], result["pattern_decision_breakdown"])
         self.assertNotIn("upstream error raw body", json.dumps(result["pattern_decision_breakdown"]))
 
+    def test_managed_pattern_rollups_aggregate_canary_cohorts_without_raw_leakage(self):
+        crunch_hash = "sha256:" + "c" * 64
+        cache_hash = "sha256:" + "d" * 64
+        rollback_hash = "sha256:" + "e" * 64
+        codex_hash = "sha256:" + "f" * 64
+
+        server.store.log_call(
+            id="provider-canary-applied",
+            created_at="2026-06-08T10:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=800,
+            input_tokens_est=1000,
+            output_tokens_est=100,
+            actual_input_tokens=1000,
+            actual_output_tokens=100,
+            cost_est_usd=0.004,
+            cost_baseline_usd=0.007,
+            crunch_json=stable_json({
+                "changed": True,
+                "policy_source": "managed-recommended",
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "crunch-rule",
+                            "candidate_id": "crunch-candidate",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": [crunch_hash],
+                            "applied_count": 1,
+                            "saved_chars": 1200,
+                            "canary": {
+                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "enabled": True,
+                                "selected": True,
+                                "status": "applied",
+                                "cohort": "canary_applied",
+                                "fraction": 0.1,
+                                "unit": "request_fingerprint",
+                                "cohort_key_hash": "sha256:" + "1" * 64,
+                            },
+                        }
+                    ],
+                },
+            }),
+            routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-result"}),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            error=None,
+            request_json=stable_json({"messages": [{"content": "raw prompt must stay local"}], "cache_key": "cache-key-secret"}),
+            response_json=stable_json({"content": "raw response must stay local"}),
+            session_id="session-secret",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id="provider-canary-holdout",
+            created_at="2026-06-08T10:01:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1200,
+            input_tokens_est=900,
+            output_tokens_est=80,
+            actual_input_tokens=900,
+            actual_output_tokens=80,
+            cost_est_usd=0.003,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-result"}),
+            cache_json=stable_json({
+                "status": "skipped",
+                "reason": "tools-disabled",
+                "policy_source": "local-default",
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "skip_reasons": [
+                        {
+                            "rule_id": "cache-rule",
+                            "candidate_id": "cache-candidate",
+                            "policy_source": "managed-recommended",
+                            "reason": "canary_holdout",
+                            "matched_hashes": [cache_hash],
+                            "canary": {
+                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "enabled": True,
+                                "selected": False,
+                                "status": "holdout",
+                                "cohort": "canary_holdout",
+                                "fraction": 0.1,
+                                "unit": "request_fingerprint",
+                                "cohort_key_hash": "sha256:" + "2" * 64,
+                            },
+                        }
+                    ],
+                },
+            }),
+            error=None,
+            request_json=stable_json({"prompt": "another raw prompt must stay local"}),
+            response_json=None,
+            session_id="session-secret",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id="provider-rollback-bypass",
+            created_at="2026-06-08T10:02:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=5200,
+            input_tokens_est=800,
+            output_tokens_est=70,
+            actual_input_tokens=800,
+            actual_output_tokens=70,
+            cost_est_usd=0.002,
+            cost_baseline_usd=0.002,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({"category": "chat", "workflow_phase": "chat"}),
+            cache_json=stable_json({
+                "status": "bypass",
+                "reason": "rollback-threshold-breached",
+                "policy_source": "managed-recommended",
+                "pattern_rule": {
+                    "rule_id": "rollback-cache-rule",
+                    "candidate_id": "rollback-cache-candidate",
+                    "policy_source": "managed-recommended",
+                    "matched_hashes": [rollback_hash],
+                },
+            }),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="session-secret",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id="provider-canary-error",
+            created_at="2026-06-08T10:03:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=0,
+            cache_hit=0,
+            status_code=500,
+            latency_ms=20000,
+            input_tokens_est=1000,
+            output_tokens_est=0,
+            actual_input_tokens=1000,
+            actual_output_tokens=0,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({
+                "changed": True,
+                "pattern_rules": {
+                    "configured_count": 1,
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "crunch-rule",
+                            "candidate_id": "crunch-candidate",
+                            "policy_source": "managed-recommended",
+                            "matched_hashes": [crunch_hash],
+                            "applied_count": 1,
+                            "saved_chars": 400,
+                            "canary": {
+                                "schema": "agentflow.pattern_canary_decision.v1",
+                                "enabled": True,
+                                "selected": True,
+                                "status": "applied",
+                                "cohort": "canary_applied",
+                                "fraction": 0.1,
+                                "unit": "request_fingerprint",
+                            },
+                        }
+                    ],
+                },
+            }),
+            routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-result"}),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+            error="upstream raw error body must stay local",
+            request_json=None,
+            response_json=None,
+            session_id="session-secret",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_codex_app_event(
+            id="codex-start",
+            created_at="2026-06-08T10:04:00+00:00",
+            direction="client_to_server",
+            method="turn/start",
+            request_id="req-secret",
+            thread_id="thread-secret",
+            message_chars=40,
+            params_chars=500,
+            input_items=1,
+            input_text_chars=2400,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="session-secret",
+            routing_json=stable_json({"category": "summary", "workflow_phase": "summary", "requested_model": "gpt-5-codex"}),
+            crunch_json=stable_json({"status": "skipped", "reason": "not-needed"}),
+            cache_json=stable_json({
+                "status": "hit",
+                "reason": "exact-match",
+                "hit_type": "exact",
+                "policy_source": "managed-recommended",
+                "pattern_rule": {
+                    "rule_id": "codex-cache-rule",
+                    "candidate_id": "codex-cache-candidate",
+                    "policy_source": "managed-recommended",
+                    "matched_hashes": [codex_hash],
+                    "canary": {
+                        "schema": "agentflow.pattern_canary_decision.v1",
+                        "enabled": True,
+                        "selected": True,
+                        "status": "applied",
+                        "cohort": "canary_applied",
+                        "fraction": 0.2,
+                        "unit": "request_fingerprint",
+                    },
+                },
+            }),
+        )
+        server.store.log_codex_app_event(
+            id="codex-end",
+            created_at="2026-06-08T10:04:01+00:00",
+            direction="server_to_client",
+            method="turn/completed",
+            request_id="req-secret",
+            thread_id="thread-secret",
+            message_chars=80,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=400,
+            error_code=None,
+            error_message=None,
+            latency_ms=900,
+            session_id="session-secret",
+            metadata_json=stable_json({"transcript": "raw codex transcript must stay local"}),
+        )
+
+        result = asyncio.run(stats_views.stats_managed_pattern_rollups(server.store, limit=20, min_samples=2))
+        cohorts = {
+            (row["policy_section"], row["candidate_id"], row["canary_cohort"]): row
+            for row in result["cohorts"]
+        }
+
+        applied = cohorts[("crunch", "crunch-candidate", "canary_applied")]
+        self.assertEqual(applied["sample_count"], 2)
+        self.assertEqual(applied["error_count"], 1)
+        self.assertEqual(applied["success_count"], 1)
+        self.assertEqual(applied["tokens_saved_est"], 400)
+        self.assertTrue(applied["minimum_sample_readiness"]["ready"])
+        self.assertEqual(applied["pattern_hash"], crunch_hash)
+        self.assertIn({"value": "gte_15s", "count": 1}, applied["latency_buckets"])
+        self.assertIn({"value": "5xx", "count": 1}, applied["status_code_counts"])
+
+        holdout = cohorts[("cache", "cache-candidate", "canary_holdout")]
+        self.assertEqual(holdout["holdout_count"], 1)
+        self.assertFalse(holdout["minimum_sample_readiness"]["ready"])
+        self.assertEqual(holdout["minimum_sample_readiness"]["remaining"], 1)
+
+        rollback = cohorts[("cache", "rollback-cache-candidate", "non_canary")]
+        self.assertEqual(rollback["bypassed_count"], 1)
+        self.assertIn({"value": "rollback-threshold-breached", "count": 1}, rollback["local_bypass_reasons"])
+        self.assertIn({"value": "rolled_back", "count": 1}, rollback["lifecycle_counts"])
+
+        codex = cohorts[("cache", "codex-cache-candidate", "canary_applied")]
+        self.assertEqual(codex["source_surface"], "codex_turn")
+        self.assertEqual(codex["app_family"], "codex")
+        self.assertEqual(codex["success_count"], 1)
+        self.assertGreater(codex["estimated_cost_savings_usd"], 0)
+
+        self.assertEqual(result["summary"]["provider_rows_considered"], 4)
+        self.assertEqual(result["summary"]["codex_turn_rows_considered"], 1)
+        self.assertEqual(result["summary"]["rolled_back_events"], 1)
+        self.assertTrue(result["privacy"]["aggregate_only"])
+        encoded = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw prompt must stay local", encoded)
+        self.assertNotIn("raw response must stay local", encoded)
+        self.assertNotIn("upstream raw error body", encoded)
+        self.assertNotIn("raw codex transcript", encoded)
+        self.assertNotIn("session-secret", encoded)
+        self.assertNotIn("req-secret", encoded)
+        self.assertNotIn("thread-secret", encoded)
+        self.assertNotIn("cache-key-secret", encoded)
+
     def test_cache_decision_breakdown_infers_legacy_null_cache_rows(self):
         server.store.log_call(
             id=str(uuid.uuid4()),

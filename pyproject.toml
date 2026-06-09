@@ -35,6 +35,7 @@ agentflow-codex-app-client = "agentflow_proxy.codex_app_client:main"
 agentflow-codex-diagnose = "agentflow_proxy.cli:codex_diagnose_main"
 agentflow-managed-feedback-status = "agentflow_proxy.cli:managed_feedback_status_main"
 agentflow-managed-feedback-flush = "agentflow_proxy.cli:managed_feedback_flush_main"
+agentflow-managed-pattern-rollups = "agentflow_proxy.cli:managed_pattern_rollups_main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]
