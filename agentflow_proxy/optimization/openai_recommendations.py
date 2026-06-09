@@ -190,9 +190,27 @@ async def evaluate_openai_recommendation(
     recommendation_unit: dict[str, Any],
     input_tokens_est: int | None,
 ) -> dict[str, Any]:
-    """Fetch and evaluate an OpenAI managed recommendation with local fallback by default."""
+    """Fetch and apply an OpenAI managed recommendation with local fallback by default."""
+    decision = await fetch_openai_recommendation_decision(
+        recommendation_unit=recommendation_unit,
+        current_model=str(body.get("model") or routing_meta.get("routed_model") or ""),
+        input_tokens_est=input_tokens_est,
+    )
+    return apply_openai_recommendation_decision(
+        body=body,
+        routing_meta=routing_meta,
+        decision=decision,
+    )
+
+
+async def fetch_openai_recommendation_decision(
+    *,
+    recommendation_unit: dict[str, Any],
+    current_model: str,
+    input_tokens_est: int | None,
+) -> dict[str, Any]:
+    """Fetch and evaluate an OpenAI managed recommendation without mutating the provider request."""
     mode = openai_recommendation_mode()
-    current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
     if mode == "observe-only":
         return _base_decision(mode=mode, current_model=current_model, input_tokens_est=input_tokens_est)
 
@@ -264,18 +282,52 @@ async def evaluate_openai_recommendation(
         })
         return decision
 
+    decision.update({
+        "status": "selected",
+        "selected_for_local_application": True,
+        "fallback": None,
+        "apply_reason": "canary-selected",
+        "target_model_normalized": target_model,
+        "lifecycle_event": "canary_selected",
+    })
+    return decision
+
+
+def apply_openai_recommendation_decision(
+    *,
+    body: dict[str, Any],
+    routing_meta: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply a preflight managed decision to the locally mutated OpenAI request when safe."""
+    applied = dict(decision)
+    target_model = applied.get("target_model_normalized")
+    if applied.get("apply_reason") != "canary-selected" or not isinstance(target_model, str):
+        return applied
+
+    current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
+    applied["local_model_at_application"] = current_model
+    if target_model == current_model:
+        applied.update({
+            "status": "noop",
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "target-model-already-selected-locally",
+            "lifecycle_event": "noop",
+        })
+        return applied
+
     body["model"] = target_model
     routing_meta["routed_model"] = target_model
     routing_meta["final_policy_source"] = "managed-recommended"
-    routing_meta["managed_policy_id"] = fetched.get("policy_id")
-    routing_meta["managed_reason"] = fetched.get("reason")
-    decision.update({
+    routing_meta["managed_policy_id"] = applied.get("policy_id")
+    routing_meta["managed_reason"] = applied.get("reason")
+    applied.update({
         "status": "applied",
         "applied": True,
         "changed_model": True,
         "fallback": None,
         "apply_reason": "canary-selected",
-        "target_model_normalized": target_model,
         "lifecycle_event": "canary_applied",
     })
-    return decision
+    return applied

@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 import os
@@ -163,6 +164,55 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
         self._assert_no_raw_values(unit)
         self._assert_no_raw_values(summary)
 
+    def test_preflight_unit_is_feature_only_before_local_mutation(self):
+        unit = openai_features.build_openai_preflight_feature_unit(
+            body={
+                "model": "gpt-5-codex",
+                "input": [
+                    {"role": "system", "content": "raw openai prompt"},
+                    {"type": "message", "content": "raw chat message /home/lutz/project/app.py"},
+                    {"type": "function_call", "arguments": "raw function args"},
+                ],
+                "tools": [{"type": "function", "name": "lookup", "description": "raw tool output"}],
+                "metadata": {
+                    "request_id": "req_raw_secret",
+                    "session_id": "secret session id",
+                    "cache_key": "cache-key-secret",
+                    "api_key": "api-key-secret",
+                },
+                "stream": True,
+            },
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routing_meta={
+                "text_chars": 4096,
+                "has_tools": True,
+                "category": "tool-light",
+                "workflow_phase": "tool-execution",
+            },
+            category="tool-light",
+            stream=True,
+            input_tokens_est=1024,
+        )
+        summary = openai_features.summarize_openai_request_feature_unit(unit)
+        rendered = json.dumps(unit, sort_keys=True)
+
+        self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+        self.assertEqual(unit["source_surface"], "openai_responses")
+        self.assertEqual(unit["candidate_target_model"], None)
+        self.assertEqual(unit["grouping_identifiers"], {})
+        self.assertEqual(unit["input_features"]["local_mutation_stage"], "preflight")
+        self.assertEqual(unit["input_features"]["path_class"], "responses")
+        self.assertEqual(unit["input_features"]["old_context"]["shape"], "responses_input_items")
+        self.assertTrue(unit["input_features"]["cache_eligibility"]["streaming_bypass_hint"])
+        self.assertFalse(unit["input_features"]["cache_eligibility"]["raw_cache_key_included"])
+        self.assertEqual(summary["local_mutation_stage"], "preflight")
+        self.assertTrue(summary["has_tools"])
+        for forbidden_key in ("messages", "input", "cache_key", "request_id", "session_id"):
+            self.assertNotIn(f'"{forbidden_key}"', rendered)
+        self._assert_no_raw_values(unit)
+        self.assertNotIn("/home/lutz/project/app.py", rendered)
+
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class OpenAIFeatureRouteTests(unittest.TestCase):
@@ -230,6 +280,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         ).fetchall()
         routing = json.loads(row["routing_json"])
         feature_summary = routing["openai_feature_unit"]
+        local_feature_summary = routing["openai_local_feature_unit"]
         outcome_summary = routing["openai_outcome_unit"]
 
         self.assertEqual(row["provider"], "openai")
@@ -241,8 +292,11 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertIsNone(row["response_json"])
         self.assertEqual(feature_summary["source_surface"], "openai_responses")
         self.assertEqual(feature_summary["endpoint"], "responses")
+        self.assertEqual(feature_summary["local_mutation_stage"], "preflight")
         self.assertTrue(feature_summary["has_tools"])
         self.assertFalse(feature_summary["raw_payload_included"])
+        self.assertEqual(local_feature_summary["source_surface"], "openai_responses")
+        self.assertEqual(local_feature_summary["endpoint"], "responses")
         self.assertEqual(outcome_summary["status_code"], 200)
         self.assertEqual(outcome_summary["actual_input_tokens"], 11)
         self.assertEqual(outcome_summary["actual_output_tokens"], 3)
@@ -250,6 +304,59 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertFalse(outcome_summary["raw_payload_included"])
         self.assertNotIn("raw openai prompt", row["routing_json"])
         self.assertNotIn("raw tool output", row["routing_json"])
+
+    def test_openai_managed_fetch_uses_preflight_unit_before_crunching(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "raw openai prompt",
+        }
+        events = []
+
+        def fake_crunch(body, *, store_obj=None):
+            events.append("crunch")
+            crunched = copy.deepcopy(body)
+            crunched["input"] = "locally crunched prompt"
+            return crunched, {"changed": True, "saved_chars": 7, "status": "applied"}
+
+        async def fake_fetch(unit):
+            events.append("fetch")
+            self.assertNotIn("crunch", events)
+            self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+            self.assertEqual(unit["input_features"]["local_mutation_stage"], "preflight")
+            rendered = json.dumps(unit, sort_keys=True)
+            self.assertNotIn("raw openai prompt", rendered)
+            self.assertNotIn("locally crunched prompt", rendered)
+            return {
+                "enabled": True,
+                "status": "received",
+                "target_model": "gpt-5-mini",
+                "confidence": 0.91,
+                "policy_id": "openai-mini-candidate",
+                "reason": "matched cheap model evidence",
+                "optimization_unit_id": 77,
+                "policy_source": "managed-recommended",
+            }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run",
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+        }):
+            with patch.object(openai_proxy, "crunch_body", fake_crunch):
+                with patch(
+                    "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                    side_effect=fake_fetch,
+                ):
+                    with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                        response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(events[:2], ["fetch", "crunch"])
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["input"], "locally crunched prompt")
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        self.assertEqual(routing["openai_feature_unit"]["local_mutation_stage"], "preflight")
+        self.assertEqual(routing["managed_recommendation"]["mode"], "dry-run")
+        self.assertEqual(routing["managed_recommendation"]["status"], "dry-run")
 
     def test_openai_observe_only_does_not_fetch_or_change_request(self):
         request_body = {

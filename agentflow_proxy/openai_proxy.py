@@ -40,12 +40,16 @@ from agentflow_proxy.headers import (
 from agentflow_proxy.limiter import TierBackoffActive, model_tier, tier_backoff_headers, tier_backoff_payload
 from agentflow_proxy.optimization.openai_features import (
     build_openai_outcome_feature_unit,
+    build_openai_preflight_feature_unit,
     build_openai_request_feature_unit,
     openai_call_store_fields,
     summarize_openai_outcome_feature_unit,
     summarize_openai_request_feature_unit,
 )
-from agentflow_proxy.optimization.openai_recommendations import evaluate_openai_recommendation
+from agentflow_proxy.optimization.openai_recommendations import (
+    apply_openai_recommendation_decision,
+    fetch_openai_recommendation_decision,
+)
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.recommendations import (
@@ -395,6 +399,35 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
     requested_model = str(raw_body.get("model") or context.openai_model_list[0])
     raw_body.setdefault("model", requested_model)
     category = categorize_request(raw_body)
+    preflight_text_chars = len(extract_text(raw_body))
+    preflight_input_tokens = estimate_tokens_from_text(extract_text(raw_body))
+    preflight_routing_meta = {
+        "enabled": False,
+        "requested_model": requested_model,
+        "routed_model": None,
+        "reason": "preflight feature extraction before local mutation",
+        "text_chars": preflight_text_chars,
+        "has_tools": has_tools(raw_body),
+        "category": category,
+        "policy_source": "preflight",
+        "provider": "openai",
+    }
+    preflight_unit = build_openai_preflight_feature_unit(
+        body=raw_body,
+        path=path,
+        requested_model=requested_model,
+        routing_meta=preflight_routing_meta,
+        category=category,
+        stream=stream,
+        input_tokens_est=preflight_input_tokens,
+    )
+    preflight_summary = summarize_openai_request_feature_unit(preflight_unit)
+    preflight_pattern_features = pattern_feature_diagnostics(preflight_unit)
+    preflight_decision = await fetch_openai_recommendation_decision(
+        recommendation_unit=preflight_unit,
+        current_model=requested_model,
+        input_tokens_est=preflight_input_tokens,
+    )
     status_code = 200
     error: Optional[str] = None
     crunch_meta: dict[str, Any] = {}
@@ -409,7 +442,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         resolved_requested_model = str(crunched.get("model") or requested_model)
         crunched["model"] = routed_model
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
-        recommendation_unit = build_openai_request_feature_unit(
+        local_feature_unit = build_openai_request_feature_unit(
             body=crunched,
             path=path,
             requested_model=resolved_requested_model,
@@ -422,14 +455,15 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             input_tokens_est=input_tokens,
             session_id=session_id,
         )
-        routing_meta["openai_feature_unit"] = summarize_openai_request_feature_unit(recommendation_unit)
+        routing_meta["openai_feature_unit"] = preflight_summary
+        routing_meta["openai_preflight_unit"] = preflight_summary
+        routing_meta["openai_local_feature_unit"] = summarize_openai_request_feature_unit(local_feature_unit)
         routing_meta.update(openai_call_store_fields(path, resolved_requested_model, str(crunched.get("model") or routed_model)))
-        routing_meta["managed_pattern_features"] = pattern_feature_diagnostics(recommendation_unit)
-        recommendation_meta = await evaluate_openai_recommendation(
+        routing_meta["managed_pattern_features"] = preflight_pattern_features
+        recommendation_meta = apply_openai_recommendation_decision(
             body=crunched,
             routing_meta=routing_meta,
-            recommendation_unit=recommendation_unit,
-            input_tokens_est=input_tokens,
+            decision=preflight_decision,
         )
         routing_meta["managed_recommendation"] = recommendation_meta
         headers = build_forward_headers(context, request)
