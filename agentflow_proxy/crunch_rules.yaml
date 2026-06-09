@@ -74,6 +74,16 @@ terminal_log_boilerplate:
   min_lines: 8
   min_repeated_lines: 4
   max_annotations: 12
+pattern_modules:
+  terminal_logs:
+    enabled: true
+    local_crunch_enabled: false
+  prompt_role:
+    enabled: true
+    local_crunch_enabled: false
+  tool_results:
+    enabled: true
+    local_crunch_enabled: true
 pattern_rules: []
 # Example local-only reviewed rule shape:
 # pattern_rules:

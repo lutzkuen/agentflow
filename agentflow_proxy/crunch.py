@@ -115,6 +115,10 @@ def _default_crunch_policy() -> dict[str, Any]:
                 "enabled": True,
                 "local_crunch_enabled": False,
             },
+            "tool_results": {
+                "enabled": True,
+                "local_crunch_enabled": True,
+            },
         },
         "pattern_rules": [],
         "codex_repeated_scaffolding": {

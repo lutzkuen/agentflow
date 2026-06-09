@@ -16,6 +16,7 @@ from agentflow_proxy.pattern_modules import (
     PatternModuleRegistry,
     PromptRolePatternModule,
     TerminalLogPatternModule,
+    ToolResultPatternModule,
     evaluate_pattern_modules,
     registered_pattern_modules,
 )
@@ -91,6 +92,7 @@ class PatternModuleTests(unittest.TestCase):
         families = {module["family"] for module in modules}
         self.assertIn("terminal_logs", families)
         self.assertIn("prompt_role", families)
+        self.assertIn("tool_results", families)
         self.assertTrue(all(module["feature_schema"] for module in modules))
 
     def test_registered_modules_emit_privacy_safe_bucketed_features(self):
@@ -215,6 +217,138 @@ pattern_modules:
             else:
                 os.environ["AGENTFLOW_CRUNCH_RULES"] = saved_env
             importlib.reload(crunch_module)
+
+    def _tool_result_feature(self, body, *, local_crunch_enabled=False):
+        crunched, meta = evaluate_pattern_modules(
+            body,
+            registry=PatternModuleRegistry([ToolResultPatternModule()]),
+            module_settings={"tool_results": {"enabled": True, "local_crunch_enabled": local_crunch_enabled}},
+            category="tool-result",
+        )
+        feature = meta["server_features"]["features"][0]
+        return crunched, meta, feature["features"]
+
+    def test_tool_result_module_emits_grep_features_without_raw_content(self):
+        body = {
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_grep",
+                    "content": "src/secret_app.py:42:SECRET_MATCH should stay local\nsrc/other.py:7:handler()",
+                }],
+            }],
+        }
+
+        _, meta, features = self._tool_result_feature(body)
+        rendered = json.dumps(meta["server_features"], sort_keys=True)
+
+        self.assertEqual(features["primary_result_shape"], "search_grep_results")
+        self.assertTrue(features["exactness_required_hint"])
+        self.assertTrue(features["current_state_evidence_hint"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("SECRET_MATCH", rendered)
+        self.assertNotIn("src/secret_app.py", rendered)
+
+    def test_tool_result_module_classifies_sql_issue_and_test_shapes(self):
+        cases = [
+            (
+                "| id | status |\n| 1 | pending |\n| 2 | done |",
+                "sql_table_rows",
+            ),
+            (
+                "#154 Add local tool-result pattern module\nAF-221 Follow up",
+                "github_ticket_list",
+            ),
+            (
+                "FAILED tests/test_app.py::test_secret\nAssertionError: SECRET_VALUE\n2 failed, 4 passed",
+                "test_output",
+            ),
+        ]
+
+        for result_text, expected_shape in cases:
+            body = {
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_case", "content": result_text}],
+                }],
+            }
+            with self.subTest(expected_shape=expected_shape):
+                _, meta, features = self._tool_result_feature(body)
+                self.assertEqual(features["primary_result_shape"], expected_shape)
+                self.assertTrue(features["exactness_required_hint"])
+                self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+                self.assertNotIn("SECRET_VALUE", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_tool_result_command_failure_content_is_preserved_by_default(self):
+        failure_text = "\n".join([
+            "stderr: Traceback (most recent call last):",
+            "File \"/tmp/private/app.py\", line 9, in <module>",
+            "RuntimeError: SECRET_FAILURE",
+            "exit code: 1",
+        ])
+        body = {
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_cmd", "content": failure_text}],
+            }],
+        }
+
+        crunched, meta, features = self._tool_result_feature(body, local_crunch_enabled=True)
+
+        self.assertEqual(crunched, body)
+        self.assertEqual(meta["modules"][0]["status"], "skipped")
+        self.assertEqual(meta["modules"][0]["reason"], "no-safe-repeated-framing")
+        self.assertEqual(features["primary_result_shape"], "command_stdout_stderr")
+        self.assertTrue(features["error_presence"])
+
+    def test_tool_result_module_compacts_only_repeated_framing_lines(self):
+        result_text = "\n".join([
+            "Tool result:",
+            "alpha=1",
+            "Tool result:",
+            "beta=2",
+            "Tool result:",
+            "/tmp/private/evidence.txt:13:SECRET_EVIDENCE",
+        ])
+        body = {
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_frame", "content": result_text}],
+            }],
+        }
+
+        crunched, meta, features = self._tool_result_feature(body, local_crunch_enabled=True)
+        crunched_text = crunched["messages"][0]["content"][0]["content"]
+
+        self.assertNotEqual(crunched, body)
+        self.assertEqual(meta["modules"][0]["status"], "applied")
+        self.assertEqual(meta["modules"][0]["reason"], "safe-repeated-framing-compacted")
+        self.assertGreater(meta["modules"][0]["saved_chars"], 0)
+        self.assertEqual(crunched_text.count("Tool result:"), 1)
+        self.assertIn("alpha=1", crunched_text)
+        self.assertIn("beta=2", crunched_text)
+        self.assertIn("SECRET_EVIDENCE", crunched_text)
+        self.assertTrue(features["safe_local_crunch_hint"])
+        self.assertNotIn("SECRET_EVIDENCE", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_tool_result_module_detects_mixed_prompt_tool_result_inputs(self):
+        body = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Use the current grep evidence, but keep secrets local."},
+                    {"type": "tool_result", "tool_use_id": "toolu_mixed", "content": "app.py:10:SECRET_MIXED"},
+                ],
+            }],
+        }
+
+        _, meta, features = self._tool_result_feature(body)
+
+        self.assertTrue(features["mixed_prompt_tool_result"])
+        self.assertEqual(features["result_count_bucket"], "one")
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("SECRET_MIXED", json.dumps(meta["server_features"], sort_keys=True))
 
 
 if __name__ == "__main__":
