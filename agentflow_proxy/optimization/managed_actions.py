@@ -9,7 +9,15 @@ from agentflow_proxy.store import stable_json
 
 MANAGED_LOCAL_ACTIONS_SCHEMA = "agentflow.managed_local_actions.v1"
 
-SUPPORTED_CRUNCH_PROFILES = {"default", "conservative", "aggressive", "managed"}
+SUPPORTED_CRUNCH_PROFILES = {
+    "default",
+    "conservative",
+    "aggressive",
+    "managed",
+    "old_context_summarization",
+    "summarization",
+    "compression",
+}
 SUPPORTED_CACHE_PROFILES = {"default", "exact", "semantic", "disabled", "managed"}
 RAW_ACTION_KEYS = {
     "prompt",
@@ -162,14 +170,98 @@ def _crunch_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         result["threshold_chars"] = threshold
     summary = section.get("old_context_summarization")
     if isinstance(summary, dict):
+        enhanced = _enhanced_crunch_hint(section, summary)
         result["old_context_summarization"] = {
             "enabled": _as_bool(summary.get("enabled"), False),
             "model_hint": summary.get("model_hint"),
+            "model_family": summary.get("model_family") or section.get("model_family"),
             "thresholds": summary.get("thresholds") if isinstance(summary.get("thresholds"), dict) else {},
-            "status": "metadata-only-local-hint",
+            "status": enhanced["state"],
+            "state": enhanced["state"],
+            "mode": enhanced["mode"],
+            "profile": enhanced["profile"],
+            "max_summary_cost_usd": enhanced.get("max_summary_cost_usd"),
+            "canary_fraction": enhanced.get("canary_fraction"),
+            "safety_stop_thresholds": enhanced.get("safety_stop_thresholds"),
         }
+        result["enhanced_crunch"] = enhanced
+        if enhanced["state"] == "fallback-not-configured":
+            result.update({
+                "status": "fallback-not-configured",
+                "applied": False,
+                "apply_reason": "local-enhanced-crunch-provider-not-configured",
+            })
+            return result, None
+        result.update({
+            "status": "configured",
+            "applied": False,
+            "apply_reason": "local-enhanced-crunch-provider-configured",
+        })
         effective["old_context_summarization"] = result["old_context_summarization"]
+        effective["enhanced_crunch"] = enhanced
     return result, effective
+
+
+def _enhanced_crunch_hint(section: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    provider_hint = section.get("enhanced_crunch_provider")
+    if not isinstance(provider_hint, dict):
+        provider_hint = section.get("enhanced_provider") if isinstance(section.get("enhanced_provider"), dict) else {}
+    mode = str(
+        provider_hint.get("mode")
+        or summary.get("mode")
+        or section.get("mode")
+        or "local_provider_account"
+    ).strip().lower().replace("-", "_")
+    profile = str(
+        provider_hint.get("profile")
+        or summary.get("profile")
+        or section.get("profile")
+        or "old_context_summarization"
+    )
+    try:
+        from agentflow_proxy.crunch import enhanced_crunch_provider_public_meta
+
+        provider_meta = enhanced_crunch_provider_public_meta({
+            "policy_source": "managed-recommended",
+            "profile": profile,
+            "old_context_summarization": summary,
+        })
+    except Exception:
+        provider_meta = {"configured": False, "state": "fallback-not-configured"}
+    canary = summary.get("canary") if isinstance(summary.get("canary"), dict) else {}
+    safety = summary.get("safety_stop") if isinstance(summary.get("safety_stop"), dict) else {}
+    thresholds = summary.get("thresholds") if isinstance(summary.get("thresholds"), dict) else {}
+    max_cost = _as_float(
+        summary.get("max_summary_cost_usd")
+        or section.get("max_summary_cost_usd")
+        or thresholds.get("max_summary_cost_usd")
+    )
+    state = "configured" if provider_meta.get("configured") else "fallback-not-configured"
+    return {
+        "schema": "agentflow.managed_enhanced_crunch_hint.v1",
+        "state": state,
+        "recommended": True,
+        "configured": bool(provider_meta.get("configured")),
+        "mode": mode,
+        "profile": profile,
+        "model_hint": summary.get("model_hint") or summary.get("model"),
+        "model_family": summary.get("model_family") or section.get("model_family"),
+        "thresholds": thresholds,
+        "max_summary_cost_usd": max_cost,
+        "canary_fraction": _as_float(
+            summary.get("canary_fraction")
+            or section.get("canary_fraction")
+            or canary.get("fraction")
+            or canary.get("canary_fraction")
+        ),
+        "safety_stop_thresholds": safety,
+        "raw_source_included": False,
+        "summary_request_content_included": False,
+        "raw_summary_included": False,
+        "provider_response_included": False,
+        "cache_key_included": False,
+        "endpoint_url_included": False,
+    }
 
 
 def _cache_section(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -323,7 +415,10 @@ def evaluate_managed_local_actions(
 
     effective_profiles: dict[str, Any] = {}
     if crunch_profile is not None:
-        crunch_meta.update({"status": "applied", "applied": True, "apply_reason": "local-profile-selected"})
+        if crunch_meta.get("status") == "configured":
+            crunch_meta.update({"applied": False, "apply_reason": "local-enhanced-crunch-provider-configured"})
+        else:
+            crunch_meta.update({"status": "applied", "applied": True, "apply_reason": "local-profile-selected"})
         effective_profiles["crunch"] = crunch_profile
     if cache_profile is not None:
         cache_meta.update({"status": "applied", "applied": True, "apply_reason": "local-profile-selected"})

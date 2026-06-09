@@ -3,6 +3,24 @@ threshold_chars: 24000
 prompt_cache:
   enabled: true
   min_chars: 4096
+enhanced_crunch_provider:
+  # Local-only provider gate for model-assisted crunching. Managed optimizer
+  # responses may recommend profiles, model families, thresholds, canary
+  # fractions, and safety-stop thresholds, but source text and generated
+  # summaries stay in this local AgentFlow process or a customer-controlled
+  # sidecar/endpoint. Endpoint URLs are never included in metadata feedback.
+  #
+  # Supported modes:
+  # - disabled
+  # - local_provider_account
+  # - customer_sidecar
+  # - customer_controlled_endpoint
+  mode: disabled
+  profile: default
+  model: null
+  model_family: null
+  endpoint_url: null
+  max_summary_cost_usd: null
 old_context_summarization:
   # Opt-in only. When enabled, AgentFlow may make one additional Anthropic
   # request to the model below to summarize old non-tool conversation turns.

@@ -606,6 +606,60 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(routing["managed_recommendation"]["apply_reason"], "privacy-not-metadata-only")
         self.assertEqual(crunch["policy_source"], "local-default")
 
+    def test_openai_enhanced_crunch_hint_falls_back_without_local_provider(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "messages": [
+                {"role": "user", "content": "raw openai prompt SECRET_ENHANCED_CRUNCH"},
+            ],
+        }
+        recommendation = {
+            "schema": "agentflow.policy_decision.v1",
+            "enabled": True,
+            "status": "received",
+            "provider": "openai",
+            "source_surface": "openai_chat",
+            "confidence": 0.9,
+            "policy_id": "enhanced-crunch-policy",
+            "reason": "feature-only enhanced crunch hint",
+            "crunch": {
+                "profile": "old_context_summarization",
+                "old_context_summarization": {
+                    "enabled": True,
+                    "model_family": "haiku",
+                    "thresholds": {"min_request_chars": 10, "min_summarized_chars": 10},
+                    "max_summary_cost_usd": 0.002,
+                    "canary": {"enabled": True, "fraction": 0.25},
+                    "safety_stop": {"max_error_rate": 0.05},
+                },
+            },
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+        }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                return_value=recommendation,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/chat/completions", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        [row] = server.store.conn.execute("select routing_json, crunch_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        crunch = json.loads(row["crunch_json"])
+        action = routing["managed_local_actions"]["crunch"]
+
+        self.assertEqual(action["status"], "fallback-not-configured")
+        self.assertEqual(action["old_context_summarization"]["state"], "fallback-not-configured")
+        self.assertEqual(action["enhanced_crunch"]["state"], "fallback-not-configured")
+        self.assertEqual(crunch["policy_source"], "local-default")
+        self.assertNotIn("SECRET_ENHANCED_CRUNCH", row["routing_json"])
+
     def test_openai_policy_decision_rejects_expired_provider_mismatch_and_unknown_actions(self):
         cases = [
             (

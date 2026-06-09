@@ -24,6 +24,12 @@ from agentflow_proxy.pattern_safety import (
 from agentflow_proxy.store import stable_json
 
 TOKEN_CHARS = 4  # rough estimator only
+ENHANCED_CRUNCH_PROVIDER_MODES = {
+    "disabled",
+    "local_provider_account",
+    "customer_sidecar",
+    "customer_controlled_endpoint",
+}
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -45,6 +51,14 @@ def _default_crunch_policy() -> dict[str, Any]:
         "prompt_cache": {
             "enabled": True,
             "min_chars": 4096,
+        },
+        "enhanced_crunch_provider": {
+            "mode": "disabled",
+            "profile": "default",
+            "model": None,
+            "model_family": None,
+            "endpoint_url": None,
+            "max_summary_cost_usd": None,
         },
         "old_context_summarization": {
             "enabled": False,
@@ -131,6 +145,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             summary = data.get("old_context_summarization") or {}
             if isinstance(summary, dict):
                 _apply_summary_policy_yaml(policy, summary)
+            provider = data.get("enhanced_crunch_provider") or data.get("enhanced_provider") or {}
+            if isinstance(provider, dict):
+                _apply_enhanced_provider_yaml(policy, provider)
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
@@ -140,6 +157,7 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
+            _promote_legacy_summary_provider(policy)
             return policy, "local-manual", str(path)
 
     defaults_path = Path(__file__).parent / "crunch_rules.yaml"
@@ -162,6 +180,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             summary = data.get("old_context_summarization") or {}
             if isinstance(summary, dict):
                 _apply_summary_policy_yaml(policy, summary)
+            provider = data.get("enhanced_crunch_provider") or data.get("enhanced_provider") or {}
+            if isinstance(provider, dict):
+                _apply_enhanced_provider_yaml(policy, provider)
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
@@ -186,7 +207,58 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
     summary["keep_recent_turns"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS", str(summary["keep_recent_turns"])))
     summary["max_summary_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS", str(summary["max_summary_chars"])))
     summary["max_source_chars"] = int(os.getenv("AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS", str(summary["max_source_chars"])))
+    provider = policy["enhanced_crunch_provider"]
+    provider["mode"] = _normalize_enhanced_provider_mode(
+        os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MODE", str(provider["mode"]))
+    )
+    provider["model"] = os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MODEL", provider.get("model") or "") or provider.get("model")
+    provider["model_family"] = (
+        os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MODEL_FAMILY", provider.get("model_family") or "")
+        or provider.get("model_family")
+    )
+    provider["endpoint_url"] = (
+        os.getenv("AGENTFLOW_ENHANCED_CRUNCH_ENDPOINT_URL", provider.get("endpoint_url") or "")
+        or provider.get("endpoint_url")
+    )
+    if os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD") is not None:
+        provider["max_summary_cost_usd"] = float(os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD", "0"))
+    _promote_legacy_summary_provider(policy)
     return policy, "local-default", str(defaults_path)
+
+
+def _normalize_enhanced_provider_mode(value: Any) -> str:
+    mode = str(value or "disabled").strip().lower().replace("-", "_")
+    return mode if mode in ENHANCED_CRUNCH_PROVIDER_MODES else "disabled"
+
+
+def _apply_enhanced_provider_yaml(policy: dict[str, Any], provider: dict[str, Any]) -> None:
+    target = policy["enhanced_crunch_provider"]
+    target["mode"] = _normalize_enhanced_provider_mode(provider.get("mode", target["mode"]))
+    if provider.get("profile") is not None:
+        target["profile"] = str(provider["profile"])
+    if provider.get("model") is not None:
+        target["model"] = str(provider["model"])
+    if provider.get("model_family") is not None:
+        target["model_family"] = str(provider["model_family"])
+    if provider.get("endpoint_url") is not None:
+        target["endpoint_url"] = str(provider["endpoint_url"])
+    if provider.get("url") is not None:
+        target["endpoint_url"] = str(provider["url"])
+    if provider.get("max_summary_cost_usd") is not None:
+        target["max_summary_cost_usd"] = float(provider["max_summary_cost_usd"])
+
+
+def _promote_legacy_summary_provider(policy: dict[str, Any]) -> None:
+    """Treat an explicit local summary policy as local provider configuration.
+
+    Older configs only had old_context_summarization.enabled. Preserve that behavior
+    while still requiring a configured provider for managed hints that enable
+    summarization from the default disabled state.
+    """
+    provider = policy["enhanced_crunch_provider"]
+    if _as_bool(policy["old_context_summarization"].get("enabled"), False) and provider.get("mode") == "disabled":
+        provider["mode"] = "local_provider_account"
+        provider["profile"] = provider.get("profile") or "old_context_summarization"
 
 
 def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) -> None:
@@ -378,6 +450,7 @@ CRUNCH_ENABLED = bool(CRUNCH_POLICY["enabled"])
 CRUNCH_THRESHOLD_CHARS = int(CRUNCH_POLICY["threshold_chars"])
 PROMPT_CACHE_ENABLED = bool(CRUNCH_POLICY["prompt_cache"]["enabled"])
 PROMPT_CACHE_MIN_CHARS = int(CRUNCH_POLICY["prompt_cache"]["min_chars"])
+ENHANCED_CRUNCH_PROVIDER_POLICY = CRUNCH_POLICY["enhanced_crunch_provider"]
 OLD_CONTEXT_SUMMARY_POLICY = CRUNCH_POLICY["old_context_summarization"]
 OLD_CONTEXT_SUMMARY_ENABLED = bool(OLD_CONTEXT_SUMMARY_POLICY["enabled"])
 OLD_CONTEXT_SUMMARY_MODEL = str(OLD_CONTEXT_SUMMARY_POLICY["model"])
@@ -409,6 +482,113 @@ CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_MIN_CHARS = int(CODEX_REPEATED_SCAFFOLDIN
 CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_HEAD_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["older_block_head_chars"])
 CODEX_REPEATED_SCAFFOLDING_OLDER_BLOCK_TAIL_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["older_block_tail_chars"])
 CODEX_REPEATED_SCAFFOLDING_MAX_REPLACEMENTS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["max_replacements"])
+
+
+def _copy_summary_policy() -> dict[str, Any]:
+    return copy.deepcopy(OLD_CONTEXT_SUMMARY_POLICY)
+
+
+def _summary_profile_from_managed_profile(managed_profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(managed_profile, dict):
+        return None
+    summary = managed_profile.get("old_context_summarization") or managed_profile.get("enhanced_crunch")
+    return summary if isinstance(summary, dict) else None
+
+
+def _managed_summary_requested(managed_profile: dict[str, Any] | None) -> bool:
+    summary = _summary_profile_from_managed_profile(managed_profile)
+    return bool(summary and _as_bool(summary.get("enabled"), False))
+
+
+def _effective_summary_policy(managed_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = _copy_summary_policy()
+    policy["policy_source"] = CRUNCH_POLICY_SOURCE
+    summary = _summary_profile_from_managed_profile(managed_profile)
+    if not isinstance(summary, dict):
+        return policy
+
+    if summary.get("enabled") is not None:
+        policy["enabled"] = _as_bool(summary.get("enabled"), bool(policy.get("enabled")))
+    policy["policy_source"] = str((managed_profile or {}).get("policy_source") or "managed-recommended")
+    for source_key, target_key in (
+        ("rule_id", "rule_id"),
+        ("policy_id", "rule_id"),
+        ("candidate_id", "candidate_id"),
+        ("model", "model"),
+        ("model_hint", "model"),
+        ("placement", "placement"),
+        ("max_summary_cost_usd", "max_summary_cost_usd"),
+    ):
+        if summary.get(source_key) is not None:
+            policy[target_key] = summary[source_key]
+    thresholds = summary.get("thresholds") if isinstance(summary.get("thresholds"), dict) else {}
+    for key in (
+        "min_request_chars",
+        "min_summarized_chars",
+        "max_turns",
+        "keep_recent_turns",
+        "max_summary_chars",
+        "max_source_chars",
+    ):
+        value = summary.get(key, thresholds.get(key))
+        if value is not None:
+            policy[key] = int(value)
+    if summary.get("excluded_categories") is not None:
+        raw_categories = summary.get("excluded_categories")
+        policy["excluded_categories"] = raw_categories if isinstance(raw_categories, list) else [str(raw_categories)]
+    for key in ("block_tool_protocol", "block_thinking"):
+        if summary.get(key) is not None:
+            policy[key] = _as_bool(summary.get(key), bool(policy.get(key)))
+    for key in ("canary", "safety_stop"):
+        if isinstance(summary.get(key), dict):
+            policy[key] = copy.deepcopy(summary[key])
+    return policy
+
+
+def _provider_endpoint_configured(provider: dict[str, Any]) -> bool:
+    return bool(str(provider.get("endpoint_url") or "").strip())
+
+
+def _enhanced_provider_configured(provider: dict[str, Any] | None = None) -> bool:
+    provider = provider or ENHANCED_CRUNCH_PROVIDER_POLICY
+    mode = _normalize_enhanced_provider_mode(provider.get("mode"))
+    if mode == "disabled":
+        return False
+    if mode == "local_provider_account":
+        return True
+    return _provider_endpoint_configured(provider)
+
+
+def enhanced_crunch_provider_public_meta(managed_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    provider = copy.deepcopy(ENHANCED_CRUNCH_PROVIDER_POLICY)
+    summary = _summary_profile_from_managed_profile(managed_profile)
+    recommended = bool(summary)
+    mode = _normalize_enhanced_provider_mode(provider.get("mode"))
+    configured = _enhanced_provider_configured(provider)
+    model = provider.get("model") or (summary or {}).get("model_hint") or (summary or {}).get("model")
+    model_family = provider.get("model_family") or (summary or {}).get("model_family")
+    state = "configured" if configured else ("fallback-not-configured" if recommended else "disabled")
+    return {
+        "schema": "agentflow.enhanced_crunch_provider.v1",
+        "recommended": recommended,
+        "configured": configured,
+        "state": state,
+        "mode": mode,
+        "profile": str(provider.get("profile") or (managed_profile or {}).get("profile") or "default"),
+        "model": str(model) if model is not None else None,
+        "model_family": str(model_family) if model_family is not None else None,
+        "endpoint_configured": _provider_endpoint_configured(provider),
+        "endpoint_url_included": False,
+        "raw_source_included": False,
+        "raw_summary_included": False,
+        "provider_response_included": False,
+        "cache_key_included": False,
+        "policy_source": str((managed_profile or {}).get("policy_source") or CRUNCH_POLICY_SOURCE),
+    }
+
+
+def local_enhanced_crunch_configured() -> bool:
+    return _enhanced_provider_configured()
 
 
 def sha256_text(text: str) -> str:
@@ -1125,35 +1305,39 @@ def _dedupe_thinking_blocks(messages: list[Any]) -> int:
     return removed
 
 
-def _summary_base_meta(status: str, reason: str) -> dict[str, Any]:
+def _summary_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None, managed_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy or _effective_summary_policy(managed_profile)
+    excluded = policy.get("excluded_categories") or []
     return {
-        "enabled": OLD_CONTEXT_SUMMARY_ENABLED,
+        "enabled": bool(policy.get("enabled")),
         "status": status,
         "reason": reason,
         "changed": False,
-        "policy_source": CRUNCH_POLICY_SOURCE,
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
         "rule_path": CRUNCH_RULES_PATH,
-        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
-        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
-        "model": OLD_CONTEXT_SUMMARY_MODEL,
-        "placement": OLD_CONTEXT_SUMMARY_PLACEMENT,
-        "min_request_chars": OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS,
-        "min_summarized_chars": OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS,
-        "max_turns": OLD_CONTEXT_SUMMARY_MAX_TURNS,
-        "keep_recent_turns": OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS,
-        "max_summary_chars": OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS,
-        "max_source_chars": OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS,
-        "max_summary_cost_usd": OLD_CONTEXT_SUMMARY_MAX_COST_USD,
-        "excluded_categories": sorted(OLD_CONTEXT_SUMMARY_EXCLUDED_CATEGORIES),
-        "block_tool_protocol": OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL,
-        "block_thinking": OLD_CONTEXT_SUMMARY_BLOCK_THINKING,
-        "canary": _summary_canary_public_meta(),
-        "safety_stop": _summary_safety_public_meta(),
+        "rule_id": str(policy.get("rule_id") or OLD_CONTEXT_SUMMARY_RULE_ID),
+        "candidate_id": str(policy.get("candidate_id")) if policy.get("candidate_id") is not None else None,
+        "model": str(policy.get("model") or OLD_CONTEXT_SUMMARY_MODEL),
+        "placement": str(policy.get("placement") or OLD_CONTEXT_SUMMARY_PLACEMENT),
+        "min_request_chars": int(policy.get("min_request_chars") or OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS),
+        "min_summarized_chars": int(policy.get("min_summarized_chars") or OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS),
+        "max_turns": int(policy.get("max_turns") or OLD_CONTEXT_SUMMARY_MAX_TURNS),
+        "keep_recent_turns": int(policy.get("keep_recent_turns") or OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS),
+        "max_summary_chars": int(policy.get("max_summary_chars") or OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS),
+        "max_source_chars": int(policy.get("max_source_chars") or OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS),
+        "max_summary_cost_usd": float(policy.get("max_summary_cost_usd") or OLD_CONTEXT_SUMMARY_MAX_COST_USD),
+        "excluded_categories": sorted({str(item) for item in excluded}),
+        "block_tool_protocol": _as_bool(policy.get("block_tool_protocol"), OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL),
+        "block_thinking": _as_bool(policy.get("block_thinking"), OLD_CONTEXT_SUMMARY_BLOCK_THINKING),
+        "canary": _summary_canary_public_meta(policy),
+        "safety_stop": _summary_safety_public_meta(policy),
+        "enhanced_crunch_provider": enhanced_crunch_provider_public_meta(managed_profile),
     }
 
 
-def _summary_canary_public_meta() -> dict[str, Any]:
-    canary = OLD_CONTEXT_SUMMARY_POLICY.get("canary") or {}
+def _summary_canary_public_meta(policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy or OLD_CONTEXT_SUMMARY_POLICY
+    canary = policy.get("canary") or {}
     return {
         "enabled": bool(canary.get("enabled")),
         "fraction": float(canary.get("fraction", 1.0)),
@@ -1162,8 +1346,9 @@ def _summary_canary_public_meta() -> dict[str, Any]:
     }
 
 
-def _summary_safety_public_meta() -> dict[str, Any]:
-    safety = OLD_CONTEXT_SUMMARY_POLICY.get("safety_stop") or {}
+def _summary_safety_public_meta(policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy or OLD_CONTEXT_SUMMARY_POLICY
+    safety = policy.get("safety_stop") or {}
     return {
         "enabled": bool(safety.get("enabled", True)),
         "min_outcome_samples": int(safety.get("min_outcome_samples", 5)),
@@ -1217,43 +1402,59 @@ def old_context_summary_plan(
     body: dict[str, Any],
     *,
     exact_cache_enabled: bool | None = None,
+    managed_profile: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    if not OLD_CONTEXT_SUMMARY_ENABLED:
-        return None, _summary_base_meta("skipped", "disabled")
+    policy = _effective_summary_policy(managed_profile)
+    enabled = bool(policy.get("enabled"))
+    model = str(policy.get("model") or OLD_CONTEXT_SUMMARY_MODEL)
+    rule_id = str(policy.get("rule_id") or OLD_CONTEXT_SUMMARY_RULE_ID)
+    candidate_id = policy.get("candidate_id")
+    placement = str(policy.get("placement") or OLD_CONTEXT_SUMMARY_PLACEMENT)
+    min_request_chars = int(policy.get("min_request_chars") or OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS)
+    min_summarized_chars = int(policy.get("min_summarized_chars") or OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS)
+    max_turns = int(policy.get("max_turns") or OLD_CONTEXT_SUMMARY_MAX_TURNS)
+    keep_recent_turns = int(policy.get("keep_recent_turns") or OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS)
+    max_summary_chars = int(policy.get("max_summary_chars") or OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS)
+    max_source_chars = int(policy.get("max_source_chars") or OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS)
+    excluded_categories = {str(item) for item in (policy.get("excluded_categories") or [])}
+    block_tool_protocol = _as_bool(policy.get("block_tool_protocol"), OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL)
+    block_thinking = _as_bool(policy.get("block_thinking"), OLD_CONTEXT_SUMMARY_BLOCK_THINKING)
+    if not enabled:
+        return None, _summary_base_meta("skipped", "disabled", policy=policy, managed_profile=managed_profile)
 
     before_chars = len(stable_json(body))
     category = _crunch_request_category(body)
-    if category in OLD_CONTEXT_SUMMARY_EXCLUDED_CATEGORIES:
-        meta = _summary_base_meta("skipped", "excluded-category")
+    if category in excluded_categories:
+        meta = _summary_base_meta("skipped", "excluded-category", policy=policy, managed_profile=managed_profile)
         meta["before_chars"] = before_chars
         meta["category"] = category
         return None, meta
 
-    if before_chars < OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS:
-        meta = _summary_base_meta("skipped", "request-too-small")
+    if before_chars < min_request_chars:
+        meta = _summary_base_meta("skipped", "request-too-small", policy=policy, managed_profile=managed_profile)
         meta["before_chars"] = before_chars
         meta["category"] = category
         return None, meta
 
     messages = body.get("messages") or []
-    if not isinstance(messages, list) or len(messages) <= OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS:
-        meta = _summary_base_meta("skipped", "not-enough-old-turns")
+    if not isinstance(messages, list) or len(messages) <= keep_recent_turns:
+        meta = _summary_base_meta("skipped", "not-enough-old-turns", policy=policy, managed_profile=managed_profile)
         meta["before_chars"] = before_chars
         meta["category"] = category
         return None, meta
 
-    old_limit = max(0, len(messages) - OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS)
-    if OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL and any(
+    old_limit = max(0, len(messages) - keep_recent_turns)
+    if block_tool_protocol and any(
         isinstance(msg, dict) and _message_has_tool_protocol(msg) for msg in messages[:old_limit]
     ):
-        meta = _summary_base_meta("skipped", "tool-protocol-context-blocked")
+        meta = _summary_base_meta("skipped", "tool-protocol-context-blocked", policy=policy, managed_profile=managed_profile)
         meta["before_chars"] = before_chars
         meta["category"] = category
         return None, meta
-    if OLD_CONTEXT_SUMMARY_BLOCK_THINKING and any(
+    if block_thinking and any(
         isinstance(msg, dict) and _message_has_thinking(msg) for msg in messages[:old_limit]
     ):
-        meta = _summary_base_meta("skipped", "thinking-context-blocked")
+        meta = _summary_base_meta("skipped", "thinking-context-blocked", policy=policy, managed_profile=managed_profile)
         meta["before_chars"] = before_chars
         meta["category"] = category
         return None, meta
@@ -1263,7 +1464,7 @@ def old_context_summary_plan(
     total_chars = 0
     source_truncated = False
     for idx, msg in enumerate(messages[:old_limit]):
-        if len(candidates) >= OLD_CONTEXT_SUMMARY_MAX_TURNS:
+        if len(candidates) >= max_turns:
             break
         if not isinstance(msg, dict):
             continue
@@ -1273,7 +1474,7 @@ def old_context_summary_plan(
         normalized = normalize_text(text)
         if not normalized:
             continue
-        remaining = OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS - total_chars
+        remaining = max_source_chars - total_chars
         if remaining <= 0:
             source_truncated = True
             break
@@ -1284,8 +1485,8 @@ def old_context_summary_plan(
         source_parts.append(f"<turn index=\"{idx}\" role=\"{msg.get('role')}\">\n{included}\n</turn>")
         total_chars += len(included)
 
-    if total_chars < OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS or not candidates:
-        meta = _summary_base_meta("skipped", "eligible-context-too-small")
+    if total_chars < min_summarized_chars or not candidates:
+        meta = _summary_base_meta("skipped", "eligible-context-too-small", policy=policy, managed_profile=managed_profile)
         meta["before_chars"] = before_chars
         meta["category"] = category
         meta["eligible_turns"] = len(candidates)
@@ -1295,8 +1496,8 @@ def old_context_summary_plan(
     source_text = "\n\n".join(source_parts)
     source_hash = sha256_text(source_text)
     summary_request = {
-        "model": OLD_CONTEXT_SUMMARY_MODEL,
-        "max_tokens": max(256, OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS // TOKEN_CHARS),
+        "model": model,
+        "max_tokens": max(256, max_summary_chars // TOKEN_CHARS),
         "temperature": 0,
         "system": (
             "Summarize old conversation context for a coding agent. Preserve durable facts, "
@@ -1318,7 +1519,7 @@ def old_context_summary_plan(
         "source_hash": source_hash,
         "cache_key": "agentflow-old-context-summary\n" + source_hash,
         "summary_request": summary_request,
-        "placement": OLD_CONTEXT_SUMMARY_PLACEMENT,
+        "placement": placement,
         "candidate_indexes": [c["index"] for c in candidates],
         "candidate_roles": [c["role"] for c in candidates],
         "eligible_turns": len(candidates),
@@ -1326,8 +1527,13 @@ def old_context_summary_plan(
         "source_truncated": source_truncated,
         "before_chars": before_chars,
         "category": category,
+        "summary_model": model,
+        "max_summary_chars": max_summary_chars,
+        "rule_id": rule_id,
+        "candidate_id": str(candidate_id) if candidate_id is not None else None,
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
     }
-    meta = _summary_base_meta("planned", "eligible")
+    meta = _summary_base_meta("planned", "eligible", policy=policy, managed_profile=managed_profile)
     meta.update({
         "before_chars": before_chars,
         "category": category,
@@ -1362,11 +1568,13 @@ def apply_old_context_summary(body: dict[str, Any], plan: dict[str, Any], summar
     new_body = copy.deepcopy(body)
     messages = new_body.get("messages") or []
     indexes = set(plan["candidate_indexes"])
+    summary_model = str(plan.get("summary_model") or OLD_CONTEXT_SUMMARY_MODEL)
+    max_summary_chars = int(plan.get("max_summary_chars") or OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS)
     notice = (
-        f"[AgentFlow: old non-tool context summarized by {OLD_CONTEXT_SUMMARY_MODEL}; "
+        f"[AgentFlow: old non-tool context summarized by {summary_model}; "
         f"source_turns={plan['eligible_turns']}; source_chars={plan['eligible_chars']}; "
         f"source_hash={plan['source_hash'][:12]}]\n\n"
-        f"{summary.strip()[:OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS]}"
+        f"{summary.strip()[:max_summary_chars]}"
     )
     system = new_body.get("system")
     summary_block = {"type": "text", "text": notice}
@@ -1389,16 +1597,21 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
-    public = _summary_canary_public_meta()
+def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any], *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy or _effective_summary_policy(None)
+    public = _summary_canary_public_meta(policy)
+    rule_id = str(plan.get("rule_id") or policy.get("rule_id") or OLD_CONTEXT_SUMMARY_RULE_ID)
+    candidate_id = plan.get("candidate_id")
+    if candidate_id is None:
+        candidate_id = policy.get("candidate_id")
     base: dict[str, Any] = {
         "schema": "agentflow.old_context_summary_canary_decision.v1",
         "enabled": public["enabled"],
         "selected": True,
         "status": "full",
         "cohort": "full",
-        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
-        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
+        "rule_id": rule_id,
+        "candidate_id": str(candidate_id) if candidate_id is not None else None,
         "source_hash": str(plan.get("source_hash") or "")[:12],
         "raw_context_included": False,
         "raw_summary_included": False,
@@ -1419,8 +1632,8 @@ def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any]) -> dict
     basis = {
         "unit": unit,
         "unit_hash": sha256_text(unit_value)[:16],
-        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
-        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
+        "rule_id": rule_id,
+        "candidate_id": str(candidate_id) if candidate_id is not None else None,
         "source_hash": str(plan.get("source_hash") or "")[:12],
         "category": str(plan.get("category") or ""),
         "requested_model": str(body.get("model") or ""),
@@ -1637,18 +1850,44 @@ async def maybe_summarize_old_context(
     set_cached_summary: Any,
     fetch_summary: Any,
     store_obj: Any | None = None,
+    managed_profile: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    plan, meta = old_context_summary_plan(body, exact_cache_enabled=exact_cache_enabled)
+    policy = _effective_summary_policy(managed_profile)
+    if _managed_summary_requested(managed_profile) and not _enhanced_provider_configured():
+        meta = _summary_base_meta(
+            "skipped",
+            "fallback-not-configured",
+            policy=policy,
+            managed_profile=managed_profile,
+        )
+        meta.update({
+            "before_chars": len(stable_json(body)),
+            "category": _crunch_request_category(body),
+            "enhanced_crunch_state": "fallback-not-configured",
+            "configured": False,
+            "applied": False,
+        })
+        return body, meta
+
+    plan, meta = old_context_summary_plan(
+        body,
+        exact_cache_enabled=exact_cache_enabled,
+        managed_profile=managed_profile,
+    )
     if plan is None:
         return body, meta
 
-    canary = _summary_canary_decision(body, plan)
+    meta["configured"] = True
+    meta["enhanced_crunch_state"] = "configured"
+    canary = _summary_canary_decision(body, plan, policy=policy)
     meta["canary"] = canary
     if canary.get("enabled") and not canary.get("selected"):
         meta.update({
             "status": "skipped",
             "reason": "canary_holdout",
             "changed": False,
+            "enhanced_crunch_state": "holdout",
+            "applied": False,
         })
         return body, meta
 
@@ -1660,6 +1899,8 @@ async def maybe_summarize_old_context(
             "changed": False,
             "safety_stop_state": "stopped",
             "safety_stop": safety_stop,
+            "enhanced_crunch_state": "bypassed",
+            "applied": False,
         })
         log_pattern_canary_safety_stop(safety_stop)
         return body, meta
@@ -1690,11 +1931,14 @@ async def maybe_summarize_old_context(
                 summary_cost = float(fetch_result.get("summary_cost_est_usd") or 0.0)
             except (TypeError, ValueError):
                 summary_cost = 0.0
-        if summary_cost > OLD_CONTEXT_SUMMARY_MAX_COST_USD:
+        max_cost = float(policy.get("max_summary_cost_usd") or OLD_CONTEXT_SUMMARY_MAX_COST_USD)
+        if summary_cost > max_cost:
             meta.update({
                 "status": "skipped",
                 "reason": "summary-cost-too-high",
                 "summary_cost_est_usd": summary_cost,
+                "enhanced_crunch_state": "bypassed",
+                "applied": False,
             })
             return body, meta
         set_cached_summary(plan["cache_key"], {
@@ -1716,6 +1960,8 @@ async def maybe_summarize_old_context(
         "status": "applied",
         "reason": "summary-cache-hit" if summary_cache_hit else "summary-created",
         "changed": after_chars != plan["before_chars"],
+        "applied": True,
+        "enhanced_crunch_state": "applied",
         "after_chars": after_chars,
         "saved_chars": plan["before_chars"] - after_chars,
         "tokens_saved_est": tokens_saved_est,

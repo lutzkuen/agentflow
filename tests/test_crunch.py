@@ -27,6 +27,11 @@ class CrunchRulesTest(unittest.TestCase):
         "AGENTFLOW_HAIKU_SUMMARY_KEEP_RECENT_TURNS",
         "AGENTFLOW_HAIKU_SUMMARY_MAX_SUMMARY_CHARS",
         "AGENTFLOW_HAIKU_SUMMARY_MAX_SOURCE_CHARS",
+        "AGENTFLOW_ENHANCED_CRUNCH_MODE",
+        "AGENTFLOW_ENHANCED_CRUNCH_MODEL",
+        "AGENTFLOW_ENHANCED_CRUNCH_MODEL_FAMILY",
+        "AGENTFLOW_ENHANCED_CRUNCH_ENDPOINT_URL",
+        "AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD",
         "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
         "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
         "AGENTFLOW_POLICY_EVENTS",
@@ -123,6 +128,161 @@ prompt_cache:
             self.assertEqual(meta["threshold_chars"], 10)
             self.assertEqual(meta["long_blocks_shortened"], 1)
             self.assertIn("middle of long older text block omitted", crunched["messages"][0]["content"])
+
+    def test_enhanced_crunch_provider_reports_configured_without_leaking_endpoint(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+enhanced_crunch_provider:
+  mode: customer_sidecar
+  profile: old-context-summary
+  model_family: haiku
+  endpoint_url: http://127.0.0.1:4811/summarize
+old_context_summarization:
+  enabled: false
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+
+            meta = manual.enhanced_crunch_provider_public_meta({
+                "policy_source": "managed-recommended",
+                "profile": "old-context-summary",
+                "old_context_summarization": {"enabled": True, "model_hint": "haiku"},
+            })
+            rendered = json.dumps(meta, sort_keys=True)
+
+            self.assertTrue(meta["configured"])
+            self.assertEqual(meta["state"], "configured")
+            self.assertEqual(meta["mode"], "customer_sidecar")
+            self.assertTrue(meta["endpoint_configured"])
+            self.assertFalse(meta["endpoint_url_included"])
+            self.assertNotIn("4811", rendered)
+
+    def test_managed_enhanced_summary_hint_falls_back_without_local_provider(self):
+        manual = importlib.reload(crunch_module)
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "SECRET_OLD_CONTEXT " * 40},
+                {"role": "assistant", "content": "old answer " * 40},
+                {"role": "user", "content": "recent"},
+            ],
+        }
+        managed_profile = {
+            "policy_source": "managed-recommended",
+            "profile": "old-context-summary",
+            "old_context_summarization": {
+                "enabled": True,
+                "model_hint": "claude-haiku-4-5-20251001",
+                "thresholds": {
+                    "min_request_chars": 10,
+                    "min_summarized_chars": 10,
+                    "keep_recent_turns": 1,
+                },
+            },
+        }
+
+        async def fail_fetch(_summary_request):
+            raise AssertionError("fallback-not-configured must not call the summary provider")
+
+        summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+            body,
+            exact_cache_enabled=False,
+            get_cached_summary=lambda _key: None,
+            set_cached_summary=lambda _key, _value: None,
+            fetch_summary=fail_fetch,
+            managed_profile=managed_profile,
+        ))
+
+        rendered = json.dumps(meta, sort_keys=True)
+        self.assertEqual(summarized, body)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "fallback-not-configured")
+        self.assertEqual(meta["enhanced_crunch_state"], "fallback-not-configured")
+        self.assertFalse(meta["enhanced_crunch_provider"]["configured"])
+        self.assertNotIn("SECRET_OLD_CONTEXT", rendered)
+
+    def test_managed_enhanced_summary_hint_executes_with_local_provider_configured(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+enhanced_crunch_provider:
+  mode: local_provider_account
+  profile: old-context-summary
+old_context_summarization:
+  enabled: false
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": "SECRET_OLD_CONTEXT keep /tmp/local-only.txt " * 40},
+                    {"role": "assistant", "content": "old answer " * 40},
+                    {"role": "user", "content": "recent"},
+                ],
+            }
+            managed_profile = {
+                "policy_source": "managed-recommended",
+                "profile": "old-context-summary",
+                "old_context_summarization": {
+                    "enabled": True,
+                    "model_hint": "claude-haiku-4-5-20251001",
+                    "policy_id": "managed-summary-policy",
+                    "candidate_id": "managed-summary-candidate",
+                    "thresholds": {
+                        "min_request_chars": 10,
+                        "min_summarized_chars": 10,
+                        "keep_recent_turns": 1,
+                        "max_summary_chars": 80,
+                        "max_source_chars": 10000,
+                    },
+                    "excluded_categories": [],
+                    "safety_stop": {"enabled": False},
+                },
+            }
+
+            async def local_fetch(summary_request):
+                request_text = stable_json(summary_request)
+                self.assertIn("SECRET_OLD_CONTEXT", request_text)
+                return {
+                    "summary": "Keep /tmp/local-only.txt. Continue from recent context.",
+                    "summary_input_tokens": 200,
+                    "summary_output_tokens": 20,
+                    "summary_cost_est_usd": 0.0004,
+                    "summary_status_code": 200,
+                }
+
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=local_fetch,
+                managed_profile=managed_profile,
+            ))
+
+            rendered_meta = json.dumps(meta, sort_keys=True)
+            self.assertEqual(meta["status"], "applied")
+            self.assertEqual(meta["enhanced_crunch_state"], "applied")
+            self.assertEqual(meta["policy_source"], "managed-recommended")
+            self.assertEqual(meta["rule_id"], "managed-summary-policy")
+            self.assertTrue(meta["enhanced_crunch_provider"]["configured"])
+            self.assertNotIn("SECRET_OLD_CONTEXT", rendered_meta)
+            self.assertNotIn("Keep /tmp/local-only.txt", rendered_meta)
+            self.assertIn("Keep /tmp/local-only.txt", stable_json(summarized))
 
     def test_pattern_rules_shorten_older_repeated_text_from_local_file(self):
         with TemporaryDirectory() as tmp:

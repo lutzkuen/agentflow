@@ -1481,6 +1481,11 @@ def build_old_context_summary_outcome_feedback(
         net_savings = 0.0
 
     safety_stop = summary_meta.get("safety_stop") if isinstance(summary_meta.get("safety_stop"), dict) else {}
+    enhanced_provider = (
+        summary_meta.get("enhanced_crunch_provider")
+        if isinstance(summary_meta.get("enhanced_crunch_provider"), dict)
+        else {}
+    )
     feedback = {
         "schema": "agentflow.old_context_summary_outcome_feedback.v1",
         "source_surface": _source_surface(provider, path),
@@ -1504,6 +1509,17 @@ def build_old_context_summary_outcome_feedback(
         "rule_id": summary_meta.get("rule_id"),
         "candidate_id": summary_meta.get("candidate_id"),
         "policy_source": summary_meta.get("policy_source"),
+        "enhanced_crunch": {
+            "state": summary_meta.get("enhanced_crunch_state") or enhanced_provider.get("state"),
+            "mode": enhanced_provider.get("mode"),
+            "profile": enhanced_provider.get("profile"),
+            "configured": enhanced_provider.get("configured"),
+            "recommended": enhanced_provider.get("recommended"),
+            "model_family": enhanced_provider.get("model_family") or _model_family(summary_meta.get("model")),
+            "model_tier": _model_family(summary_meta.get("model")),
+            "failure_state": reason if status != "applied" else None,
+            "safety_stop_status": summary_meta.get("safety_stop_state"),
+        },
         "canary": {
             "enabled": bool(canary.get("enabled")),
             "selected": canary.get("selected"),
