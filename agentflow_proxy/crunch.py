@@ -107,6 +107,14 @@ def _default_crunch_policy() -> dict[str, Any]:
             "max_annotations": 12,
         },
         "pattern_modules": {
+            "diffs": {
+                "enabled": True,
+                "local_crunch_enabled": True,
+            },
+            "generated_artifacts": {
+                "enabled": True,
+                "local_crunch_enabled": True,
+            },
             "terminal_logs": {
                 "enabled": True,
                 "local_crunch_enabled": False,

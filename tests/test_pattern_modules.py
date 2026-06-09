@@ -9,6 +9,8 @@ import unittest
 import agentflow_proxy.crunch as crunch_module
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.pattern_modules import (
+    DiffPatternModule,
+    GeneratedArtifactPatternModule,
     LocalPatternModule,
     PatternCrunchResult,
     PatternDetection,
@@ -86,10 +88,12 @@ class UnsafeFeatureModule(LocalPatternModule):
 
 
 class PatternModuleTests(unittest.TestCase):
-    def test_default_registry_exposes_two_independent_families(self):
+    def test_default_registry_exposes_independent_families(self):
         modules = registered_pattern_modules()
 
         families = {module["family"] for module in modules}
+        self.assertIn("diffs", families)
+        self.assertIn("generated_artifacts", families)
         self.assertIn("terminal_logs", families)
         self.assertIn("prompt_role", families)
         self.assertIn("tool_results", families)
@@ -228,6 +232,31 @@ pattern_modules:
         feature = meta["server_features"]["features"][0]
         return crunched, meta, feature["features"]
 
+    def _diff_feature(self, body, *, local_crunch_enabled=False):
+        crunched, meta = evaluate_pattern_modules(
+            body,
+            registry=PatternModuleRegistry([DiffPatternModule()]),
+            module_settings={"diffs": {"enabled": True, "local_crunch_enabled": local_crunch_enabled}},
+            category="code-gen",
+        )
+        feature = meta["server_features"]["features"][0]
+        return crunched, meta, feature["features"]
+
+    def _artifact_feature(self, body, *, local_crunch_enabled=False):
+        crunched, meta = evaluate_pattern_modules(
+            body,
+            registry=PatternModuleRegistry([GeneratedArtifactPatternModule()]),
+            module_settings={
+                "generated_artifacts": {
+                    "enabled": True,
+                    "local_crunch_enabled": local_crunch_enabled,
+                }
+            },
+            category="long-context",
+        )
+        feature = meta["server_features"]["features"][0]
+        return crunched, meta, feature["features"]
+
     def test_tool_result_module_emits_grep_features_without_raw_content(self):
         body = {
             "messages": [{
@@ -349,6 +378,125 @@ pattern_modules:
         self.assertEqual(features["result_count_bucket"], "one")
         self.assertEqual(managed_egress_violations(meta["server_features"]), [])
         self.assertNotIn("SECRET_MIXED", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_diff_module_emits_small_diff_features_without_raw_content(self):
+        diff_text = "\n".join([
+            "diff --git a/src/private.py b/src/private.py",
+            "--- a/src/private.py",
+            "+++ b/src/private.py",
+            "@@ -1,3 +1,3 @@",
+            " keep context",
+            "-SECRET_OLD = 1",
+            "+SECRET_NEW = 2",
+        ])
+        body = {"messages": [{"role": "user", "content": f"Review this patch:\n{diff_text}"}]}
+
+        crunched, meta, features = self._diff_feature(body, local_crunch_enabled=True)
+        rendered = json.dumps(meta["server_features"], sort_keys=True)
+
+        self.assertEqual(crunched, body)
+        self.assertTrue(features["diff_present"])
+        self.assertFalse(features["multi_file_diff"])
+        self.assertEqual(features["added_removed_line_count_bucket"], "two_three")
+        self.assertTrue(features["changed_hunks_preserved_by_default"])
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("SECRET_NEW", rendered)
+        self.assertNotIn("src/private.py", rendered)
+
+    def test_diff_module_compacts_repeated_context_in_large_multifile_diff(self):
+        repeated_context = " repeated unchanged generated context line"
+        diff_text = "\n".join([
+            "diff --git a/a.py b/a.py",
+            "--- a/a.py",
+            "+++ b/a.py",
+            "@@ -1,4 +1,4 @@",
+            repeated_context,
+            "-old_a = 'SECRET_A'",
+            "+new_a = 'SECRET_A'",
+            repeated_context,
+            "diff --git a/b.py b/b.py",
+            "--- a/b.py",
+            "+++ b/b.py",
+            "@@ -10,4 +10,4 @@",
+            repeated_context,
+            "-old_b = 'SECRET_B'",
+            "+new_b = 'SECRET_B'",
+            repeated_context,
+        ])
+        body = {"messages": [{"role": "user", "content": diff_text}]}
+
+        crunched, meta, features = self._diff_feature(body, local_crunch_enabled=True)
+        crunched_text = crunched["messages"][0]["content"]
+
+        self.assertNotEqual(crunched, body)
+        self.assertTrue(features["multi_file_diff"])
+        self.assertEqual(meta["modules"][0]["status"], "applied")
+        self.assertEqual(meta["modules"][0]["reason"], "safe-repeated-diff-context-compacted")
+        self.assertIn("+new_a = 'SECRET_A'", crunched_text)
+        self.assertIn("-old_b = 'SECRET_B'", crunched_text)
+        self.assertLess(crunched_text.count(repeated_context), diff_text.count(repeated_context))
+        self.assertNotIn("SECRET_A", json.dumps(meta["server_features"], sort_keys=True))
+
+    def test_diff_module_preserves_exact_request(self):
+        diff_text = "\n".join([
+            "Please keep the exact full file diff.",
+            "diff --git a/app.py b/app.py",
+            "--- a/app.py",
+            "+++ b/app.py",
+            "@@ -1,4 +1,4 @@",
+            " repeated unchanged context line",
+            "-before()",
+            "+after()",
+            " repeated unchanged context line",
+        ])
+        body = {"messages": [{"role": "user", "content": diff_text}]}
+
+        crunched, meta, features = self._diff_feature(body, local_crunch_enabled=True)
+
+        self.assertEqual(crunched, body)
+        self.assertTrue(features["exact_artifact_requested_hint"])
+        self.assertEqual(meta["modules"][0]["reason"], "exact-diff-request-preserved")
+
+    def test_generated_artifact_module_preserves_dependency_lockfile_prompt(self):
+        lock_text = "\n".join([
+            "Resolve this dependency conflict in the exact package-lock.json.",
+            '"lockfileVersion": 3,',
+            '"node_modules/private-package": {"version": "1.2.3"}',
+        ])
+        body = {"messages": [{"role": "user", "content": lock_text}]}
+
+        crunched, meta, features = self._artifact_feature(body, local_crunch_enabled=True)
+        rendered = json.dumps(meta["server_features"], sort_keys=True)
+
+        self.assertEqual(crunched, body)
+        self.assertTrue(features["lockfile_present"])
+        self.assertTrue(features["dependency_resolution_task_hint"])
+        self.assertTrue(features["exact_artifact_preserved_by_default"])
+        self.assertEqual(meta["modules"][0]["reason"], "exact-artifact-request-preserved")
+        self.assertEqual(managed_egress_violations(meta["server_features"]), [])
+        self.assertNotIn("private-package", rendered)
+
+    def test_generated_artifact_module_compacts_generated_minified_bulk(self):
+        generated_line = "// Code generated by protoc-gen-go. DO NOT EDIT."
+        minified = "function x(){" + ("var_a=1;" * 180) + "return a;}"
+        artifact_text = "\n".join([
+            generated_line,
+            "package privatepb",
+            generated_line,
+            minified,
+        ])
+        body = {"messages": [{"role": "user", "content": artifact_text}]}
+
+        crunched, meta, features = self._artifact_feature(body, local_crunch_enabled=True)
+        crunched_text = crunched["messages"][0]["content"]
+
+        self.assertNotEqual(crunched, body)
+        self.assertEqual(features["generated_file_likelihood_bucket"], "high")
+        self.assertEqual(features["minified_content_fraction_bucket"], "25_50pct")
+        self.assertEqual(meta["modules"][0]["reason"], "safe-generated-artifact-bulk-compacted")
+        self.assertEqual(crunched_text.count(generated_line), 1)
+        self.assertIn("generated/minified bulk omitted", crunched_text)
+        self.assertNotIn("privatepb", json.dumps(meta["server_features"], sort_keys=True))
 
 
 if __name__ == "__main__":

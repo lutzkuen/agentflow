@@ -75,6 +75,12 @@ terminal_log_boilerplate:
   min_repeated_lines: 4
   max_annotations: 12
 pattern_modules:
+  diffs:
+    enabled: true
+    local_crunch_enabled: true
+  generated_artifacts:
+    enabled: true
+    local_crunch_enabled: true
   terminal_logs:
     enabled: true
     local_crunch_enabled: false
