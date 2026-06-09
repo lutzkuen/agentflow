@@ -206,6 +206,27 @@ class DashboardImportTests(unittest.TestCase):
                     "raw_payload_included": False,
                 },
             )
+            log_policy_event(
+                "rollout-actions-impact",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "path": "/tmp/dry-run-report.json",
+                    "db_path": tmp.name,
+                    "action_count": 2,
+                    "projected_affected_metadata_row_count": 9,
+                    "actual_matched_metadata_row_count": 4,
+                    "actual_matched_provider_call_count": 3,
+                    "actual_matched_codex_turn_count": 1,
+                    "actual_canary_applied_count": 2,
+                    "actual_canary_holdout_count": 1,
+                    "actual_bypassed_or_disabled_count": 1,
+                    "actual_tokens_saved_est": 700,
+                    "actual_estimated_cost_savings_usd": 0.007,
+                    "actions_without_post_apply_matches": 0,
+                    "exit_code": 0,
+                },
+            )
             store.enqueue_managed_outcome_feedback(
                 id="rollout-feedback-queued",
                 created_at="2026-06-09T03:40:00+00:00",
@@ -284,6 +305,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["affected_metadata_row_count"], 9)
             self.assertEqual(payload["dry_run_impact"]["projected_additional_applied_count"], 3)
             self.assertEqual(payload["dry_run_impact"]["projected_local_bypass_or_disable_count"], 2)
+            self.assertEqual(payload["latest_impact"]["stage"], "impact")
+            self.assertEqual(payload["post_apply_impact"]["actual_matched_metadata_row_count"], 4)
+            self.assertEqual(payload["post_apply_impact"]["actual_canary_applied_count"], 2)
             self.assertEqual({row["value"]: row["count"] for row in payload["action_type_counts"]}, {"widen": 1, "rollback": 1})
             self.assertTrue(payload["safety_stop"]["active"])
             self.assertFalse(payload["privacy"]["raw_action_payloads_included"])
@@ -299,6 +323,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertNotIn("candidate-id-not-rendered", rendered)
             self.assertNotIn("rule-id-not-rendered", rendered)
             self.assertNotIn("/tmp/raw-action-payload.json", rendered)
+            self.assertNotIn("/tmp/dry-run-report.json", rendered)
             self.assertNotIn("/tmp/local-yaml-config", rendered)
         finally:
             if old_event_log is None:

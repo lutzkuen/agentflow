@@ -25,6 +25,7 @@ PATTERN_ROLLOUT_ACTIONS_SCHEMA = "agentflow.pattern_rollout_actions.v1"
 PATTERN_ROLLOUT_ACTION_REVIEW_SCHEMA = "agentflow.pattern_rollout_actions_review.v1"
 PATTERN_ROLLOUT_ACTION_APPLY_SCHEMA = "agentflow.pattern_rollout_actions_apply.v1"
 PATTERN_ROLLOUT_ACTION_DRY_RUN_SCHEMA = "agentflow.pattern_rollout_actions_dry_run.v1"
+PATTERN_ROLLOUT_ACTION_IMPACT_SCHEMA = "agentflow.pattern_rollout_actions_impact.v1"
 PATTERN_ROLLOUT_ACTION_VALIDATION_SCHEMA = "agentflow.pattern_rollout_actions_validation.v1"
 PATTERN_ROLLOUT_ACTION_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.pattern_rollout_actions_provenance_verification.v1"
 
@@ -93,6 +94,18 @@ def canonical_rollout_action_bundle_hash(bundle: Any) -> str | None:
         return None
     payload = _action_bundle_payload_for_hash(bundle)
     return f"sha256:{hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()}"
+
+
+def rollout_action_id(action: dict[str, Any]) -> str:
+    basis = {
+        "policy_section": action.get("policy_section"),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
+        "pattern_hash": action.get("pattern_hash"),
+        "action_type": action.get("action_type"),
+    }
+    digest = hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest()
+    return f"rollout-action:{digest[:24]}"
 
 
 def _is_iso_datetime(value: Any) -> bool:
@@ -449,6 +462,37 @@ def _status_bucket(status_code: Any) -> str:
     return "5xx"
 
 
+def _error_bucket(error: Any, status_code: Any = None) -> str:
+    status = _as_int(status_code)
+    if status and status < 400 and not error:
+        return "none"
+    if not error:
+        return f"http_{_status_bucket(status)}" if status >= 400 else "none"
+    try:
+        parsed = json.loads(str(error))
+    except (TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        error_obj = parsed.get("error") if isinstance(parsed.get("error"), dict) else parsed
+        error_type = error_obj.get("type") if isinstance(error_obj, dict) else None
+        if isinstance(error_type, str) and error_type:
+            return error_type[:80]
+    return f"http_{_status_bucket(status)}" if status >= 400 else "error"
+
+
+def _latency_bucket(latency_ms: Any) -> str:
+    latency = _as_int(latency_ms, -1)
+    if latency < 0:
+        return "unknown"
+    if latency < 500:
+        return "lt_500ms"
+    if latency < 2000:
+        return "500ms_2s"
+    if latency < 10000:
+        return "2s_10s"
+    return "gte_10s"
+
+
 def _saving_bucket(value: Any) -> str:
     amount = _as_float(value, 0.0)
     if amount <= 0:
@@ -479,6 +523,28 @@ def _cohort_for_summary(summary: dict[str, Any]) -> str:
     return "received"
 
 
+def _parse_utc_datetime(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        text = str(raw)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _created_at_matches_since(raw: Any, since: datetime | None) -> bool:
+    if since is None:
+        return True
+    created = _parse_utc_datetime(raw)
+    return created is not None and created >= since
+
+
 def _codex_estimated_cost(input_text_chars: Any, result_chars: Any) -> float:
     # Rollout action dry-runs are metadata-only; Codex app rows do not have provider-reported
     # billing fields yet, so expose count/risk impact without inventing model-specific spend.
@@ -486,10 +552,11 @@ def _codex_estimated_cost(input_text_chars: Any, result_chars: Any) -> float:
     return 0.0
 
 
-def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _traffic_pattern_summaries(store_obj: Any, *, limit: int, since: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from agentflow_proxy.recommendations import pattern_decision_summaries
 
     capped_limit = max(1, min(int(limit or 500), 5000))
+    since_dt = _parse_utc_datetime(since)
     conn = store_obj.conn
     summaries: list[dict[str, Any]] = []
     unknowns = {
@@ -509,7 +576,7 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
             select id, created_at, path, coalesce(provider, 'anthropic') as provider,
                    requested_model, routed_model, status_code, latency_ms,
                    cost_est_usd, cost_baseline_usd, crunch_json, routing_json,
-                   cache_json, category
+                   cache_json, category, error
             from calls
             order by created_at desc
             limit ?
@@ -517,9 +584,12 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
             (capped_limit,),
         ).fetchall()
     ]
+    provider_rows = [row for row in provider_rows if _created_at_matches_since(row.get("created_at"), since_dt)]
     unknowns["provider_rows_considered"] = len(provider_rows)
     for row in provider_rows:
         routing = _json_obj(row.get("routing_json"))
+        cache_meta = _json_obj(row.get("cache_json"))
+        crunch_meta = _json_obj(row.get("crunch_json"))
         rows = pattern_decision_summaries(
             provider=str(row.get("provider") or "anthropic"),
             path=str(row.get("path") or ""),
@@ -528,8 +598,8 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
             status_code=_as_int(row.get("status_code")) if row.get("status_code") is not None else None,
             cost_est_usd=_as_float(row.get("cost_est_usd")) if row.get("cost_est_usd") is not None else None,
             cost_baseline_usd=_as_float(row.get("cost_baseline_usd")) if row.get("cost_baseline_usd") is not None else None,
-            cache_meta=_json_obj(row.get("cache_json")),
-            crunch_meta=_json_obj(row.get("crunch_json")),
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
             routing_meta=routing,
             category=row.get("category") or routing.get("category"),
         )
@@ -546,6 +616,10 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
                 "latency_ms": row.get("latency_ms"),
                 "cost_est_usd": row.get("cost_est_usd"),
                 "traffic_kind": "provider_call",
+                "error_bucket": _error_bucket(row.get("error"), row.get("status_code")),
+                "latency_bucket": _latency_bucket(row.get("latency_ms")),
+                "cache_decision_status": cache_meta.get("status") or "missing",
+                "crunch_decision_status": "changed" if crunch_meta.get("changed") else "unchanged" if "changed" in crunch_meta else "missing",
             })
             summaries.append(item)
 
@@ -603,10 +677,12 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
             (capped_limit,),
         ).fetchall()
     ]
+    codex_rows = [row for row in codex_rows if _created_at_matches_since(row.get("created_at"), since_dt)]
     unknowns["codex_turn_rows_considered"] = len(codex_rows)
     for row in codex_rows:
         routing = _json_obj(row.get("routing_json"))
         cache = _json_obj(row.get("cache_json"))
+        crunch_meta = _json_obj(row.get("crunch_json"))
         status_code = 500 if row.get("response_error_code") is not None else (200 if row.get("response_event_id") else None)
         rows = pattern_decision_summaries(
             provider="openai",
@@ -617,7 +693,7 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
             cost_est_usd=_codex_estimated_cost(row.get("input_text_chars"), row.get("response_result_chars")),
             cost_baseline_usd=_codex_estimated_cost(row.get("input_text_chars"), row.get("response_result_chars")),
             cache_meta=cache,
-            crunch_meta=_json_obj(row.get("crunch_json")),
+            crunch_meta=crunch_meta,
             routing_meta=routing,
             category=routing.get("category") or "codex_turn",
         )
@@ -636,6 +712,10 @@ def _traffic_pattern_summaries(store_obj: Any, *, limit: int) -> tuple[list[dict
                 "latency_ms": row.get("response_latency_ms"),
                 "cost_est_usd": 0.0,
                 "traffic_kind": "codex_turn",
+                "error_bucket": "codex_error" if row.get("response_error_code") is not None else "none",
+                "latency_bucket": _latency_bucket(row.get("response_latency_ms")),
+                "cache_decision_status": cache.get("status") or "missing",
+                "crunch_decision_status": "changed" if crunch_meta.get("changed") else "unchanged" if "changed" in crunch_meta else "missing",
             })
             summaries.append(item)
 
@@ -710,6 +790,8 @@ def dry_run_rollout_actions(
     result: dict[str, Any] = {
         "schema": PATTERN_ROLLOUT_ACTION_DRY_RUN_SCHEMA,
         "ok": False,
+        "generated_at": utc_now(),
+        "bundle_hash": canonical_rollout_action_bundle_hash(bundle),
         "dry_run": True,
         "read_only": True,
         "wrote_policy_files": False,
@@ -797,6 +879,7 @@ def dry_run_rollout_actions(
         }
         action_results.append({
             "path": planned.get("path"),
+            "action_id": rollout_action_id(raw_action) if isinstance(raw_action, dict) else rollout_action_id(planned),
             "status": planned.get("status"),
             "reason": planned.get("reason"),
             "policy_section": raw_action.get("policy_section") or planned.get("policy_section"),
@@ -841,6 +924,222 @@ def dry_run_rollout_actions(
     })
     if not review.get("ok"):
         result["error"] = {"type": "review_failed", "message": "rollout actions are invalid or target unknown local rules"}
+    return result
+
+
+def _dry_run_projection(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "affected_metadata_row_count": _as_int(action.get("affected_metadata_row_count")),
+        "affected_provider_call_count": _as_int(action.get("affected_provider_call_count")),
+        "affected_codex_turn_count": _as_int(action.get("affected_codex_turn_count")),
+        "projected_canary_applied_count": _as_int(action.get("projected_canary_applied_count")),
+        "projected_canary_holdout_count": _as_int(action.get("projected_canary_holdout_count")),
+        "projected_local_bypass_or_disable_count": _as_int(action.get("projected_local_bypass_or_disable_count")),
+        "projected_additional_applied_count": _as_int(action.get("projected_additional_applied_count")),
+        "historical_tokens_saved_est": _as_int(action.get("historical_tokens_saved_est")),
+        "historical_saved_chars": _as_int(action.get("historical_saved_chars")),
+        "historical_estimated_cost_savings_usd": round(_as_float(action.get("historical_estimated_cost_savings_usd")), 8),
+    }
+
+
+def _increment_count(counts: dict[str, int], value: Any) -> None:
+    key = str(value or "unknown")
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _rollout_actual_impact(matched: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: dict[str, int] = {}
+    error_counts: dict[str, int] = {}
+    latency_counts: dict[str, int] = {}
+    savings_counts: dict[str, int] = {}
+    traffic_counts: dict[str, int] = {}
+    cache_status_counts: dict[str, int] = {}
+    crunch_status_counts: dict[str, int] = {}
+    decision_status_counts: dict[str, int] = {}
+    bypass_reasons: dict[str, int] = {}
+    applied_count = 0
+    holdout_count = 0
+    bypass_count = 0
+    saved_chars = 0
+    tokens_saved = 0
+    cost_savings = 0.0
+    for summary in matched:
+        cohort = _cohort_for_summary(summary)
+        if cohort == "canary_applied":
+            applied_count += 1
+        elif cohort == "canary_holdout":
+            holdout_count += 1
+        elif cohort == "bypassed":
+            bypass_count += 1
+            _increment_count(bypass_reasons, summary.get("reason") or "unknown")
+        _increment_count(status_counts, _status_bucket(summary.get("status_code")))
+        _increment_count(error_counts, summary.get("error_bucket") or "none")
+        _increment_count(latency_counts, summary.get("latency_bucket") or _latency_bucket(summary.get("latency_ms")))
+        _increment_count(savings_counts, _saving_bucket(summary.get("estimated_cost_savings_usd")))
+        _increment_count(traffic_counts, summary.get("traffic_kind") or "unknown")
+        _increment_count(cache_status_counts, summary.get("cache_decision_status") or "missing")
+        _increment_count(crunch_status_counts, summary.get("crunch_decision_status") or "missing")
+        _increment_count(decision_status_counts, summary.get("status") or "unknown")
+        saved_chars += _as_int(summary.get("saved_chars"))
+        tokens_saved += _as_int(summary.get("tokens_saved_est"))
+        cost_savings += _as_float(summary.get("estimated_cost_savings_usd"), 0.0)
+    return {
+        "matched_metadata_row_count": len(matched),
+        "matched_provider_call_count": traffic_counts.get("provider_call", 0),
+        "matched_codex_turn_count": traffic_counts.get("codex_turn", 0),
+        "actual_canary_applied_count": applied_count,
+        "actual_canary_holdout_count": holdout_count,
+        "actual_bypassed_or_disabled_count": bypass_count,
+        "actual_tokens_saved_est": tokens_saved,
+        "actual_saved_chars": saved_chars,
+        "actual_estimated_cost_savings_usd": round(cost_savings, 8),
+        "status_risk_buckets": _count_bucket(status_counts),
+        "error_buckets": _count_bucket(error_counts),
+        "latency_buckets": _count_bucket(latency_counts),
+        "savings_buckets": _count_bucket(savings_counts),
+        "cache_decision_status_buckets": _count_bucket(cache_status_counts),
+        "crunch_decision_status_buckets": _count_bucket(crunch_status_counts),
+        "rollout_decision_status_buckets": _count_bucket(decision_status_counts),
+        "safety_stop_outcomes": _count_bucket(bypass_reasons),
+    }
+
+
+def _impact_delta(projection: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "matched_vs_projected_affected_delta": _as_int(actual.get("matched_metadata_row_count")) - _as_int(projection.get("affected_metadata_row_count")),
+        "applied_vs_projected_delta": _as_int(actual.get("actual_canary_applied_count")) - _as_int(projection.get("projected_canary_applied_count")),
+        "holdout_vs_projected_delta": _as_int(actual.get("actual_canary_holdout_count")) - _as_int(projection.get("projected_canary_holdout_count")),
+        "bypass_or_disable_vs_projected_delta": _as_int(actual.get("actual_bypassed_or_disabled_count")) - _as_int(projection.get("projected_local_bypass_or_disable_count")),
+        "tokens_saved_vs_historical_projection_delta": _as_int(actual.get("actual_tokens_saved_est")) - _as_int(projection.get("historical_tokens_saved_est")),
+        "saved_chars_vs_historical_projection_delta": _as_int(actual.get("actual_saved_chars")) - _as_int(projection.get("historical_saved_chars")),
+        "estimated_cost_savings_vs_historical_projection_delta_usd": round(
+            _as_float(actual.get("actual_estimated_cost_savings_usd")) - _as_float(projection.get("historical_estimated_cost_savings_usd")),
+            8,
+        ),
+    }
+
+
+def measure_rollout_action_impact(
+    dry_run_report: Any,
+    *,
+    store_obj: Any,
+    limit: int = 500,
+    since: str | None = None,
+) -> dict[str, Any]:
+    lookback_limit = max(1, min(int(limit or 500), 5000))
+    result: dict[str, Any] = {
+        "schema": PATTERN_ROLLOUT_ACTION_IMPACT_SCHEMA,
+        "ok": False,
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_policy_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "lookback_limit": lookback_limit,
+        "post_apply_since": since,
+        "actions": [],
+        "summary": {},
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_params_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "yaml_contents_included": False,
+            "basis": "dry-run aggregate projections plus post-apply pattern decision metadata, status/error buckets, latency buckets, and size-derived savings only",
+        },
+        "warnings": [],
+    }
+    if not isinstance(dry_run_report, dict) or dry_run_report.get("schema") != PATTERN_ROLLOUT_ACTION_DRY_RUN_SCHEMA:
+        result["error"] = {"type": "invalid_dry_run_report", "message": f"expected {PATTERN_ROLLOUT_ACTION_DRY_RUN_SCHEMA}"}
+        return result
+    if not dry_run_report.get("ok"):
+        result["error"] = {"type": "dry_run_not_ok", "message": "dry-run report was not successful"}
+        return result
+    since_value = since or dry_run_report.get("generated_at")
+    if since_value and _parse_utc_datetime(since_value) is None:
+        result["error"] = {"type": "invalid_since", "message": "post-apply since timestamp must be ISO-8601"}
+        return result
+    result["post_apply_since"] = since_value
+    result["dry_run"] = {
+        "generated_at": dry_run_report.get("generated_at"),
+        "bundle_hash": dry_run_report.get("bundle_hash") or ((dry_run_report.get("provenance") or {}).get("computed_bundle_hash") if isinstance(dry_run_report.get("provenance"), dict) else None),
+        "summary": {
+            "affected_metadata_row_count": _as_int((dry_run_report.get("summary") or {}).get("affected_metadata_row_count")) if isinstance(dry_run_report.get("summary"), dict) else 0,
+            "projected_additional_applied_count": _as_int((dry_run_report.get("summary") or {}).get("projected_additional_applied_count")) if isinstance(dry_run_report.get("summary"), dict) else 0,
+            "projected_local_bypass_or_disable_count": _as_int((dry_run_report.get("summary") or {}).get("projected_local_bypass_or_disable_count")) if isinstance(dry_run_report.get("summary"), dict) else 0,
+            "historical_tokens_saved_est": _as_int((dry_run_report.get("summary") or {}).get("historical_tokens_saved_est")) if isinstance(dry_run_report.get("summary"), dict) else 0,
+            "historical_estimated_cost_savings_usd": round(_as_float((dry_run_report.get("summary") or {}).get("historical_estimated_cost_savings_usd")) if isinstance(dry_run_report.get("summary"), dict) else 0.0, 8),
+        },
+    }
+
+    summaries, unknowns = _traffic_pattern_summaries(store_obj, limit=lookback_limit, since=since_value)
+    action_results: list[dict[str, Any]] = []
+    for dry_action in dry_run_report.get("actions") or []:
+        if not isinstance(dry_action, dict):
+            continue
+        matched = [summary for summary in summaries if _summary_matches_action(summary, dry_action)]
+        projection = _dry_run_projection(dry_action)
+        actual = _rollout_actual_impact(matched)
+        unknown_action = {
+            "matched_summaries_missing_candidate_id": sum(1 for item in matched if not item.get("candidate_id")),
+            "matched_summaries_missing_rule_id": sum(1 for item in matched if not item.get("rule_id")),
+            "matched_summaries_missing_pattern_hash": sum(1 for item in matched if not str(item.get("pattern_hash") or "").startswith("sha256:")),
+            "matched_summaries_missing_canary_cohort": sum(
+                1
+                for item in matched
+                if not item.get("cohort")
+                and not ((item.get("canary") if isinstance(item.get("canary"), dict) else {}) or {}).get("cohort")
+                and not ((item.get("canary") if isinstance(item.get("canary"), dict) else {}) or {}).get("status")
+            ),
+        }
+        action_results.append({
+            "path": dry_action.get("path"),
+            "status": "matched" if matched else "no-post-apply-matches",
+            "action_id": dry_action.get("action_id") or rollout_action_id(dry_action),
+            "policy_section": dry_action.get("policy_section"),
+            "action_type": dry_action.get("action_type"),
+            "target_candidate_id": dry_action.get("target_candidate_id"),
+            "target_rule_id": dry_action.get("target_rule_id"),
+            "pattern_hash": _normalize_pattern_hash(dry_action.get("pattern_hash")),
+            "projection": projection,
+            "actual": actual,
+            "delta": _impact_delta(projection, actual),
+            "unknowns": unknown_action,
+        })
+
+    total_actual = sum(_as_int(action.get("actual", {}).get("matched_metadata_row_count")) for action in action_results)
+    total_projected = sum(_as_int(action.get("projection", {}).get("affected_metadata_row_count")) for action in action_results)
+    result.update({
+        "ok": True,
+        "status": "matched" if total_actual else "no-post-apply-matches",
+        "actions": action_results,
+        "summary": {
+            "sampled_provider_calls": unknowns["provider_rows_considered"],
+            "sampled_codex_turns": unknowns["codex_turn_rows_considered"],
+            "pattern_decision_summary_count": len(summaries),
+            "action_count": len(action_results),
+            "projected_affected_metadata_row_count": total_projected,
+            "actual_matched_metadata_row_count": total_actual,
+            "actual_matched_provider_call_count": sum(_as_int(action.get("actual", {}).get("matched_provider_call_count")) for action in action_results),
+            "actual_matched_codex_turn_count": sum(_as_int(action.get("actual", {}).get("matched_codex_turn_count")) for action in action_results),
+            "actual_canary_applied_count": sum(_as_int(action.get("actual", {}).get("actual_canary_applied_count")) for action in action_results),
+            "actual_canary_holdout_count": sum(_as_int(action.get("actual", {}).get("actual_canary_holdout_count")) for action in action_results),
+            "actual_bypassed_or_disabled_count": sum(_as_int(action.get("actual", {}).get("actual_bypassed_or_disabled_count")) for action in action_results),
+            "actual_tokens_saved_est": sum(_as_int(action.get("actual", {}).get("actual_tokens_saved_est")) for action in action_results),
+            "actual_saved_chars": sum(_as_int(action.get("actual", {}).get("actual_saved_chars")) for action in action_results),
+            "actual_estimated_cost_savings_usd": round(sum(_as_float(action.get("actual", {}).get("actual_estimated_cost_savings_usd")) for action in action_results), 8),
+            "actions_without_post_apply_matches": sum(1 for action in action_results if action.get("status") == "no-post-apply-matches"),
+            "unknowns": unknowns,
+        },
+    })
     return result
 
 

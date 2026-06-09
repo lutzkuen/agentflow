@@ -640,6 +640,7 @@ async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
 ROLLOUT_ACTION_STAGES = {
     "rollout-actions-review": "review",
     "rollout-actions-dry-run": "dry_run",
+    "rollout-actions-impact": "impact",
     "rollout-actions-apply": "apply",
     "pattern-canary-safety-stop": "safety_stop",
 }
@@ -674,6 +675,16 @@ def _rollout_details_counts(details: dict[str, Any]) -> dict[str, Any]:
         "rejected_action_count": _as_int(details.get("rejected_action_count")),
         "changed_file_count": _as_int(details.get("changed_file_count")),
         "affected_metadata_row_count": _as_int(details.get("affected_metadata_row_count")),
+        "projected_affected_metadata_row_count": _as_int(details.get("projected_affected_metadata_row_count")),
+        "actual_matched_metadata_row_count": _as_int(details.get("actual_matched_metadata_row_count")),
+        "actual_matched_provider_call_count": _as_int(details.get("actual_matched_provider_call_count")),
+        "actual_matched_codex_turn_count": _as_int(details.get("actual_matched_codex_turn_count")),
+        "actual_canary_applied_count": _as_int(details.get("actual_canary_applied_count")),
+        "actual_canary_holdout_count": _as_int(details.get("actual_canary_holdout_count")),
+        "actual_bypassed_or_disabled_count": _as_int(details.get("actual_bypassed_or_disabled_count")),
+        "actual_tokens_saved_est": _as_int(details.get("actual_tokens_saved_est")),
+        "actual_estimated_cost_savings_usd": _as_float(details.get("actual_estimated_cost_savings_usd")),
+        "actions_without_post_apply_matches": _as_int(details.get("actions_without_post_apply_matches")),
         "validation_error_count": _as_int(details.get("validation_error_count") or details.get("error_count")),
         "validation_warning_count": _as_int(details.get("validation_warning_count")),
         "review_error_count": _as_int(details.get("review_error_count")),
@@ -904,6 +915,7 @@ async def stats_rollout_actions_readiness(store_obj: Any, limit: int = 500) -> d
 
     review_event = _latest_rollout_event(events, "rollout-actions-review")
     dry_run_event = _latest_rollout_event(events, "rollout-actions-dry-run")
+    impact_event = _latest_rollout_event(events, "rollout-actions-impact")
     apply_event = _latest_rollout_event(events, "rollout-actions-apply")
     latest_review = _latest_lifecycle(public_lifecycle, {"reviewed", "rejected"}, {"rollout-actions-review"}) or (
         _public_rollout_policy_event(review_event, now=now) if review_event else None
@@ -918,6 +930,7 @@ async def stats_rollout_actions_readiness(store_obj: Any, limit: int = 500) -> d
     ) or (
         _public_rollout_policy_event(apply_event, now=now) if apply_event else None
     )
+    latest_impact = _public_rollout_policy_event(impact_event, now=now) if impact_event else None
     latest_lifecycle = public_lifecycle[0] if public_lifecycle else None
     action_counts = (latest_lifecycle or {}).get("action_type_counts") or []
     latest_projected = (latest_dry_run or {}).get("projected_impact") if isinstance(latest_dry_run, dict) else None
@@ -969,12 +982,14 @@ async def stats_rollout_actions_readiness(store_obj: Any, limit: int = 500) -> d
         },
         "latest_review": latest_review,
         "latest_dry_run": latest_dry_run,
+        "latest_impact": latest_impact,
         "latest_apply_or_rollback": latest_apply_or_rollback,
         "latest_lifecycle_feedback": latest_lifecycle,
         "action_type_counts": action_counts,
         "policy_section_counts": (latest_lifecycle or {}).get("policy_section_counts") or [],
         "local_status_counts": (latest_lifecycle or {}).get("local_status_counts") or [],
         "dry_run_impact": latest_projected,
+        "post_apply_impact": (latest_impact or {}).get("counts") or {},
         "missing_metadata": missing_metadata,
         "safety_stop": _rollout_safety_stop_state(events, public_lifecycle, now=now),
         "lifecycle_feedback_queue": feedback_queue,

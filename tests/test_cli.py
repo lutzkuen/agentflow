@@ -1266,7 +1266,17 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["review"]["actions"][0]["reason"], "unknown-rule")
 
-    def _log_rollout_pattern_call(self, store, *, pattern_hash: str, cohort: str, status_code: int = 200):
+    def _log_rollout_pattern_call(
+        self,
+        store,
+        *,
+        pattern_hash: str,
+        cohort: str,
+        status_code: int = 200,
+        created_at: str = "2026-06-09T03:20:00+00:00",
+        id_suffix: str = "",
+        error: str | None = None,
+    ):
         from agentflow_proxy.store import stable_json
 
         applied = cohort == "canary_applied"
@@ -1289,15 +1299,15 @@ class PolicyReloadCliTests(unittest.TestCase):
             rule["canary"]["status"] = "applied"
 
         store.log_call(
-            id=f"call-{cohort}-{status_code}",
-            created_at="2026-06-09T03:20:00+00:00",
+            id=f"call-{cohort}-{status_code}{id_suffix}",
+            created_at=created_at,
             path="/v1/messages",
             requested_model="claude-sonnet-4-6",
             routed_model="claude-sonnet-4-6",
             stream=0,
             cache_hit=0,
             status_code=status_code,
-            latency_ms=10,
+            latency_ms=1234 if status_code < 400 else 12000,
             input_tokens_est=100,
             output_tokens_est=10,
             actual_input_tokens=100,
@@ -1316,7 +1326,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             }),
             routing_json=stable_json({"category": "tool-result"}),
             cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
-            error=None,
+            error=error,
             request_json=None,
             response_json=None,
             session_id="session-hidden",
@@ -1440,6 +1450,205 @@ class PolicyReloadCliTests(unittest.TestCase):
         rendered = json.dumps(payload)
         self.assertNotIn("session-hidden", rendered)
         self.assertNotIn("codex-session-hidden", rendered)
+
+    def test_managed_rollout_actions_impact_reports_post_apply_projection_deltas(self):
+        from agentflow_proxy.policy_events import recent_policy_events
+        from agentflow_proxy.store import Store, stable_json
+
+        bundle = self._rollout_action_bundle(action_type="widen")
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._write_rollout_crunch_rule(tmp)
+                self._log_rollout_pattern_call(
+                    store,
+                    pattern_hash=self._pattern_hash(),
+                    cohort="canary_applied",
+                    created_at="2026-06-09T03:20:00+00:00",
+                )
+                self._log_rollout_pattern_call(
+                    store,
+                    pattern_hash=self._pattern_hash(),
+                    cohort="canary_holdout",
+                    created_at="2026-06-09T03:20:01+00:00",
+                )
+                dry_stdout = io.StringIO()
+                self.assertEqual(
+                    cli.managed_rollout_actions_dry_run_cli(
+                        ["--config-dir", tmp, "--db", db_path, "--limit", "20", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=dry_stdout,
+                    ),
+                    0,
+                )
+                dry_run_report = json.loads(dry_stdout.getvalue())
+                self._log_rollout_pattern_call(
+                    store,
+                    pattern_hash=self._pattern_hash(),
+                    cohort="canary_applied",
+                    created_at="2026-06-09T04:00:01+00:00",
+                    id_suffix="-post",
+                )
+                self._log_rollout_pattern_call(
+                    store,
+                    pattern_hash=self._pattern_hash(),
+                    cohort="canary_holdout",
+                    status_code=500,
+                    created_at="2026-06-09T04:00:02+00:00",
+                    id_suffix="-post",
+                    error='{"error":{"type":"overloaded_error"}}',
+                )
+                self._log_rollout_pattern_call(
+                    store,
+                    pattern_hash=self._pattern_hash(),
+                    cohort="bypassed",
+                    created_at="2026-06-09T04:00:03+00:00",
+                    id_suffix="-post",
+                )
+                store.log_codex_app_event(
+                    id="codex-start-rollout-post",
+                    created_at="2026-06-09T04:00:04+00:00",
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="req-rollout-post",
+                    thread_id="thread-rollout-post",
+                    message_chars=100,
+                    params_chars=10,
+                    input_items=1,
+                    input_text_chars=100,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    session_id="codex-session-hidden-post",
+                    routing_json=stable_json({"category": "codex_turn"}),
+                    crunch_json=stable_json({
+                        "changed": True,
+                        "policy_source": "managed-recommended",
+                        "pattern_rules": {
+                            "configured_count": 1,
+                            "policy_source": "managed-recommended",
+                            "category": "codex_turn",
+                            "rules": [
+                                {
+                                    "rule_id": "managed-crunch-pattern-candidate-crunch-rollout",
+                                    "candidate_id": "candidate-crunch-rollout",
+                                    "policy_source": "managed-recommended",
+                                    "applied_count": 1,
+                                    "saved_chars": 400,
+                                    "matched_hashes": [self._pattern_hash()],
+                                    "canary": {"enabled": True, "status": "applied", "cohort": "canary_applied", "fraction": 0.25},
+                                }
+                            ],
+                        },
+                    }),
+                    cache_json=stable_json({"status": "skipped", "reason": "codex-app-cache-disabled"}),
+                )
+                store.log_codex_app_event(
+                    id="codex-end-rollout-post",
+                    created_at="2026-06-09T04:00:05+00:00",
+                    direction="server_to_client",
+                    method="turn/completed",
+                    request_id="req-rollout-post",
+                    thread_id="thread-rollout-post",
+                    message_chars=20,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=20,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=100,
+                    session_id="codex-session-hidden-post",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_impact_cli(
+                ["--db", db_path, "--limit", "20", "--since", "2026-06-09T04:00:00+00:00", "-"],
+                stdin=io.StringIO(json.dumps(dry_run_report)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.pattern_rollout_actions_impact.v1")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "matched")
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["wrote_policy_files"])
+        self.assertFalse(payload["wrote_store"])
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertEqual(payload["summary"]["projected_affected_metadata_row_count"], 2)
+        self.assertEqual(payload["summary"]["actual_matched_metadata_row_count"], 4)
+        self.assertEqual(payload["summary"]["actual_matched_provider_call_count"], 3)
+        self.assertEqual(payload["summary"]["actual_matched_codex_turn_count"], 1)
+        action = payload["actions"][0]
+        self.assertTrue(action["action_id"].startswith("rollout-action:"))
+        self.assertEqual(action["projection"]["affected_metadata_row_count"], 2)
+        self.assertEqual(action["actual"]["matched_metadata_row_count"], 4)
+        self.assertEqual(action["actual"]["actual_canary_applied_count"], 2)
+        self.assertEqual(action["actual"]["actual_canary_holdout_count"], 1)
+        self.assertEqual(action["actual"]["actual_bypassed_or_disabled_count"], 1)
+        self.assertEqual(action["delta"]["matched_vs_projected_affected_delta"], 2)
+        self.assertIn("overloaded_error", {row["value"] for row in action["actual"]["error_buckets"]})
+        self.assertIn("gte_10s", {row["value"] for row in action["actual"]["latency_buckets"]})
+        self.assertIn("changed", {row["value"] for row in action["actual"]["crunch_decision_status_buckets"]})
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+        rendered = json.dumps(payload)
+        self.assertNotIn("session-hidden", rendered)
+        self.assertNotIn("req-rollout-post", rendered)
+        self.assertNotIn("raw_request", rendered)
+        self.assertEqual(recent_policy_events(limit=1)["events"][0]["action"], "rollout-actions-impact")
+
+    def test_managed_rollout_actions_impact_is_useful_before_post_apply_matches(self):
+        from agentflow_proxy.store import Store
+
+        bundle = self._rollout_action_bundle(action_type="widen")
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._write_rollout_crunch_rule(tmp)
+                self._log_rollout_pattern_call(
+                    store,
+                    pattern_hash=self._pattern_hash(),
+                    cohort="canary_applied",
+                    created_at="2026-06-09T03:20:00+00:00",
+                )
+                dry_stdout = io.StringIO()
+                self.assertEqual(
+                    cli.managed_rollout_actions_dry_run_cli(
+                        ["--config-dir", tmp, "--db", db_path, "--limit", "20", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=dry_stdout,
+                    ),
+                    0,
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_impact_cli(
+                ["--db", db_path, "--limit", "20", "--since", "2026-06-09T05:00:00+00:00", "-"],
+                stdin=io.StringIO(dry_stdout.getvalue()),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "no-post-apply-matches")
+        self.assertEqual(payload["summary"]["actual_matched_metadata_row_count"], 0)
+        self.assertEqual(payload["summary"]["actions_without_post_apply_matches"], 1)
+        self.assertEqual(payload["actions"][0]["status"], "no-post-apply-matches")
+        self.assertEqual(payload["actions"][0]["projection"]["affected_metadata_row_count"], 1)
+        self.assertEqual(payload["actions"][0]["actual"]["matched_metadata_row_count"], 0)
+        self.assertEqual(payload["actions"][0]["actual"]["status_risk_buckets"], [])
 
     def test_managed_rollout_actions_dry_run_covers_hold_rollback_unknown_and_raw_rejection(self):
         from agentflow_proxy.store import Store

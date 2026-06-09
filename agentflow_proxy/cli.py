@@ -1343,6 +1343,100 @@ def managed_rollout_actions_dry_run_cli(
     return 0 if result["ok"] else 1
 
 
+def managed_rollout_actions_impact_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Measure post-apply rollout-action impact against a dry-run projection")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Rollout action dry-run JSON report path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls and Codex turns to inspect, default: 500.")
+    parser.add_argument(
+        "--since",
+        help="Only count provider/Codex metadata at or after this ISO-8601 post-apply timestamp. Defaults to dry-run generated_at.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print impact JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    dry_run_report, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = {
+            "schema": "agentflow.pattern_rollout_actions_impact.v1",
+            "ok": False,
+            "read_only": True,
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "rollout action dry-run report could not be read"},
+            "actions": [],
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_messages_included": False,
+                "raw_responses_included": False,
+                "tool_payloads_included": False,
+                "request_ids_included": False,
+                "local_session_ids_included": False,
+                "file_paths_included": False,
+                "yaml_contents_included": False,
+            },
+        }
+    else:
+        from agentflow_proxy.rollout_actions import measure_rollout_action_impact
+
+        store = _open_store_for_db(args.db)
+        try:
+            result = measure_rollout_action_impact(
+                dry_run_report,
+                store_obj=store,
+                limit=args.limit,
+                since=args.since,
+            )
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "rollout-actions-impact",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "input_source": "stdin" if args.path == "-" else "file",
+            "db_configured": bool(args.db),
+            "since": args.since,
+            "action_count": len(result.get("actions", [])),
+            "projected_affected_metadata_row_count": summary.get("projected_affected_metadata_row_count"),
+            "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+            "actual_matched_provider_call_count": summary.get("actual_matched_provider_call_count"),
+            "actual_matched_codex_turn_count": summary.get("actual_matched_codex_turn_count"),
+            "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+            "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+            "actual_bypassed_or_disabled_count": summary.get("actual_bypassed_or_disabled_count"),
+            "actual_tokens_saved_est": summary.get("actual_tokens_saved_est"),
+            "actual_estimated_cost_savings_usd": summary.get("actual_estimated_cost_savings_usd"),
+            "actions_without_post_apply_matches": summary.get("actions_without_post_apply_matches"),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result["ok"] else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0 if result["ok"] else 1
+
+
 def policy_rollback_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -2037,6 +2131,10 @@ def managed_rollout_actions_apply_main() -> None:
 
 def managed_rollout_actions_dry_run_main() -> None:
     raise SystemExit(managed_rollout_actions_dry_run_cli())
+
+
+def managed_rollout_actions_impact_main() -> None:
+    raise SystemExit(managed_rollout_actions_impact_cli())
 
 
 def policy_rollback_main() -> None:

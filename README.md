@@ -170,6 +170,7 @@ Common policy commands:
 | `agentflow-managed-pattern-rollups --limit 500 --pretty` | Export metadata-only managed pattern canary cohort outcome rollups for review |
 | `agentflow-managed-rollout-actions-review --url http://127.0.0.1:4100/v1/pattern-rollout-actions --allow-unauthenticated --pretty` | Review managed pattern rollout actions against local crunch/cache rule files |
 | `agentflow-managed-rollout-actions-dry-run actions.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Estimate rollout action impact against recent local traffic metadata without writing policy files |
+| `agentflow-managed-rollout-actions-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply metadata against rollout-action dry-run projections |
 | `agentflow-managed-rollout-actions-apply actions.json --config-dir ~/.agentflow --dry-run --pretty` | Preview approved rollout action edits before writing local YAML files |
 
 Policy operations can append compact local audit events under `~/.agentflow/policy_events.jsonl`. Set `AGENTFLOW_POLICY_EVENTS=0` to disable that audit log.
