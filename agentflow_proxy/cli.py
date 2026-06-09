@@ -1499,6 +1499,7 @@ def old_context_summary_impact_cli(
     from agentflow_proxy.policy_events import log_policy_event
 
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    quality_gate = result.get("quality_gate") if isinstance(result.get("quality_gate"), dict) else {}
     log_policy_event(
         "old-context-summary-impact",
         ok=bool(result.get("ok")),
@@ -1515,6 +1516,8 @@ def old_context_summary_impact_cli(
             "summary_failure_count": summary.get("summary_failure_count"),
             "actual_tokens_saved_est": summary.get("actual_tokens_saved_est"),
             "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
+            "quality_gate_verdict": quality_gate.get("verdict"),
+            "quality_gate_reason_codes": quality_gate.get("reason_codes"),
             "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
             "exit_code": 0 if result.get("ok") else 1,
         },
@@ -2293,6 +2296,7 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
         actual = dry_run.get("actual") if isinstance(dry_run.get("actual"), dict) else {}
         delta = dry_run.get("delta") if isinstance(dry_run.get("delta"), dict) else {}
+        quality_gate = dry_run.get("quality_gate") if isinstance(dry_run.get("quality_gate"), dict) else {}
         basis = {
             "command": command,
             "rule_id": policy.get("rule_id"),
@@ -2339,6 +2343,14 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
             "summary_cache_buckets": actual.get("summary_cache_buckets"),
             "safety_stop_buckets": actual.get("safety_stop_buckets"),
             "delta": delta,
+            "quality_gate": {
+                "schema": quality_gate.get("schema"),
+                "verdict": quality_gate.get("verdict"),
+                "reason_codes": quality_gate.get("reason_codes"),
+                "warning_codes": quality_gate.get("warning_codes"),
+                "metrics": quality_gate.get("metrics"),
+                "thresholds": quality_gate.get("thresholds"),
+            } if quality_gate else None,
             "error_type": (dry_run.get("error") or {}).get("type") if isinstance(dry_run.get("error"), dict) else None,
             "privacy": {
                 "metadata_only": True,

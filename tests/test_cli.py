@@ -957,6 +957,135 @@ class PolicyReloadCliTests(unittest.TestCase):
         finally:
             store.conn.close()
 
+    def _old_context_summary_quality_gate_dry_run(self) -> dict:
+        dry_run = self._old_context_summary_impact_dry_run()
+        dry_run["policy"]["rule_id"] = "test-old-context-quality-gate"
+        dry_run["policy"]["candidate_id"] = "candidate-old-context-quality-gate"
+        dry_run["policy"]["safety_gates"] = {
+            "min_outcome_samples": 4,
+            "min_canary_applied_samples": 2,
+            "min_canary_holdout_samples": 2,
+            "min_net_savings_usd": 0.0,
+            "min_payback_ratio": 1.0,
+            "min_projection_realization_ratio": 0.5,
+            "max_error_rate": 0.05,
+            "max_error_rate_delta": 0.0,
+            "max_retry_rate": 0.10,
+            "max_retry_rate_delta": 0.10,
+            "max_summary_failure_rate": 0.02,
+            "max_bypass_or_disabled_rate": 0.10,
+            "max_safety_stop_count": 0,
+            "max_latency_regression_ms": 2000,
+            "rollback_error_rate": 0.40,
+            "rollback_summary_failure_rate": 0.20,
+            "rollback_safety_stop_count": 1,
+            "rollback_negative_net_savings_usd": 0.0,
+        }
+        dry_run["summary"]["eligible_call_count"] = 4
+        dry_run["summary"]["projected_saved_tokens"] = 2000
+        dry_run["summary"]["projected_net_savings_usd"] = 0.004
+        return dry_run
+
+    def _write_old_context_summary_quality_gate_rows(self, db_path: str, *, scenario: str) -> None:
+        from agentflow_proxy.store import Store, stable_json
+
+        def meta_for(cohort: str, *, status_code: int = 200, retry_count: int = 0) -> dict:
+            applied = cohort == "canary_applied"
+            meta = {
+                "enabled": True,
+                "status": "applied" if applied else "skipped",
+                "reason": "summary-created" if applied else "canary_holdout",
+                "rule_id": "test-old-context-quality-gate",
+                "candidate_id": "candidate-old-context-quality-gate",
+                "policy_source": "managed-recommended",
+                "category": "chat",
+                "eligible_chars": 32000,
+                "eligible_turns": 3,
+                "canary": {
+                    "enabled": True,
+                    "cohort": cohort,
+                    "selected": applied,
+                    "fraction": 0.5,
+                    "unit": "source_hash",
+                },
+            }
+            if applied:
+                meta.update({
+                    "before_chars": 40000,
+                    "saved_chars": 4000,
+                    "tokens_saved_est": 1000,
+                    "estimated_gross_savings_usd": 0.003,
+                    "summary_cost_est_usd": 0.001,
+                    "estimated_net_savings_usd": 0.002,
+                    "summary_status_code": 200 if status_code < 400 else status_code,
+                    "summary_cache_hit": False,
+                })
+            if status_code >= 400:
+                meta["summary_error"] = "redacted summary failure bucket"
+            if retry_count:
+                meta["retry_bucket"] = "retried"
+            return meta
+
+        if scenario == "insufficient-evidence":
+            rows = [("applied-0", "canary_applied", 200, 0, 1000)]
+        elif scenario == "hold":
+            rows = [
+                ("applied-0", "canary_applied", 200, 1, 1000),
+                ("applied-1", "canary_applied", 200, 1, 1100),
+                ("holdout-0", "canary_holdout", 200, 0, 1000),
+                ("holdout-1", "canary_holdout", 200, 0, 1100),
+            ]
+        elif scenario == "rollback":
+            rows = [
+                ("applied-0", "canary_applied", 500, 0, 1000),
+                ("applied-1", "canary_applied", 200, 0, 1100),
+                ("holdout-0", "canary_holdout", 200, 0, 1000),
+                ("holdout-1", "canary_holdout", 200, 0, 1100),
+            ]
+        else:
+            rows = [
+                ("applied-0", "canary_applied", 200, 0, 1000),
+                ("applied-1", "canary_applied", 200, 0, 1100),
+                ("holdout-0", "canary_holdout", 200, 0, 1000),
+                ("holdout-1", "canary_holdout", 200, 0, 1100),
+            ]
+
+        store = Store(db_path)
+        try:
+            for suffix, cohort, status_code, retry_count, latency_ms in rows:
+                store.log_call(
+                    id=f"quality-gate-{scenario}-{suffix}",
+                    created_at=f"2026-06-08T11:00:0{len(suffix)}+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    input_tokens_est=10000,
+                    output_tokens_est=200,
+                    actual_input_tokens=9000,
+                    actual_output_tokens=180,
+                    cost_est_usd=0.03,
+                    cost_baseline_usd=0.04,
+                    routing_json=stable_json({"category": "chat", "text_chars": 40000, "has_tools": False}),
+                    crunch_json=stable_json({
+                        "changed": cohort == "canary_applied",
+                        "old_context_summarization": meta_for(cohort, status_code=status_code, retry_count=retry_count),
+                    }),
+                    cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                    request_json=stable_json({"messages": [{"content": "raw quality secret must not leak"}]}),
+                    response_json=stable_json({"content": "generated quality summary must not leak"}),
+                    session_id="quality-gate-session-secret",
+                    category="chat",
+                    retry_count=retry_count,
+                    provider="anthropic",
+                    error="raw quality error must not leak" if status_code >= 400 else None,
+                )
+        finally:
+            store.conn.close()
+
     def test_old_context_summary_impact_cli_reports_metadata_only_post_apply_evidence(self):
         dry_run = self._old_context_summary_impact_dry_run()
         with TemporaryDirectory() as tmp:
@@ -996,6 +1125,44 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "disabled")
         self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
 
+    def test_old_context_summary_quality_gate_verdicts_are_metadata_only(self):
+        for scenario, expected_verdict, expected_reason in (
+            ("promote", "promote", "quality-gate-passed"),
+            ("hold", "hold", "applied-retry-rate-above-threshold"),
+            ("rollback", "rollback", "rollback-error-rate"),
+            ("insufficient-evidence", "insufficient-evidence", "insufficient-matched-samples"),
+        ):
+            dry_run = self._old_context_summary_quality_gate_dry_run()
+            with self.subTest(scenario=scenario):
+                with TemporaryDirectory() as tmp:
+                    db_path = str(Path(tmp) / "agentflow.sqlite3")
+                    self._write_old_context_summary_quality_gate_rows(db_path, scenario=scenario)
+                    stdout = io.StringIO()
+
+                    code = cli.old_context_summary_impact_cli(
+                        ["-", "--db", db_path, "--limit", "10"],
+                        stdin=io.StringIO(json.dumps(dry_run)),
+                        stdout=stdout,
+                    )
+
+                self.assertEqual(code, 0)
+                payload = json.loads(stdout.getvalue())
+                gate = payload["quality_gate"]
+                self.assertEqual(gate["schema"], "agentflow.old_context_summary_quality_gate.v1")
+                self.assertEqual(gate["verdict"], expected_verdict)
+                self.assertIn(expected_reason, gate["reason_codes"])
+                self.assertEqual(payload["summary"]["quality_gate_verdict"], expected_verdict)
+                self.assertEqual(gate["thresholds"]["min_matched_samples"], 4)
+                self.assertEqual(gate["thresholds"]["max_error_rate"], 0.05)
+                self.assertEqual(gate["cohorts"]["canary_applied"]["count"], 1 if scenario == "insufficient-evidence" else 2)
+                self.assertFalse(gate["privacy"]["raw_old_context_included"])
+                self.assertFalse(gate["privacy"]["generated_summaries_included"])
+                encoded = json.dumps(payload, sort_keys=True)
+                self.assertNotIn("raw quality secret", encoded)
+                self.assertNotIn("generated quality summary", encoded)
+                self.assertNotIn("quality-gate-session-secret", encoded)
+                self.assertNotIn("raw quality error", encoded)
+
     def test_old_context_summary_impact_cli_exits_nonzero_without_matches(self):
         dry_run = self._old_context_summary_impact_dry_run()
         with TemporaryDirectory() as tmp:
@@ -1013,6 +1180,8 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "no-post-apply-matches")
         self.assertEqual(payload["error"]["type"], "no_post_apply_matches")
+        self.assertEqual(payload["quality_gate"]["verdict"], "insufficient-evidence")
+        self.assertIn("insufficient-matched-samples", payload["quality_gate"]["reason_codes"])
 
     def test_old_context_summary_impact_sends_metadata_only_lifecycle_feedback(self):
         dry_run = self._old_context_summary_impact_dry_run()
