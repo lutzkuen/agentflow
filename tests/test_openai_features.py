@@ -251,6 +251,156 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertNotIn("raw openai prompt", row["routing_json"])
         self.assertNotIn("raw tool output", row["routing_json"])
 
+    def test_openai_observe_only_does_not_fetch_or_change_request(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "short prompt",
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}, clear=False):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                side_effect=AssertionError("observe-only must not fetch managed recommendations"),
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(managed["mode"], "observe-only")
+        self.assertFalse(managed["enabled"])
+        self.assertFalse(managed["applied"])
+
+    def test_openai_dry_run_recommendation_records_projection_without_changing_request(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "short prompt",
+        }
+        recommendation = {
+            "enabled": True,
+            "status": "received",
+            "target_model": "gpt-5-mini",
+            "confidence": 0.91,
+            "policy_id": "openai-mini-candidate",
+            "reason": "matched cheap model evidence",
+            "optimization_unit_id": 77,
+            "matched_sample_count": 42,
+            "error_rate": 0.01,
+            "retry_rate": 0.02,
+            "fallback_rate": 0.03,
+            "latency_regression_ratio": 0.8,
+            "policy_source": "managed-recommended",
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run"}):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                return_value=recommendation,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(managed["mode"], "dry-run")
+        self.assertEqual(managed["status"], "dry-run")
+        self.assertFalse(managed["applied"])
+        self.assertTrue(managed["would_change_model"])
+        self.assertEqual(managed["would_route_model"], "gpt-5-mini")
+        self.assertEqual(managed["projection"]["matched_sample_count"], 42)
+        self.assertEqual(managed["projection"]["risk"]["error_rate"], 0.01)
+        self.assertIsNotNone(managed["projection"]["current_input_cost_est_usd"])
+        self.assertIsNotNone(managed["projection"]["target_input_cost_est_usd"])
+
+    def test_openai_canary_applies_only_selected_safe_openai_model(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "short prompt",
+        }
+        recommendation = {
+            "enabled": True,
+            "status": "received",
+            "target_model": "gpt-5-mini",
+            "confidence": 0.91,
+            "policy_id": "openai-mini-candidate",
+            "reason": "matched cheap model evidence",
+            "optimization_unit_id": 77,
+            "policy_source": "managed-recommended",
+        }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                return_value=recommendation,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+
+        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(managed["mode"], "canary")
+        self.assertEqual(managed["status"], "applied")
+        self.assertTrue(managed["applied"])
+        self.assertTrue(managed["changed_model"])
+        self.assertEqual(managed["canary"]["cohort"], "canary_applied")
+        self.assertEqual(routing["final_policy_source"], "managed-recommended")
+
+    def test_openai_bad_recommendation_falls_back_to_local_request(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "short prompt",
+        }
+        recommendation = {
+            "enabled": True,
+            "status": "received",
+            "target_model": "claude-haiku-4-5-20251001",
+            "confidence": 0.91,
+            "policy_id": "wrong-provider-candidate",
+            "reason": "bad provider",
+            "optimization_unit_id": 77,
+            "policy_source": "managed-recommended",
+        }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "canary",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_recommendation",
+                return_value=recommendation,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(managed["status"], "skipped")
+        self.assertEqual(managed["apply_reason"], "provider-mismatch")
+        self.assertFalse(managed["applied"])
+
 
 if __name__ == "__main__":
     unittest.main()

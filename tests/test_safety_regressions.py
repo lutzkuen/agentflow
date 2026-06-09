@@ -208,6 +208,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             "AGENTFLOW_RECOMMENDATION_ENABLED",
             "AGENTFLOW_RECOMMENDATION_SERVER_URL",
             "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_MODE",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION",
+            "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_SALT",
         )
         self.saved_recommendation_env = {key: os.environ.get(key) for key in self.recommendation_env_keys}
         for key in self.recommendation_env_keys:
@@ -577,7 +580,11 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         }
         request_body = {"model": "gpt-5-codex", "input": "raw openai prompt"}
 
-        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+        with (
+            self._managed_feedback_env(),
+            patch.dict(os.environ, {"AGENTFLOW_OPENAI_RECOMMENDATION_MODE": "dry-run"}, clear=False),
+            patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
+        ):
             response = TestClient(server.app).post("/v1/responses", json=request_body)
 
         self.assertEqual(response.status_code, 200)

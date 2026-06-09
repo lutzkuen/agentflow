@@ -735,6 +735,40 @@ def _normalize_recommendation(body: Any) -> tuple[dict[str, Any] | None, str | N
     recommendation_id = body.get("recommendation_id")
     if isinstance(recommendation_id, (int, str)):
         normalized["recommendation_id"] = recommendation_id
+    for key in (
+        "source_surface",
+        "app_family",
+        "recommendation_family",
+        "candidate_id",
+        "routing_rule_id",
+        "projected_latency_basis",
+    ):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            normalized[key] = value
+    for key in (
+        "sample_count",
+        "matched_sample_count",
+        "baseline_sample_count",
+        "candidate_sample_count",
+        "projected_latency_ms",
+        "latency_ms_p50",
+        "candidate_latency_ms_p50",
+    ):
+        value = body.get(key)
+        if isinstance(value, int):
+            normalized[key] = value
+    for key in (
+        "error_rate",
+        "retry_rate",
+        "fallback_rate",
+        "latency_regression_ratio",
+        "observed_savings_usd",
+        "projected_savings_usd",
+    ):
+        value = body.get(key)
+        if isinstance(value, (int, float)):
+            normalized[key] = float(value)
     if normalized["replacement_prompt_present"]:
         normalized["replacement_prompt_sha256"] = hashlib.sha256(replacement_prompt.encode("utf-8")).hexdigest()
     return normalized, None
@@ -1332,10 +1366,18 @@ def build_outcome_feedback(
             "recommendation_id": managed.get("recommendation_id"),
             "policy_id": managed.get("policy_id"),
             "target_model": managed.get("target_model"),
+            "mode": managed.get("mode"),
+            "status": managed.get("status"),
+            "lifecycle_event": managed.get("lifecycle_event"),
             "applied": bool(managed.get("applied")),
             "changed_model": bool(managed.get("changed_model")),
             "apply_reason": managed.get("apply_reason"),
             "target_model_normalized": managed.get("target_model_normalized"),
+            "canary_cohort": (
+                managed.get("canary", {}).get("cohort")
+                if isinstance(managed.get("canary"), dict)
+                else None
+            ),
         },
         "quality_signals": quality_signals,
     }

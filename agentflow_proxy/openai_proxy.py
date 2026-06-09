@@ -45,12 +45,11 @@ from agentflow_proxy.optimization.openai_features import (
     summarize_openai_outcome_feature_unit,
     summarize_openai_request_feature_unit,
 )
+from agentflow_proxy.optimization.openai_recommendations import evaluate_openai_recommendation
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.recommendations import (
-    apply_recommendation_to_body,
     build_outcome_feedback,
-    fetch_recommendation,
     pattern_feature_diagnostics,
     queue_outcome_feedback,
 )
@@ -426,12 +425,11 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         routing_meta["openai_feature_unit"] = summarize_openai_request_feature_unit(recommendation_unit)
         routing_meta.update(openai_call_store_fields(path, resolved_requested_model, str(crunched.get("model") or routed_model)))
         routing_meta["managed_pattern_features"] = pattern_feature_diagnostics(recommendation_unit)
-        recommendation_meta = await fetch_recommendation(recommendation_unit)
-        recommendation_meta = apply_recommendation_to_body(
-            provider="openai",
+        recommendation_meta = await evaluate_openai_recommendation(
             body=crunched,
             routing_meta=routing_meta,
-            recommendation_meta=recommendation_meta,
+            recommendation_unit=recommendation_unit,
+            input_tokens_est=input_tokens,
         )
         routing_meta["managed_recommendation"] = recommendation_meta
         headers = build_forward_headers(context, request)
