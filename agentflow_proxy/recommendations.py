@@ -222,7 +222,20 @@ def _pattern_features(
     crunch_status = _decision_status(crunch_meta, default="skipped")
     cache_status = str(cache_meta.get("status") or _decision_status(cache_meta, default="skipped"))
     pattern_summaries = _codex_pattern_summaries(crunch_meta)
-    pattern_types = sorted({item["type"] for item in pattern_summaries})
+    local_pattern_modules = crunch_meta.get("pattern_modules") if isinstance(crunch_meta, dict) else None
+    local_module_features = (
+        local_pattern_modules.get("server_features")
+        if isinstance(local_pattern_modules, dict) and isinstance(local_pattern_modules.get("server_features"), dict)
+        else {}
+    )
+    raw_local_module_entries = local_module_features.get("features") if isinstance(local_module_features, dict) else []
+    local_module_entries = raw_local_module_entries if isinstance(raw_local_module_entries, list) else []
+    local_module_families = sorted({
+        str(item.get("family"))
+        for item in local_module_entries
+        if isinstance(item, dict) and item.get("family")
+    })
+    pattern_types = sorted({item["type"] for item in pattern_summaries} | set(local_module_families))
     descriptor: dict[str, Any] = {
         "schema": "agentflow.normalized_pattern_descriptor.v1",
         "source_surface": source_surface,
@@ -244,6 +257,8 @@ def _pattern_features(
         "crunch_changed": bool(crunch_meta.get("changed")),
         "pattern_types": pattern_types,
         "codex_pattern_summaries": pattern_summaries,
+        "local_pattern_module_families": local_module_families,
+        "local_pattern_module_count": len(local_module_families),
     }
     base_hash = _pattern_hash({**descriptor, "pattern_family": "general"})
     crunch_hash = _pattern_hash({**descriptor, "pattern_family": "crunch"})
@@ -267,6 +282,8 @@ def _pattern_features(
         "local_decision_status": f"routing:{routing_status}|crunch:{crunch_status}|cache:{cache_status}",
         "pattern_types": pattern_types,
         "codex_pattern_summaries": pattern_summaries,
+        "local_pattern_module_families": local_module_families,
+        "local_pattern_module_count": len(local_module_families),
         "pattern_hash": base_hash,
         "normalized_pattern_hash": base_hash,
         "crunch_pattern_hash": crunch_hash,
@@ -316,6 +333,8 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         "has_tools": pattern_features.get("has_tools"),
         "stream": pattern_features.get("stream"),
         "pattern_types": pattern_features.get("pattern_types") or [],
+        "local_pattern_module_families": pattern_features.get("local_pattern_module_families") or [],
+        "local_pattern_module_count": pattern_features.get("local_pattern_module_count") or 0,
         "raw_pattern_strings_included": False,
     }
 
@@ -470,6 +489,12 @@ def build_optimization_unit(
         and prompt_difficulty_features.get("schema") == PROMPT_DIFFICULTY_FEATURE_SCHEMA
     ):
         prompt_difficulty_features = None
+    local_pattern_modules = crunch_meta.get("pattern_modules") if isinstance(crunch_meta, dict) else None
+    local_pattern_module_features = (
+        local_pattern_modules.get("server_features")
+        if isinstance(local_pattern_modules, dict) and isinstance(local_pattern_modules.get("server_features"), dict)
+        else None
+    )
     unit = {
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "source_surface": source_surface,
@@ -496,6 +521,7 @@ def build_optimization_unit(
             "cache_status": cache_meta.get("status"),
             "cache_reason": cache_meta.get("reason"),
             "pattern_features": pattern_features,
+            "local_pattern_module_features": local_pattern_module_features,
             "pattern_hash": pattern_features["pattern_hash"],
             "normalized_pattern_hash": pattern_features["normalized_pattern_hash"],
             "crunch_pattern_hash": pattern_features["crunch_pattern_hash"],

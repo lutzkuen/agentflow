@@ -21,6 +21,7 @@ from agentflow_proxy.pattern_safety import (
     evaluate_pattern_canary_safety_stop,
     log_pattern_canary_safety_stop,
 )
+from agentflow_proxy.pattern_modules import evaluate_pattern_modules, registered_pattern_modules
 from agentflow_proxy.store import stable_json
 
 TOKEN_CHARS = 4  # rough estimator only
@@ -105,6 +106,16 @@ def _default_crunch_policy() -> dict[str, Any]:
             "min_repeated_lines": 4,
             "max_annotations": 12,
         },
+        "pattern_modules": {
+            "terminal_logs": {
+                "enabled": True,
+                "local_crunch_enabled": False,
+            },
+            "prompt_role": {
+                "enabled": True,
+                "local_crunch_enabled": False,
+            },
+        },
         "pattern_rules": [],
         "codex_repeated_scaffolding": {
             "enabled": True,
@@ -160,6 +171,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             terminal_log = data.get("terminal_log_boilerplate") or {}
             if isinstance(terminal_log, dict):
                 _apply_terminal_log_policy_yaml(policy, terminal_log)
+            pattern_modules = data.get("pattern_modules") or {}
+            if isinstance(pattern_modules, dict):
+                _apply_pattern_modules_policy_yaml(policy, pattern_modules)
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-manual")
@@ -198,6 +212,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             terminal_log = data.get("terminal_log_boilerplate") or {}
             if isinstance(terminal_log, dict):
                 _apply_terminal_log_policy_yaml(policy, terminal_log)
+            pattern_modules = data.get("pattern_modules") or {}
+            if isinstance(pattern_modules, dict):
+                _apply_pattern_modules_policy_yaml(policy, pattern_modules)
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-default")
@@ -367,6 +384,27 @@ def _apply_terminal_log_policy_yaml(policy: dict[str, Any], terminal_log: dict[s
             target[key] = int(terminal_log[key])
 
 
+def _apply_pattern_modules_policy_yaml(policy: dict[str, Any], pattern_modules: dict[str, Any]) -> None:
+    target = policy["pattern_modules"]
+    for family, raw_config in pattern_modules.items():
+        if str(family).strip() not in target:
+            target[str(family).strip()] = {
+                "enabled": True,
+                "local_crunch_enabled": False,
+            }
+        module_config = target[str(family).strip()]
+        if isinstance(raw_config, bool):
+            module_config["enabled"] = raw_config
+            continue
+        if not isinstance(raw_config, dict):
+            continue
+        module_config["enabled"] = _as_bool(raw_config.get("enabled"), module_config["enabled"])
+        module_config["local_crunch_enabled"] = _as_bool(
+            raw_config.get("local_crunch_enabled"),
+            module_config.get("local_crunch_enabled", False),
+        )
+
+
 def _parse_pattern_hashes(value: Any) -> list[str]:
     if value is None:
         return []
@@ -497,6 +535,7 @@ TERMINAL_LOG_ENABLED = bool(TERMINAL_LOG_POLICY["enabled"])
 TERMINAL_LOG_MIN_LINES = int(TERMINAL_LOG_POLICY["min_lines"])
 TERMINAL_LOG_MIN_REPEATED_LINES = int(TERMINAL_LOG_POLICY["min_repeated_lines"])
 TERMINAL_LOG_MAX_ANNOTATIONS = int(TERMINAL_LOG_POLICY["max_annotations"])
+PATTERN_MODULES_POLICY = copy.deepcopy(CRUNCH_POLICY["pattern_modules"])
 PATTERN_RULES = list(CRUNCH_POLICY["pattern_rules"])
 CODEX_REPEATED_SCAFFOLDING_POLICY = CRUNCH_POLICY["codex_repeated_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_ENABLED = bool(CODEX_REPEATED_SCAFFOLDING_POLICY["enabled"])
@@ -2315,6 +2354,15 @@ def crunch_body(
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
+    category = _crunch_request_category(new_body)
+    new_body, pattern_modules_meta = evaluate_pattern_modules(
+        new_body,
+        module_settings=PATTERN_MODULES_POLICY,
+        apply_local_crunch=True,
+        policy_source=policy_source,
+        rule_path=CRUNCH_RULES_PATH,
+        category=category,
+    )
     _pattern_saved_chars, pattern_rules_meta = _apply_pattern_rules(new_body, store_obj=store_obj)
     seen: dict[str, int] = {}
     seen_shingles: list[tuple[frozenset, int]] = []
@@ -2409,6 +2457,8 @@ def crunch_body(
         "terminal_log_boilerplate_simplified": terminal_log_meta["simplified_line_count"],
         "terminal_log_boilerplate_saved_chars": terminal_log_meta["saved_chars"],
         "terminal_log_boilerplate": terminal_log_meta,
+        "pattern_modules": pattern_modules_meta,
+        "registered_pattern_modules": registered_pattern_modules(),
         "pattern_rules_applied": pattern_rules_meta["applied_count"],
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
         "pattern_rules": pattern_rules_meta,
