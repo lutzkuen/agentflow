@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from agentflow_proxy import cli
-from agentflow_proxy.phase_routing_report import build_phase_routing_report
+from agentflow_proxy.phase_routing_report import build_phase_routing_dry_run, build_phase_routing_report
 from agentflow_proxy.store import Store, stable_json
 
 
@@ -24,7 +24,7 @@ def _log_call(store, suffix, *, requested_model, routed_model, category, routing
         path="/v1/messages",
         requested_model=requested_model,
         routed_model=routed_model,
-        stream=1,
+        stream=overrides.pop("stream", 1),
         cache_hit=0,
         status_code=overrides.pop("status_code", 200),
         latency_ms=1200,
@@ -171,3 +171,167 @@ class PhaseRoutingReportTests(unittest.TestCase):
         self.assertEqual(row["phase"], "summary")
         self.assertEqual(row["model_pair"], "opus_to_sonnet")
         self.assertEqual(row["target_model"], "claude-sonnet-4-6")
+
+    def test_dry_run_simulates_local_yaml_rule_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "routing_rules.yaml"
+            policy_path.write_text(
+                """
+rules:
+  - id: local-tool-result-dry-run
+    conditions:
+      model_pattern: sonnet
+      category: tool-result
+    action:
+      route_to: haiku
+      reason: dry-run tool-result phase route
+""",
+                encoding="utf-8",
+            )
+            before_policy_text = policy_path.read_text(encoding="utf-8")
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                _log_call(
+                    store,
+                    "1",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    stream=0,
+                )
+                _log_call(
+                    store,
+                    "2",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    routing={"reason": "keep requested model for thinking request"},
+                    thinking_output_tokens=64,
+                    stream=0,
+                )
+                _log_call(
+                    store,
+                    "3",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    stream=0,
+                )
+                _log_call(
+                    store,
+                    "4",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    status_code=500,
+                    stream=0,
+                )
+
+                stdout = io.StringIO()
+                code = cli.phase_routing_report_cli(
+                    [
+                        "--db",
+                        db_path,
+                        "--dry-run-policy",
+                        str(policy_path),
+                        "--pretty",
+                        "--stale-hours",
+                        "999999",
+                    ],
+                    stdout=stdout,
+                )
+            finally:
+                store.conn.close()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(policy_path.read_text(encoding="utf-8"), before_policy_text)
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(payload["schema"], "agentflow.phase_routing_dry_run.v1")
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(payload["wrote_local_files"])
+        self.assertFalse(payload["altered_provider_routing"])
+        self.assertEqual(payload["policy_source"], "local-manual")
+        self.assertEqual(payload["summary"]["matched_count"], 4)
+        self.assertEqual(payload["summary"]["projected_candidate_count"], 1)
+        self.assertGreater(payload["summary"]["projected_savings_usd"], 0)
+        self.assertIn("local-tool-result-dry-run", payload["summary"]["candidate_rule_ids"])
+        rule = payload["rules"][0]
+        self.assertEqual(rule["matched_count"], 4)
+        self.assertEqual(rule["projected_candidate_count"], 1)
+        exclusions = {item["reason"]: item["count"] for item in rule["excluded_count_by_reason"]}
+        self.assertEqual(exclusions["thinking"], 1)
+        self.assertEqual(exclusions["already_routed"], 1)
+        self.assertEqual(exclusions["high_error_rate"], 1)
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertFalse(payload["privacy"]["raw_body_columns_read"])
+        self.assertNotIn("secret-session", json.dumps(payload))
+
+    def test_dry_run_accepts_managed_bundle_candidate_and_shadow_exclusion(self):
+        managed_bundle = {
+            "schema": "agentflow.policy_bundle.v1",
+            "policies": {
+                "routing": {
+                    "policy_source": "managed-recommended",
+                    "rules": [
+                        {
+                            "rule_id": "managed-summary-rule",
+                            "conditions": {
+                                "model_pattern": "sonnet",
+                                "workflow_phase": "summary",
+                                "text_bucket": "2k_8k_chars",
+                            },
+                            "action": {"route_to": "haiku", "reason": "managed summary phase route"},
+                            "managed_recommendation": {
+                                "candidate_id": "phase-candidate-summary",
+                                "policy_source": "managed-recommended",
+                            },
+                        }
+                    ],
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "1",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="short-completion",
+                    routing={"workflow_phase": "summary", "text_chars": 4000},
+                    stream=1,
+                )
+                _log_call(
+                    store,
+                    "2",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="short-completion",
+                    routing={"workflow_phase": "summary", "text_chars": 4000},
+                    stream=0,
+                )
+
+                result = build_phase_routing_dry_run(
+                    store,
+                    managed_bundle,
+                    limit=10,
+                    stale_hours=999999,
+                    require_shadow_support=True,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(result["schema"], "agentflow.phase_routing_dry_run.v1")
+        self.assertEqual(result["policy_source"], "managed-recommended")
+        self.assertEqual(result["summary"]["candidate_rule_ids"], ["phase-candidate-summary"])
+        self.assertEqual(result["summary"]["matched_count"], 2)
+        self.assertEqual(result["summary"]["projected_candidate_count"], 1)
+        rule = result["rules"][0]
+        self.assertEqual(rule["candidate_id"], "phase-candidate-summary")
+        self.assertEqual(rule["policy_source"], "managed-recommended")
+        exclusions = {item["reason"]: item["count"] for item in rule["excluded_count_by_reason"]}
+        self.assertEqual(exclusions["streaming_shadow_unsupported"], 1)

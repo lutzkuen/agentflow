@@ -2235,7 +2235,7 @@ def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None)
 
 
 def phase_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
-    parser = argparse.ArgumentParser(description="Measure Anthropic phase-routing opportunity from local metadata")
+    parser = argparse.ArgumentParser(description="Measure or dry-run Anthropic phase-routing policy from local metadata")
     parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
@@ -2252,15 +2252,58 @@ def phase_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any =
         action="store_true",
         help="Pretty-print JSON instead of emitting one compact line.",
     )
+    parser.add_argument(
+        "--dry-run-policy",
+        help="Proposed routing YAML or policy bundle JSON/YAML to simulate without writing local policy files.",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=1,
+        help="Minimum matched safe samples required before projecting savings in dry-run mode, default: 1.",
+    )
+    parser.add_argument(
+        "--max-error-rate",
+        type=float,
+        default=0.05,
+        help="Historical matched error-rate warning threshold for dry-run mode, default: 0.05.",
+    )
+    parser.add_argument(
+        "--stale-hours",
+        type=int,
+        default=168,
+        help="Treat evidence older than this as stale in dry-run mode, default: 168 hours.",
+    )
+    parser.add_argument(
+        "--require-shadow-support",
+        action="store_true",
+        help="Exclude streaming calls when the proposed phase policy requires shadow/holdout comparison support.",
+    )
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
 
-    from agentflow_proxy.phase_routing_report import build_phase_routing_report
+    from agentflow_proxy.phase_routing_report import (
+        build_phase_routing_dry_run,
+        build_phase_routing_report,
+        load_phase_routing_policy,
+    )
 
     store = _open_store_for_db(str(args.db))
     try:
-        result = build_phase_routing_report(store, limit=args.limit)
+        if args.dry_run_policy:
+            proposed = load_phase_routing_policy(args.dry_run_policy)
+            result = build_phase_routing_dry_run(
+                store,
+                proposed,
+                limit=args.limit,
+                min_samples=args.min_samples,
+                max_error_rate=args.max_error_rate,
+                stale_hours=args.stale_hours,
+                require_shadow_support=args.require_shadow_support,
+            )
+        else:
+            result = build_phase_routing_report(store, limit=args.limit)
     finally:
         store.conn.close()
     if args.pretty:

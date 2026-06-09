@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from typing import Any
+
+import yaml
 
 from agentflow_proxy.pricing import estimate_cost
 
 SCHEMA = "agentflow.phase_routing_opportunity.v1"
+DRY_RUN_SCHEMA = "agentflow.phase_routing_dry_run.v1"
 SAFE_DOWNGRADE_PHASES = {"tool-execution", "summary"}
 TOKEN_CHARS = 4
 
@@ -61,6 +66,17 @@ def _target_for_requested(model: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _resolve_route_to(route_to: Any) -> str:
+    value = str(route_to or "").strip()
+    if value == "haiku":
+        return os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
+    if value == "sonnet":
+        return os.getenv("AGENTFLOW_SONNET_MODEL", "claude-sonnet-4-6")
+    if value == "opus":
+        return os.getenv("AGENTFLOW_OPUS_MODEL", "claude-opus-4-5")
+    return value
+
+
 def _text_bucket(chars: int) -> str:
     if chars < 2_000:
         return "lt_2k_chars"
@@ -102,6 +118,18 @@ def _error_bucket(row: dict[str, Any]) -> str:
     if status >= 500:
         return "server_error"
     return f"http_{status}"
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _derive_phase(row: dict[str, Any], routing: dict[str, Any]) -> tuple[str, str]:
@@ -172,6 +200,359 @@ def _estimated_input_tokens(row: dict[str, Any], routing: dict[str, Any]) -> int
 
 def _estimated_output_tokens(row: dict[str, Any]) -> int:
     return _as_int(row.get("actual_output_tokens")) or _as_int(row.get("output_tokens_est"))
+
+
+def _row_features(row: dict[str, Any]) -> dict[str, Any]:
+    routing = _json_obj(row.get("routing_json"))
+    phase, phase_source = _derive_phase(row, routing)
+    input_tokens = _estimated_input_tokens(row, routing)
+    output_tokens = _estimated_output_tokens(row)
+    text_chars = _as_int(routing.get("text_chars")) or input_tokens * TOKEN_CHARS
+    category = row.get("category") or routing.get("category")
+    has_tools = routing.get("has_tools")
+    if has_tools is None:
+        has_tools = str(category or "").startswith("tool-")
+    thinking = (
+        phase == "thinking"
+        or _as_int(row.get("thinking_output_tokens")) > 0
+        or "thinking" in str(routing.get("reason") or "").lower()
+    )
+    return {
+        "created_at": row.get("created_at"),
+        "provider": row.get("provider") or "anthropic",
+        "requested_model": row.get("requested_model"),
+        "routed_model": row.get("routed_model") or row.get("requested_model"),
+        "requested_tier": _model_tier(row.get("requested_model")),
+        "routed_tier": _model_tier(row.get("routed_model")),
+        "workflow_phase": phase,
+        "workflow_phase_source": phase_source,
+        "category": category,
+        "has_tools": bool(has_tools),
+        "stream": bool(row.get("stream")),
+        "status_bucket": _error_bucket(row),
+        "status_code": _as_int(row.get("status_code")),
+        "retry_count": _as_int(row.get("retry_count")),
+        "fallback": bool(routing.get("fallback_reason")),
+        "thinking": bool(thinking),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_input_tokens": _as_int(row.get("cache_creation_input_tokens")),
+        "cache_read_input_tokens": _as_int(row.get("cache_read_input_tokens")),
+        "text_chars": text_chars,
+        "text_bucket": _text_bucket(text_chars),
+        "token_bucket": _token_bucket(input_tokens),
+        "current_cost_usd": _as_float(row.get("cost_est_usd")),
+        "baseline_cost_usd": _as_float(row.get("cost_baseline_usd")),
+        "routing": routing,
+    }
+
+
+def _value_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _condition_matches(item: dict[str, Any], conditions: dict[str, Any]) -> bool:
+    requested = str(item.get("requested_model") or "").lower()
+    model_pattern = conditions.get("model_pattern")
+    if model_pattern and str(model_pattern).lower() not in requested:
+        return False
+    env_flag = conditions.get("env_flag")
+    if env_flag:
+        raw = os.getenv(str(env_flag), "0").strip().lower()
+        if raw not in {"1", "true", "yes", "on"}:
+            return False
+    for key, feature_key in (
+        ("category", "category"),
+        ("workflow_phase", "workflow_phase"),
+        ("text_bucket", "text_bucket"),
+        ("token_bucket", "token_bucket"),
+    ):
+        if key in conditions and str(item.get(feature_key) or "") not in set(_value_list(conditions.get(key))):
+            return False
+    if "category_not_in" in conditions:
+        excluded = set(_value_list(conditions.get("category_not_in")))
+        if str(item.get("category") or "") in excluded:
+            return False
+    if "has_tools" in conditions and bool(conditions["has_tools"]) != bool(item.get("has_tools")):
+        return False
+    text_chars = _as_int(item.get("text_chars"))
+    if "text_chars_lt" in conditions and not (text_chars < _as_int(conditions["text_chars_lt"])):
+        return False
+    if "text_chars_gt" in conditions and not (text_chars > _as_int(conditions["text_chars_gt"])):
+        return False
+    if "text_chars_lte" in conditions and not (text_chars <= _as_int(conditions["text_chars_lte"])):
+        return False
+    if "text_chars_gte" in conditions and not (text_chars >= _as_int(conditions["text_chars_gte"])):
+        return False
+    if "min_text_chars" in conditions and not (text_chars >= _as_int(conditions["min_text_chars"])):
+        return False
+    if "max_text_chars" in conditions and not (text_chars <= _as_int(conditions["max_text_chars"])):
+        return False
+    return True
+
+
+def _rule_entries(proposed: Any) -> tuple[list[dict[str, Any]], str | None]:
+    if isinstance(proposed, list):
+        routing = {"rules": proposed}
+        policy_source = None
+    elif isinstance(proposed, dict) and isinstance(proposed.get("policies"), dict):
+        routing = proposed.get("policies", {}).get("routing")
+        if not isinstance(routing, dict):
+            routing = {}
+        policy_source = routing.get("policy_source") or (proposed.get("recommendation") or {}).get("policy_source")
+    elif isinstance(proposed, dict):
+        routing = proposed
+        policy_source = routing.get("policy_source")
+    else:
+        routing = {}
+        policy_source = None
+
+    entries: list[dict[str, Any]] = []
+    rules = routing.get("rules") if isinstance(routing.get("rules"), list) else []
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+        entries.append({
+            "path": f"$.policies.routing.rules[{index}]",
+            "source": "rules",
+            "rule_id": rule.get("id") or rule.get("rule_id") or managed.get("policy_id"),
+            "candidate_id": rule.get("candidate_id") or managed.get("candidate_id") or managed.get("recommendation_id"),
+            "policy_source": rule.get("policy_source") or managed.get("policy_source") or policy_source,
+            "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
+            "action": rule.get("action") if isinstance(rule.get("action"), dict) else {},
+        })
+
+    canary = routing.get("phase_canary") if isinstance(routing.get("phase_canary"), dict) else {}
+    if canary:
+        conditions: dict[str, Any] = {}
+        if canary.get("model_pattern"):
+            conditions["model_pattern"] = canary.get("model_pattern")
+        phases = _value_list(canary.get("eligible_workflow_phases"))
+        if phases:
+            conditions["workflow_phase"] = phases
+        excluded_categories = _value_list(canary.get("excluded_categories"))
+        if excluded_categories:
+            conditions["category_not_in"] = excluded_categories
+        if canary.get("min_text_chars") is not None:
+            conditions["min_text_chars"] = canary.get("min_text_chars")
+        if canary.get("max_text_chars") is not None:
+            conditions["max_text_chars"] = canary.get("max_text_chars")
+        target_model = canary.get("target_model") or "haiku"
+        entries.append({
+            "path": "$.policies.routing.phase_canary",
+            "source": "phase_canary",
+            "rule_id": canary.get("policy_id"),
+            "candidate_id": canary.get("candidate_id") or canary.get("recommendation_id"),
+            "policy_source": canary.get("policy_source") or policy_source,
+            "conditions": conditions,
+            "action": {"route_to": target_model, "reason": "phase canary dry-run"},
+        })
+    return entries, policy_source
+
+
+def load_phase_routing_policy(path: str) -> Any:
+    with open(path, encoding="utf-8") as f:
+        payload = yaml.safe_load(f) or {}
+    if isinstance(payload, list):
+        return {"policy_source": "local-manual", "rules": payload}
+    if isinstance(payload, dict) and "policies" not in payload and "policy_source" not in payload:
+        payload = dict(payload)
+        payload["policy_source"] = "local-manual"
+    return payload
+
+
+def _risk_list(counts: dict[str, int]) -> list[dict[str, Any]]:
+    return [
+        {"reason": key, "count": value}
+        for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _add_count(counts: dict[str, int], reason: str) -> None:
+    counts[reason] = counts.get(reason, 0) + 1
+
+
+def build_phase_routing_dry_run(
+    store: Any,
+    proposed_policy: Any,
+    *,
+    limit: int = 1000,
+    min_samples: int = 1,
+    max_error_rate: float = 0.05,
+    stale_hours: int = 168,
+    require_shadow_support: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    rows = _load_recent_rows(store, limit=limit)
+    features = [_row_features(row) for row in rows]
+    entries, policy_source = _rule_entries(proposed_policy)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    stale_before = now - timedelta(hours=max(1, int(stale_hours))) if stale_hours > 0 else None
+
+    summaries: list[dict[str, Any]] = []
+    total_excluded: dict[str, int] = {}
+    warnings: list[dict[str, Any]] = []
+
+    for index, entry in enumerate(entries):
+        conditions = entry.get("conditions") or {}
+        action = entry.get("action") or {}
+        target_model = _resolve_route_to(action.get("route_to"))
+        matched = [item for item in features if _condition_matches(item, conditions)]
+        excluded: dict[str, int] = {}
+        projected: list[dict[str, Any]] = []
+        current_cost = 0.0
+        projected_target_cost = 0.0
+        target_cost_known = 0
+
+        for item in matched:
+            item_current_cost = float(item.get("current_cost_usd") or 0.0)
+            current_cost += item_current_cost
+            reasons: list[str] = []
+            if item.get("workflow_phase") in {"", "unknown", None}:
+                reasons.append("missing_phase")
+            if item.get("thinking"):
+                reasons.append("thinking")
+            if item.get("status_code", 0) >= 400:
+                reasons.append("high_error_rate")
+            if item.get("retry_count", 0) > 0:
+                reasons.append("retry_history")
+            if item.get("fallback"):
+                reasons.append("fallback_history")
+            if require_shadow_support and item.get("stream"):
+                reasons.append("streaming_shadow_unsupported")
+            created_at = _parse_dt(item.get("created_at"))
+            if stale_before and (created_at is None or created_at < stale_before):
+                reasons.append("stale_evidence")
+            if target_model and _model_tier(item.get("routed_model")) == _model_tier(target_model):
+                reasons.append("already_routed")
+            if not target_model:
+                reasons.append("no_baseline_support")
+                target_cost = None
+            else:
+                target_cost = estimate_cost(
+                    target_model,
+                    _as_int(item.get("input_tokens")),
+                    _as_int(item.get("output_tokens")),
+                    _as_int(item.get("cache_creation_input_tokens")),
+                    _as_int(item.get("cache_read_input_tokens")),
+                    provider="anthropic",
+                )
+                if target_cost is None or item_current_cost <= 0:
+                    reasons.append("no_baseline_support")
+            if reasons:
+                for reason in sorted(set(reasons)):
+                    _add_count(excluded, reason)
+                    _add_count(total_excluded, reason)
+                continue
+            projected.append(item)
+            projected_target_cost += float(target_cost or 0.0)
+            target_cost_known += 1
+
+        if len(projected) < max(1, int(min_samples)):
+            if projected:
+                excluded["insufficient_samples"] = excluded.get("insufficient_samples", 0) + len(projected)
+                total_excluded["insufficient_samples"] = total_excluded.get("insufficient_samples", 0) + len(projected)
+            projected_target_cost = 0.0
+            target_cost_known = 0
+            projected = []
+
+        matched_errors = sum(1 for item in matched if _as_int(item.get("status_code")) >= 400)
+        matched_retries = sum(1 for item in matched if _as_int(item.get("retry_count")) > 0)
+        historical_error_rate = (matched_errors / len(matched)) if matched else 0.0
+        historical_retry_rate = (matched_retries / len(matched)) if matched else 0.0
+        rule_warnings: list[dict[str, Any]] = []
+        path = str(entry.get("path") or f"$.policies.routing.rules[{index}]")
+        if historical_error_rate > max_error_rate:
+            rule_warnings.append({
+                "code": "high-error-rate",
+                "path": path,
+                "severity": "warning",
+                "message": f"matched historical calls had {historical_error_rate:.1%} error rate",
+            })
+        if not any(str(conditions.get(key) or "") for key in ("workflow_phase",)):
+            rule_warnings.append({
+                "code": "missing-workflow-phase-condition",
+                "path": path,
+                "severity": "warning",
+                "message": "phase-routing dry-run rule has no workflow_phase condition",
+            })
+        warnings.extend(rule_warnings)
+        projected_current_cost = sum(float(item.get("current_cost_usd") or 0.0) for item in projected)
+        summaries.append({
+            "path": path,
+            "source": entry.get("source"),
+            "rule_id": entry.get("rule_id") or f"routing-rule-{index}",
+            "candidate_id": entry.get("candidate_id"),
+            "policy_source": entry.get("policy_source") or policy_source,
+            "conditions": conditions,
+            "action": {
+                "route_to": action.get("route_to"),
+                "target_model": target_model,
+                "reason": action.get("reason"),
+            },
+            "matched_count": len(matched),
+            "projected_candidate_count": len(projected),
+            "excluded_count": sum(excluded.values()),
+            "excluded_count_by_reason": _risk_list(excluded),
+            "current_cost_usd": _round_usd(current_cost),
+            "projected_current_cost_usd": _round_usd(projected_current_cost),
+            "projected_target_cost_usd": _round_usd(projected_target_cost),
+            "projected_savings_usd": _round_usd(max(0.0, projected_current_cost - projected_target_cost)),
+            "cost_estimate_count": target_cost_known,
+            "historical_error_rate": round(historical_error_rate, 6),
+            "historical_retry_rate": round(historical_retry_rate, 6),
+            "risk_warnings": rule_warnings,
+        })
+
+    return {
+        "schema": DRY_RUN_SCHEMA,
+        "ok": True,
+        "dry_run": True,
+        "wrote_local_files": False,
+        "altered_provider_routing": False,
+        "sampled_call_count": len(features),
+        "limit": max(1, min(int(limit), 10_000)),
+        "policy_source": policy_source,
+        "rule_count": len(summaries),
+        "summary": {
+            "matched_count": sum(item["matched_count"] for item in summaries),
+            "projected_candidate_count": sum(item["projected_candidate_count"] for item in summaries),
+            "excluded_count": sum(item["excluded_count"] for item in summaries),
+            "excluded_count_by_reason": _risk_list(total_excluded),
+            "projected_savings_usd": _round_usd(sum(float(item["projected_savings_usd"]) for item in summaries)),
+            "projected_target_cost_usd": _round_usd(sum(float(item["projected_target_cost_usd"]) for item in summaries)),
+            "risk_warning_count": len(warnings),
+            "candidate_rule_ids": [
+                str(item.get("candidate_id") or item.get("rule_id"))
+                for item in summaries
+                if item.get("candidate_id") or item.get("rule_id")
+            ],
+        },
+        "rules": summaries,
+        "risk_warnings": warnings,
+        "settings": {
+            "min_samples": max(1, int(min_samples)),
+            "max_error_rate": float(max_error_rate),
+            "stale_hours": int(stale_hours),
+            "require_shadow_support": bool(require_shadow_support),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "raw_body_columns_read": False,
+            "session_ids_included": False,
+            "request_ids_included": False,
+            "file_paths_included": False,
+            "error_samples_included": False,
+        },
+    }
 
 
 def _load_recent_rows(store: Any, *, limit: int) -> list[dict[str, Any]]:
