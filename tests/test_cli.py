@@ -812,6 +812,119 @@ class PolicyReloadCliTests(unittest.TestCase):
         encoded = json.dumps(dry_run, sort_keys=True)
         self.assertNotIn("raw-secret-old-context", encoded)
 
+    def test_policy_review_cli_surfaces_managed_old_context_summary_candidate(self):
+        proposed = self._managed_policy_bundle()
+        proposed["recommendation"]["candidate_ids"].append("candidate-old-context-summary")
+        proposed["recommendation"]["candidate_count"] = 2
+        proposed["policies"]["crunch"]["policy_source"] = "managed-recommended"
+        proposed["policies"]["crunch"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "candidate_count": 1,
+            "candidates": [
+                {
+                    "candidate_id": "candidate-old-context-summary",
+                    "candidate_family": "old-context-summarization-policy-rule",
+                    "policy_source": "managed-recommended",
+                    "confidence": 0.84,
+                    "sample_count": 42,
+                    "source_model": "claude-sonnet-4-6",
+                    "summary_model": "claude-haiku-4-5-20251001",
+                    "conditions": {
+                        "min_request_chars": 1,
+                        "min_summarized_chars": 10,
+                        "max_source_chars": 10000,
+                    },
+                    "action": {
+                        "max_turns": 3,
+                        "keep_recent_turns": 1,
+                        "max_summary_chars": 80,
+                        "max_summary_cost_usd": 1.0,
+                    },
+                    "canary": {
+                        "enabled": True,
+                        "fraction": 0.25,
+                        "salt": "summary-canary-test",
+                        "unit": "source_hash",
+                        "holdout_sample_count": 9,
+                        "widening_threshold": 0.8,
+                        "rollback_threshold": 0.2,
+                    },
+                    "safety_gates": {
+                        "max_error_rate": 0.05,
+                        "max_summary_failure_rate": 0.02,
+                    },
+                    "net_savings_evidence": {
+                        "projected_net_savings_usd": 0.42,
+                        "projected_saved_tokens": 1200,
+                        "estimated_summary_cost_usd": 0.01,
+                    },
+                    "quality_evidence": {
+                        "holdout_success_count": 9,
+                        "eval_pass_rate": 0.98,
+                    },
+                    "blocker_reason_codes": ["quality-gate-passed"],
+                    "local_action_requirements": {
+                        "expected_policy_section": "crunch",
+                        "actionability_status": "review-only-local-action",
+                    },
+                    "privacy_summary": {
+                        "metadata_only": True,
+                        "raw_body_storage": False,
+                        "aggregate_only": False,
+                    },
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_dry_run_rows(db_path)
+            stdout = io.StringIO()
+            code = cli.policy_review_cli(
+                ["-", "--db", db_path, "--impact-limit", "10"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        old_context = payload["section_reviews"]["crunch"]["old_context_summarization"]
+        self.assertEqual(old_context["schema"], "agentflow.old_context_summary_policy_review.v1")
+        self.assertEqual(old_context["candidate_ids"], ["candidate-old-context-summary"])
+        candidate = old_context["candidates"][0]
+        self.assertEqual(candidate["candidate_family"], "old-context-summarization-policy-rule")
+        self.assertEqual(candidate["source_model"], "claude-sonnet-4-6")
+        self.assertEqual(candidate["summary_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(candidate["canary"]["fraction"], 0.25)
+        self.assertEqual(candidate["safety_gates"]["max_error_rate"], 0.05)
+        self.assertEqual(candidate["net_savings_evidence"]["projected_net_savings_usd"], 0.42)
+        self.assertEqual(candidate["quality_evidence"]["holdout_success_count"], 9)
+        self.assertEqual(candidate["blocker_reason_codes"], ["quality-gate-passed"])
+        self.assertFalse(old_context["application"]["writes_local_policy_files"])
+        self.assertFalse(old_context["application"]["provider_calls_made"])
+        dry_run = payload["impact_summary"]["sections"]["crunch"]["old_context_summary_dry_run"]
+        self.assertEqual(dry_run["policy"]["candidate_id"], "candidate-old-context-summary")
+        self.assertEqual(dry_run["summary"]["eligible_call_count"], 1)
+        rendered = stdout.getvalue()
+        self.assertNotIn("raw-secret-old-context", rendered)
+        self.assertIn("old-context summarization candidates: 1", " ".join(payload["human_summary"]))
+
+    def test_policy_review_cli_rejects_raw_like_old_context_summary_fields(self):
+        proposed = self._managed_policy_bundle()
+        proposed["policies"]["crunch"]["old_context_summarization"]["raw_prompt"] = "managed raw prompt must not be accepted"
+        proposed["policies"]["crunch"]["old_context_summarization"]["candidate_id"] = "candidate-old-context-summary"
+        stdout = io.StringIO()
+
+        code = cli.policy_review_cli(["-"], stdin=io.StringIO(json.dumps(proposed)), stdout=stdout)
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        errors = payload["proposed_validation"]["errors"]
+        self.assertIn("$.policies.crunch.old_context_summarization.raw_prompt", {error["path"] for error in errors})
+        rendered = stdout.getvalue()
+        self.assertNotIn("managed raw prompt must not be accepted", rendered)
+
     def test_policy_impact_simulates_managed_pattern_bundle_without_mutation(self):
         from agentflow_proxy.policy_bundle import simulate_policy_bundle_impact
         from agentflow_proxy.store import Store, stable_json

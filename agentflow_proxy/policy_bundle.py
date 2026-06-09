@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import sqlite3
+import copy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ POLICY_BUNDLE_VALIDATION_SCHEMA = "agentflow.policy_bundle_validation.v1"
 POLICY_BUNDLE_PROVENANCE_SCHEMA = "agentflow.policy_bundle_provenance.v1"
 POLICY_BUNDLE_PROVENANCE_VERIFICATION_SCHEMA = "agentflow.policy_bundle_provenance_verification.v1"
 PATTERN_CANDIDATE_REVIEW_SCHEMA = "agentflow.pattern_candidate_review.v1"
+OLD_CONTEXT_SUMMARY_POLICY_REVIEW_SCHEMA = "agentflow.old_context_summary_policy_review.v1"
 POLICY_STATE_SCHEMA = "agentflow.policy_state.v1"
 MANAGED_POLICY_VERIFICATION_SECRET_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"
 MANAGED_POLICY_VERIFICATION_SECRETS_ENV = "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS"
@@ -402,6 +404,113 @@ def _validate_non_empty_string(errors: list[dict[str, str]], path: str, value: A
         _add_error(errors, path, "expected non-empty string")
 
 
+_SUMMARY_SAFE_RAW_FLAG_KEYS = {
+    "raw_body_storage",
+    "raw_bodies_read",
+    "raw_bodies_read_locally",
+    "raw_prompts_included",
+    "raw_request_bodies_included",
+    "raw_responses_included",
+    "raw_tool_payloads_included",
+}
+_SUMMARY_RAW_EXACT_KEYS = {
+    "body",
+    "cache_key",
+    "cache_keys",
+    "content",
+    "contents",
+    "file_content",
+    "local_file",
+    "message",
+    "messages",
+    "prompt",
+    "prompts",
+    "provider_body",
+    "raw_context",
+    "raw_context_turns",
+    "raw_messages",
+    "raw_old_context",
+    "raw_prompt",
+    "raw_request",
+    "raw_response",
+    "request",
+    "response",
+    "system",
+    "system_prompt",
+    "transcript",
+    "transcripts",
+}
+_SUMMARY_RAW_KEY_PARTS = (
+    "account_id",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cache_key",
+    "file_content",
+    "generated_summary",
+    "local_file",
+    "policy_yaml",
+    "prompt",
+    "provider_body",
+    "request_id",
+    "secret",
+    "summary_text",
+    "tenant_id",
+    "transcript",
+)
+
+
+def _summary_raw_payload_key(key: Any) -> bool:
+    lowered = str(key).strip().lower()
+    if lowered in _SUMMARY_SAFE_RAW_FLAG_KEYS:
+        return False
+    if lowered in _SUMMARY_RAW_EXACT_KEYS:
+        return True
+    if lowered.startswith("raw_"):
+        return True
+    return any(part in lowered for part in _SUMMARY_RAW_KEY_PARTS)
+
+
+def _reject_summary_raw_payload_fields(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child_path = f"{path}.{key}"
+            if _summary_raw_payload_key(key):
+                _add_error(errors, child_path, "raw or prompt-like old-context summarization payloads are not accepted")
+                continue
+            _reject_summary_raw_payload_fields(item, errors, child_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:100]):
+            _reject_summary_raw_payload_fields(item, errors, f"{path}[{index}]")
+
+
+_OLD_CONTEXT_SUMMARY_FAMILIES = {
+    "old-context-summarization-policy-rule",
+    "old-context-summary-policy-rule",
+    "old_context_summarization_policy_rule",
+    "old_context_summary_policy_rule",
+    "managed-summary-candidate-to-local-rule",
+}
+
+
+def _is_old_context_summary_candidate(candidate: Any) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    family = str(candidate.get("candidate_family") or candidate.get("family") or candidate.get("score_family") or "").strip()
+    if family in _OLD_CONTEXT_SUMMARY_FAMILIES:
+        return True
+    requirements = candidate.get("local_action_requirements") if isinstance(candidate.get("local_action_requirements"), dict) else {}
+    if requirements.get("expected_policy_section") == "crunch":
+        action = str(requirements.get("actionability_status") or requirements.get("required_local_action") or "")
+        if "summary" in action or "old-context" in action:
+            return True
+    for key in ("candidate_id", "policy_id", "recommendation_id", "rule_id"):
+        value = str(candidate.get(key) or "")
+        if "old-context" in value or "old_context" in value:
+            return True
+    return False
+
+
 _ROUTING_CONDITION_KEYS = {
     "model_pattern",
     "text_chars_lt",
@@ -491,8 +600,12 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
         _validate_intish(errors, f"{base}.prompt_cache.min_chars", prompt_cache["min_chars"], min_value=0)
 
     summary = _validate_object_field(policy, base, "old_context_summarization", errors)
+    _reject_summary_raw_payload_fields(summary, errors, f"{base}.old_context_summarization")
     if "enabled" in summary:
         _validate_boolish(errors, f"{base}.old_context_summarization.enabled", summary["enabled"])
+    for key in ("rule_id", "candidate_id", "source_model", "summary_model"):
+        if key in summary and summary[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"{base}.old_context_summarization.{key}", summary[key])
     if "model" in summary:
         _validate_non_empty_string(errors, f"{base}.old_context_summarization.model", summary["model"])
     if "placement" in summary:
@@ -508,6 +621,44 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
     ):
         if key in summary:
             _validate_intish(errors, f"{base}.old_context_summarization.{key}", summary[key], min_value=0)
+    if "max_summary_cost_usd" in summary:
+        _validate_floatish(errors, f"{base}.old_context_summarization.max_summary_cost_usd", summary["max_summary_cost_usd"], min_value=0.0)
+    if "excluded_categories" in summary:
+        categories = summary["excluded_categories"]
+        if isinstance(categories, str):
+            _validate_non_empty_string(errors, f"{base}.old_context_summarization.excluded_categories", categories)
+        elif isinstance(categories, list):
+            for index, category in enumerate(categories):
+                _validate_non_empty_string(errors, f"{base}.old_context_summarization.excluded_categories[{index}]", category)
+        else:
+            _add_error(errors, f"{base}.old_context_summarization.excluded_categories", "expected string or list of strings")
+    for key in ("block_tool_protocol", "block_thinking"):
+        if key in summary:
+            _validate_boolish(errors, f"{base}.old_context_summarization.{key}", summary[key])
+    canary = _validate_object_field(summary, f"{base}.old_context_summarization", "canary", errors)
+    if "enabled" in canary:
+        _validate_boolish(errors, f"{base}.old_context_summarization.canary.enabled", canary["enabled"])
+    for key in ("fraction", "rollout_fraction", "canary_fraction", "widening_threshold", "rollback_threshold"):
+        if key in canary:
+            _validate_floatish(errors, f"{base}.old_context_summarization.canary.{key}", canary[key], min_value=0.0, max_value=1.0)
+    for key in ("salt", "canary_salt", "unit", "canary_unit"):
+        if key in canary and canary[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"{base}.old_context_summarization.canary.{key}", canary[key])
+    safety = _validate_object_field(summary, f"{base}.old_context_summarization", "safety_stop", errors)
+    if "enabled" in safety:
+        _validate_boolish(errors, f"{base}.old_context_summarization.safety_stop.enabled", safety["enabled"])
+    for key in ("min_outcome_samples", "window"):
+        if key in safety:
+            _validate_intish(errors, f"{base}.old_context_summarization.safety_stop.{key}", safety[key], min_value=0)
+    for key in (
+        "max_error_rate",
+        "max_retry_rate",
+        "max_negative_net_savings_rate",
+        "max_summary_failure_rate",
+        "max_error_rate_delta",
+    ):
+        if key in safety:
+            _validate_floatish(errors, f"{base}.old_context_summarization.safety_stop.{key}", safety[key], min_value=0.0)
 
     thinking_dedup = _validate_object_field(policy, base, "thinking_deduplication", errors)
     if "enabled" in thinking_dedup:
@@ -738,6 +889,8 @@ def _validate_pattern_candidate(
     if not isinstance(candidate, dict):
         _add_error(errors, path, "expected pattern candidate object")
         return
+    if _is_old_context_summary_candidate(candidate):
+        _reject_summary_raw_payload_fields(candidate, errors, path)
     candidate_id = candidate.get("candidate_id") or candidate.get("policy_id") or candidate.get("recommendation_id")
     if candidate_id is not None:
         _validate_non_empty_string(errors, f"{path}.candidate_id", candidate_id)
@@ -1490,6 +1643,42 @@ def _routing_impact(policy: dict[str, Any], calls: list[dict[str, Any]]) -> dict
     }
 
 
+def _old_context_summary_review_dry_run_policy(policy: dict[str, Any]) -> dict[str, Any] | None:
+    entries = _old_context_summary_raw_entries(policy)
+    if not entries:
+        return None
+    proposed = copy.deepcopy(policy)
+    summary = proposed.get("old_context_summarization") if isinstance(proposed.get("old_context_summarization"), dict) else {}
+    if not isinstance(summary, dict):
+        summary = {}
+    candidate = entries[0]["candidate"]
+    action = _first_mapping(candidate.get("action"), candidate.get("recommended_action"))
+    conditions = _first_mapping(candidate.get("conditions"), candidate.get("matching_conditions"))
+    summary["enabled"] = True
+    for target_key, values in {
+        "rule_id": (candidate.get("rule_id"), candidate.get("policy_id"), summary.get("rule_id")),
+        "candidate_id": (candidate.get("candidate_id"), candidate.get("policy_id"), candidate.get("recommendation_id"), summary.get("candidate_id")),
+        "model": (candidate.get("summary_model"), candidate.get("model"), action.get("summary_model"), action.get("model"), summary.get("model")),
+        "source_model": (candidate.get("source_model"), candidate.get("requested_model"), summary.get("source_model")),
+        "min_request_chars": (conditions.get("min_request_chars"), action.get("min_request_chars"), summary.get("min_request_chars")),
+        "min_summarized_chars": (conditions.get("min_summarized_chars"), action.get("min_summarized_chars"), summary.get("min_summarized_chars")),
+        "max_turns": (action.get("max_turns"), conditions.get("max_turns"), summary.get("max_turns")),
+        "keep_recent_turns": (action.get("keep_recent_turns"), conditions.get("keep_recent_turns"), summary.get("keep_recent_turns")),
+        "max_summary_chars": (action.get("max_summary_chars"), candidate.get("max_summary_chars"), summary.get("max_summary_chars")),
+        "max_source_chars": (conditions.get("max_source_chars"), action.get("max_source_chars"), summary.get("max_source_chars")),
+        "max_summary_cost_usd": (action.get("max_summary_cost_usd"), candidate.get("max_summary_cost_usd"), summary.get("max_summary_cost_usd")),
+    }.items():
+        value = _summary_first(*values)
+        if value is not None:
+            summary[target_key] = value
+    for source_key, target_key in (("canary", "canary"), ("rollout", "canary"), ("safety_stop", "safety_stop"), ("safety_gates", "safety_stop")):
+        if isinstance(candidate.get(source_key), dict):
+            summary[target_key] = copy.deepcopy(candidate[source_key])
+    proposed["old_context_summarization"] = summary
+    proposed["policy_source"] = proposed.get("policy_source") or "managed-recommended"
+    return proposed
+
+
 def _pattern_candidate_entries(policy: dict[str, Any], *, section: str) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     if section == "crunch":
@@ -1745,8 +1934,14 @@ def _crunch_impact(
     old_context_dry_run: dict[str, Any] | None = None
 
     old_context = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
-    if _enabled(old_context.get("enabled")):
-        min_chars = _as_int(old_context.get("min_request_chars"), 32000)
+    review_dry_run_policy = policy if _enabled(old_context.get("enabled")) else _old_context_summary_review_dry_run_policy(policy)
+    if review_dry_run_policy is not None:
+        dry_run_old_context = (
+            review_dry_run_policy.get("old_context_summarization")
+            if isinstance(review_dry_run_policy.get("old_context_summarization"), dict)
+            else old_context
+        )
+        min_chars = _as_int(dry_run_old_context.get("min_request_chars"), 32000)
         matched = [item for item in calls if item["text_chars"] >= min_chars]
         feature = {
             "name": "old_context_summarization",
@@ -1765,7 +1960,7 @@ def _crunch_impact(
         if db_path:
             from agentflow_proxy.old_context_summary_dry_run import dry_run_old_context_summary
 
-            old_context_dry_run = dry_run_old_context_summary(policy, db_path=str(db_path), limit=limit)
+            old_context_dry_run = dry_run_old_context_summary(review_dry_run_policy, db_path=str(db_path), limit=limit)
 
     thinking_dedup = policy.get("thinking_deduplication") if isinstance(policy.get("thinking_deduplication"), dict) else {}
     if _enabled(thinking_dedup.get("enabled")):
@@ -2314,6 +2509,342 @@ def pattern_policy_review_summary(policy: Any, *, section: str) -> dict[str, Any
     }
 
 
+def _old_context_summary_policy_present(summary: dict[str, Any], policy: dict[str, Any]) -> bool:
+    if not summary:
+        return False
+    if _enabled(summary.get("enabled")):
+        return True
+    if str(summary.get("policy_source") or "").startswith("managed-"):
+        return True
+    for key in (
+        "candidate_id",
+        "source_model",
+        "summary_model",
+        "net_savings_evidence",
+        "quality_evidence",
+        "blocker_reason_codes",
+        "local_action_requirements",
+    ):
+        if summary.get(key) not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _old_context_summary_raw_entries(policy: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    summary = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
+    if _old_context_summary_policy_present(summary, policy):
+        entries.append({
+            "path": "$.policies.crunch.old_context_summarization",
+            "source": "old_context_summarization",
+            "candidate": summary,
+            "candidate_status": "candidate" if _enabled(summary.get("enabled")) else "review_only",
+        })
+    recommendation = policy.get("recommendation") if isinstance(policy.get("recommendation"), dict) else {}
+    for list_name in ("candidates", "review_only_candidates", "omitted_candidates"):
+        items = recommendation.get(list_name) if isinstance(recommendation.get(list_name), list) else []
+        for index, candidate in enumerate(items):
+            if isinstance(candidate, dict) and _is_old_context_summary_candidate(candidate):
+                if list_name == "candidates":
+                    status = "candidate"
+                elif list_name == "review_only_candidates":
+                    status = "review_only"
+                else:
+                    status = "omitted"
+                entries.append({
+                    "path": f"$.policies.crunch.recommendation.{list_name}[{index}]",
+                    "source": list_name,
+                    "candidate": candidate,
+                    "candidate_status": status,
+                })
+    return entries
+
+
+def _summary_first(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _summary_nested(candidate: dict[str, Any], *keys: str) -> Any:
+    current: Any = candidate
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _summary_conditions(candidate: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    conditions = _first_mapping(
+        candidate.get("conditions"),
+        candidate.get("matching_conditions"),
+        candidate.get("dimensions"),
+        candidate.get("buckets"),
+    )
+    if conditions:
+        return _safe_pattern_value(conditions) or {}
+    return {
+        key: fallback[key]
+        for key in (
+            "min_request_chars",
+            "min_summarized_chars",
+            "max_turns",
+            "keep_recent_turns",
+            "max_source_chars",
+            "excluded_categories",
+            "block_tool_protocol",
+            "block_thinking",
+        )
+        if key in fallback
+    }
+
+
+def _summary_canary(candidate: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    raw = _first_mapping(candidate.get("canary"), candidate.get("rollout"), candidate.get("canary_rollout"), fallback.get("canary"))
+    if not raw:
+        return {"enabled": False}
+    enabled = _enabled(
+        _summary_first(
+            raw.get("enabled"),
+            raw.get("canary_enabled"),
+            raw.get("rollout_enabled"),
+        )
+    )
+    return {
+        key: value
+        for key, value in {
+            "enabled": enabled,
+            "fraction": _summary_first(raw.get("fraction"), raw.get("rollout_fraction"), raw.get("canary_fraction")),
+            "salt": _summary_first(raw.get("salt"), raw.get("canary_salt")),
+            "unit": _summary_first(raw.get("unit"), raw.get("canary_unit")),
+            "widening_threshold": raw.get("widening_threshold"),
+            "rollback_threshold": raw.get("rollback_threshold"),
+            "holdout_sample_count": _summary_first(raw.get("holdout_sample_count"), raw.get("holdout_count")),
+        }.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _summary_safety_gates(candidate: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    gates = _first_mapping(
+        candidate.get("safety_gates"),
+        candidate.get("safety_stop"),
+        candidate.get("quality_gates"),
+        fallback.get("safety_stop"),
+    )
+    return _safe_pattern_value(gates) or {}
+
+
+def _summary_net_savings(candidate: dict[str, Any]) -> dict[str, Any]:
+    evidence = _first_mapping(
+        candidate.get("net_savings_evidence"),
+        _summary_nested(candidate, "evidence", "net_savings"),
+        _summary_nested(candidate, "review_evidence", "net_savings"),
+        candidate.get("evidence"),
+    )
+    safe = _safe_pattern_value(evidence) if evidence else {}
+    for key in (
+        "estimated_savings_usd",
+        "projected_net_savings_usd",
+        "projected_gross_savings_usd",
+        "estimated_summary_cost_usd",
+        "sample_count",
+    ):
+        value = candidate.get(key)
+        if value is not None:
+            safe.setdefault(key, value)
+    return safe
+
+
+def _summary_net_savings_value(evidence: dict[str, Any]) -> float | None:
+    for key in ("projected_net_savings_usd", "net_savings_usd", "estimated_savings_usd", "estimated_net_savings_usd"):
+        if key in evidence:
+            return _as_float(evidence.get(key))
+    return None
+
+
+def _summary_quality_evidence(candidate: dict[str, Any]) -> dict[str, Any]:
+    evidence = _first_mapping(
+        candidate.get("quality_evidence"),
+        _summary_nested(candidate, "review_evidence", "quality"),
+        _summary_nested(candidate, "evidence", "quality"),
+        candidate.get("confidence_inputs"),
+    )
+    return _safe_pattern_value(evidence) or {}
+
+
+def _summary_reason_codes(candidate: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    for key in (
+        "blocker_reason_codes",
+        "blockers",
+        "warning_reasons",
+        "omission_reasons",
+        "reason_codes",
+        "reasons",
+        "threshold_failures",
+    ):
+        value = candidate.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    code = item.get("code") or item.get("reason") or item.get("status")
+                    if code:
+                        codes.append(str(code))
+                elif str(item or "").strip():
+                    codes.append(str(item))
+        elif isinstance(value, str) and value.strip():
+            codes.append(value)
+    reason = candidate.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        codes.append(reason)
+    return sorted(set(codes))
+
+
+def _summary_privacy(candidate: dict[str, Any]) -> dict[str, Any]:
+    privacy = _first_mapping(candidate.get("privacy_summary"), candidate.get("privacy"), candidate.get("privacy_profile"))
+    safe = _safe_pattern_value(privacy) if privacy else {}
+    aggregate_only = bool(safe.get("aggregate_only") or safe.get("telemetry_profile") == "aggregate-only")
+    return {
+        **safe,
+        "metadata_only": safe.get("metadata_only", True),
+        "aggregate_only": aggregate_only,
+        "raw_prompts_included": False,
+        "raw_old_context_included": False,
+        "raw_summaries_included": False,
+        "provider_bodies_included": False,
+        "request_ids_included": False,
+        "tenant_ids_included": False,
+        "account_ids_included": False,
+        "cache_keys_included": False,
+    }
+
+
+def _summary_has_holdout_evidence(canary: dict[str, Any], quality: dict[str, Any], net_savings: dict[str, Any]) -> bool:
+    for source in (canary, quality, net_savings):
+        for key, value in source.items():
+            lowered = str(key).lower()
+            if "holdout" not in lowered:
+                continue
+            if isinstance(value, bool):
+                if value:
+                    return True
+            elif _as_float(value) > 0:
+                return True
+            elif isinstance(value, str) and value.strip():
+                return True
+    return False
+
+
+def _old_context_summary_candidate_review(
+    entry: dict[str, Any],
+    index: int,
+    *,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    candidate = entry["candidate"]
+    fallback = policy.get("old_context_summarization") if isinstance(policy.get("old_context_summarization"), dict) else {}
+    action = _first_mapping(candidate.get("action"), candidate.get("recommended_action"))
+    canary = _summary_canary(candidate, fallback)
+    safety_gates = _summary_safety_gates(candidate, fallback)
+    net_savings = _summary_net_savings(candidate)
+    quality = _summary_quality_evidence(candidate)
+    privacy = _summary_privacy(candidate)
+    reason_codes = _summary_reason_codes(candidate)
+    warnings: list[str] = []
+    if canary.get("enabled") and not _summary_has_holdout_evidence(canary, quality, net_savings):
+        warnings.append("missing-holdout-evidence")
+    net_value = _summary_net_savings_value(net_savings)
+    if net_value is not None and net_value <= 0:
+        warnings.append("non-positive-net-savings")
+    if any("stale" in code for code in reason_codes) or candidate.get("stale_evidence") is True:
+        warnings.append("stale-evidence")
+    if privacy.get("aggregate_only"):
+        warnings.append("aggregate-only-privacy-limit")
+    if candidate.get("policy_source") == "managed-enforced":
+        warnings.append("managed-enforced-not-accepted-for-local-review")
+
+    candidate_id = _summary_first(
+        candidate.get("candidate_id"),
+        candidate.get("policy_id"),
+        candidate.get("recommendation_id"),
+        fallback.get("candidate_id"),
+        f"old-context-summary-candidate-{index + 1}",
+    )
+    return {
+        "path": entry["path"],
+        "source": entry.get("source"),
+        "candidate_id": candidate_id,
+        "rule_id": _summary_first(candidate.get("rule_id"), candidate.get("policy_id"), fallback.get("rule_id")),
+        "candidate_family": candidate.get("candidate_family") or "old-context-summarization-policy-rule",
+        "candidate_status": entry.get("candidate_status"),
+        "policy_source": candidate.get("policy_source") or policy.get("policy_source") or "managed-recommended",
+        "confidence": candidate.get("confidence"),
+        "sample_count": candidate.get("sample_count"),
+        "source_model": _summary_first(candidate.get("source_model"), candidate.get("requested_model"), action.get("source_model"), fallback.get("source_model")),
+        "summary_model": _summary_first(candidate.get("summary_model"), candidate.get("model"), action.get("summary_model"), action.get("model"), fallback.get("model")),
+        "conditions": _summary_conditions(candidate, fallback),
+        "canary": canary,
+        "safety_gates": safety_gates,
+        "net_savings_evidence": net_savings,
+        "quality_evidence": quality,
+        "blocker_reason_codes": reason_codes,
+        "warning_codes": sorted(set(warnings)),
+        "local_action_requirements": _safe_pattern_value(candidate.get("local_action_requirements")) or {},
+        "privacy": privacy,
+    }
+
+
+def old_context_summary_policy_review_summary(policy: Any) -> dict[str, Any]:
+    if not isinstance(policy, dict):
+        policy = {}
+    entries = _old_context_summary_raw_entries(policy)
+    candidates = [
+        _old_context_summary_candidate_review(entry, index, policy=policy)
+        for index, entry in enumerate(entries)
+    ]
+    warning_codes = sorted({
+        warning
+        for candidate in candidates
+        for warning in candidate.get("warning_codes", [])
+    })
+    application_status = "review-only-not-applied" if candidates else "no-old-context-summary-candidates"
+    return {
+        "schema": OLD_CONTEXT_SUMMARY_POLICY_REVIEW_SCHEMA,
+        "status": "review-only" if candidates else "empty",
+        "policy_source": policy.get("policy_source"),
+        "candidate_count": len(candidates),
+        "candidate_ids": [candidate["candidate_id"] for candidate in candidates],
+        "warning_codes": warning_codes,
+        "application": {
+            "status": application_status,
+            "reason": (
+                "Managed old-context summarization recommendations are reviewed locally and are not written by review commands."
+                if candidates
+                else "No managed old-context summarization recommendation is present."
+            ),
+            "expected_policy_section": "crunch",
+            "writes_local_policy_files": False,
+            "provider_calls_made": False,
+            "summary_model_calls_made": False,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_old_context_included": False,
+            "raw_summaries_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "tenant_ids_included": False,
+            "account_ids_included": False,
+            "cache_keys_included": False,
+        },
+        "candidates": candidates,
+    }
+
+
 def _review_human_summary(result: dict[str, Any]) -> list[str]:
     lines = [
         f"Policy review: {'ok' if result.get('ok') else 'invalid'}; changed sections: {', '.join(result.get('changed_sections') or []) or 'none'}.",
@@ -2330,6 +2861,13 @@ def _review_human_summary(result: dict[str, Any]) -> list[str]:
                 f"{review.get('omitted_candidate_count', 0)} omitted; application: "
                 f"{(review.get('application') or {}).get('status')}."
             )
+            old_context = review.get("old_context_summarization") if isinstance(review.get("old_context_summarization"), dict) else {}
+            if section == "crunch" and old_context.get("candidate_count"):
+                lines.append(
+                    "old-context summarization candidates: "
+                    f"{old_context.get('candidate_count', 0)} review-only; application: "
+                    f"{(old_context.get('application') or {}).get('status')}."
+                )
         elif review.get("candidate_count"):
             lines.append(
                 f"codex_app candidates: {review.get('candidate_count', 0)} review-only; application: "
@@ -2482,6 +3020,22 @@ def policy_bundle_safety_warnings(bundle: Any) -> list[dict[str, str]]:
             "$.policies.crunch.old_context_summarization.enabled",
             "model-assisted summarization changes request context and should be reviewed against quality risk before enabling",
         )
+    old_context_review = old_context_summary_policy_review_summary(crunch)
+    for candidate in old_context_review.get("candidates", []):
+        if candidate.get("policy_source") == "managed-enforced":
+            _add_warning(
+                warnings,
+                "managed-enforced-old-context-summarization",
+                str(candidate.get("path") or "$.policies.crunch.old_context_summarization"),
+                "managed-enforced old-context summarization recommendations are not accepted by review-only local tooling",
+            )
+        for code in candidate.get("warning_codes", []):
+            _add_warning(
+                warnings,
+                f"old-context-summarization-{code}",
+                str(candidate.get("path") or "$.policies.crunch.old_context_summarization"),
+                f"old-context summarization recommendation warning: {code}",
+            )
 
     recommendation_health = summarize_recommendation_health(bundle)
     for row in recommendation_health.get("rows", []):
@@ -2533,7 +3087,11 @@ def review_policy_bundle(
     for section in ("crunch", "cache"):
         if isinstance(policies.get(section), dict):
             review = pattern_policy_review_summary(policies[section], section=section)
-            if review.get("candidate_count"):
+            if section == "crunch":
+                old_context_review = old_context_summary_policy_review_summary(policies[section])
+                if old_context_review.get("candidate_count"):
+                    review["old_context_summarization"] = old_context_review
+            if review.get("candidate_count") or review.get("old_context_summarization"):
                 section_reviews[section] = review
     if isinstance(policies.get("codex_app"), dict):
         section_reviews["codex_app"] = codex_app_policy_review_summary(policies["codex_app"])

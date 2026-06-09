@@ -599,11 +599,13 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
 
         codex_app_summary = codex_app_policy_review_summary(codex_app)
     pattern_summaries: dict[str, Any] = {}
+    old_context_summary: dict[str, Any] = {}
     if crunch or cache:
-        from agentflow_proxy.policy_bundle import pattern_policy_review_summary
+        from agentflow_proxy.policy_bundle import old_context_summary_policy_review_summary, pattern_policy_review_summary
 
         if crunch:
             pattern_summaries["crunch"] = pattern_policy_review_summary(crunch, section="crunch")
+            old_context_summary = old_context_summary_policy_review_summary(crunch)
         if cache:
             pattern_summaries["cache"] = pattern_policy_review_summary(cache, section="cache")
     pattern_candidate_ids = [
@@ -628,6 +630,10 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         "cache_pattern_candidate_count": pattern_summaries.get("cache", {}).get("candidate_count", 0),
         "pattern_review_only_candidate_count": sum(summary.get("review_only_candidate_count", 0) for summary in pattern_summaries.values()),
         "pattern_omitted_candidate_count": sum(summary.get("omitted_candidate_count", 0) for summary in pattern_summaries.values()),
+        "old_context_summary_candidate_ids": old_context_summary.get("candidate_ids", []),
+        "old_context_summary_candidate_count": old_context_summary.get("candidate_count", 0),
+        "old_context_summary_application_status": (old_context_summary.get("application") or {}).get("status"),
+        "old_context_summary_warning_codes": old_context_summary.get("warning_codes", []),
         "omitted_candidate_count": recommendation.get(
             "omitted_candidate_count",
             routing_recommendation.get("omitted_candidate_count", 0),
@@ -636,6 +642,7 @@ def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
         "candidates": candidates,
         "codex_app": codex_app_summary,
         "patterns": pattern_summaries,
+        "old_context_summarization": old_context_summary,
         "health": summarize_recommendation_health(bundle),
     }
 
