@@ -6,10 +6,18 @@ import unittest
 from unittest.mock import patch
 
 import agentflow_proxy.router as router_module
+from agentflow_proxy.store import Store, stable_json, utc_now
 from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
 
 
 class RouterTest(unittest.TestCase):
+    def _reload_with_routing_yaml(self, tmp: str, yaml_text: str, extra_env: dict[str, str] | None = None):
+        rules_path = Path(tmp) / "routing_rules.yaml"
+        rules_path.write_text(yaml_text, encoding="utf-8")
+        env = {"AGENTFLOW_ROUTING_RULES": str(rules_path)}
+        env.update(extra_env or {})
+        return patch.dict(os.environ, env)
+
     def test_tool_result_sonnet_routes_to_haiku_without_thinking(self):
         body = {
             "model": SONNET_DEFAULT,
@@ -404,6 +412,224 @@ rules:
 
         self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
+
+    def test_phase_canary_applies_seeded_eligible_tool_execution(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["reason"], "phase canary selected Sonnet-to-Haiku route")
+                    self.assertEqual(meta["phase_canary"]["status"], "applied")
+                    self.assertEqual(meta["phase_canary"]["cohort"], "applied")
+                    self.assertEqual(meta["phase_canary"]["policy_id"], "test-phase-canary")
+                    self.assertEqual(meta["phase_canary"]["workflow_phase"], "tool-execution")
+                    self.assertIn("cohort_hash", meta["phase_canary"])
+                    self.assertNotIn("content", stable_json(meta["phase_canary"]["cohort_features"]))
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_holdout_keeps_requested_model(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  canary_fraction: 0.0
+  holdout_fraction: 1.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["reason"], "phase canary holdout; keep requested model")
+                    self.assertEqual(meta["phase_canary"]["status"], "holdout")
+                    self.assertEqual(meta["phase_canary"]["cohort"], "holdout")
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_ineligible_planning_passes_through_before_broad_tool_rule(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-light
+    action:
+      route_to: haiku
+      reason: broad tool-light route
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+                        "messages": [{"role": "user", "content": "Inspect the repo and plan the work."}],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["workflow_phase"], "planning")
+                    self.assertEqual(meta["phase_canary"]["status"], "ineligible")
+                    self.assertEqual(meta["phase_canary"]["reason"], "workflow-phase-not-enabled")
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_safety_stop_prevents_downgrade_after_errors(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            for index in range(2):
+                store.log_call(
+                    id=f"call-{index}",
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    requested_model=SONNET_DEFAULT,
+                    routed_model=HAIKU_DEFAULT,
+                    stream=0,
+                    cache_hit=0,
+                    status_code=500,
+                    latency_ms=100,
+                    input_tokens_est=10,
+                    output_tokens_est=10,
+                    routing_json=stable_json({
+                        "phase_canary": {
+                            "policy_id": "test-phase-canary",
+                            "status": "applied",
+                        }
+                    }),
+                    retry_count=0,
+                    provider="anthropic",
+                )
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: true
+    window_hours: 24
+    min_samples: 2
+    max_error_rate: 0.0
+    max_retry_rate: 1.0
+    max_fallback_rate: 1.0
+rules: []
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["reason"], "phase canary safety stop; keep requested model")
+                    self.assertEqual(meta["phase_canary"]["status"], "safety_stopped")
+                    self.assertTrue(meta["phase_canary"]["safety_stop"]["tripped"])
+                    self.assertIn("error-rate", meta["phase_canary"]["safety_stop"]["reason_codes"])
+            finally:
+                importlib.reload(router_module)
+
+    def test_routing_rule_can_match_workflow_phase(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      workflow_phase: summary
+    action:
+      route_to: haiku
+      reason: summary phase routed to Haiku
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {"role": "user", "content": "Make the change."},
+                            {"role": "assistant", "content": "Done."},
+                            {"role": "user", "content": "Summarize the result."},
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["workflow_phase"], "summary")
+                    self.assertEqual(meta["reason"], "summary phase routed to Haiku")
+            finally:
+                importlib.reload(router_module)
 
 
 if __name__ == "__main__":

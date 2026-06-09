@@ -532,6 +532,7 @@ async def stats_policies() -> dict[str, Any]:
                 loaded_snapshot=router.ROUTING_RULES_LOADED_FILE,
             ),
             "rules": _copy_policy(router.ROUTING_RULES),
+            "phase_canary": _copy_policy(router.ROUTING_PHASE_CANARY),
             "defaults": {
                 "haiku": router.HAIKU_DEFAULT,
                 "sonnet": router.SONNET_DEFAULT,

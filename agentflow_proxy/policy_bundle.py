@@ -523,12 +523,44 @@ _ROUTING_CONDITION_KEYS = {
     "env_flag",
     "category",
     "category_not_in",
+    "workflow_phase",
 }
 
 
 def _validate_routing_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
     if "enabled" in policy:
         _validate_boolish(errors, "$.policies.routing.enabled", policy["enabled"])
+    canary = _validate_object_field(policy, "$.policies.routing", "phase_canary", errors)
+    if "enabled" in canary:
+        _validate_boolish(errors, "$.policies.routing.phase_canary.enabled", canary["enabled"])
+    for key in ("policy_id", "model_pattern", "target_model", "min_workflow_phase_confidence", "salt"):
+        if key in canary and canary[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"$.policies.routing.phase_canary.{key}", canary[key])
+    for key in ("eligible_workflow_phases", "excluded_workflow_phases", "eligible_categories", "excluded_categories"):
+        if key in canary:
+            value = canary[key]
+            if isinstance(value, str):
+                _validate_non_empty_string(errors, f"$.policies.routing.phase_canary.{key}", value)
+            elif isinstance(value, list):
+                for item_index, item in enumerate(value):
+                    _validate_non_empty_string(errors, f"$.policies.routing.phase_canary.{key}[{item_index}]", item)
+            else:
+                _add_error(errors, f"$.policies.routing.phase_canary.{key}", "expected string or list of strings")
+    for key in ("min_text_chars", "max_text_chars"):
+        if key in canary:
+            _validate_intish(errors, f"$.policies.routing.phase_canary.{key}", canary[key], min_value=0)
+    for key in ("canary_fraction", "rollout_fraction", "holdout_fraction"):
+        if key in canary:
+            _validate_floatish(errors, f"$.policies.routing.phase_canary.{key}", canary[key], min_value=0.0, max_value=1.0)
+    safety = _validate_object_field(canary, "$.policies.routing.phase_canary", "safety_stop", errors)
+    if "enabled" in safety:
+        _validate_boolish(errors, "$.policies.routing.phase_canary.safety_stop.enabled", safety["enabled"])
+    for key in ("window_hours", "min_samples", "min_holdout_samples", "limit"):
+        if key in safety:
+            _validate_intish(errors, f"$.policies.routing.phase_canary.safety_stop.{key}", safety[key], min_value=0)
+    for key in ("max_error_rate", "max_retry_rate", "max_fallback_rate", "max_latency_regression_ratio"):
+        if key in safety:
+            _validate_floatish(errors, f"$.policies.routing.phase_canary.safety_stop.{key}", safety[key], min_value=0.0)
     rules = policy.get("rules", [])
     if not isinstance(rules, list):
         _add_error(errors, "$.policies.routing.rules", "expected list")
@@ -546,7 +578,7 @@ def _validate_routing_policy(policy: dict[str, Any], errors: list[dict[str, str]
         else:
             for key in sorted(set(conditions) - _ROUTING_CONDITION_KEYS):
                 _add_error(errors, f"{rule_path}.conditions.{key}", "unknown routing condition")
-            for key in ("model_pattern", "env_flag", "category"):
+            for key in ("model_pattern", "env_flag", "category", "workflow_phase"):
                 if key in conditions:
                     _validate_non_empty_string(errors, f"{rule_path}.conditions.{key}", conditions[key])
             for key in ("text_chars_lt", "text_chars_gt", "text_chars_lte", "text_chars_gte", "max_tokens_lte"):
@@ -3291,7 +3323,10 @@ def _old_context_summary_apply_metadata(bundle: Any) -> dict[str, Any]:
 
 def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
     if section == "routing":
-        return {"rules": policy.get("rules") if isinstance(policy.get("rules"), list) else []}
+        payload: dict[str, Any] = {"rules": policy.get("rules") if isinstance(policy.get("rules"), list) else []}
+        if isinstance(policy.get("phase_canary"), dict):
+            payload["phase_canary"] = policy["phase_canary"]
+        return payload
     if section == "crunch":
         payload: dict[str, Any] = {}
         if "enabled" in policy:

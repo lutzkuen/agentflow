@@ -15,10 +15,48 @@
 #   env_flag        — environment variable that must be truthy for the rule to match
 #   category        — exact match: tool-result | tool-heavy | tool-light | long-context | short-completion | code-gen | chat
 #   category_not_in — category name or list of category names to exclude
+#   workflow_phase  — exact match against routing metadata: planning | tool-execution | verification | summary | thinking | chat | unknown
 #
 # Action:
 #   route_to  — "haiku", "sonnet", "opus" (resolves to current default model), or a full model ID
 #   reason    — logged in routing metadata
+
+# Optional behavior-changing phase canary. Disabled by default. When enabled in a
+# local manual policy, eligible Sonnet requests are deterministically assigned to
+# applied, holdout, or not-selected cohorts from metadata-only request features.
+phase_canary:
+  enabled: false
+  policy_id: local-phase-sonnet-haiku-canary-v1
+  model_pattern: sonnet
+  target_model: haiku
+  eligible_workflow_phases:
+    - tool-execution
+    - summary
+  excluded_workflow_phases:
+    - planning
+    - thinking
+    - unknown
+  eligible_categories: []
+  excluded_categories:
+    - code-gen
+  min_workflow_phase_confidence: medium
+  min_text_chars: 0
+  max_text_chars: 30000
+  canary_fraction: 0.0
+  holdout_fraction: 0.0
+  salt: agentflow-phase-routing-canary-v1
+  safety_stop:
+    enabled: true
+    window_hours: 24
+    min_samples: 10
+    min_holdout_samples: 5
+    max_error_rate: 0.05
+    max_retry_rate: 0.20
+    max_fallback_rate: 0.20
+    max_latency_regression_ratio: 1.50
+    limit: 500
+
+rules:
 
 - conditions:
     model_pattern: "opus"
