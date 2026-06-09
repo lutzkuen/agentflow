@@ -642,6 +642,7 @@ old_context_summarization:
   keep_recent_turns: 2
   max_summary_chars: 1000
   max_source_chars: 20000
+  block_tool_protocol: false
 """,
                 encoding="utf-8",
             )
@@ -810,6 +811,229 @@ old_context_summarization:
             self.assertEqual(summarized["system"][0], {"type": "text", "text": "Original system instruction."})
             self.assertIn("compact summary", summarized["system"][1]["text"])
             self.assertEqual(summarized["messages"], [{"role": "user", "content": "recent"}])
+
+    def test_old_context_summarization_canary_applies_and_holds_out_without_raw_metadata(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            secret = "secret old context must not be stored in metadata"
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  rule_id: test-old-summary
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 2
+  keep_recent_turns: 1
+  max_summary_chars: 1000
+  max_source_chars: 20000
+  canary:
+    enabled: true
+    fraction: 1.0
+    salt: test-salt
+    unit: source_hash
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": (secret + " ") * 20},
+                    {"role": "assistant", "content": "old answer " * 20},
+                    {"role": "user", "content": "recent"},
+                ],
+            }
+            cache = {}
+
+            async def fetch(_request):
+                return {
+                    "summary": "compact durable facts",
+                    "summary_input_tokens": 20,
+                    "summary_output_tokens": 5,
+                    "summary_cost_est_usd": 0.0002,
+                    "summary_status_code": 200,
+                }
+
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=cache.get,
+                set_cached_summary=lambda key, value: cache.__setitem__(key, value),
+                fetch_summary=fetch,
+            ))
+
+            self.assertEqual(meta["status"], "applied")
+            self.assertEqual(meta["canary"]["cohort"], "canary_applied")
+            self.assertTrue(meta["canary"]["selected"])
+            self.assertIn("compact durable facts", summarized["system"][0]["text"])
+            metadata_json = json.dumps(meta)
+            self.assertNotIn(secret, metadata_json)
+            self.assertNotIn("compact durable facts", metadata_json)
+            self.assertFalse(meta["canary"]["raw_context_included"])
+            self.assertFalse(meta["canary"]["raw_summary_included"])
+            self.assertIn("source_hash", meta)
+            self.assertLessEqual(len(meta["source_hash"]), 12)
+
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  rule_id: test-old-summary
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 2
+  keep_recent_turns: 1
+  max_summary_chars: 1000
+  max_source_chars: 20000
+  canary:
+    enabled: true
+    fraction: 0.0
+    salt: test-salt
+    unit: source_hash
+""",
+                encoding="utf-8",
+            )
+            manual = importlib.reload(crunch_module)
+
+            held_out, holdout_meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=cache.get,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=fetch,
+            ))
+
+            self.assertIs(held_out, body)
+            self.assertEqual(holdout_meta["status"], "skipped")
+            self.assertEqual(holdout_meta["reason"], "canary_holdout")
+            self.assertEqual(holdout_meta["canary"]["cohort"], "canary_holdout")
+
+    def test_old_context_summarization_blocks_tool_protocol_context_by_default(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 4
+  keep_recent_turns: 1
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "messages": [
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "file"}]},
+                    {"role": "user", "content": "old plain text " * 20},
+                    {"role": "user", "content": "recent"},
+                ]
+            }
+
+            plan, meta = manual.old_context_summary_plan(body, exact_cache_enabled=False)
+
+            self.assertIsNone(plan)
+            self.assertEqual(meta["status"], "skipped")
+            self.assertEqual(meta["reason"], "tool-protocol-context-blocked")
+
+    def test_old_context_summarization_safety_stop_bypasses_application(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  rule_id: test-old-summary-stop
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 2
+  keep_recent_turns: 1
+  max_summary_chars: 1000
+  max_source_chars: 20000
+  canary:
+    enabled: true
+    fraction: 1.0
+    salt: stop-salt
+    unit: source_hash
+  safety_stop:
+    enabled: true
+    min_outcome_samples: 2
+    window: 10
+    max_error_rate: 0.5
+    max_retry_rate: 1.0
+    max_negative_net_savings_rate: 1.0
+    max_summary_failure_rate: 1.0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            store = Store(str(tmp_path / "calls.sqlite3"))
+            for idx in range(2):
+                store.log_call(
+                    id=f"call-{idx}",
+                    created_at=f"2026-06-09T00:00:0{idx}+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=500,
+                    latency_ms=10,
+                    crunch_json=stable_json({
+                        "old_context_summarization": {
+                            "rule_id": "test-old-summary-stop",
+                            "status": "applied",
+                            "estimated_net_savings_usd": 0.001,
+                            "canary": {
+                                "enabled": True,
+                                "cohort": "canary_applied",
+                            },
+                        }
+                    }),
+                    retry_count=0,
+                )
+
+            async def fail_fetch(_request):
+                raise AssertionError("safety stop should bypass before summary fetch")
+
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": "old text " * 30},
+                    {"role": "assistant", "content": "old answer " * 30},
+                    {"role": "user", "content": "recent"},
+                ],
+            }
+            unchanged, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=fail_fetch,
+                store_obj=store,
+            ))
+
+            self.assertIs(unchanged, body)
+            self.assertEqual(meta["status"], "bypass")
+            self.assertEqual(meta["reason"], manual.LOCAL_CANARY_SAFETY_STOP_REASON)
+            self.assertEqual(meta["safety_stop_state"], "stopped")
+            self.assertGreaterEqual(meta["safety_stop"]["error_rate"], 0.5)
 
 
 if __name__ == "__main__":

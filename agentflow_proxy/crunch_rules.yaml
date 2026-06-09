@@ -13,6 +13,7 @@ old_context_summarization:
   # stats. The summary cache is used when available but exact request caching is
   # not required for eligibility.
   enabled: false
+  rule_id: local-old-context-summarization
   model: claude-haiku-4-5-20251001
   placement: system
   min_request_chars: 32000
@@ -21,6 +22,26 @@ old_context_summarization:
   keep_recent_turns: 4
   max_summary_chars: 4000
   max_source_chars: 80000
+  max_summary_cost_usd: 0.02
+  excluded_categories:
+    - tool-heavy
+    - tool-result
+  block_tool_protocol: true
+  block_thinking: true
+  canary:
+    enabled: false
+    fraction: 1.0
+    salt: ""
+    unit: source_hash
+  safety_stop:
+    enabled: true
+    min_outcome_samples: 5
+    window: 500
+    max_error_rate: 0.1
+    max_retry_rate: 0.25
+    max_negative_net_savings_rate: 0.5
+    max_summary_failure_rate: 0.1
+    max_error_rate_delta: 0.05
 thinking_deduplication:
   enabled: true
   min_chars: 2000

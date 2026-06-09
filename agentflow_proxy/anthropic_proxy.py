@@ -452,6 +452,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 value,
             ),
             fetch_summary=lambda summary_request: _fetch_old_context_summary(context, summary_request, summary_headers),
+            store_obj=context.store,
         )
         summary_extra_cost = float(summary_meta.get("summary_cost_est_usd") or 0.0)
         if summary_meta.get("status") == "applied":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 import yaml
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+from agentflow_proxy.pricing import pricing_basis
 from agentflow_proxy.pattern_rollout import (
     normalize_pattern_rollout,
     pattern_canary_decision,
@@ -46,6 +48,8 @@ def _default_crunch_policy() -> dict[str, Any]:
         },
         "old_context_summarization": {
             "enabled": False,
+            "rule_id": "local-old-context-summarization",
+            "candidate_id": None,
             "model": "claude-haiku-4-5-20251001",
             "placement": "system",
             "min_request_chars": 32000,
@@ -54,6 +58,26 @@ def _default_crunch_policy() -> dict[str, Any]:
             "keep_recent_turns": 4,
             "max_summary_chars": 4000,
             "max_source_chars": 80000,
+            "max_summary_cost_usd": 0.02,
+            "excluded_categories": ["tool-heavy", "tool-result"],
+            "block_tool_protocol": True,
+            "block_thinking": True,
+            "canary": {
+                "enabled": False,
+                "fraction": 1.0,
+                "salt": "",
+                "unit": "source_hash",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 5,
+                "window": 500,
+                "max_error_rate": 0.1,
+                "max_retry_rate": 0.25,
+                "max_negative_net_savings_rate": 0.5,
+                "max_summary_failure_rate": 0.1,
+                "max_error_rate_delta": 0.05,
+            },
         },
         "thinking_deduplication": {
             "enabled": True,
@@ -168,6 +192,10 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
 def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) -> None:
     target = policy["old_context_summarization"]
     target["enabled"] = _as_bool(summary.get("enabled"), target["enabled"])
+    if summary.get("rule_id") is not None:
+        target["rule_id"] = str(summary["rule_id"])
+    if summary.get("candidate_id") is not None:
+        target["candidate_id"] = str(summary["candidate_id"])
     if summary.get("model") is not None:
         target["model"] = str(summary["model"])
     if summary.get("placement") is not None:
@@ -185,6 +213,53 @@ def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) 
     ):
         if summary.get(key) is not None:
             target[key] = int(summary[key])
+    if summary.get("max_summary_cost_usd") is not None:
+        target["max_summary_cost_usd"] = float(summary["max_summary_cost_usd"])
+    if summary.get("excluded_categories") is not None:
+        raw_categories = summary.get("excluded_categories")
+        if isinstance(raw_categories, list):
+            target["excluded_categories"] = [str(item) for item in raw_categories]
+        elif raw_categories in ("", None):
+            target["excluded_categories"] = []
+        else:
+            target["excluded_categories"] = [str(raw_categories)]
+    target["block_tool_protocol"] = _as_bool(summary.get("block_tool_protocol"), target["block_tool_protocol"])
+    target["block_thinking"] = _as_bool(summary.get("block_thinking"), target["block_thinking"])
+    canary = summary.get("canary") or {}
+    if isinstance(canary, dict):
+        target_canary = target["canary"]
+        target_canary["enabled"] = _as_bool(canary.get("enabled"), target_canary["enabled"])
+        for source_key, target_key in (
+            ("fraction", "fraction"),
+            ("rollout_fraction", "fraction"),
+            ("canary_fraction", "fraction"),
+        ):
+            if canary.get(source_key) is not None:
+                target_canary[target_key] = max(0.0, min(1.0, float(canary[source_key])))
+        if canary.get("salt") is not None:
+            target_canary["salt"] = str(canary["salt"])
+        if canary.get("canary_salt") is not None:
+            target_canary["salt"] = str(canary["canary_salt"])
+        if canary.get("unit") is not None:
+            target_canary["unit"] = str(canary["unit"])
+        if canary.get("canary_unit") is not None:
+            target_canary["unit"] = str(canary["canary_unit"])
+    safety = summary.get("safety_stop") or {}
+    if isinstance(safety, dict):
+        target_safety = target["safety_stop"]
+        target_safety["enabled"] = _as_bool(safety.get("enabled"), target_safety["enabled"])
+        for key in ("min_outcome_samples", "window"):
+            if safety.get(key) is not None:
+                target_safety[key] = int(safety[key])
+        for key in (
+            "max_error_rate",
+            "max_retry_rate",
+            "max_negative_net_savings_rate",
+            "max_summary_failure_rate",
+            "max_error_rate_delta",
+        ):
+            if safety.get(key) is not None:
+                target_safety[key] = max(0.0, float(safety[key]))
 
 
 def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: dict[str, Any]) -> None:
@@ -306,6 +381,8 @@ PROMPT_CACHE_MIN_CHARS = int(CRUNCH_POLICY["prompt_cache"]["min_chars"])
 OLD_CONTEXT_SUMMARY_POLICY = CRUNCH_POLICY["old_context_summarization"]
 OLD_CONTEXT_SUMMARY_ENABLED = bool(OLD_CONTEXT_SUMMARY_POLICY["enabled"])
 OLD_CONTEXT_SUMMARY_MODEL = str(OLD_CONTEXT_SUMMARY_POLICY["model"])
+OLD_CONTEXT_SUMMARY_RULE_ID = str(OLD_CONTEXT_SUMMARY_POLICY["rule_id"])
+OLD_CONTEXT_SUMMARY_CANDIDATE_ID = OLD_CONTEXT_SUMMARY_POLICY.get("candidate_id")
 OLD_CONTEXT_SUMMARY_PLACEMENT = str(OLD_CONTEXT_SUMMARY_POLICY["placement"])
 OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["min_request_chars"])
 OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["min_summarized_chars"])
@@ -313,6 +390,10 @@ OLD_CONTEXT_SUMMARY_MAX_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["max_turns"])
 OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS = int(OLD_CONTEXT_SUMMARY_POLICY["keep_recent_turns"])
 OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["max_summary_chars"])
 OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS = int(OLD_CONTEXT_SUMMARY_POLICY["max_source_chars"])
+OLD_CONTEXT_SUMMARY_MAX_COST_USD = float(OLD_CONTEXT_SUMMARY_POLICY["max_summary_cost_usd"])
+OLD_CONTEXT_SUMMARY_EXCLUDED_CATEGORIES = {str(item) for item in OLD_CONTEXT_SUMMARY_POLICY["excluded_categories"]}
+OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL = bool(OLD_CONTEXT_SUMMARY_POLICY["block_tool_protocol"])
+OLD_CONTEXT_SUMMARY_BLOCK_THINKING = bool(OLD_CONTEXT_SUMMARY_POLICY["block_thinking"])
 THINKING_DEDUP_POLICY = CRUNCH_POLICY["thinking_deduplication"]
 THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
 THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
@@ -1052,6 +1133,8 @@ def _summary_base_meta(status: str, reason: str) -> dict[str, Any]:
         "changed": False,
         "policy_source": CRUNCH_POLICY_SOURCE,
         "rule_path": CRUNCH_RULES_PATH,
+        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
+        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
         "model": OLD_CONTEXT_SUMMARY_MODEL,
         "placement": OLD_CONTEXT_SUMMARY_PLACEMENT,
         "min_request_chars": OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS,
@@ -1060,7 +1143,51 @@ def _summary_base_meta(status: str, reason: str) -> dict[str, Any]:
         "keep_recent_turns": OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS,
         "max_summary_chars": OLD_CONTEXT_SUMMARY_MAX_SUMMARY_CHARS,
         "max_source_chars": OLD_CONTEXT_SUMMARY_MAX_SOURCE_CHARS,
+        "max_summary_cost_usd": OLD_CONTEXT_SUMMARY_MAX_COST_USD,
+        "excluded_categories": sorted(OLD_CONTEXT_SUMMARY_EXCLUDED_CATEGORIES),
+        "block_tool_protocol": OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL,
+        "block_thinking": OLD_CONTEXT_SUMMARY_BLOCK_THINKING,
+        "canary": _summary_canary_public_meta(),
+        "safety_stop": _summary_safety_public_meta(),
     }
+
+
+def _summary_canary_public_meta() -> dict[str, Any]:
+    canary = OLD_CONTEXT_SUMMARY_POLICY.get("canary") or {}
+    return {
+        "enabled": bool(canary.get("enabled")),
+        "fraction": float(canary.get("fraction", 1.0)),
+        "salt": str(canary.get("salt") or ""),
+        "unit": str(canary.get("unit") or "source_hash"),
+    }
+
+
+def _summary_safety_public_meta() -> dict[str, Any]:
+    safety = OLD_CONTEXT_SUMMARY_POLICY.get("safety_stop") or {}
+    return {
+        "enabled": bool(safety.get("enabled", True)),
+        "min_outcome_samples": int(safety.get("min_outcome_samples", 5)),
+        "window": int(safety.get("window", 500)),
+        "max_error_rate": float(safety.get("max_error_rate", 0.1)),
+        "max_retry_rate": float(safety.get("max_retry_rate", 0.25)),
+        "max_negative_net_savings_rate": float(safety.get("max_negative_net_savings_rate", 0.5)),
+        "max_summary_failure_rate": float(safety.get("max_summary_failure_rate", 0.1)),
+        "max_error_rate_delta": float(safety.get("max_error_rate_delta", 0.05)),
+    }
+
+
+def _message_has_tool_protocol(msg: dict[str, Any]) -> bool:
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"} for block in content)
+
+
+def _message_has_thinking(msg: dict[str, Any]) -> bool:
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "thinking" for block in content)
 
 
 def _non_tool_message_text(msg: dict[str, Any]) -> str | None:
@@ -1095,18 +1222,42 @@ def old_context_summary_plan(
         return None, _summary_base_meta("skipped", "disabled")
 
     before_chars = len(stable_json(body))
+    category = _crunch_request_category(body)
+    if category in OLD_CONTEXT_SUMMARY_EXCLUDED_CATEGORIES:
+        meta = _summary_base_meta("skipped", "excluded-category")
+        meta["before_chars"] = before_chars
+        meta["category"] = category
+        return None, meta
+
     if before_chars < OLD_CONTEXT_SUMMARY_MIN_REQUEST_CHARS:
         meta = _summary_base_meta("skipped", "request-too-small")
         meta["before_chars"] = before_chars
+        meta["category"] = category
         return None, meta
 
     messages = body.get("messages") or []
     if not isinstance(messages, list) or len(messages) <= OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS:
         meta = _summary_base_meta("skipped", "not-enough-old-turns")
         meta["before_chars"] = before_chars
+        meta["category"] = category
         return None, meta
 
     old_limit = max(0, len(messages) - OLD_CONTEXT_SUMMARY_KEEP_RECENT_TURNS)
+    if OLD_CONTEXT_SUMMARY_BLOCK_TOOL_PROTOCOL and any(
+        isinstance(msg, dict) and _message_has_tool_protocol(msg) for msg in messages[:old_limit]
+    ):
+        meta = _summary_base_meta("skipped", "tool-protocol-context-blocked")
+        meta["before_chars"] = before_chars
+        meta["category"] = category
+        return None, meta
+    if OLD_CONTEXT_SUMMARY_BLOCK_THINKING and any(
+        isinstance(msg, dict) and _message_has_thinking(msg) for msg in messages[:old_limit]
+    ):
+        meta = _summary_base_meta("skipped", "thinking-context-blocked")
+        meta["before_chars"] = before_chars
+        meta["category"] = category
+        return None, meta
+
     candidates: list[dict[str, Any]] = []
     source_parts: list[str] = []
     total_chars = 0
@@ -1136,6 +1287,7 @@ def old_context_summary_plan(
     if total_chars < OLD_CONTEXT_SUMMARY_MIN_SUMMARIZED_CHARS or not candidates:
         meta = _summary_base_meta("skipped", "eligible-context-too-small")
         meta["before_chars"] = before_chars
+        meta["category"] = category
         meta["eligible_turns"] = len(candidates)
         meta["eligible_chars"] = total_chars
         return None, meta
@@ -1173,10 +1325,12 @@ def old_context_summary_plan(
         "eligible_chars": total_chars,
         "source_truncated": source_truncated,
         "before_chars": before_chars,
+        "category": category,
     }
     meta = _summary_base_meta("planned", "eligible")
     meta.update({
         "before_chars": before_chars,
+        "category": category,
         "eligible_turns": len(candidates),
         "eligible_chars": total_chars,
         "source_hash": source_hash[:12],
@@ -1231,6 +1385,250 @@ def apply_old_context_summary(body: dict[str, Any], plan: dict[str, Any], summar
     return new_body
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    public = _summary_canary_public_meta()
+    base: dict[str, Any] = {
+        "schema": "agentflow.old_context_summary_canary_decision.v1",
+        "enabled": public["enabled"],
+        "selected": True,
+        "status": "full",
+        "cohort": "full",
+        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
+        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
+        "source_hash": str(plan.get("source_hash") or "")[:12],
+        "raw_context_included": False,
+        "raw_summary_included": False,
+    }
+    if not public["enabled"]:
+        return base
+
+    fraction = max(0.0, min(1.0, float(public["fraction"])))
+    unit = str(public["unit"] or "source_hash")
+    request_hash = sha256_text(stable_json(body))
+    if unit == "request_fingerprint":
+        unit_value = request_hash
+    elif unit == "category":
+        unit_value = str(plan.get("category") or _crunch_request_category(body))
+    else:
+        unit = "source_hash"
+        unit_value = str(plan.get("source_hash") or "")
+    basis = {
+        "unit": unit,
+        "unit_hash": sha256_text(unit_value)[:16],
+        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
+        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
+        "source_hash": str(plan.get("source_hash") or "")[:12],
+        "category": str(plan.get("category") or ""),
+        "requested_model": str(body.get("model") or ""),
+        "eligible_turns": int(plan.get("eligible_turns") or 0),
+        "eligible_chars_bucket": _text_bucket(int(plan.get("eligible_chars") or 0)),
+        "request_chars_bucket": _text_bucket(int(plan.get("before_chars") or 0)),
+    }
+    material = {"salt": str(public["salt"] or ""), "basis": basis}
+    digest = hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+    bucket = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    selected = bucket < fraction
+    base.update({
+        "selected": selected,
+        "status": "applied" if selected else "holdout",
+        "cohort": "canary_applied" if selected else "canary_holdout",
+        "reason": None if selected else "canary_holdout",
+        "fraction": fraction,
+        "salt": str(public["salt"] or ""),
+        "unit": unit,
+        "bucket": round(bucket, 8),
+        "threshold": fraction,
+        "cohort_key_hash": "sha256:" + hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest(),
+    })
+    return base
+
+
+def _json_obj(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _summary_meta_from_crunch_json(raw: Any) -> dict[str, Any]:
+    crunch_meta = _json_obj(raw)
+    summary_meta = crunch_meta.get("old_context_summarization")
+    return summary_meta if isinstance(summary_meta, dict) else {}
+
+
+def _is_summary_canary_selected(meta: dict[str, Any]) -> bool:
+    canary = meta.get("canary")
+    return isinstance(canary, dict) and bool(canary.get("enabled")) and str(canary.get("cohort")) == "canary_applied"
+
+
+def _is_summary_canary_holdout(meta: dict[str, Any]) -> bool:
+    canary = meta.get("canary")
+    return isinstance(canary, dict) and bool(canary.get("enabled")) and str(canary.get("cohort")) == "canary_holdout"
+
+
+def _summary_failure(meta: dict[str, Any]) -> bool:
+    status = str(meta.get("status") or "")
+    reason = str(meta.get("reason") or "")
+    status_code = meta.get("summary_status_code")
+    try:
+        if status_code is not None and int(status_code) >= 400:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return reason in {"summary-empty", "summary-cost-too-high"} or status == "error"
+
+
+def _rate(count: int, total: int) -> float:
+    return (count / total) if total else 0.0
+
+
+def evaluate_old_context_summary_safety_stop(store_obj: Any | None) -> dict[str, Any] | None:
+    safety = _summary_safety_public_meta()
+    if not safety["enabled"]:
+        return None
+    if store_obj is None or not hasattr(store_obj, "conn"):
+        return None
+    window = max(1, min(int(safety["window"]), 10_000))
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select status_code, retry_count, crunch_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (window,),
+        ).fetchall()
+    except Exception:
+        return None
+
+    applied = {"samples": 0, "errors": 0, "retries": 0, "negative_net_savings": 0, "summary_failures": 0}
+    holdout = {"samples": 0, "errors": 0, "retries": 0}
+    baseline = {"samples": 0, "errors": 0, "retries": 0}
+    for row in rows:
+        row_dict = dict(row)
+        meta = _summary_meta_from_crunch_json(row_dict.get("crunch_json"))
+        status_code = row_dict.get("status_code")
+        retry_count = row_dict.get("retry_count")
+        errored = False
+        retried = False
+        try:
+            errored = status_code is not None and int(status_code) >= 400
+        except (TypeError, ValueError):
+            errored = False
+        try:
+            retried = retry_count is not None and int(retry_count) > 0
+        except (TypeError, ValueError):
+            retried = False
+        if not meta or str(meta.get("rule_id") or "") != OLD_CONTEXT_SUMMARY_RULE_ID:
+            baseline["samples"] += 1
+            baseline["errors"] += int(errored)
+            baseline["retries"] += int(retried)
+            continue
+        is_applied = _is_summary_canary_selected(meta)
+        is_holdout = _is_summary_canary_holdout(meta)
+        if not is_applied and not is_holdout:
+            baseline["samples"] += 1
+            baseline["errors"] += int(errored)
+            baseline["retries"] += int(retried)
+            continue
+        if is_applied:
+            applied["samples"] += 1
+            applied["errors"] += int(errored)
+            applied["retries"] += int(retried)
+            applied["summary_failures"] += int(_summary_failure(meta))
+            try:
+                applied["negative_net_savings"] += int(float(meta.get("estimated_net_savings_usd") or 0.0) < 0.0)
+            except (TypeError, ValueError):
+                pass
+        elif is_holdout:
+            holdout["samples"] += 1
+            holdout["errors"] += int(errored)
+            holdout["retries"] += int(retried)
+
+    samples = applied["samples"]
+    min_samples = max(1, int(safety["min_outcome_samples"]))
+    if samples < min_samples:
+        return None
+
+    applied_error_rate = _rate(applied["errors"], samples)
+    applied_retry_rate = _rate(applied["retries"], samples)
+    negative_net_rate = _rate(applied["negative_net_savings"], samples)
+    summary_failure_rate = _rate(applied["summary_failures"], samples)
+    holdout_error_rate = _rate(holdout["errors"], holdout["samples"])
+    baseline_error_rate = _rate(baseline["errors"], baseline["samples"])
+    triggers: list[dict[str, Any]] = []
+    if applied_error_rate >= float(safety["max_error_rate"]):
+        triggers.append({"metric": "error_rate", "value": round(applied_error_rate, 4), "threshold": safety["max_error_rate"]})
+    if holdout["samples"] >= min_samples and (applied_error_rate - holdout_error_rate) >= float(safety["max_error_rate_delta"]):
+        triggers.append({
+            "metric": "error_rate_delta_vs_holdout",
+            "value": round(applied_error_rate - holdout_error_rate, 4),
+            "threshold": safety["max_error_rate_delta"],
+        })
+    if baseline["samples"] >= min_samples and (applied_error_rate - baseline_error_rate) >= float(safety["max_error_rate_delta"]):
+        triggers.append({
+            "metric": "error_rate_delta_vs_recent_baseline",
+            "value": round(applied_error_rate - baseline_error_rate, 4),
+            "threshold": safety["max_error_rate_delta"],
+        })
+    if applied_retry_rate >= float(safety["max_retry_rate"]):
+        triggers.append({"metric": "retry_rate", "value": round(applied_retry_rate, 4), "threshold": safety["max_retry_rate"]})
+    if negative_net_rate >= float(safety["max_negative_net_savings_rate"]):
+        triggers.append({
+            "metric": "negative_net_savings_rate",
+            "value": round(negative_net_rate, 4),
+            "threshold": safety["max_negative_net_savings_rate"],
+        })
+    if summary_failure_rate >= float(safety["max_summary_failure_rate"]):
+        triggers.append({
+            "metric": "summary_failure_rate",
+            "value": round(summary_failure_rate, 4),
+            "threshold": safety["max_summary_failure_rate"],
+        })
+    if not triggers:
+        return None
+    return {
+        "schema": "agentflow.old_context_summary_safety_stop.v1",
+        "stopped": True,
+        "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+        "rule_id": OLD_CONTEXT_SUMMARY_RULE_ID,
+        "candidate_id": str(OLD_CONTEXT_SUMMARY_CANDIDATE_ID) if OLD_CONTEXT_SUMMARY_CANDIDATE_ID is not None else None,
+        "sample_count": samples,
+        "holdout_sample_count": holdout["samples"],
+        "baseline_sample_count": baseline["samples"],
+        "error_count": applied["errors"],
+        "retry_count": applied["retries"],
+        "negative_net_savings_count": applied["negative_net_savings"],
+        "summary_failure_count": applied["summary_failures"],
+        "error_rate": round(applied_error_rate, 4),
+        "holdout_error_rate": round(holdout_error_rate, 4),
+        "baseline_error_rate": round(baseline_error_rate, 4),
+        "retry_rate": round(applied_retry_rate, 4),
+        "negative_net_savings_rate": round(negative_net_rate, 4),
+        "summary_failure_rate": round(summary_failure_rate, 4),
+        "min_outcome_samples": min_samples,
+        "window": window,
+        "triggers": triggers,
+        "raw_payload_included": False,
+    }
+
+
+def _summary_input_savings_usd(model: str, tokens_saved: int) -> float:
+    basis = pricing_basis(model or "claude-sonnet-4-6", provider="anthropic")
+    input_price = float(basis.get("input_usd_per_million") or 0.0)
+    return (max(0, int(tokens_saved)) / 1_000_000.0) * input_price
+
+
 async def maybe_summarize_old_context(
     body: dict[str, Any],
     *,
@@ -1238,9 +1636,32 @@ async def maybe_summarize_old_context(
     get_cached_summary: Any,
     set_cached_summary: Any,
     fetch_summary: Any,
+    store_obj: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     plan, meta = old_context_summary_plan(body, exact_cache_enabled=exact_cache_enabled)
     if plan is None:
+        return body, meta
+
+    canary = _summary_canary_decision(body, plan)
+    meta["canary"] = canary
+    if canary.get("enabled") and not canary.get("selected"):
+        meta.update({
+            "status": "skipped",
+            "reason": "canary_holdout",
+            "changed": False,
+        })
+        return body, meta
+
+    safety_stop = evaluate_old_context_summary_safety_stop(store_obj)
+    if safety_stop:
+        meta.update({
+            "status": "bypass",
+            "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+            "changed": False,
+            "safety_stop_state": "stopped",
+            "safety_stop": safety_stop,
+        })
+        log_pattern_canary_safety_stop(safety_stop)
         return body, meta
 
     cached = get_cached_summary(plan["cache_key"])
@@ -1263,6 +1684,19 @@ async def maybe_summarize_old_context(
                     if key in fetch_result:
                         meta[key] = fetch_result[key]
             return body, meta
+        summary_cost = 0.0
+        if isinstance(fetch_result, dict):
+            try:
+                summary_cost = float(fetch_result.get("summary_cost_est_usd") or 0.0)
+            except (TypeError, ValueError):
+                summary_cost = 0.0
+        if summary_cost > OLD_CONTEXT_SUMMARY_MAX_COST_USD:
+            meta.update({
+                "status": "skipped",
+                "reason": "summary-cost-too-high",
+                "summary_cost_est_usd": summary_cost,
+            })
+            return body, meta
         set_cached_summary(plan["cache_key"], {
             "summary": summary,
             "usage": fetch_result.get("usage") if isinstance(fetch_result, dict) else None,
@@ -1270,13 +1704,23 @@ async def maybe_summarize_old_context(
 
     summarized = apply_old_context_summary(body, plan, summary)
     after_chars = len(stable_json(summarized))
+    tokens_saved_est = (plan["before_chars"] - after_chars) // TOKEN_CHARS
+    summary_cost_est = 0.0
+    if isinstance(fetch_result, dict):
+        try:
+            summary_cost_est = float(fetch_result.get("summary_cost_est_usd") or 0.0)
+        except (TypeError, ValueError):
+            summary_cost_est = 0.0
+    estimated_gross_savings = _summary_input_savings_usd(str(body.get("model") or ""), tokens_saved_est)
     meta.update({
         "status": "applied",
         "reason": "summary-cache-hit" if summary_cache_hit else "summary-created",
         "changed": after_chars != plan["before_chars"],
         "after_chars": after_chars,
         "saved_chars": plan["before_chars"] - after_chars,
-        "tokens_saved_est": (plan["before_chars"] - after_chars) // TOKEN_CHARS,
+        "tokens_saved_est": tokens_saved_est,
+        "estimated_gross_savings_usd": round(estimated_gross_savings, 8),
+        "estimated_net_savings_usd": round(estimated_gross_savings - summary_cost_est, 8),
         "summary_cache_hit": summary_cache_hit,
         "summary_chars": len(summary),
     })
