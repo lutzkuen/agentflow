@@ -20,6 +20,7 @@ from agentflow_proxy.store import utc_now
 
 OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA = "agentflow.optimization_rollout_actions.v1"
 OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "agentflow.optimization_rollout_action.v1"
+OPTIMIZATION_ROLLOUT_OMITTED_ACTION_SCHEMA = "agentflow.optimization_rollout_omitted_action.v1"
 OPTIMIZATION_ROLLOUT_ACTION_REVIEW_SCHEMA = "agentflow.optimization_rollout_actions_review.v1"
 OPTIMIZATION_ROLLOUT_ACTION_VALIDATION_SCHEMA = "agentflow.optimization_rollout_actions_validation.v1"
 OPTIMIZATION_ROLLOUT_ACTION_PROVENANCE_SCHEMA = "agentflow.optimization_rollout_actions_provenance_verification.v1"
@@ -292,6 +293,32 @@ def _local_eval_verdict(action: dict[str, Any]) -> dict[str, Any] | None:
     return verdict if isinstance(verdict, dict) else None
 
 
+def _validate_compatibility(
+    value: Any,
+    path: str,
+    errors: list[dict[str, str]],
+    *,
+    family: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        _add_error(errors, path, "local executor compatibility contract is required")
+        return {}
+    if not isinstance(value.get("minimum_local_client_version"), str) or not value.get("minimum_local_client_version").strip():
+        _add_error(errors, f"{path}.minimum_local_client_version", "expected non-empty string")
+    elif not _minimum_version_compatible(value.get("minimum_local_client_version")):
+        _add_error(errors, f"{path}.minimum_local_client_version", "minimum local client version is newer than this package")
+    if value.get("compatible") is False:
+        _add_error(errors, f"{path}.compatible", "managed bundle reports local executor incompatibility")
+    elif value.get("compatible") is not True:
+        _add_error(errors, f"{path}.compatible", "expected true")
+    supported = value.get("supported_local_action_families")
+    if not isinstance(supported, list) or not supported:
+        _add_error(errors, f"{path}.supported_local_action_families", "expected non-empty list")
+    elif family and family not in {str(item) for item in supported}:
+        _add_error(errors, f"{path}.supported_local_action_families", "action family is not supported by compatibility contract")
+    return value
+
+
 def _validate_action(action: Any, path: str, errors: list[dict[str, str]], *, now: datetime) -> None:
     if not isinstance(action, dict):
         _add_error(errors, path, "expected optimization rollout action object")
@@ -318,14 +345,7 @@ def _validate_action(action: Any, path: str, errors: list[dict[str, str]], *, no
         _add_error(errors, f"{path}.expires_at", "expected ISO-8601 timestamp string")
     elif expires_at <= now:
         _add_error(errors, f"{path}.expires_at", "optimization rollout action is expired")
-    compat = action.get("local_executor_compatibility") if isinstance(action.get("local_executor_compatibility"), dict) else {}
-    if compat.get("compatible") is False:
-        _add_error(errors, f"{path}.local_executor_compatibility.compatible", "managed action reports local executor incompatibility")
-    supported = compat.get("supported_local_action_families")
-    if isinstance(supported, list) and family and family not in {str(item) for item in supported}:
-        _add_error(errors, f"{path}.local_executor_compatibility.supported_local_action_families", "action family is not supported by compatibility contract")
-    if not _minimum_version_compatible(compat.get("minimum_local_client_version")):
-        _add_error(errors, f"{path}.local_executor_compatibility.minimum_local_client_version", "minimum local client version is newer than this package")
+    _validate_compatibility(action.get("local_executor_compatibility"), f"{path}.local_executor_compatibility", errors, family=family)
     verdict = _local_eval_verdict(action)
     if not verdict:
         _add_error(errors, f"{path}.evidence_summary.local_eval_verdict", "local eval verdict evidence is required")
@@ -338,6 +358,26 @@ def _validate_action(action: Any, path: str, errors: list[dict[str, str]], *, no
     for key in ("provider_forwarding", "managed_enforced"):
         if privacy.get(key) is not False:
             _add_error(errors, f"{path}.privacy_summary.{key}", "expected false")
+
+
+def _validate_omitted_action(item: Any, path: str, errors: list[dict[str, str]]) -> None:
+    if not isinstance(item, dict):
+        _add_error(errors, path, "expected omitted optimization rollout action object")
+        return
+    if item.get("schema") != OPTIMIZATION_ROLLOUT_OMITTED_ACTION_SCHEMA:
+        _add_error(errors, f"{path}.schema", f"expected {OPTIMIZATION_ROLLOUT_OMITTED_ACTION_SCHEMA}")
+    if not isinstance(item.get("reason"), str) or not item.get("reason").strip():
+        _add_error(errors, f"{path}.reason", "omitted action reason is required")
+    if not isinstance(item.get("target_candidate_id"), str) or not item.get("target_candidate_id").strip():
+        _add_error(errors, f"{path}.target_candidate_id", "expected non-empty string")
+    family = str(item.get("action_family") or "")
+    if not family:
+        _add_error(errors, f"{path}.action_family", "expected non-empty string")
+    privacy = item.get("privacy_summary") if isinstance(item.get("privacy_summary"), dict) else {}
+    if privacy.get("metadata_only") is not True:
+        _add_error(errors, f"{path}.privacy_summary.metadata_only", "expected true")
+    if privacy.get("feature_only") is not True:
+        _add_error(errors, f"{path}.privacy_summary.feature_only", "expected true")
 
 
 def _max_evidence_age_seconds(bundle: dict[str, Any]) -> int:
@@ -408,11 +448,7 @@ def validate_optimization_rollout_bundle(bundle: Any, *, now: datetime | None = 
     for key in ("provider_forwarding", "managed_enforced"):
         if privacy.get(key) is not False:
             _add_error(errors, f"$.privacy_summary.{key}", "expected false")
-    compat = bundle.get("local_executor_compatibility") if isinstance(bundle.get("local_executor_compatibility"), dict) else {}
-    if compat.get("compatible") is False:
-        _add_error(errors, "$.local_executor_compatibility.compatible", "managed bundle reports local executor incompatibility")
-    if not _minimum_version_compatible(compat.get("minimum_local_client_version")):
-        _add_error(errors, "$.local_executor_compatibility.minimum_local_client_version", "minimum local client version is newer than this package")
+    _validate_compatibility(bundle.get("local_executor_compatibility"), "$.local_executor_compatibility", errors)
     actions = bundle.get("actions")
     if not isinstance(actions, list):
         _add_error(errors, "$.actions", "expected list")
@@ -429,6 +465,14 @@ def validate_optimization_rollout_bundle(bundle: Any, *, now: datetime | None = 
                 now=effective_now,
                 max_age_seconds=max_age_seconds,
             )
+    omitted_actions = bundle.get("omitted_actions")
+    if omitted_actions is None:
+        omitted_actions = []
+    if not isinstance(omitted_actions, list):
+        _add_error(errors, "$.omitted_actions", "expected list")
+        omitted_actions = []
+    for index, item in enumerate(omitted_actions):
+        _validate_omitted_action(item, f"$.omitted_actions[{index}]", errors)
     _scan_raw_like(bundle, "$", errors)
     _privacy_flags_safe(bundle, "$", errors)
     for error in provenance.get("errors", []):

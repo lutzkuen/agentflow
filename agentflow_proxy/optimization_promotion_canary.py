@@ -34,6 +34,41 @@ _COHORT_SAFE_KEYS = (
     "has_tools",
     "stream",
 )
+_RAW_LIKE_KEY_PARTS = (
+    "api_key",
+    "authorization",
+    "cache_key",
+    "command",
+    "content",
+    "credential",
+    "file_path",
+    "message",
+    "param",
+    "prompt",
+    "provider_body",
+    "raw_payload",
+    "raw_request",
+    "raw_response",
+    "request_id",
+    "secret",
+    "session_id",
+    "tool_payload",
+    "transcript",
+)
+_ALLOWED_RAW_LIKE_KEYS = {
+    "raw_prompts_included",
+    "raw_provider_bodies_included",
+    "raw_responses_included",
+    "raw_session_ids_included",
+    "raw_content_included",
+    "request_ids_included",
+    "session_id_hash",
+    "request_fingerprint",
+    "traffic_fingerprint",
+    "apply_preview_command",
+    "review_command",
+    "content_free",
+}
 
 
 def _canonical_json(value: Any) -> str:
@@ -76,6 +111,26 @@ def _safe_cohort_features(metadata: dict[str, Any] | None) -> dict[str, Any]:
         elif isinstance(value, list):
             safe[key] = [item for item in value if isinstance(item, (str, int, float, bool))]
     return safe
+
+
+def _truthy(value: Any) -> bool:
+    return value not in (None, False, 0, "", [], {})
+
+
+def _scan_raw_like(value: Any, path: str, errors: list[dict[str, str]]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            lowered = key_text.lower()
+            child_path = f"{path}.{key_text}" if path else f"$.{key_text}"
+            if lowered not in _ALLOWED_RAW_LIKE_KEYS and any(part in lowered for part in _RAW_LIKE_KEY_PARTS):
+                if _truthy(item):
+                    errors.append({"path": child_path, "message": "raw or local-identifier promotion rollout payloads are not accepted"})
+                    continue
+            _scan_raw_like(item, child_path, errors)
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:300]):
+            _scan_raw_like(item, f"{path}[{index}]", errors)
 
 
 def promotion_canary_decision(
@@ -301,6 +356,8 @@ def apply_optimization_promotion_canaries(
     invalid_sections = sorted(requested_sections - set(_POLICY_SECTION_FILES))
     for section in invalid_sections:
         errors.append({"path": f"$.sections.{section}", "message": "unsupported promotion canary policy section"})
+    if isinstance(bundle, dict):
+        _scan_raw_like(bundle, "$", errors)
 
     if not errors:
         routing_path = config_path / _POLICY_SECTION_FILES["routing"]

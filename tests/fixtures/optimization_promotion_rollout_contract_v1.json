@@ -1,0 +1,411 @@
+{
+  "schema": "agentflow.optimization_promotion_rollout_contract_fixture.v1",
+  "fixture_version": "2026-06-10",
+  "description": "Metadata-only contract fixture shared by local promotion rollout tests and managed optimizer rollout tests.",
+  "managed_rollout_bundle": {
+    "schema": "agentflow.optimization_rollout_actions.v1",
+    "generated_at": "2026-06-10T05:00:00+00:00",
+    "expires_at": "2026-06-11T05:00:00+00:00",
+    "tenant_scope": "current-authenticated-tenant",
+    "summary": {
+      "candidate_count": 3,
+      "action_count": 2,
+      "omitted_count": 1,
+      "managed_enforced": false,
+      "required_local_review": true,
+      "provider_forwarding": false,
+      "server_content_processing": false
+    },
+    "recommendation": {
+      "policy_source": "managed-recommended",
+      "required_local_review": true,
+      "managed_enforced": false,
+      "provider_forwarding": false
+    },
+    "local_executor_compatibility": {
+      "minimum_local_client_version": "0.1.0",
+      "compatible": true,
+      "supported_local_action_families": [
+        "routing",
+        "crunch",
+        "cache",
+        "old_context_summarization"
+      ],
+      "local_review_required": true
+    },
+    "actions": [
+      {
+        "schema": "agentflow.optimization_rollout_action.v1",
+        "action_id": "optimization-rollout-action:fixture-routing",
+        "action_type": "widen",
+        "target_candidate_id": "fixture-routing-candidate",
+        "action_family": "routing",
+        "candidate_family": "provider-routing-rule",
+        "policy_section": "routing",
+        "source_surface": "openai_responses",
+        "provider_endpoint": "responses",
+        "confidence": 0.93,
+        "generated_at": "2026-06-10T05:00:00+00:00",
+        "expires_at": "2026-06-11T05:00:00+00:00",
+        "required_local_review": true,
+        "managed_enforced": false,
+        "local_executor_compatibility": {
+          "minimum_local_client_version": "0.1.0",
+          "compatible": true,
+          "supported_local_action_families": [
+            "routing",
+            "crunch",
+            "cache",
+            "old_context_summarization"
+          ],
+          "local_review_required": true
+        },
+        "evidence_summary": {
+          "local_eval_verdict": {
+            "verdict": "widen",
+            "latest_eval_at": "2026-06-10T04:30:00+00:00",
+            "pass_count": 3,
+            "fail_count": 0,
+            "reason_codes": [
+              "local-eval-widen"
+            ]
+          },
+          "provider_capability": {
+            "capabilities": {
+              "rollout_actions": "supported"
+            }
+          },
+          "sample_count": 3
+        },
+        "action": {
+          "schema": "agentflow.openai_rollout_action.v1",
+          "target_rule_id": "fixture-openai-routing-rule",
+          "proposed_edit": {
+            "rule_id": "fixture-openai-routing-rule",
+            "changed": true,
+            "action": {
+              "route_to": "gpt-5-mini"
+            }
+          }
+        },
+        "privacy_summary": {
+          "metadata_only": true,
+          "feature_only": true,
+          "raw_payloads_returned": false,
+          "raw_prompts_returned": false,
+          "raw_responses_returned": false,
+          "raw_provider_bodies_included": false,
+          "provider_bodies_returned": false,
+          "request_ids_returned": false,
+          "tenant_ids_returned": false,
+          "cache_keys_returned": false,
+          "file_paths_returned": false,
+          "locally_executed": false,
+          "provider_forwarding": false,
+          "managed_enforced": false
+        }
+      },
+      {
+        "schema": "agentflow.optimization_rollout_action.v1",
+        "action_id": "optimization-rollout-action:fixture-cache",
+        "action_type": "hold",
+        "target_candidate_id": "fixture-cache-candidate",
+        "action_family": "cache",
+        "candidate_family": "cache-replay-rule",
+        "policy_section": "cache",
+        "source_surface": "openai_responses",
+        "provider_endpoint": "responses",
+        "confidence": 0.88,
+        "generated_at": "2026-06-10T05:00:00+00:00",
+        "expires_at": "2026-06-11T05:00:00+00:00",
+        "required_local_review": true,
+        "managed_enforced": false,
+        "local_executor_compatibility": {
+          "minimum_local_client_version": "0.1.0",
+          "compatible": true,
+          "supported_local_action_families": [
+            "routing",
+            "crunch",
+            "cache",
+            "old_context_summarization"
+          ],
+          "local_review_required": true
+        },
+        "evidence_summary": {
+          "local_eval_verdict": {
+            "verdict": "widen",
+            "latest_eval_at": "2026-06-10T04:35:00+00:00",
+            "pass_count": 2,
+            "fail_count": 0,
+            "reason_codes": [
+              "local-eval-widen"
+            ]
+          },
+          "sample_count": 2,
+          "replayability_level": "features_only"
+        },
+        "action": {
+          "schema": "agentflow.cache_rollout_action.v1",
+          "target_rule_id": "fixture-cache-replay-rule",
+          "proposed_edit": {
+            "rule_id": "fixture-cache-replay-rule",
+            "changed": true,
+            "action": {
+              "profile": "exact",
+              "allow_tool_calls": false
+            }
+          }
+        },
+        "privacy_summary": {
+          "metadata_only": true,
+          "feature_only": true,
+          "raw_payloads_returned": false,
+          "raw_prompts_returned": false,
+          "raw_responses_returned": false,
+          "raw_provider_bodies_included": false,
+          "provider_bodies_returned": false,
+          "request_ids_returned": false,
+          "tenant_ids_returned": false,
+          "cache_keys_returned": false,
+          "file_paths_returned": false,
+          "locally_executed": false,
+          "provider_forwarding": false,
+          "managed_enforced": false
+        }
+      }
+    ],
+    "omitted_actions": [
+      {
+        "schema": "agentflow.optimization_rollout_omitted_action.v1",
+        "status": "omitted",
+        "reason": "unsupported-local-policy-section",
+        "target_candidate_id": "fixture-unsupported-candidate",
+        "action_family": "prompt_rewrite",
+        "candidate_family": "provider-body-rewrite",
+        "source_surface": "openai_responses",
+        "provider_endpoint": "responses",
+        "privacy_summary": {
+          "metadata_only": true,
+          "feature_only": true,
+          "raw_payloads_returned": false,
+          "raw_prompts_returned": false,
+          "raw_responses_returned": false,
+          "provider_forwarding": false,
+          "managed_enforced": false
+        }
+      }
+    ],
+    "privacy_summary": {
+      "metadata_only": true,
+      "feature_only": true,
+      "raw_payloads_returned": false,
+      "raw_prompts_returned": false,
+      "raw_responses_returned": false,
+      "raw_provider_bodies_included": false,
+      "provider_bodies_returned": false,
+      "request_ids_returned": false,
+      "tenant_ids_returned": false,
+      "cache_keys_returned": false,
+      "file_paths_returned": false,
+      "provider_forwarding": false,
+      "managed_enforced": false
+    }
+  },
+  "promotion_report": {
+    "schema": "agentflow.optimization_promotion_report.v1",
+    "candidates": [
+      {
+        "candidate_id": "fixture-routing-candidate",
+        "optimization_family": "phase_routing",
+        "action_family": "routing",
+        "source_surface": "anthropic_messages",
+        "app_family": "claude_code",
+        "candidate_target_model": "claude-haiku-4-5-20251001",
+        "projected_savings_usd": 0.05,
+        "sample_count": 3,
+        "cohort_counts": {
+          "canary_applied": 1,
+          "canary_holdout": 1,
+          "bypassed_or_disabled": 0
+        },
+        "eval_evidence": {
+          "result_count": 1,
+          "pass_count": 1,
+          "fail_count": 0,
+          "blocked_count": 0,
+          "latest_result_at": "2026-06-10T04:30:00+00:00",
+          "score_summary": {
+            "avg_output_similarity": 0.98,
+            "avg_quality_score": 0.97
+          }
+        },
+        "verdict": "widen",
+        "reason_codes": [
+          "promotion-thresholds-met"
+        ],
+        "privacy": {
+          "raw_prompts_included": false,
+          "raw_responses_included": false,
+          "tool_payloads_included": false,
+          "cache_keys_included": false,
+          "request_ids_included": false,
+          "raw_session_ids_included": false
+        }
+      },
+      {
+        "candidate_id": "fixture-cache-candidate",
+        "optimization_family": "cache_replayability",
+        "action_family": "cache",
+        "source_surface": "anthropic_messages",
+        "app_family": "claude_code",
+        "candidate_profile": "replay-safe-exact-candidate",
+        "projected_savings_usd": 0.03,
+        "sample_count": 2,
+        "cohort_counts": {
+          "canary_applied": 1,
+          "canary_holdout": 1,
+          "bypassed_or_disabled": 0
+        },
+        "eval_evidence": {
+          "result_count": 1,
+          "pass_count": 1,
+          "fail_count": 0,
+          "blocked_count": 0,
+          "latest_result_at": "2026-06-10T04:35:00+00:00"
+        },
+        "verdict": "hold",
+        "reason_codes": [
+          "promotion-thresholds-met"
+        ],
+        "privacy": {
+          "raw_prompts_included": false,
+          "raw_responses_included": false,
+          "tool_payloads_included": false,
+          "cache_keys_included": false,
+          "request_ids_included": false,
+          "raw_session_ids_included": false
+        }
+      },
+      {
+        "candidate_id": "fixture-unsupported-candidate",
+        "optimization_family": "provider_body_rewrite",
+        "action_family": "prompt_rewrite",
+        "source_surface": "openai_responses",
+        "app_family": "generic_openai",
+        "projected_savings_usd": 0.11,
+        "sample_count": 3,
+        "cohort_counts": {
+          "canary_applied": 0,
+          "canary_holdout": 0,
+          "bypassed_or_disabled": 0
+        },
+        "eval_evidence": {
+          "result_count": 1,
+          "pass_count": 1,
+          "fail_count": 0,
+          "blocked_count": 0
+        },
+        "verdict": "widen",
+        "reason_codes": [
+          "server-content-processing-required"
+        ],
+        "privacy": {
+          "raw_prompts_included": false,
+          "raw_responses_included": false,
+          "tool_payloads_included": false,
+          "cache_keys_included": false,
+          "request_ids_included": false,
+          "raw_session_ids_included": false
+        }
+      }
+    ]
+  },
+  "canary_metadata": {
+    "request_fingerprint": "fixture-request-fingerprint",
+    "session_id_hash": "sha256:fixture-session-hash",
+    "source_surface": "anthropic_messages",
+    "app_family": "claude_code",
+    "workflow_phase": "tool-execution",
+    "category": "tool-result",
+    "text_bucket": "2k-8k",
+    "requested_model": "claude-sonnet-4-6",
+    "candidate_target_model": "claude-haiku-4-5-20251001",
+    "has_tools": true,
+    "stream": true
+  },
+  "safety_stop_records": [
+    {
+      "cohort": "canary_applied",
+      "status_code": 500,
+      "error_bucket": "http_5xx"
+    },
+    {
+      "cohort": "canary_applied",
+      "status_code": 400,
+      "error_bucket": "unsupported_model"
+    },
+    {
+      "cohort": "canary_holdout",
+      "status_code": 200
+    }
+  ],
+  "lifecycle_feedback_event": {
+    "event_type": "safety-stop",
+    "occurred_at": "2026-06-10T05:20:00+00:00",
+    "recommendation_id": "promotion-rollout-action:fixture-routing",
+    "bundle_hash": "sha256:fixture-contract-bundle",
+    "policy_sections": [
+      "routing"
+    ],
+    "validation_warning_count": 0,
+    "review_warning_count": 0,
+    "applied_files": [],
+    "local_tool_version": "0.1.0",
+    "metadata": {
+      "schema": "agentflow.rollout_action_lifecycle_metadata.v1",
+      "lifecycle_kind": "optimization_promotion_rollout",
+      "command": "optimization-promotion-canaries-apply",
+      "local_result_status": "ok",
+      "dry_run": false,
+      "read_only": false,
+      "action_count": 1,
+      "planned_action_count": 1,
+      "action_type_counts": {
+        "widen": 1
+      },
+      "policy_section_counts": {
+        "routing": 1
+      },
+      "local_status_counts": {
+        "safety_stopped": 1
+      },
+      "safety_stop_reason_counts": {
+        "error-rate": 1,
+        "provider-5xx-rate": 1,
+        "unsupported-model-errors": 1
+      },
+      "action_ids": [
+        "promotion-rollout-action:fixture-routing"
+      ],
+      "candidate_ids": [
+        "fixture-routing-candidate"
+      ],
+      "rule_ids": [
+        "promotion-routing-fixture"
+      ],
+      "privacy": {
+        "metadata_only": true,
+        "raw_prompts_included": false,
+        "raw_messages_included": false,
+        "raw_responses_included": false,
+        "raw_transcripts_included": false,
+        "raw_params_included": false,
+        "tool_payloads_included": false,
+        "request_ids_included": false,
+        "local_session_ids_included": false,
+        "file_paths_included": false,
+        "yaml_contents_included": false
+      }
+    }
+  }
+}
