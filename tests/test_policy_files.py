@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
@@ -62,6 +64,10 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("cache", bundle["policies"])
         self.assertIn("routing_experiments", bundle["policies"])
         self.assertIn("codex_app", bundle["policies"])
+        self.assertIn("openai", bundle["policies"]["routing"])
+        self.assertIn("canary", bundle["policies"]["routing"]["openai"])
+        self.assertFalse(bundle["policies"]["routing"]["openai"]["canary"]["enabled"])
+        self.assertEqual(bundle["policies"]["routing"]["openai"]["rule_path"], bundle["policies"]["routing"]["rule_path"])
         self.assertEqual(bundle["policies"]["crunch"]["pattern_rules"], [])
         self.assertFalse(bundle["policies"]["codex_app"]["review_only"])
         self.assertEqual(bundle["policies"]["codex_app"]["policy_source"], "local-default")
@@ -245,6 +251,60 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertIn("$.policies.crunch.thinking_deduplication.similarity_threshold", paths)
         self.assertIn("$.policies.cache.semantic_cache.threshold", paths)
         self.assertIn("$.policies.cache.file_watch.max_paths", paths)
+
+    def test_policy_bundle_validation_rejects_unsafe_openai_canary_policy(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["routing"]["openai"]["canary"] = {
+            "enabled": True,
+            "policy_id": "unsafe-openai-canary",
+            "model_pattern": "gpt-5",
+            "target_model": "claude-haiku-4-5-20251001",
+            "eligible_categories": ["unknown-category"],
+            "excluded_categories": ["chat"],
+            "canary_fraction": 0.8,
+            "holdout_fraction": 0.4,
+            "raw_prompt": "must never be accepted",
+        }
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertFalse(result["ok"])
+        paths = {error["path"] for error in result["errors"]}
+        self.assertIn("$.policies.routing.openai.canary.target_model", paths)
+        self.assertIn("$.policies.routing.openai.canary.eligible_categories[0]", paths)
+        self.assertIn("$.policies.routing.openai.canary.raw_prompt", paths)
+        self.assertIn("$.policies.routing.openai.canary", paths)
+
+    def test_apply_policy_bundle_writes_openai_canary_to_routing_yaml(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["routing"]["openai"]["canary"] = {
+            "enabled": True,
+            "policy_id": "reviewed-openai-canary",
+            "model_pattern": "gpt-5",
+            "target_model": "gpt-5.4-mini",
+            "eligible_categories": ["chat"],
+            "excluded_categories": [],
+            "allow_tools": False,
+            "allow_stream": False,
+            "min_text_chars": 0,
+            "max_text_chars": 8000,
+            "min_input_tokens_est": 0,
+            "max_input_tokens_est": 2000,
+            "canary_fraction": 0.1,
+            "holdout_fraction": 0.1,
+            "salt": "reviewed-openai-canary-salt",
+            "safety_stop": {"enabled": False},
+        }
+
+        with TemporaryDirectory() as tmp:
+            result = apply_policy_bundle(bundle, config_dir=tmp, dry_run=False)
+            data = yaml.safe_load((Path(tmp) / "routing_rules.yaml").read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(data["openai_canary"]["policy_id"], "reviewed-openai-canary")
+        self.assertEqual(data["openai_canary"]["target_model"], "gpt-5.4-mini")
+        self.assertEqual(data["openai_canary"]["canary_fraction"], 0.1)
+        self.assertEqual(data["openai_canary"]["holdout_fraction"], 0.1)
 
     def test_policy_bundle_validation_accepts_reviewable_codex_app_policy(self):
         bundle = asyncio.run(build_policy_bundle())

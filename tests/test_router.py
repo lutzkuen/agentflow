@@ -307,6 +307,135 @@ rules:
         finally:
             importlib.reload(router_module)
 
+    def test_openai_file_canary_applies_without_env_flag(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+openai_canary:
+  enabled: true
+  policy_id: test-openai-canary
+  model_pattern: gpt-5
+  target_model: gpt-5.4-mini
+  eligible_categories:
+    - chat
+    - short-completion
+  excluded_categories: []
+  allow_tools: false
+  allow_stream: false
+  min_text_chars: 0
+  max_text_chars: 8000
+  min_input_tokens_est: 0
+  max_input_tokens_est: 2000
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  salt: test-openai-routing-canary
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                    manual_router = importlib.reload(router_module)
+
+                    routed, meta = manual_router.route_openai_model({
+                        "model": "gpt-5.4",
+                        "input": "summarize the recent result",
+                    })
+
+                    self.assertEqual(routed, "gpt-5.4-mini")
+                    self.assertTrue(meta["enabled"])
+                    self.assertEqual(meta["provider"], "openai")
+                    self.assertEqual(meta["policy_source"], "local-manual")
+                    self.assertEqual(meta["openai_canary"]["status"], "applied")
+                    self.assertEqual(meta["openai_canary"]["cohort"], "canary_applied")
+            finally:
+                importlib.reload(router_module)
+
+    def test_openai_file_canary_holdout_is_deterministic(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+openai_canary:
+  enabled: true
+  policy_id: test-openai-holdout
+  model_pattern: gpt-5
+  target_model: gpt-5.4-mini
+  eligible_categories:
+    - chat
+    - short-completion
+  excluded_categories: []
+  canary_fraction: 0.0
+  holdout_fraction: 1.0
+  salt: test-openai-routing-holdout
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                    manual_router = importlib.reload(router_module)
+
+                    routed_1, meta_1 = manual_router.route_openai_model({
+                        "model": "gpt-5.4",
+                        "input": "summarize the recent result",
+                    })
+                    routed_2, meta_2 = manual_router.route_openai_model({
+                        "model": "gpt-5.4",
+                        "input": "summarize the recent result",
+                    })
+
+                    self.assertEqual(routed_1, "gpt-5.4")
+                    self.assertEqual(routed_2, "gpt-5.4")
+                    self.assertEqual(meta_1["openai_canary"], meta_2["openai_canary"])
+                    self.assertEqual(meta_1["openai_canary"]["status"], "holdout")
+                    self.assertEqual(meta_1["openai_canary"]["cohort"], "canary_holdout")
+            finally:
+                importlib.reload(router_module)
+
+    def test_openai_file_canary_not_selected_keeps_requested_model(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "routing_rules.yaml"
+            rules_path.write_text(
+                """
+openai_canary:
+  enabled: true
+  policy_id: test-openai-not-selected
+  model_pattern: gpt-5
+  target_model: gpt-5.4-mini
+  eligible_categories:
+    - chat
+    - short-completion
+  excluded_categories: []
+  canary_fraction: 0.0
+  holdout_fraction: 0.0
+  salt: test-openai-routing-not-selected
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                encoding="utf-8",
+            )
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_ROUTING_RULES": str(rules_path)}, clear=False):
+                    manual_router = importlib.reload(router_module)
+
+                    routed, meta = manual_router.route_openai_model({
+                        "model": "gpt-5.4",
+                        "input": "summarize the recent result",
+                    })
+
+                    self.assertEqual(routed, "gpt-5.4")
+                    self.assertEqual(meta["openai_canary"]["status"], "not_selected")
+                    self.assertEqual(meta["openai_canary"]["cohort"], "skipped")
+            finally:
+                importlib.reload(router_module)
+
     def test_small_non_tool_sonnet_routes_to_haiku_under_10000_chars(self):
         body = {
             "model": SONNET_DEFAULT,

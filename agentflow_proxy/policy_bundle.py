@@ -526,6 +526,93 @@ _ROUTING_CONDITION_KEYS = {
     "workflow_phase",
 }
 
+_ROUTING_CATEGORY_VALUES = {
+    "tool-result",
+    "tool-heavy",
+    "tool-light",
+    "long-context",
+    "short-completion",
+    "code-gen",
+    "chat",
+}
+
+
+def _reject_raw_payload_fields(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if _summary_raw_payload_key(key):
+                _add_error(errors, child_path, "raw or prompt-like provider payloads are not accepted")
+            _reject_raw_payload_fields(child, errors, child_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_raw_payload_fields(item, errors, f"{path}[{index}]")
+
+
+def _validate_openai_target_model(errors: list[dict[str, str]], path: str, value: Any) -> None:
+    _validate_non_empty_string(errors, path, value)
+    if not isinstance(value, str) or not value.strip():
+        return
+    lowered = value.strip().lower()
+    if lowered.startswith("claude-") or any(part in lowered for part in ("haiku", "sonnet", "opus")):
+        _add_error(errors, path, "OpenAI routing canary target_model must stay inside the OpenAI provider family")
+        return
+    if not (lowered.startswith(("gpt-", "o", "text-", "computer-use-", "codex")) or "gpt" in lowered):
+        _add_error(errors, path, "unsupported OpenAI target model")
+
+
+def _validate_category_list(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        _add_error(errors, path, "expected string or list of strings")
+        return
+    for index, item in enumerate(values):
+        item_path = path if isinstance(value, str) else f"{path}[{index}]"
+        _validate_non_empty_string(errors, item_path, item)
+        if isinstance(item, str) and item not in _ROUTING_CATEGORY_VALUES:
+            _add_error(errors, item_path, "unknown routing category")
+
+
+def _validate_openai_canary_policy(canary: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    base = "$.policies.routing.openai.canary"
+    _reject_raw_payload_fields(canary, errors, base)
+    if "enabled" in canary:
+        _validate_boolish(errors, f"{base}.enabled", canary["enabled"])
+    for key in ("policy_id", "model_pattern", "salt"):
+        if key in canary and canary[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"{base}.{key}", canary[key])
+    if "target_model" in canary:
+        _validate_openai_target_model(errors, f"{base}.target_model", canary["target_model"])
+    for key in ("eligible_categories", "excluded_categories"):
+        if key in canary:
+            _validate_category_list(canary[key], errors, f"{base}.{key}")
+    for key in ("allow_tools", "allow_stream"):
+        if key in canary:
+            _validate_boolish(errors, f"{base}.{key}", canary[key])
+    for key in ("min_text_chars", "max_text_chars", "min_input_tokens_est", "max_input_tokens_est"):
+        if key in canary:
+            _validate_intish(errors, f"{base}.{key}", canary[key], min_value=0)
+    for key in ("canary_fraction", "rollout_fraction", "holdout_fraction"):
+        if key in canary:
+            _validate_floatish(errors, f"{base}.{key}", canary[key], min_value=0.0, max_value=1.0)
+    canary_fraction = canary.get("canary_fraction", canary.get("rollout_fraction", 0.0))
+    holdout_fraction = canary.get("holdout_fraction", 0.0)
+    if _is_floatish(canary_fraction) and _is_floatish(holdout_fraction):
+        if _float_value(canary_fraction) + _float_value(holdout_fraction) > 1.0:
+            _add_error(errors, base, "canary_fraction plus holdout_fraction must be <= 1.0")
+    safety = _validate_object_field(canary, base, "safety_stop", errors)
+    if "enabled" in safety:
+        _validate_boolish(errors, f"{base}.safety_stop.enabled", safety["enabled"])
+    for key in ("window_hours", "min_samples", "min_holdout_samples", "limit"):
+        if key in safety:
+            _validate_intish(errors, f"{base}.safety_stop.{key}", safety[key], min_value=0)
+    for key in ("max_error_rate", "max_retry_rate", "max_fallback_rate", "max_latency_regression_ratio"):
+        if key in safety:
+            _validate_floatish(errors, f"{base}.safety_stop.{key}", safety[key], min_value=0.0)
+
 
 def _validate_routing_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
     if "enabled" in policy:
@@ -561,6 +648,13 @@ def _validate_routing_policy(policy: dict[str, Any], errors: list[dict[str, str]
     for key in ("max_error_rate", "max_retry_rate", "max_fallback_rate", "max_latency_regression_ratio"):
         if key in safety:
             _validate_floatish(errors, f"$.policies.routing.phase_canary.safety_stop.{key}", safety[key], min_value=0.0)
+    openai = _validate_object_field(policy, "$.policies.routing", "openai", errors)
+    openai_canary = _validate_object_field(openai, "$.policies.routing.openai", "canary", errors)
+    if openai_canary:
+        _validate_openai_canary_policy(openai_canary, errors)
+    top_level_openai_canary = _validate_object_field(policy, "$.policies.routing", "openai_canary", errors)
+    if top_level_openai_canary:
+        _validate_openai_canary_policy(top_level_openai_canary, errors)
     rules = policy.get("rules", [])
     if not isinstance(rules, list):
         _add_error(errors, "$.policies.routing.rules", "expected list")
@@ -3331,6 +3425,11 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
         payload: dict[str, Any] = {"rules": policy.get("rules") if isinstance(policy.get("rules"), list) else []}
         if isinstance(policy.get("phase_canary"), dict):
             payload["phase_canary"] = policy["phase_canary"]
+        openai = policy.get("openai")
+        if isinstance(openai, dict) and isinstance(openai.get("canary"), dict):
+            payload["openai_canary"] = openai["canary"]
+        elif isinstance(policy.get("openai_canary"), dict):
+            payload["openai_canary"] = policy["openai_canary"]
         return payload
     if section == "crunch":
         payload: dict[str, Any] = {}

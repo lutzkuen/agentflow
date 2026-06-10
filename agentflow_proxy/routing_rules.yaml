@@ -56,6 +56,45 @@ phase_canary:
     max_latency_regression_ratio: 1.50
     limit: 500
 
+# Optional behavior-changing OpenAI routing canary. Disabled by default. When
+# enabled in a local manual policy, eligible OpenAI requests are
+# deterministically assigned to applied, holdout, or not-selected cohorts from
+# metadata-only request features. The target model must stay inside the OpenAI
+# provider family.
+openai_canary:
+  enabled: false
+  policy_id: local-openai-routing-canary-v1
+  model_pattern: gpt-5
+  target_model: gpt-5-mini
+  eligible_categories:
+    - chat
+    - short-completion
+  excluded_categories:
+    - tool-result
+    - tool-heavy
+    - tool-light
+    - code-gen
+    - long-context
+  allow_tools: false
+  allow_stream: false
+  min_text_chars: 0
+  max_text_chars: 8000
+  min_input_tokens_est: 0
+  max_input_tokens_est: 2000
+  canary_fraction: 0.0
+  holdout_fraction: 0.0
+  salt: agentflow-openai-routing-canary-v1
+  safety_stop:
+    enabled: true
+    window_hours: 24
+    min_samples: 20
+    min_holdout_samples: 10
+    max_error_rate: 0.03
+    max_retry_rate: 0.10
+    max_fallback_rate: 0.10
+    max_latency_regression_ratio: 1.50
+    limit: 1000
+
 rules:
 
 - conditions:
