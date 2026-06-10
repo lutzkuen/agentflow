@@ -190,6 +190,9 @@ class PostgresConnection:
                     conn.commit()
                 return PostgresResult(rows)
 
+    def commit(self) -> None:
+        return None
+
     def close(self) -> None:
         self.pool.close()
 
@@ -404,6 +407,22 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists optimization_eval_results (
+              id text primary key,
+              run_id text not null,
+              created_at text not null,
+              candidate_id text not null,
+              source_surface text,
+              optimization_family text,
+              action_family text,
+              status_class text not null,
+              reason_codes_json text,
+              score_json text,
+              cost_json text,
+              result_json text not null
+            )
+            """)
+            cur.execute("""
             create index if not exists idx_codex_app_events_start_recent
             on codex_app_events(direction, method, created_at)
             """)
@@ -422,6 +441,10 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_managed_outcome_feedback_due
             on managed_outcome_feedback_queue(status, next_attempt_at, created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_optimization_eval_results_recent
+            on optimization_eval_results(created_at, status_class)
             """)
             self.conn.commit()
 
@@ -876,6 +899,20 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def log_optimization_eval_result(self, **kwargs: Any) -> None:
+        cols = [
+            "id", "run_id", "created_at", "candidate_id", "source_surface",
+            "optimization_family", "action_family", "status_class",
+            "reason_codes_json", "score_json", "cost_json", "result_json",
+        ]
+        values = [kwargs.get(c) for c in cols]
+        with self._lock:
+            self.conn.execute(
+                f"insert into optimization_eval_results({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+                values,
+            )
+            self.conn.commit()
+
 
 class PostgresStore(SQLiteStore):
     backend = "postgres"
@@ -1037,6 +1074,22 @@ class PostgresStore(SQLiteStore):
               sent_at timestamptz
             )
             """,
+            """
+            create table if not exists optimization_eval_results (
+              id text primary key,
+              run_id text not null,
+              created_at timestamptz not null,
+              candidate_id text not null,
+              source_surface text,
+              optimization_family text,
+              action_family text,
+              status_class text not null,
+              reason_codes_json text,
+              score_json text,
+              cost_json text,
+              result_json text not null
+            )
+            """,
         ):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
@@ -1062,6 +1115,10 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_managed_outcome_feedback_due
             on managed_outcome_feedback_queue(status, next_attempt_at, created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_optimization_eval_results_recent
+            on optimization_eval_results(created_at, status_class)
         """)
 
     def set_cache(

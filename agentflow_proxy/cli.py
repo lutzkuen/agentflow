@@ -2372,6 +2372,122 @@ def optimization_eval_plan_cli(argv: Sequence[str] | None = None, *, stdout: Any
     return 0
 
 
+def _read_json_input(path: str, *, stdin: Any = None) -> dict[str, Any]:
+    if path == "-":
+        source = stdin if stdin is not None else sys.stdin
+        return json.loads(source.read())
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def optimization_shadow_eval_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Run opt-in local metadata-only shadow evals from an optimization eval plan")
+    parser.add_argument(
+        "plan",
+        help="Optimization eval plan JSON path, or '-' to read from stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for result records, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--results-jsonl",
+        help="Optional path to write sanitized per-candidate result records as JSONL.",
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Opt in to provider-call execution. Requires --budget-usd > 0; rows without replayable local inputs remain blocked.",
+    )
+    parser.add_argument(
+        "--budget-usd",
+        type=float,
+        default=0.0,
+        help="Maximum provider-call spend allowed when --execute is set. Default 0, which disables execution.",
+    )
+    parser.add_argument(
+        "--min-output-similarity",
+        type=float,
+        default=0.9,
+        help="Minimum offline fixture output similarity/quality score required for a pass verdict, default: 0.9",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=100,
+        help="Maximum plan rows to evaluate, default: 100, max: 1000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    if args.execute and args.budget_usd <= 0:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_shadow_eval_error.v1",
+                "error": {
+                    "type": "missing_budget_cap",
+                    "message": "--execute requires --budget-usd greater than 0",
+                },
+                "provider_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 2
+
+    from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
+
+    try:
+        plan = _read_json_input(str(args.plan), stdin=stdin)
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_shadow_eval_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = run_optimization_shadow_eval(
+            plan,
+            store=store,
+            execute=bool(args.execute),
+            budget_usd=float(args.budget_usd or 0.0),
+            min_output_similarity=float(args.min_output_similarity or 0.9),
+            max_candidates=int(args.max_candidates or 100),
+            results_jsonl_path=args.results_jsonl,
+        )
+    finally:
+        store.conn.close()
+
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -3098,6 +3214,10 @@ def managed_pattern_rollups_main() -> None:
 
 def optimization_eval_plan_main() -> None:
     raise SystemExit(optimization_eval_plan_cli())
+
+
+def optimization_shadow_eval_main() -> None:
+    raise SystemExit(optimization_shadow_eval_cli())
 
 
 def managed_feedback_status_main() -> None:

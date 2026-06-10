@@ -145,6 +145,20 @@ agentflow-phase-routing-report --db ~/.agentflow/agentflow.sqlite3 --dry-run-pol
 
 The dry-run reports matched counts, projected candidate counts and savings, exclusions such as thinking, high error rate, stale evidence, unsupported shadow/streaming evidence, missing baseline support, insufficient samples, candidate rule IDs, and metadata-only privacy flags.
 
+To export family-agnostic optimization candidates for local evaluation, run:
+
+```bash
+agentflow-optimization-eval-plan --db ~/.agentflow/agentflow.sqlite3 --pretty > eval-plan.json
+```
+
+To score an eval plan with local fixture evidence or record explicit blockers without changing live traffic or policy files, run:
+
+```bash
+agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The shadow-eval command writes metadata-only result records. Provider execution is off by default and requires both `--execute` and a positive `--budget-usd`; rows without replayable local inputs are recorded as blocked instead of attempting a call.
+
 ## Dashboard
 
 The dashboard shows local usage and optimization behavior, including:
@@ -194,6 +208,8 @@ Common policy commands:
 | `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
 | `agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Measure replay-safe cache opportunity and blockers from local metadata |
 | `agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run cache replay pattern rules against recent local metadata without mutating cache entries |
+| `agentflow-optimization-eval-plan --db ~/.agentflow/agentflow.sqlite3 --pretty` | Export metadata-only optimization candidates for local evaluation |
+| `agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Record metadata-only local shadow-eval pass/fail/blocked/unknown results without provider calls by default |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
 | `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
 | `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |

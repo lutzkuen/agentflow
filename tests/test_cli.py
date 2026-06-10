@@ -782,6 +782,190 @@ class PolicyReloadCliTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, encoded)
 
+    def test_optimization_shadow_eval_cli_scores_fixture_plan_metadata_only(self):
+        from agentflow_proxy.store import Store
+
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "candidate_id": "shadow-pass",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "projected_savings_usd": 0.02,
+                    "shadow_eval_fixture": {
+                        "baseline_status_code": 200,
+                        "candidate_status_code": 200,
+                        "output_similarity": 0.98,
+                        "baseline_cost_usd": 0.03,
+                        "candidate_cost_usd": 0.01,
+                        "output": "raw passing output must stay local",
+                    },
+                    "request_json": {"messages": [{"content": "raw passing prompt must stay local"}]},
+                    "session_id": "shadow-pass-session-secret",
+                },
+                {
+                    "candidate_id": "shadow-fail",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "offline_eval": {
+                        "baseline_status_code": 200,
+                        "candidate_status_code": 200,
+                        "output_similarity": 0.42,
+                    },
+                },
+                {
+                    "candidate_id": "shadow-blocked",
+                    "optimization_family": "managed_pattern_candidate",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "features_only",
+                    "blocker_reason_codes": ["tool-call-disabled"],
+                },
+                {
+                    "candidate_id": "shadow-unknown",
+                    "optimization_family": "old_context_summarization",
+                    "action_family": "crunch",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                },
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            Store(db_path).conn.close()
+            plan_path = Path(tmp) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            jsonl_path = Path(tmp) / "results.jsonl"
+            stdout = io.StringIO()
+
+            code = cli.optimization_shadow_eval_cli(
+                ["--db", db_path, "--results-jsonl", str(jsonl_path), str(plan_path)],
+                stdout=stdout,
+            )
+
+            conn = sqlite3.connect(db_path)
+            try:
+                stored_count = conn.execute("select count(*) from optimization_eval_results").fetchone()[0]
+            finally:
+                conn.close()
+            jsonl_text = jsonl_path.read_text(encoding="utf-8")
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_shadow_eval.v1")
+        self.assertEqual(payload["mode"], "plan-only")
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["managed_server_calls_made"])
+        self.assertFalse(payload["wrote_local_policy_files"])
+        self.assertTrue(payload["wrote_result_records"])
+        status_by_candidate = {row["candidate_id"]: row["status_class"] for row in payload["results"]}
+        self.assertEqual(status_by_candidate["shadow-pass"], "pass")
+        self.assertEqual(status_by_candidate["shadow-fail"], "fail")
+        self.assertEqual(status_by_candidate["shadow-blocked"], "blocked")
+        self.assertEqual(status_by_candidate["shadow-unknown"], "unknown")
+        self.assertEqual(stored_count, 4)
+        self.assertEqual(len(jsonl_text.splitlines()), 4)
+        rendered = stdout.getvalue() + jsonl_text
+        for forbidden in (
+            "raw passing prompt must stay local",
+            "raw passing output must stay local",
+            "shadow-pass-session-secret",
+            '"request_json"',
+            '"session_id"',
+            '"messages"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_optimization_shadow_eval_cli_requires_budget_for_execute(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = cli.optimization_shadow_eval_cli(
+            ["--execute", "-"],
+            stdin=io.StringIO(json.dumps({"schema": "agentflow.optimization_eval_plan.v1", "plans": []})),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error"]["type"], "missing_budget_cap")
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["wrote_local_policy_files"])
+
+    def test_optimization_shadow_eval_cli_enforces_budget_cap_without_policy_mutation(self):
+        from agentflow_proxy.store import Store
+
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "candidate_id": "shadow-budget-blocked",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "evidence": {"estimated_eval_cost_usd": 0.25},
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            Store(db_path).conn.close()
+            plan_path = Path(tmp) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            policy_path = Path(tmp) / "routing_rules.yaml"
+            original_policy = "enabled: true\nrules: []\n"
+            policy_path.write_text(original_policy, encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.optimization_shadow_eval_cli(
+                ["--db", db_path, "--execute", "--budget-usd", "0.01", str(plan_path)],
+                stdout=stdout,
+            )
+
+            policy_after = policy_path.read_text(encoding="utf-8")
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute(
+                    "select status_class, reason_codes_json, result_json from optimization_eval_results"
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(policy_after, original_policy)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["mode"], "execute")
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["wrote_local_policy_files"])
+        self.assertEqual(payload["summary"]["budget_exhausted_count"], 1)
+        self.assertEqual(payload["results"][0]["status_class"], "blocked")
+        self.assertIn("budget-cap-exceeded", payload["results"][0]["reason_codes"])
+        self.assertEqual(row[0], "blocked")
+        self.assertIn("budget-cap-exceeded", json.loads(row[1]))
+        stored_result = json.loads(row[2])
+        self.assertFalse(stored_result["provider_call_made"])
+        self.assertNotIn("request_json", json.dumps(stored_result))
+
     def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)
