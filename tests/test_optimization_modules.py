@@ -18,6 +18,7 @@ from agentflow_proxy.optimization_promotion_canary import (
     promotion_canary_decision,
 )
 from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
+from agentflow_proxy.optimization_promotion_impact import measure_optimization_promotion_impact
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
 from agentflow_proxy.optimization_rollout_review import (
     attach_optimization_rollout_provenance,
@@ -543,6 +544,221 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(stopped["status"], "safety_stopped")
         self.assertEqual(stopped["cohort"], "bypassed_or_disabled")
         self.assertEqual(stopped["reason"], "local-canary-safety-stop")
+
+    def _promotion_impact_bundle(self, *actions):
+        return {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T00:00:00+00:00",
+            "ok": True,
+            "actions": list(actions),
+            "privacy": {"metadata_only": True},
+        }
+
+    def _promotion_impact_action(self, section: str, candidate_id: str, *, projected_savings: float = 0.004):
+        return {
+            "schema": "agentflow.optimization_promotion_rollout_action.v1",
+            "action_id": f"promotion-action-{candidate_id}",
+            "action_type": "widen",
+            "policy_section": section,
+            "target_candidate_id": candidate_id,
+            "target_rule_id": f"promotion-{section}-{candidate_id}",
+            "canary_fraction": 0.25,
+            "holdout_fraction": 0.10,
+            "evidence_summary": {
+                "projected_savings_usd": projected_savings,
+                "sample_count": 3,
+                "cohort_counts": {"canary_applied": 1, "canary_holdout": 1, "bypassed_or_disabled": 0},
+            },
+            "local_policy_update": {"policy_source": "managed-recommended"},
+            "privacy": {"metadata_only": True},
+        }
+
+    def _log_promotion_impact_call(
+        self,
+        store,
+        action: dict,
+        *,
+        cohort: str,
+        status_code: int = 200,
+        cost_est: float = 0.001,
+        cost_baseline: float = 0.003,
+        created_at: str = "2026-06-10T00:10:00+00:00",
+        suffix: str = "",
+    ):
+        section = action["policy_section"]
+        applied = cohort == "canary_applied"
+        status = "applied" if applied else "holdout" if cohort == "canary_holdout" else "safety_stopped"
+        reason = "selected-canary" if applied else "selected-holdout" if cohort == "canary_holdout" else "local-canary-safety-stop"
+        base_meta = {
+            "promotion_action_id": action["action_id"],
+            "target_candidate_id": action["target_candidate_id"],
+            "target_rule_id": action["target_rule_id"],
+            "policy_section": section,
+            "policy_source": "managed-recommended",
+            "status": status,
+            "cohort": cohort,
+            "reason": reason,
+        }
+        if cohort == "safety_stopped":
+            base_meta["safety_stop"] = {"tripped": True, "reason_codes": ["error-rate"]}
+        routing_json = {"category": "tool-result"}
+        crunch_json = {"changed": False}
+        cache_json = {"status": "miss", "reason": "exact-miss"}
+        if section == "routing":
+            routing_json["phase_canary"] = base_meta
+        else:
+            rule = {
+                "rule_id": action["target_rule_id"],
+                "candidate_id": action["target_candidate_id"],
+                "promotion_action_id": action["action_id"],
+                "policy_source": "managed-recommended",
+                "canary": {"status": status, "cohort": cohort},
+                "reason": reason,
+                "estimated_cost_savings_usd": max(0.0, cost_baseline - cost_est),
+            }
+            if cohort == "safety_stopped":
+                rule["safety_stop"] = {"tripped": True, "reason_codes": ["error-rate"]}
+            if section == "crunch":
+                crunch_json = {
+                    "changed": applied,
+                    "pattern_rules": {"configured_count": 1, "rules": [rule], "skip_reasons": []},
+                }
+            else:
+                cache_json = {
+                    "status": "hit" if applied else "miss",
+                    "pattern_rules": {"configured_count": 1, "rules": [rule], "skip_reasons": []},
+                }
+        store.log_call(
+            id=f"promotion-impact-{section}-{cohort}-{suffix}",
+            created_at=created_at,
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001" if section == "routing" and applied else "claude-sonnet-4-6",
+            stream=0,
+            cache_hit=1 if section == "cache" and applied else 0,
+            status_code=status_code,
+            latency_ms=1000 if status_code < 400 else 12000,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=cost_est,
+            cost_baseline_usd=cost_baseline,
+            crunch_json=stable_json(crunch_json),
+            routing_json=stable_json(routing_json),
+            cache_json=stable_json(cache_json),
+            error='{"error":{"type":"overloaded_error"}}' if status_code >= 400 else None,
+            request_json=None,
+            response_json=None,
+            session_id="raw-session-secret",
+            category="tool-result",
+            retry_count=1 if status_code >= 400 else 0,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+        )
+
+    def test_optimization_promotion_impact_reports_routing_crunch_cache_metadata_only(self):
+        routing = self._promotion_impact_action("routing", "routing-impact")
+        crunch = self._promotion_impact_action("crunch", "crunch-impact")
+        cache = self._promotion_impact_action("cache", "cache-impact")
+        bundle = self._promotion_impact_bundle(routing, crunch, cache)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for action in (routing, crunch, cache):
+                    self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="a")
+                    self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h")
+                report = measure_optimization_promotion_impact(
+                    bundle,
+                    store_obj=store,
+                    limit=20,
+                    now=datetime(2026, 6, 10, 1, tzinfo=timezone.utc),
+                    max_evidence_age_hours=24,
+                    min_applied_samples=1,
+                    min_holdout_samples=1,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["schema"], "agentflow.optimization_promotion_impact.v1")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["status"], "matched")
+        self.assertTrue(report["read_only"])
+        self.assertFalse(report["wrote_policy_files"])
+        self.assertFalse(report["wrote_store"])
+        self.assertFalse(report["provider_calls_made"])
+        self.assertFalse(report["managed_server_calls_made"])
+        self.assertEqual(report["summary"]["actual_canary_applied_count"], 3)
+        self.assertEqual(report["summary"]["actual_canary_holdout_count"], 3)
+        self.assertEqual({row["next_step"]["verdict"] for row in report["actions"]}, {"widen"})
+        self.assertGreater(report["summary"]["observed_savings_usd"], 0)
+        by_section = {row["policy_section"]: row for row in report["actions"]}
+        self.assertEqual(by_section["routing"]["actual"]["actual_canary_applied_count"], 1)
+        self.assertEqual(by_section["crunch"]["actual"]["actual_canary_holdout_count"], 1)
+        self.assertEqual(by_section["cache"]["next_step"]["projected_vs_observed_savings_ratio"], 0.5)
+        rendered = stable_json(report)
+        self.assertNotIn("raw-session-secret", rendered)
+        self.assertNotIn("request_json", rendered)
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+
+    def test_optimization_promotion_impact_verdicts_cover_safety_negative_stale_insufficient_and_privacy(self):
+        scenarios = (
+            ("insufficient", "needs_more_samples", "insufficient-canary-applied-samples"),
+            ("safety", "rollback", "safety-stop-observed"),
+            ("negative", "rollback", "negative-observed-savings"),
+            ("stale", "hold", "stale-evidence"),
+        )
+        for scenario, expected_verdict, expected_reason in scenarios:
+            action = self._promotion_impact_action("routing", f"routing-{scenario}", projected_savings=0.001)
+            bundle = self._promotion_impact_bundle(action)
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+                    try:
+                        if scenario == "insufficient":
+                            self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="one")
+                        elif scenario == "safety":
+                            self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="a1")
+                            self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h")
+                            self._log_promotion_impact_call(store, action, cohort="safety_stopped", status_code=500, suffix="stop")
+                        elif scenario == "negative":
+                            self._log_promotion_impact_call(store, action, cohort="canary_applied", cost_est=0.004, cost_baseline=0.001, suffix="a1")
+                            self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h")
+                        else:
+                            self._log_promotion_impact_call(store, action, cohort="canary_applied", created_at="2026-06-01T00:00:00+00:00", suffix="a1")
+                            self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, created_at="2026-06-01T00:00:01+00:00", suffix="h")
+                        report = measure_optimization_promotion_impact(
+                            bundle,
+                            store_obj=store,
+                            limit=10,
+                            since="2026-06-01T00:00:00+00:00" if scenario == "stale" else "2026-06-10T00:00:00+00:00",
+                            min_applied_samples=2 if scenario == "insufficient" else 1,
+                            min_holdout_samples=1,
+                            max_evidence_age_hours=1,
+                            now=datetime(2026, 6, 10, 1, tzinfo=timezone.utc),
+                        )
+                    finally:
+                        store.conn.close()
+                step = report["actions"][0]["next_step"]
+                self.assertEqual(step["verdict"], expected_verdict)
+                self.assertIn(expected_reason, step["reason_codes"])
+                if scenario == "stale":
+                    self.assertTrue(report["actions"][0]["stale_evidence"]["stale"])
+
+        blocked = self._promotion_impact_bundle(self._promotion_impact_action("routing", "privacy"))
+        blocked["actions"][0]["raw_prompt"] = "raw promotion impact secret"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                blocked_report = measure_optimization_promotion_impact(blocked, store_obj=store)
+            finally:
+                store.conn.close()
+        self.assertFalse(blocked_report["ok"])
+        self.assertEqual(blocked_report["status"], "privacy-blocked")
+        self.assertFalse(blocked_report["privacy"]["raw_prompts_included"])
+        self.assertNotIn("raw promotion impact secret", stable_json(blocked_report))
 
     def _optimization_rollout_bundle(self):
         return {

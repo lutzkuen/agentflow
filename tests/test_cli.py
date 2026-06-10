@@ -1333,6 +1333,106 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(data["phase_canary"]["canary_fraction"], 0.1)
             self.assertEqual(data["phase_canary"]["holdout_fraction"], 0.1)
 
+    def test_optimization_promotion_impact_cli_reports_post_apply_canary_metadata(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        action = {
+            "schema": "agentflow.optimization_promotion_rollout_action.v1",
+            "action_id": "promotion-rollout-action:cli-impact",
+            "action_type": "widen",
+            "target_candidate_id": "routing-cli-impact",
+            "target_rule_id": "promotion-routing-cli-impact",
+            "action_family": "routing",
+            "optimization_family": "phase_routing",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "policy_section": "routing",
+            "target_local_policy_section": "routing.rules",
+            "canary_fraction": 0.25,
+            "holdout_fraction": 0.10,
+            "evidence_summary": {
+                "projected_savings_usd": 0.004,
+                "sample_count": 2,
+                "cohort_counts": {"canary_applied": 1, "canary_holdout": 1, "bypassed_or_disabled": 0},
+            },
+            "local_policy_update": {"policy_source": "managed-recommended"},
+            "privacy": {"metadata_only": True},
+        }
+        bundle = {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T00:00:00+00:00",
+            "ok": True,
+            "actions": [action],
+            "privacy": {"metadata_only": True},
+        }
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for cohort, suffix, cost_est, cost_baseline in (
+                    ("canary_applied", "a", 0.001, 0.003),
+                    ("canary_holdout", "h", 0.003, 0.003),
+                ):
+                    store.log_call(
+                        id=f"cli-promotion-impact-{suffix}",
+                        created_at=f"2026-06-10T00:10:0{0 if suffix == 'a' else 1}+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-haiku-4-5-20251001" if cohort == "canary_applied" else "claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=1000,
+                        input_tokens_est=100,
+                        output_tokens_est=10,
+                        actual_input_tokens=100,
+                        actual_output_tokens=10,
+                        cost_est_usd=cost_est,
+                        cost_baseline_usd=cost_baseline,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({
+                            "category": "tool-result",
+                            "phase_canary": {
+                                "promotion_action_id": action["action_id"],
+                                "target_candidate_id": action["target_candidate_id"],
+                                "target_rule_id": action["target_rule_id"],
+                                "policy_section": "routing",
+                                "policy_source": "managed-recommended",
+                                "status": "applied" if cohort == "canary_applied" else "holdout",
+                                "cohort": cohort,
+                                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                            },
+                        }),
+                        cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                        error=None,
+                        request_json=None,
+                        response_json=None,
+                        session_id="cli-impact-session-secret",
+                        category="tool-result",
+                        retry_count=0,
+                        provider="anthropic",
+                        source_surface="anthropic_messages",
+                    )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.optimization_promotion_impact_cli(
+                ["--db", db_path, "--limit", "10", "--min-applied-samples", "1", "--min-holdout-samples", "1", "--max-evidence-age-hours", "999999", "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_promotion_impact.v1")
+        self.assertEqual(payload["summary"]["actual_canary_applied_count"], 1)
+        self.assertEqual(payload["summary"]["actual_canary_holdout_count"], 1)
+        self.assertEqual(payload["actions"][0]["next_step"]["verdict"], "widen")
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("cli-impact-session-secret", rendered)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+
     def test_optimization_rollout_actions_review_cli_accepts_signed_bundle_and_logs_event(self):
         from agentflow_proxy.optimization_rollout_review import attach_optimization_rollout_provenance
 
