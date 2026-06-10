@@ -17,6 +17,31 @@ from agentflow_proxy.store import utc_now
 
 SCHEMA = "agentflow.optimization_eval_plan.v1"
 ROW_SCHEMA = "agentflow.optimization_eval_plan_row.v1"
+_RAW_FIELD_NAMES = {
+    "api_key",
+    "body",
+    "cache_key",
+    "content",
+    "file_path",
+    "messages",
+    "output",
+    "params",
+    "path",
+    "prompt",
+    "provider_body",
+    "raw_body",
+    "raw_request",
+    "raw_response",
+    "request",
+    "request_id",
+    "request_json",
+    "response",
+    "response_json",
+    "session_id",
+    "thread_id",
+    "tool_payload",
+    "transcript",
+}
 
 
 def _as_int(value: Any) -> int:
@@ -55,6 +80,31 @@ def _count_breakdown(counts: Counter[str]) -> list[dict[str, Any]]:
     rows = [{"value": key, "count": value} for key, value in counts.items()]
     rows.sort(key=lambda row: (-_as_int(row["count"]), str(row["value"])))
     return rows
+
+
+def _clean_metadata(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return None
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text.lower() in _RAW_FIELD_NAMES:
+                continue
+            cleaned_item = _clean_metadata(item, depth=depth + 1)
+            if cleaned_item is not None:
+                cleaned[key_text] = cleaned_item
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list = []
+        for item in value[:50]:
+            cleaned_item = _clean_metadata(item, depth=depth + 1)
+            if cleaned_item is not None:
+                cleaned_list.append(cleaned_item)
+        return cleaned_list
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _privacy_summary() -> dict[str, Any]:
@@ -123,7 +173,7 @@ def _add_common(
         "recommended_eval_mode": recommended_eval_mode
         or _eval_mode(projected=max(0, int(sample_count or 0)), applied=current_canary_count, holdout=holdout_count, blockers=blockers),
         "replayability_level": replayability_level or "metadata_only",
-        "evidence": evidence or {},
+        "evidence": _clean_metadata(evidence or {}),
         "privacy": _privacy_summary(),
     })
 

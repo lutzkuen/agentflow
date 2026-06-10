@@ -1,10 +1,15 @@
 import asyncio
 import json
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
+from agentflow_proxy.optimization_eval_plan import _add_common
+from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
+from agentflow_proxy.store import Store, stable_json
 
 
 class FakeFeedbackStore:
@@ -44,6 +49,210 @@ class FakeOutcomeStore:
 
 
 class OptimizationModuleTests(unittest.TestCase):
+    def _assert_privacy_clean(self, payload):
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw eval prompt secret",
+            "raw eval message secret",
+            "raw eval content secret",
+            "raw eval request secret",
+            "raw eval response secret",
+            "raw eval output secret",
+            "raw eval tool secret",
+            "/tmp/raw-eval-secret.py",
+            "eval-cache-key-secret",
+            "eval-request-id-secret",
+            "eval-session-id-secret",
+            "sk-eval-secret",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        for forbidden_key in (
+            '"api_key"',
+            '"cache_key"',
+            '"content"',
+            '"file_path"',
+            '"messages"',
+            '"output"',
+            '"prompt"',
+            '"raw_request"',
+            '"raw_response"',
+            '"request_id"',
+            '"session_id"',
+            '"tool_payload"',
+        ):
+            self.assertNotIn(forbidden_key, rendered)
+
+    def _dangerous_metadata(self):
+        return {
+            "safe_count": 3,
+            "safe_score": 0.98,
+            "prompt": "raw eval prompt secret",
+            "messages": [{"role": "user", "content": "raw eval message secret"}],
+            "content": "raw eval content secret",
+            "raw_request": {"body": "raw eval request secret"},
+            "raw_response": {"output": "raw eval response secret"},
+            "tool_payload": {"command": "raw eval tool secret"},
+            "file_path": "/tmp/raw-eval-secret.py",
+            "cache_key": "eval-cache-key-secret",
+            "request_id": "eval-request-id-secret",
+            "session_id": "eval-session-id-secret",
+            "api_key": "sk-eval-secret",
+            "nested": {
+                "safe_reason": "offline-fixture-passed",
+                "prompt": "raw eval prompt secret",
+                "content": "raw eval content secret",
+            },
+        }
+
+    def test_eval_plan_rows_scrub_raw_like_nested_evidence(self):
+        rows = []
+        _add_common(
+            rows,
+            candidate_id="eval-privacy-candidate",
+            optimization_family="phase_routing",
+            action_family="routing",
+            source_surface="anthropic_messages",
+            app_family="claude_code",
+            workflow_phase="tool_execution",
+            category="tool-result",
+            candidate_target_model="claude-haiku-4-5-20251001",
+            projected_savings_usd=0.0123,
+            sample_count=5,
+            current_canary_count=2,
+            holdout_count=1,
+            blocker_reason_codes=["local-replay-input-unavailable"],
+            replayability_level="features_only",
+            evidence=self._dangerous_metadata(),
+        )
+
+        row = rows[0]
+        self.assertEqual(row["candidate_id"], "eval-privacy-candidate")
+        self.assertEqual(row["sample_count"], 5)
+        self.assertEqual(row["blocker_reason_codes"], ["local-replay-input-unavailable"])
+        self.assertEqual(row["evidence"]["safe_count"], 3)
+        self.assertEqual(row["evidence"]["nested"]["safe_reason"], "offline-fixture-passed")
+        self.assertTrue(row["privacy"]["metadata_only"])
+        self._assert_privacy_clean(row)
+
+    def test_shadow_eval_output_and_stored_result_scrub_raw_like_fixture_fields(self):
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "candidate_id": "shadow-privacy-candidate",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "projected_savings_usd": 0.02,
+                    "shadow_eval_fixture": {
+                        **self._dangerous_metadata(),
+                        "baseline_status_code": 200,
+                        "candidate_status_code": 200,
+                        "output_similarity": 0.98,
+                        "quality_score": 0.97,
+                        "baseline_cost_usd": 0.03,
+                        "candidate_cost_usd": 0.01,
+                    },
+                    "request_json": {"messages": [{"content": "raw eval message secret"}]},
+                    "session_id": "eval-session-id-secret",
+                }
+            ],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                result = run_optimization_shadow_eval(plan, store=store)
+                stored = store.conn.execute(
+                    "select result_json, score_json, cost_json from optimization_eval_results"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(result["results"][0]["candidate_id"], "shadow-privacy-candidate")
+        self.assertEqual(result["results"][0]["status_class"], "pass")
+        self.assertIn("offline-fixture-passed", result["results"][0]["reason_codes"])
+        self.assertEqual(result["results"][0]["score_summary"]["output_similarity"], 0.98)
+        self.assertEqual(json.loads(stored["score_json"])["quality_score"], 0.97)
+        self.assertEqual(json.loads(stored["cost_json"])["observed_savings_usd"], 0.02)
+        self._assert_privacy_clean(result)
+        self._assert_privacy_clean(json.loads(stored["result_json"]))
+
+    def test_promotion_report_omits_raw_like_plan_and_eval_result_fields(self):
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "candidate_id": "promotion-privacy-candidate",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "current_canary_count": 2,
+                    "holdout_count": 1,
+                    "sample_count": 3,
+                    "projected_savings_usd": 0.02,
+                    "evidence": {
+                        **self._dangerous_metadata(),
+                        "canary_evidence": {
+                            "applied": {
+                                "count": 2,
+                                "error_rate": 0.0,
+                                "retry_rate": 0.0,
+                                "latency_avg_ms": 100,
+                                "net_savings_usd": 0.02,
+                                "tool_payload": {"command": "raw eval tool secret"},
+                            },
+                            "holdout": {
+                                "count": 1,
+                                "error_rate": 0.0,
+                                "retry_rate": 0.0,
+                                "latency_avg_ms": 120,
+                                "prompt": "raw eval prompt secret",
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                store.log_optimization_eval_result(
+                    id="promotion-privacy-result",
+                    run_id="promotion-privacy-run",
+                    created_at="2026-06-10T03:30:00+00:00",
+                    candidate_id="promotion-privacy-candidate",
+                    source_surface="anthropic_messages",
+                    optimization_family="phase_routing",
+                    action_family="routing",
+                    status_class="pass",
+                    reason_codes_json=stable_json(["offline-fixture-passed"]),
+                    score_json=stable_json({"output_similarity": 0.98, "content": "raw eval content secret"}),
+                    cost_json=stable_json({"projected_savings_usd": 0.02, "cache_key": "eval-cache-key-secret"}),
+                    result_json=stable_json(self._dangerous_metadata()),
+                )
+                report = build_optimization_promotion_report(store, plan=plan)
+            finally:
+                store.conn.close()
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["candidate_id"], "promotion-privacy-candidate")
+        self.assertEqual(candidate["verdict"], "widen")
+        self.assertIn("promotion-thresholds-met", candidate["reason_codes"])
+        self.assertEqual(candidate["eval_evidence"]["pass_count"], 1)
+        self.assertEqual(candidate["cohort_counts"]["canary_applied"], 2)
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self._assert_privacy_clean(report)
+
     def test_feedback_status_result_is_metadata_only(self):
         result = feedback.managed_feedback_status_result(
             FakeFeedbackStore(),
