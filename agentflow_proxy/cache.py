@@ -301,12 +301,15 @@ def _dependency_count_bucket(count: int) -> str:
 
 def _dependency_root_policy(root: Path) -> str:
     cwd = Path.cwd().resolve(strict=False)
-    home = Path.home().resolve(strict=False)
     try:
         root.relative_to(cwd)
         return "cwd-relative"
     except ValueError:
         pass
+    try:
+        home = Path.home().resolve(strict=False)
+    except RuntimeError:
+        return "configured-local-root"
     try:
         root.relative_to(home)
         return "home-relative"
@@ -645,8 +648,17 @@ def _candidate_path_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _expand_path_or_none(value: str | Path) -> Path | None:
+    try:
+        return Path(value).expanduser()
+    except RuntimeError:
+        return None
+
+
 def _resolve_under_root(token: str, root: Path) -> Path | None:
-    expanded = Path(token).expanduser()
+    expanded = _expand_path_or_none(token)
+    if expanded is None:
+        return None
     if expanded.is_absolute():
         resolved = expanded.resolve(strict=False)
     else:
@@ -664,7 +676,8 @@ def _cache_file_dependency_scan(
     root: str | Path | None = None,
     max_paths: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    watch_root = Path(root if root is not None else CACHE_FILE_WATCH_ROOT).expanduser().resolve(strict=False)
+    expanded_root = _expand_path_or_none(root if root is not None else CACHE_FILE_WATCH_ROOT)
+    watch_root = (expanded_root or Path.cwd()).resolve(strict=False)
     limit = max(0, CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else int(max_paths))
     paths: dict[str, Path] = {}
     candidate_count = 0
@@ -729,7 +742,8 @@ def cache_file_dependency_audit(
     root: str | Path | None = None,
 ) -> dict[str, Any]:
     watch_enabled = CACHE_FILE_WATCH_ENABLED if enabled is None else bool(enabled)
-    watch_root = Path(root if root is not None else CACHE_FILE_WATCH_ROOT).expanduser().resolve(strict=False)
+    expanded_root = _expand_path_or_none(root if root is not None else CACHE_FILE_WATCH_ROOT)
+    watch_root = (expanded_root or Path.cwd()).resolve(strict=False)
     limit = max(0, CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else int(max_paths))
     if snapshots is None:
         if not watch_enabled or body is None:

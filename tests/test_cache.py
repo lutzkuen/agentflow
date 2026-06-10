@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import yaml
 
@@ -559,6 +560,26 @@ pattern_rules:
             self.assertEqual(by_name["example.py"]["size"], watched.stat().st_size)
             self.assertEqual(by_name["missing.txt"]["exists"], False)
             self.assertNotIn("a.py", by_name)
+
+    def test_file_dependency_snapshots_skip_unexpandable_home_paths(self):
+        original_expanduser = cache_module.Path.expanduser
+
+        def fail_home_expand(path):
+            if str(path).startswith("~"):
+                raise RuntimeError("Could not determine home directory.")
+            return original_expanduser(path)
+
+        with patch.object(cache_module.Path, "expanduser", fail_home_expand):
+            snapshots = cache_module.cache_file_dependency_snapshots({
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Read ~/private.txt and ./relative.txt",
+                    }
+                ]
+            })
+
+        self.assertEqual([Path(item["path"]).name for item in snapshots], ["relative.txt"])
 
     def test_file_dependency_snapshots_can_be_disabled_by_policy(self):
         os.environ["AGENTFLOW_CACHE_FILE_WATCH"] = "0"
