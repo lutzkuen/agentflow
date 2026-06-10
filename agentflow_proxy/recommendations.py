@@ -39,6 +39,7 @@ OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE = "old_context_summary_lifecycle"
 OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE = "old_context_summary_outcome"
 PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE = "phase_routing_lifecycle"
 PHASE_ROUTING_OUTCOME_SOURCE_SURFACE = "phase_routing_outcome"
+OPTIMIZATION_PROMOTION_LIFECYCLE_SOURCE_SURFACE = "optimization_promotion_lifecycle"
 
 TOKEN_CHARS = 4
 CHAR_BUCKETS = (
@@ -2696,8 +2697,45 @@ async def queue_policy_event_feedback(
     event_payload: dict[str, Any],
     *,
     source_surface: str = ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE,
+    queue_when_disabled: bool = False,
 ) -> dict[str, Any]:
     if not recommendations_enabled():
+        if queue_when_disabled and hasattr(store_obj, "enqueue_managed_outcome_feedback"):
+            try:
+                assert_managed_egress_safe(event_payload)
+            except ManagedEgressBlocked as exc:
+                return {
+                    "enabled": False,
+                    "server_url": recommendation_server_url(),
+                    "timeout_seconds": recommendation_timeout_seconds(),
+                    "failure_mode": recommendation_failure_mode(),
+                    "auth_configured": managed_auth_configured(),
+                    "api_key_value_included": False,
+                    **managed_egress_blocked_meta(endpoint=POLICY_EVENTS_PATH, violations=exc.violations),
+                }
+            payload = _sanitize_features(event_payload)
+            queue_id = str(uuid.uuid4())
+            now = utc_now()
+            row = {
+                "id": queue_id,
+                "created_at": now,
+                "updated_at": now,
+                "source_surface": source_surface,
+                "endpoint": POLICY_EVENTS_PATH,
+                "optimization_unit_id": 0,
+                "payload_json": stable_json(payload),
+                "status": "queued",
+                "attempts": 0,
+                "next_attempt_at": now,
+            }
+            store_obj.enqueue_managed_outcome_feedback(**row)
+            stored = store_obj.get_managed_outcome_feedback(queue_id) if hasattr(store_obj, "get_managed_outcome_feedback") else row
+            meta = _queued_meta(stored or row)
+            meta.update({
+                "enabled": False,
+                "reason": "queued-managed-disabled",
+            })
+            return meta
         return {
             **disabled_outcome_feedback_meta(),
             "endpoint": POLICY_EVENTS_PATH,

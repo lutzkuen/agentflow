@@ -1301,9 +1301,10 @@ class PolicyReloadCliTests(unittest.TestCase):
             ],
         }
         with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
             stdout = io.StringIO()
             code = cli.optimization_promotion_canary_apply_cli(
-                ["--config-dir", tmp, "--dry-run", "-"],
+                ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
                 stdin=io.StringIO(json.dumps(bundle)),
                 stdout=stdout,
             )
@@ -1317,7 +1318,7 @@ class PolicyReloadCliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             code = cli.optimization_promotion_canary_apply_cli(
-                ["--config-dir", tmp, "--write", "-"],
+                ["--config-dir", tmp, "--db", db_path, "--write", "-"],
                 stdin=io.StringIO(json.dumps(bundle)),
                 stdout=stdout,
             )
@@ -1332,6 +1333,202 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(data["phase_canary"]["target_candidate_id"], "routing-cli-canary")
             self.assertEqual(data["phase_canary"]["canary_fraction"], 0.1)
             self.assertEqual(data["phase_canary"]["holdout_fraction"], 0.1)
+
+    def test_optimization_promotion_canary_apply_queues_lifecycle_feedback_when_managed_disabled(self):
+        from agentflow_proxy.store import Store
+
+        bundle = {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "actions": [
+                {
+                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "action_id": "promotion-rollout-action:cli-disabled-queue",
+                    "status": "planned",
+                    "action_type": "widen",
+                    "target_candidate_id": "routing-cli-disabled-queue",
+                    "target_rule_id": "promotion-routing-disabled-queue",
+                    "action_family": "routing",
+                    "optimization_family": "phase_routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "policy_section": "routing",
+                    "target_local_policy_section": "routing.rules",
+                    "local_policy_update": {
+                        "kind": "yaml-rule-canary",
+                        "policy_source": "managed-recommended",
+                        "managed_enforced": False,
+                        "required_local_review": True,
+                        "candidate_target_model": "claude-haiku-4-5-20251001",
+                    },
+                    "canary_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                    "privacy": {"metadata_only": True},
+                }
+            ],
+            "privacy": {"metadata_only": True},
+        }
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            stdout = io.StringIO()
+            with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "0"}, clear=False):
+                code = cli.optimization_promotion_canary_apply_cli(
+                    ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stdout,
+                )
+
+            status_stdout = io.StringIO()
+            cli.managed_feedback_status_cli(
+                ["--db", db_path, "--source-surface", "optimization_promotion_lifecycle"],
+                stdout=status_stdout,
+            )
+            store = Store(db_path)
+            try:
+                row = store.managed_outcome_feedback_payload_rows(source_surface="optimization_promotion_lifecycle", limit=1)[0]
+                queued_payload = json.loads(row["payload_json"])
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "queued")
+        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+        self.assertFalse(payload["managed_server_calls_made"])
+        status_payload = json.loads(status_stdout.getvalue())
+        self.assertEqual(status_payload["summary"]["queued"], 1)
+        self.assertEqual(status_payload["oldest_pending"]["source_surface"], "optimization_promotion_lifecycle")
+        self.assertFalse(status_payload["privacy"]["payload_json_included"])
+        self.assertEqual(queued_payload["event_type"], "dry-run")
+        self.assertEqual(queued_payload["metadata"]["schema"], "agentflow.optimization_promotion_lifecycle_feedback.v1")
+        self.assertEqual(queued_payload["metadata"]["candidate_ids"], ["routing-cli-disabled-queue"])
+        self.assertFalse(queued_payload["metadata"]["privacy"]["file_paths_included"])
+
+    def test_optimization_promotion_canary_apply_retries_lifecycle_feedback_without_payload_output(self):
+        bundle = {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "actions": [
+                {
+                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "action_id": "promotion-rollout-action:cli-retry",
+                    "status": "planned",
+                    "action_type": "widen",
+                    "target_candidate_id": "routing-cli-retry",
+                    "target_rule_id": "promotion-routing-retry",
+                    "action_family": "routing",
+                    "optimization_family": "phase_routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "policy_section": "routing",
+                    "target_local_policy_section": "routing.rules",
+                    "local_policy_update": {
+                        "kind": "yaml-rule-canary",
+                        "policy_source": "managed-recommended",
+                        "candidate_target_model": "claude-haiku-4-5-20251001",
+                    },
+                    "canary_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                    "privacy": {"metadata_only": True},
+                }
+            ],
+        }
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 503
+        ManagedFeedbackFlushClient.text = "managed unavailable"
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.optimization_promotion_canary_apply_cli(
+                        ["--config-dir", tmp, "--db", db_path, "--write", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=stdout,
+                    )
+
+            status_stdout = io.StringIO()
+            cli.managed_feedback_status_cli(
+                ["--db", db_path, "--source-surface", "optimization_promotion_lifecycle"],
+                stdout=status_stdout,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "apply")
+        self.assertEqual(sent_payload["metadata"]["command"], "optimization-promotion-apply")
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "retryable-error")
+        self.assertEqual(output["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
+        self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
+        status_payload = json.loads(status_stdout.getvalue())
+        self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        self.assertFalse(status_payload["privacy"]["payload_json_included"])
+
+    def test_optimization_promotion_canary_apply_rejects_raw_like_input_without_leaking_feedback(self):
+        bundle = {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "actions": [
+                {
+                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "action_id": "promotion-rollout-action:cli-raw-rejected",
+                    "status": "planned",
+                    "action_type": "widen",
+                    "target_candidate_id": "routing-cli-raw-rejected",
+                    "target_rule_id": "promotion-routing-raw-rejected",
+                    "action_family": "routing",
+                    "optimization_family": "phase_routing",
+                    "policy_section": "routing",
+                    "local_policy_update": {
+                        "kind": "yaml-rule-canary",
+                        "policy_source": "managed-recommended",
+                        "candidate_target_model": "claude-haiku-4-5-20251001",
+                        "raw_prompt": "raw promotion lifecycle secret",
+                    },
+                    "canary_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                }
+            ],
+        }
+        ManagedFeedbackFlushClient.calls = []
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            stderr = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.optimization_promotion_canary_apply_cli(
+                        ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=io.StringIO(),
+                        stderr=stderr,
+                    )
+
+        self.assertEqual(code, 1)
+        output = json.loads(stderr.getvalue())
+        self.assertFalse(output["ok"])
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "sent")
+        self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
+        self.assertEqual(ManagedFeedbackFlushClient.calls[0]["json"]["event_type"], "dry-run")
+        rendered = json.dumps(ManagedFeedbackFlushClient.calls[0]["json"], sort_keys=True)
+        self.assertNotIn("raw promotion lifecycle secret", rendered)
+        self.assertNotIn('"raw_prompt"', rendered)
 
     def test_optimization_promotion_impact_cli_reports_post_apply_canary_metadata(self):
         from agentflow_proxy.store import Store, stable_json
@@ -1432,6 +1629,134 @@ class PolicyReloadCliTests(unittest.TestCase):
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("cli-impact-session-secret", rendered)
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
+
+    def test_optimization_promotion_impact_queues_lifecycle_feedback_with_next_step_summary(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        action = {
+            "schema": "agentflow.optimization_promotion_rollout_action.v1",
+            "action_id": "promotion-rollout-action:cli-impact-feedback",
+            "action_type": "widen",
+            "target_candidate_id": "routing-cli-impact-feedback",
+            "target_rule_id": "promotion-routing-cli-impact-feedback",
+            "action_family": "routing",
+            "optimization_family": "phase_routing",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "policy_section": "routing",
+            "target_local_policy_section": "routing.rules",
+            "canary_fraction": 0.25,
+            "holdout_fraction": 0.10,
+            "evidence_summary": {
+                "projected_savings_usd": 0.004,
+                "sample_count": 2,
+                "cohort_counts": {"canary_applied": 1, "canary_holdout": 1, "bypassed_or_disabled": 0},
+            },
+            "local_policy_update": {"policy_source": "managed-recommended"},
+            "privacy": {"metadata_only": True},
+        }
+        bundle = {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T00:00:00+00:00",
+            "ok": True,
+            "actions": [action],
+            "privacy": {"metadata_only": True},
+        }
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 503
+        ManagedFeedbackFlushClient.text = "managed unavailable with raw impact secret"
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for cohort, suffix, cost_est, cost_baseline in (
+                    ("canary_applied", "a", 0.001, 0.003),
+                    ("canary_holdout", "h", 0.003, 0.003),
+                ):
+                    store.log_call(
+                        id=f"cli-promotion-impact-feedback-{suffix}",
+                        created_at=f"2026-06-10T00:10:0{0 if suffix == 'a' else 1}+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-haiku-4-5-20251001" if cohort == "canary_applied" else "claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=1000,
+                        input_tokens_est=100,
+                        output_tokens_est=10,
+                        actual_input_tokens=100,
+                        actual_output_tokens=10,
+                        cost_est_usd=cost_est,
+                        cost_baseline_usd=cost_baseline,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({
+                            "phase_canary": {
+                                "promotion_action_id": action["action_id"],
+                                "target_candidate_id": action["target_candidate_id"],
+                                "target_rule_id": action["target_rule_id"],
+                                "policy_section": "routing",
+                                "policy_source": "managed-recommended",
+                                "status": "applied" if cohort == "canary_applied" else "holdout",
+                                "cohort": cohort,
+                                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                            },
+                        }),
+                        cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                        error=None,
+                        request_json=None,
+                        response_json=None,
+                        session_id="cli-impact-feedback-session-secret",
+                        category="tool-result",
+                        retry_count=0,
+                        provider="anthropic",
+                        source_surface="anthropic_messages",
+                    )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.optimization_promotion_impact_cli(
+                        ["--db", db_path, "--limit", "10", "--min-applied-samples", "1", "--min-holdout-samples", "1", "--max-evidence-age-hours", "999999", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=stdout,
+                    )
+
+            status_stdout = io.StringIO()
+            cli.managed_feedback_status_cli(
+                ["--db", db_path, "--source-surface", "optimization_promotion_lifecycle"],
+                stdout=status_stdout,
+            )
+
+        self.assertEqual(code, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "retryable-error")
+        self.assertTrue(output["managed_server_calls_made"])
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "impact")
+        metadata = sent_payload["metadata"]
+        self.assertEqual(metadata["schema"], "agentflow.optimization_promotion_lifecycle_feedback.v1")
+        self.assertEqual(metadata["actual_canary_applied_count"], 1)
+        self.assertEqual(metadata["actual_canary_holdout_count"], 1)
+        self.assertEqual(metadata["reason_code_counts"]["promotion-impact-positive"], 1)
+        self.assertEqual(metadata["action_snapshots"][0]["next_step_verdict"], "widen")
+        self.assertFalse(metadata["privacy"]["request_ids_included"])
+        rendered = json.dumps(sent_payload, sort_keys=True)
+        self.assertNotIn("cli-impact-feedback-session-secret", rendered)
+        self.assertNotIn("raw impact secret", rendered)
+        status_payload = json.loads(status_stdout.getvalue())
+        self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        self.assertFalse(status_payload["privacy"]["payload_json_included"])
 
     def test_optimization_rollout_actions_review_cli_accepts_signed_bundle_and_logs_event(self):
         from agentflow_proxy.optimization_rollout_review import attach_optimization_rollout_provenance

@@ -2922,6 +2922,11 @@ def optimization_promotion_canary_apply_cli(
         help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
     )
     parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
         "--section",
         action="append",
         choices=["routing", "crunch", "cache"],
@@ -2969,6 +2974,11 @@ def optimization_promotion_canary_apply_cli(
         config_dir=args.config_dir,
         dry_run=args.dry_run,
         sections=args.section,
+    )
+    _attach_optimization_promotion_lifecycle_feedback(
+        result,
+        command="dry-run" if args.dry_run else "apply",
+        db_path=str(args.db),
     )
     stream = stdout if result.get("ok") else stderr
     if args.pretty:
@@ -3042,6 +3052,7 @@ def optimization_promotion_impact_cli(
     finally:
         store.conn.close()
 
+    _attach_optimization_promotion_lifecycle_feedback(result, command="impact", db_path=str(args.db))
     stream = stdout if result.get("ok") else stderr
     if args.pretty:
         stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
@@ -3318,6 +3329,196 @@ def _attach_rollout_lifecycle_feedback(result: dict[str, Any], *, command: str, 
     public_meta = _public_lifecycle_feedback_meta(meta)
     result["managed_lifecycle_feedback"] = public_meta
     if command in {"dry-run", "impact"} and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+        result["managed_server_calls_made"] = True
+
+
+def _optimization_promotion_event_type(command: str, result: dict[str, Any]) -> str:
+    if command == "impact":
+        return "impact"
+    if command == "dry-run" or result.get("dry_run"):
+        return "dry-run"
+    actions = [item for item in result.get("actions", []) if isinstance(item, dict)]
+    action_types = {str(item.get("action_type") or "") for item in actions}
+    if action_types & {"rollback", "retire", "disable"}:
+        return "rollback"
+    return "apply"
+
+
+def _optimization_promotion_counts(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _optimization_promotion_reason_counts(actions: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for action in actions:
+        for key in ("reason",):
+            value = action.get(key)
+            if isinstance(value, str) and value:
+                counts[value] = counts.get(value, 0) + 1
+        next_step = action.get("next_step") if isinstance(action.get("next_step"), dict) else {}
+        for key in ("reason_codes", "warning_codes"):
+            for value in next_step.get(key) or []:
+                if isinstance(value, str) and value:
+                    counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _optimization_promotion_action_snapshot(action: dict[str, Any]) -> dict[str, Any]:
+    projection = action.get("projection") if isinstance(action.get("projection"), dict) else {}
+    actual = action.get("actual") if isinstance(action.get("actual"), dict) else {}
+    next_step = action.get("next_step") if isinstance(action.get("next_step"), dict) else {}
+    snapshot = {
+        "action_id": action.get("action_id"),
+        "action_type": action.get("action_type"),
+        "status": action.get("status"),
+        "reason": action.get("reason"),
+        "policy_section": action.get("policy_section"),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
+        "canary_fraction": action.get("canary_fraction") or projection.get("target_canary_fraction"),
+        "holdout_fraction": action.get("holdout_fraction") or projection.get("target_holdout_fraction"),
+        "projected_savings_usd": projection.get("projected_savings_usd"),
+        "observed_savings_usd": actual.get("observed_savings_usd"),
+        "actual_canary_applied_count": actual.get("actual_canary_applied_count"),
+        "actual_canary_holdout_count": actual.get("actual_canary_holdout_count"),
+        "actual_skipped_count": actual.get("actual_skipped_count"),
+        "actual_bypassed_or_disabled_count": actual.get("actual_bypassed_or_disabled_count"),
+        "actual_safety_stopped_count": actual.get("actual_safety_stopped_count"),
+        "error_rate_delta": actual.get("applied_minus_holdout_error_rate"),
+        "retry_rate_delta": actual.get("applied_minus_holdout_retry_rate"),
+        "latency_avg_delta_ms": actual.get("applied_minus_holdout_latency_avg_ms"),
+        "next_step_verdict": next_step.get("verdict"),
+        "next_step_reason_codes": next_step.get("reason_codes") or [],
+        "next_step_warning_codes": next_step.get("warning_codes") or [],
+    }
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _optimization_promotion_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any]:
+    from agentflow_proxy import __version__
+
+    actions = [item for item in result.get("actions", []) if isinstance(item, dict)]
+    snapshots = [_optimization_promotion_action_snapshot(item) for item in actions]
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    source_bundle = result.get("source_action_bundle") if isinstance(result.get("source_action_bundle"), dict) else {}
+    action_ids = sorted({str(item.get("action_id")) for item in snapshots if item.get("action_id")})
+    candidate_ids = sorted({str(item.get("target_candidate_id")) for item in snapshots if item.get("target_candidate_id")})
+    rule_ids = sorted({str(item.get("target_rule_id")) for item in snapshots if item.get("target_rule_id")})
+    policy_sections = sorted(_optimization_promotion_counts(actions, "policy_section"))
+    event_type = _optimization_promotion_event_type(command, result)
+    basis = {
+        "command": command,
+        "generated_at": result.get("generated_at"),
+        "source_generated_at": source_bundle.get("generated_at"),
+        "action_ids": action_ids,
+        "candidate_ids": candidate_ids,
+        "status": result.get("status"),
+    }
+    digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+    metadata: dict[str, Any] = {
+        "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+        "lifecycle_kind": "optimization_promotion_canary",
+        "command": f"optimization-promotion-{command}",
+        "local_result_status": "ok" if result.get("ok") else "error",
+        "dry_run": bool(result.get("dry_run")),
+        "read_only": bool(result.get("read_only")),
+        "wrote_policy_files": bool(result.get("wrote_policy_files")),
+        "action_count": len(actions) or summary.get("action_count") or source_bundle.get("action_count") or 0,
+        "planned_action_count": summary.get("planned_action_count"),
+        "skipped_action_count": summary.get("skipped_action_count"),
+        "error_count": summary.get("error_count"),
+        "action_type_counts": _optimization_promotion_counts(actions, "action_type"),
+        "policy_section_counts": _optimization_promotion_counts(actions, "policy_section"),
+        "local_status_counts": _optimization_promotion_counts(actions, "status"),
+        "reason_code_counts": _optimization_promotion_reason_counts(actions),
+        "action_ids": action_ids,
+        "candidate_ids": candidate_ids,
+        "rule_ids": rule_ids,
+        "action_snapshots": snapshots,
+        "sampled_call_count": summary.get("sampled_call_count"),
+        "observed_promotion_metadata_row_count": summary.get("observed_promotion_metadata_row_count"),
+        "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+        "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+        "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+        "actual_skipped_count": summary.get("actual_skipped_count"),
+        "actual_bypassed_or_disabled_count": summary.get("actual_bypassed_or_disabled_count"),
+        "actual_safety_stopped_count": summary.get("actual_safety_stopped_count"),
+        "observed_savings_usd": summary.get("observed_savings_usd"),
+        "next_step_counts": summary.get("next_step_counts"),
+        "stale_evidence_action_count": summary.get("stale_evidence_action_count"),
+        "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "raw_params_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "local_session_ids_included": False,
+            "file_paths_included": False,
+            "yaml_contents_included": False,
+            "db_path_included": False,
+        },
+    }
+    metadata = {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+    return {
+        "event_type": event_type,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "recommendation_id": action_ids[0] if len(action_ids) == 1 else f"optimization-promotion:{digest}",
+        "bundle_hash": f"sha256:{hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()}",
+        "policy_sections": policy_sections,
+        "validation_warning_count": 0,
+        "review_warning_count": 0,
+        "applied_files": [],
+        "local_tool_version": __version__,
+        "metadata": metadata,
+    }
+
+
+def _attach_optimization_promotion_lifecycle_feedback(result: dict[str, Any], *, command: str, db_path: str) -> None:
+    from agentflow_proxy import recommendations
+
+    payload = _optimization_promotion_lifecycle_payload(command, result)
+    store = None
+    try:
+        store = _open_store_for_db(str(db_path))
+        meta = asyncio.run(
+            recommendations.queue_policy_event_feedback(
+                store,
+                payload,
+                source_surface=recommendations.OPTIMIZATION_PROMOTION_LIFECYCLE_SOURCE_SURFACE,
+                queue_when_disabled=True,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+        }
+    finally:
+        if store is not None:
+            store.conn.close()
+
+    public_meta = _public_lifecycle_feedback_meta(meta)
+    result["managed_lifecycle_feedback"] = public_meta
+    if public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
         result["managed_server_calls_made"] = True
 
 
