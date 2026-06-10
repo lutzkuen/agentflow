@@ -1762,13 +1762,177 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(quota["token_usage_totals"]["total_tokens"], 1550)
         self.assertEqual(quota["agentflow_estimated_totals"]["total_tokens_est"], 1100)
         self.assertEqual(quota["reconciliation"]["total_drift_tokens"], 450)
-        self.assertEqual(quota["reconciliation"]["total_drift_bucket"], "100_999")
+        self.assertEqual(quota["reconciliation"]["total_drift_bucket"], "reconciled")
+        self.assertEqual(quota["reconciliation"]["total_drift_size_bucket"], "100_999")
+        self.assertEqual(quota["matched_agentflow_estimated_totals"]["total_tokens_est"], 1100)
+        self.assertEqual(quota["latest_token_usage_delta"]["total_tokens"], 1550)
+        self.assertGreater(quota["reconciled_cost_usd"], 0)
+        self.assertEqual(quota["by_workflow_phase"][0]["workflow_phase"], "unknown")
+        self.assertEqual(quota["by_workflow_phase"][0]["total_tokens"], 1550)
+        self.assertEqual(quota["by_model"][0]["processing_mode"], stats_views.CODEX_APP_PROCESSING_MODE)
+        self.assertEqual(quota["by_thread"][0]["scope_type"], "thread")
+        self.assertTrue(quota["by_thread"][0]["scope_hash"].startswith("sha256:"))
+        self.assertFalse(quota["by_thread"][0]["thread_id_included"])
         self.assertFalse(quota["privacy"]["raw_prompts_included"])
         self.assertFalse(quota["privacy"]["raw_commands_included"])
+        self.assertFalse(quota["privacy"]["raw_thread_ids_included"])
         rendered = json.dumps(result)
         self.assertNotIn(raw_prompt, rendered)
         self.assertNotIn(raw_command, rendered)
         self.assertNotIn(raw_transcript, rendered)
+        self.assertNotIn("thread-quota", rendered)
+        self.assertNotIn("codex-quota", rendered)
+
+    def test_codex_effectiveness_reconciles_token_usage_deltas_and_reasons(self):
+        def log_turn(request_id, thread_id, created_at, *, session_id="codex-deltas", phase="summary"):
+            server.store.log_codex_app_event(
+                id=f"start-{request_id}",
+                created_at=created_at,
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id=thread_id,
+                message_chars=200,
+                params_chars=100,
+                input_items=1,
+                input_text_chars=400,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id=session_id,
+                routing_json=stable_json({"status": "not-applied", "workflow_phase": phase}),
+                crunch_json=stable_json({"status": "skipped", "changed": False, "workflow_phase": phase}),
+                cache_json=stable_json({"status": "skipped", "eligible": False, "workflow_phase": phase}),
+            )
+            server.store.log_codex_app_event(
+                id=f"response-{request_id}",
+                created_at=created_at.replace(":00+00:00", ":30+00:00"),
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id=thread_id,
+                message_chars=80,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=120,
+                error_code=None,
+                error_message=None,
+                latency_ms=50,
+                session_id=session_id,
+            )
+
+        def log_usage(
+            event_id,
+            created_at,
+            usage,
+            *,
+            thread_id=None,
+            session_id="codex-deltas",
+        ):
+            server.store.log_codex_app_event(
+                id=event_id,
+                created_at=created_at,
+                direction="server_to_client",
+                method="thread/tokenUsage/updated",
+                request_id=None,
+                thread_id=thread_id,
+                message_chars=80,
+                params_chars=80,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id=session_id,
+                metadata_json=stable_json({
+                    "schema": "agentflow.codex_app_metadata.v1",
+                    "kind": "token_usage",
+                    "method": "thread/tokenUsage/updated",
+                    "token_usage": {
+                        **usage,
+                        "total_tokens": sum(usage.values()),
+                        "total_tokens_bucket": "1_9",
+                    },
+                }),
+            )
+
+        log_turn("one", "thread-delta", "2026-06-10T12:00:00+00:00", phase="summary")
+        log_turn("two", "thread-delta", "2026-06-10T12:02:00+00:00", phase="tool_execution")
+        log_usage(
+            "usage-one",
+            "2026-06-10T12:00:45+00:00",
+            {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 30, "reasoning_output_tokens": 0},
+            thread_id="thread-delta",
+        )
+        log_usage(
+            "usage-two",
+            "2026-06-10T12:02:45+00:00",
+            {"input_tokens": 160, "cached_input_tokens": 25, "output_tokens": 55, "reasoning_output_tokens": 0},
+            thread_id="thread-delta",
+        )
+        log_usage(
+            "usage-reset",
+            "2026-06-10T12:03:15+00:00",
+            {"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 5, "reasoning_output_tokens": 0},
+            thread_id="thread-delta",
+        )
+        log_usage(
+            "usage-aggregate",
+            "2026-06-10T12:03:30+00:00",
+            {"input_tokens": 7, "cached_input_tokens": 0, "output_tokens": 3, "reasoning_output_tokens": 0},
+            thread_id=None,
+            session_id="codex-deltas",
+        )
+        log_usage(
+            "usage-missing",
+            "2026-06-10T12:04:00+00:00",
+            {"input_tokens": 5, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_output_tokens": 0},
+            thread_id=None,
+            session_id=None,
+        )
+        log_usage(
+            "usage-stale",
+            "2026-06-10T12:05:00+00:00",
+            {"input_tokens": 8, "cached_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0},
+            thread_id="thread-stale",
+            session_id="codex-deltas",
+        )
+
+        result = asyncio.run(stats_views.stats_codex_effectiveness(server.store, limit=10))
+        quota = result["quota_and_token_usage"]
+        statuses = {row["value"]: row["count"] for row in quota["reconciliation"]["status_breakdown"]}
+        status_tokens = {row["status"]: row["total_tokens"] for row in quota["reconciliation"]["status_token_totals"]}
+
+        self.assertEqual(statuses["reconciled"], 2)
+        self.assertEqual(statuses["reset"], 1)
+        self.assertEqual(statuses["aggregate-only"], 1)
+        self.assertEqual(statuses["missing-thread"], 1)
+        self.assertEqual(statuses["stale"], 1)
+        self.assertEqual(status_tokens["reconciled"], 240)
+        self.assertEqual(status_tokens["reset"], 17)
+        self.assertEqual(status_tokens["aggregate-only"], 10)
+        self.assertEqual(status_tokens["missing-thread"], 6)
+        self.assertEqual(status_tokens["stale"], 10)
+        self.assertEqual(quota["token_usage_totals"]["total_tokens"], 283)
+        self.assertEqual(quota["raw_counter_totals"]["total_tokens"], 433)
+        self.assertEqual(quota["matched_agentflow_estimated_totals"]["total_tokens_est"], 260)
+        self.assertEqual(quota["reconciliation"]["total_drift_bucket"], "reset")
+        self.assertEqual(result["summary"]["token_usage_reconciliation_drift_bucket"], "reset")
+        phase_tokens = {row["workflow_phase"]: row["total_tokens"] for row in quota["by_workflow_phase"]}
+        self.assertEqual(phase_tokens["summary"], 150)
+        self.assertEqual(phase_tokens["tool_execution"], 90)
+        self.assertEqual(phase_tokens["reset"], 17)
+        self.assertEqual(phase_tokens["aggregate-only"], 10)
+        self.assertEqual(phase_tokens["missing-thread"], 6)
+        self.assertEqual(phase_tokens["stale"], 10)
+        self.assertTrue(all(row["scope_hash"].startswith("sha256:") for row in quota["by_thread"]))
+        rendered = json.dumps(result)
+        self.assertNotIn("thread-delta", rendered)
+        self.assertNotIn("thread-stale", rendered)
+        self.assertNotIn("codex-deltas", rendered)
 
     def test_codex_effectiveness_normalizes_historical_missing_decision_metadata(self):
         fixtures = [

@@ -220,29 +220,68 @@ def _reset_seconds(value: Any) -> float | None:
 def _token_usage_metadata(method: str | None, params: Any) -> dict[str, Any] | None:
     if method != "thread/tokenUsage/updated" or not isinstance(params, dict):
         return None
-    info = params.get("usage") if isinstance(params.get("usage"), dict) else params
     mapping = {
         "input_tokens": ("inputTokens", "input_tokens", "input"),
-        "cached_input_tokens": ("cachedInputTokens", "cached_input_tokens", "cached"),
+        "cached_input_tokens": (
+            "cachedInputTokens",
+            "cached_input_tokens",
+            "cacheReadInputTokens",
+            "cache_read_input_tokens",
+            "cached",
+        ),
         "output_tokens": ("outputTokens", "output_tokens", "output"),
-        "reasoning_output_tokens": ("reasoningOutputTokens", "reasoning_output_tokens", "reasoning"),
+        "reasoning_output_tokens": (
+            "reasoningOutputTokens",
+            "reasoning_output_tokens",
+            "reasoningTokens",
+            "reasoning_tokens",
+            "reasoning",
+        ),
         "total_tokens": ("totalTokens", "total_tokens", "total"),
     }
-    usage: dict[str, int] = {}
-    for public_key, raw_keys in mapping.items():
-        for raw_key in raw_keys:
-            if raw_key in info:
-                parsed = _as_float(info.get(raw_key))
-                if parsed is not None and parsed >= 0:
-                    usage[public_key] = int(parsed)
-                break
+    raw_key_set = {raw_key for raw_keys in mapping.values() for raw_key in raw_keys}
+
+    def parse_candidate(info: dict[str, Any]) -> dict[str, int]:
+        usage: dict[str, int] = {}
+        for public_key, raw_keys in mapping.items():
+            for raw_key in raw_keys:
+                if raw_key in info:
+                    parsed = _as_float(info.get(raw_key))
+                    if parsed is not None and parsed >= 0:
+                        usage[public_key] = int(parsed)
+                    break
+        if usage and "total_tokens" not in usage:
+            usage["total_tokens"] = sum(
+                usage.get(key, 0)
+                for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+            )
+        return usage
+
+    candidates: list[dict[str, int]] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            if raw_key_set.intersection(value.keys()):
+                parsed = parse_candidate(value)
+                if parsed:
+                    candidates.append(parsed)
+            for nested in value.values():
+                if isinstance(nested, (dict, list)):
+                    walk(nested)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    walk(item)
+
+    preferred = params.get("usage") if isinstance(params.get("usage"), dict) else None
+    if preferred:
+        parsed_preferred = parse_candidate(preferred)
+        if parsed_preferred:
+            candidates.append(parsed_preferred)
+    walk(params)
+    usage = max(candidates, key=lambda row: row.get("total_tokens", 0), default={})
     if not usage:
         return None
-    if "total_tokens" not in usage:
-        usage["total_tokens"] = sum(
-            usage.get(key, 0)
-            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
-        )
     return {
         "schema": "agentflow.codex_app_metadata.v1",
         "kind": "token_usage",

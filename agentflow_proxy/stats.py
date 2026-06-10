@@ -7446,19 +7446,190 @@ def _token_drift_bucket(value: int) -> str:
     return "10k_plus"
 
 
+_CODEX_TOKEN_USAGE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def _codex_count_bucket(value: Any) -> str:
+    number = _as_int(value)
+    if number <= 0:
+        return "0"
+    if number < 10:
+        return "1_9"
+    if number < 100:
+        return "10_99"
+    if number < 1000:
+        return "100_999"
+    if number < 10000:
+        return "1k_10k"
+    return "10k_plus"
+
+
+def _empty_codex_token_totals() -> dict[str, int]:
+    return {key: 0 for key in _CODEX_TOKEN_USAGE_KEYS}
+
+
+def _codex_public_scope_hash(scope_type: str, scope_value: Any) -> str | None:
+    value = str(scope_value or "")
+    if not value:
+        return None
+    digest = hashlib.sha256(f"{scope_type}:{value}".encode("utf-8")).hexdigest()[:16]
+    return f"sha256:{digest}"
+
+
+def _codex_public_token_usage(raw_usage: Any) -> dict[str, int]:
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
+    result = _empty_codex_token_totals()
+    for key in _CODEX_TOKEN_USAGE_KEYS:
+        result[key] = max(0, _as_int(usage.get(key)))
+    if not result["total_tokens"]:
+        result["total_tokens"] = sum(
+            result[key]
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+        )
+    result["total_tokens_bucket"] = _codex_count_bucket(result["total_tokens"])
+    return result
+
+
+def _codex_token_usage_delta(
+    current: dict[str, int],
+    previous: dict[str, int] | None,
+) -> tuple[dict[str, int], bool]:
+    if previous is None:
+        return {key: current.get(key, 0) for key in _CODEX_TOKEN_USAGE_KEYS}, False
+    reset = any(current.get(key, 0) < previous.get(key, 0) for key in _CODEX_TOKEN_USAGE_KEYS)
+    if reset:
+        return {key: current.get(key, 0) for key in _CODEX_TOKEN_USAGE_KEYS}, True
+    return {
+        key: max(0, current.get(key, 0) - previous.get(key, 0))
+        for key in _CODEX_TOKEN_USAGE_KEYS
+    }, False
+
+
+def _codex_token_usage_cost(usage: dict[str, int]) -> tuple[float, bool]:
+    input_total = _as_int(usage.get("input_tokens")) + _as_int(usage.get("cached_input_tokens"))
+    output_total = _as_int(usage.get("output_tokens")) + _as_int(usage.get("reasoning_output_tokens"))
+    cost = estimate_cost(
+        CODEX_APP_MODEL,
+        input_total,
+        output_total,
+        cache_read=_as_int(usage.get("cached_input_tokens")),
+        provider="openai",
+        processing_mode=CODEX_APP_PROCESSING_MODE,
+    )
+    if cost is None:
+        return 0.0, False
+    return float(cost), True
+
+
+def _codex_turn_token_estimates(row: dict[str, Any]) -> dict[str, int]:
+    input_tokens = max(0, int(_as_int(row.get("input_text_chars")) / TOKEN_CHARS))
+    output_tokens = max(0, int(_as_int(row.get("response_result_chars")) / TOKEN_CHARS))
+    return {
+        "input_tokens_est": input_tokens,
+        "output_tokens_est": output_tokens,
+        "total_tokens_est": input_tokens + output_tokens,
+    }
+
+
+def _codex_turn_model(row: dict[str, Any]) -> str:
+    routing = row.get("routing_json_normalized")
+    if not isinstance(routing, dict):
+        routing = _json_obj(row.get("routing_json"))
+    return str(
+        routing.get("routed_model")
+        or routing.get("target_model")
+        or routing.get("requested_model")
+        or CODEX_APP_MODEL
+    )
+
+
+def _codex_usage_matching_turn(
+    event: dict[str, Any],
+    turn_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    event_at = str(event.get("created_at") or "")
+    event_thread = str(event.get("thread_id") or "")
+    event_session = str(event.get("session_id") or "")
+    if event_thread:
+        candidates = [
+            row for row in turn_rows
+            if str(row.get("thread_id") or "") == event_thread
+        ]
+    elif event_session:
+        candidates = [
+            row for row in turn_rows
+            if str(row.get("session_id") or "") == event_session
+        ]
+    else:
+        return None
+    if not candidates:
+        return None
+    ordered = sorted(candidates, key=lambda row: str(row.get("created_at") or ""))
+    if event_at and event_at < str(ordered[0].get("created_at") or ""):
+        return None
+    for index, row in enumerate(ordered):
+        next_row = ordered[index + 1] if index + 1 < len(ordered) else None
+        start_at = str(row.get("created_at") or "")
+        next_at = str(next_row.get("created_at") or "") if next_row else None
+        if event_at >= start_at and (next_at is None or event_at < next_at):
+            return row
+    return ordered[-1]
+
+
+def _codex_usage_reconciliation_status(
+    event: dict[str, Any],
+    *,
+    matched_turn: dict[str, Any] | None,
+    reset: bool,
+) -> str:
+    if reset:
+        return "reset"
+    if not str(event.get("thread_id") or ""):
+        if str(event.get("session_id") or ""):
+            return "aggregate-only"
+        return "missing-thread"
+    if matched_turn is None:
+        return "stale"
+    return "reconciled"
+
+
+def _codex_token_usage_reconciliation_state(status_counts: dict[str, int]) -> str:
+    for status in ("reset", "missing-thread", "stale", "aggregate-only"):
+        if status_counts.get(status):
+            return status
+    if status_counts.get("reconciled"):
+        return "reconciled"
+    return "no-token-usage"
+
+
+def _add_codex_token_totals(target: dict[str, int], usage: dict[str, int]) -> None:
+    for key in _CODEX_TOKEN_USAGE_KEYS:
+        target[key] = target.get(key, 0) + _as_int(usage.get(key))
+
+
 def _codex_quota_token_usage_report(
     event_rows: list[dict[str, Any]],
     turn_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     rate_limit_updates: list[dict[str, Any]] = []
     token_usage_updates: list[dict[str, Any]] = []
-    token_totals = {
-        "input_tokens": 0,
-        "cached_input_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_output_tokens": 0,
-        "total_tokens": 0,
-    }
+    token_totals = _empty_codex_token_totals()
+    raw_counter_totals = _empty_codex_token_totals()
+    status_counts: dict[str, int] = {}
+    status_token_totals: dict[str, dict[str, int]] = {}
+    phase_buckets: dict[str, dict[str, Any]] = {}
+    model_buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    thread_buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    previous_by_scope: dict[tuple[str, str], dict[str, int]] = {}
+    reconciled_estimates = {"input_tokens_est": 0, "output_tokens_est": 0, "total_tokens_est": 0}
+    reconciled_cost_usd = 0.0
+    reconciled_cost_known = True
     for event in event_rows:
         metadata = _json_obj(event.get("metadata_json"))
         kind = metadata.get("kind")
@@ -7468,13 +7639,119 @@ def _codex_quota_token_usage_report(
                 **metadata,
             })
         elif kind == "token_usage":
-            usage = metadata.get("token_usage") if isinstance(metadata.get("token_usage"), dict) else {}
+            usage = _codex_public_token_usage(metadata.get("token_usage"))
+            scope_type = "thread" if event.get("thread_id") else ("session" if event.get("session_id") else "aggregate")
+            scope_value = str(event.get("thread_id") or event.get("session_id") or "codex-app")
+            scope_key = (scope_type, scope_value)
+            delta, reset = _codex_token_usage_delta(usage, previous_by_scope.get(scope_key))
+            previous_by_scope[scope_key] = usage
+            matched_turn = _codex_usage_matching_turn(event, turn_rows)
+            status = _codex_usage_reconciliation_status(event, matched_turn=matched_turn, reset=reset)
+            _increment_count(status_counts, status)
+            _add_codex_token_totals(status_token_totals.setdefault(status, _empty_codex_token_totals()), delta)
+            _add_codex_token_totals(token_totals, delta)
+            _add_codex_token_totals(raw_counter_totals, usage)
+            turn_estimates = (
+                _codex_turn_token_estimates(matched_turn)
+                if matched_turn is not None and status == "reconciled"
+                else {"input_tokens_est": 0, "output_tokens_est": 0, "total_tokens_est": 0}
+            )
+            for key in reconciled_estimates:
+                reconciled_estimates[key] += _as_int(turn_estimates.get(key))
+            cost, cost_known = _codex_token_usage_cost(delta)
+            reconciled_cost_usd += cost
+            reconciled_cost_known = reconciled_cost_known and cost_known
+            phase = (
+                str((matched_turn or {}).get("workflow_phase") or "unknown")
+                if matched_turn is not None and status == "reconciled"
+                else status
+            )
+            model = _codex_turn_model(matched_turn or {}) if matched_turn is not None and status == "reconciled" else CODEX_APP_MODEL
+            phase_bucket = phase_buckets.setdefault(
+                phase,
+                {
+                    "workflow_phase": phase,
+                    "updates": 0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 0,
+                    "agentflow_total_tokens_est": 0,
+                    "cost_usd": 0.0,
+                    "status_counts": {},
+                },
+            )
+            phase_bucket["updates"] += 1
+            for key in _CODEX_TOKEN_USAGE_KEYS:
+                phase_bucket[key] += _as_int(delta.get(key))
+            phase_bucket["agentflow_total_tokens_est"] += _as_int(turn_estimates.get("total_tokens_est"))
+            phase_bucket["cost_usd"] += cost
+            _increment_count(phase_bucket["status_counts"], status)
+            model_key = (model, CODEX_APP_PROCESSING_MODE)
+            model_bucket = model_buckets.setdefault(
+                model_key,
+                {
+                    "model": model,
+                    "processing_mode": CODEX_APP_PROCESSING_MODE,
+                    "updates": 0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 0,
+                    "cost_usd": 0.0,
+                    "status_counts": {},
+                },
+            )
+            model_bucket["updates"] += 1
+            for key in _CODEX_TOKEN_USAGE_KEYS:
+                model_bucket[key] += _as_int(delta.get(key))
+            model_bucket["cost_usd"] += cost
+            _increment_count(model_bucket["status_counts"], status)
+            public_hash = _codex_public_scope_hash(scope_type, scope_value)
+            if public_hash:
+                thread_key = (scope_type, public_hash)
+                thread_bucket = thread_buckets.setdefault(
+                    thread_key,
+                    {
+                        "scope_type": scope_type,
+                        "scope_hash": public_hash,
+                        "thread_id_included": False,
+                        "session_id_included": False,
+                        "updates": 0,
+                        "input_tokens": 0,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                        "total_tokens": 0,
+                        "agentflow_total_tokens_est": 0,
+                        "cost_usd": 0.0,
+                        "status_counts": {},
+                    },
+                )
+                thread_bucket["updates"] += 1
+                for key in _CODEX_TOKEN_USAGE_KEYS:
+                    thread_bucket[key] += _as_int(delta.get(key))
+                thread_bucket["agentflow_total_tokens_est"] += _as_int(turn_estimates.get("total_tokens_est"))
+                thread_bucket["cost_usd"] += cost
+                _increment_count(thread_bucket["status_counts"], status)
             token_usage_updates.append({
                 "created_at": event.get("created_at"),
-                **metadata,
+                "method": metadata.get("method"),
+                "kind": metadata.get("kind"),
+                "thread_id_present": bool(event.get("thread_id") or metadata.get("thread_id_present")),
+                "session_id_present": bool(event.get("session_id")),
+                "scope_type": scope_type,
+                "scope_hash": _codex_public_scope_hash(scope_type, scope_value),
+                "status": status,
+                "reset_detected": reset,
+                "token_usage": usage,
+                "token_usage_delta": {
+                    **delta,
+                    "total_tokens_bucket": _codex_count_bucket(delta.get("total_tokens")),
+                },
             })
-            for key in token_totals:
-                token_totals[key] += _as_int(usage.get(key))
     latest_rate_limit = rate_limit_updates[-1] if rate_limit_updates else None
     latest_token_usage = token_usage_updates[-1] if token_usage_updates else None
     estimated_input = sum(max(0, int(_as_int(row.get("input_text_chars")) / TOKEN_CHARS)) for row in turn_rows)
@@ -7493,27 +7770,65 @@ def _codex_quota_token_usage_report(
         "latest_rate_limits": latest_rate_limit.get("rate_limits") if latest_rate_limit else None,
         "latest_rate_limit_at": latest_rate_limit.get("created_at") if latest_rate_limit else None,
         "latest_token_usage": latest_token_usage.get("token_usage") if latest_token_usage else None,
+        "latest_token_usage_delta": latest_token_usage.get("token_usage_delta") if latest_token_usage else None,
         "latest_token_usage_at": latest_token_usage.get("created_at") if latest_token_usage else None,
         "token_usage_totals": token_totals,
+        "raw_counter_totals": raw_counter_totals,
+        "reconciled_cost_usd": round(reconciled_cost_usd, 8),
+        "reconciled_cost_known": reconciled_cost_known,
         "agentflow_estimated_totals": {
             "input_tokens_est": estimated_input,
             "output_tokens_est": estimated_output,
             "total_tokens_est": estimated_total,
         },
+        "matched_agentflow_estimated_totals": reconciled_estimates,
         "reconciliation": {
             "input_drift_tokens": drift["input_tokens"],
             "output_drift_tokens": drift["output_tokens"],
             "total_drift_tokens": drift["total_tokens"],
-            "total_drift_bucket": _token_drift_bucket(drift["total_tokens"]),
+            "total_drift_bucket": _codex_token_usage_reconciliation_state(status_counts),
+            "total_drift_size_bucket": _token_drift_bucket(drift["total_tokens"]),
+            "status": _codex_token_usage_reconciliation_state(status_counts),
+            "status_breakdown": _count_breakdown(status_counts),
+            "status_token_totals": [
+                {"status": status, **totals}
+                for status, totals in sorted(status_token_totals.items())
+            ],
             "drift_ratio": round(drift["total_tokens"] / usage_total, 4) if usage_total else None,
-            "basis": "tokenUsage metadata totals minus AgentFlow char-derived turn estimates in this scan window",
+            "basis": "tokenUsage monotonic deltas reconciled to scoped Codex turn windows minus AgentFlow char-derived estimates",
         },
+        "by_workflow_phase": [
+            {
+                **{key: value for key, value in bucket.items() if key != "status_counts"},
+                "cost_usd": round(_as_float(bucket.get("cost_usd")), 8),
+                "status_breakdown": _count_breakdown(dict(bucket.get("status_counts") or {})),
+            }
+            for bucket in sorted(phase_buckets.values(), key=lambda item: item["total_tokens"], reverse=True)
+        ],
+        "by_model": [
+            {
+                **{key: value for key, value in bucket.items() if key != "status_counts"},
+                "cost_usd": round(_as_float(bucket.get("cost_usd")), 8),
+                "status_breakdown": _count_breakdown(dict(bucket.get("status_counts") or {})),
+            }
+            for bucket in sorted(model_buckets.values(), key=lambda item: item["total_tokens"], reverse=True)
+        ],
+        "by_thread": [
+            {
+                **{key: value for key, value in bucket.items() if key != "status_counts"},
+                "cost_usd": round(_as_float(bucket.get("cost_usd")), 8),
+                "status_breakdown": _count_breakdown(dict(bucket.get("status_counts") or {})),
+            }
+            for bucket in sorted(thread_buckets.values(), key=lambda item: item["total_tokens"], reverse=True)[:20]
+        ],
         "privacy": {
             "metadata_only": True,
             "raw_params_included": False,
             "raw_prompts_included": False,
             "raw_commands_included": False,
             "raw_transcripts_included": False,
+            "raw_thread_ids_included": False,
+            "raw_session_ids_included": False,
             "arbitrary_payload_strings_included": False,
         },
     }
@@ -8158,6 +8473,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             cache=cache,
         )
         phase = str(phase_meta.get("phase") or "unknown")
+        row["workflow_phase"] = phase
         _increment_count(phase_counts, phase)
         _increment_count(phase_source_counts, phase_meta.get("source") or "unknown")
 
@@ -11268,7 +11584,7 @@ def dashboard_html() -> str:
   <h2>Codex quota and token usage</h2>
   <table data-table-id="codex-quota" data-filter-label="Filter Codex quota">
     <thead><tr>
-      <th data-sort-type="number">Rate updates</th><th data-sort-type="number">Token updates</th><th data-sort-type="text">Plan</th><th data-sort-type="text">Pressure</th><th data-sort-type="number">Reported tokens</th><th data-sort-type="number">Estimated tokens</th><th data-sort-type="number">Drift</th><th data-sort-type="text">Drift bucket</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="number">Rate updates</th><th data-sort-type="number">Token updates</th><th data-sort-type="text">Plan</th><th data-sort-type="text">Pressure</th><th data-sort-type="number">Reconciled tokens</th><th data-sort-type="number">Estimated tokens</th><th data-sort-type="number">Drift</th><th data-sort-type="text">Reconciliation</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="codex-quota-tbody"></tbody>
   </table>
@@ -12142,7 +12458,7 @@ async function refreshCodexQuota(){
       <td class="tokens">${fmtTok(totals.total_tokens||0)}</td>
       <td class="tokens">${fmtTok(est.total_tokens_est||0)}</td>
       <td class="tokens">${(rec.total_drift_tokens||0).toLocaleString()}</td>
-      <td><span class="badge miss">${esc(rec.total_drift_bucket||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(rec.status||rec.total_drift_bucket||'unknown')}</span> <span class="badge provider">${esc(rec.total_drift_size_bucket||'unknown')}</span></td>
       <td class="flags">${privacyBadges}</td>
     </tr>`;
     const hintRows=((d.summary_model_hint||{}).buckets)||d.summary_model_hint_buckets||[];
