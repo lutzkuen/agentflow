@@ -283,14 +283,16 @@ def _eval_evidence(results: list[dict[str, Any]], *, now: datetime, thresholds: 
 def _old_context_quality_gate(plan_row: dict[str, Any]) -> tuple[str | None, list[str]]:
     evidence = plan_row.get("evidence") if isinstance(plan_row.get("evidence"), dict) else {}
     verdict = str(evidence.get("verdict") or "")
+    if verdict == "widen":
+        return "widen", _reason_codes(evidence.get("quality_gate_reason_codes")) or ["external-quality-gate-passed"]
     if verdict == "promote":
         return "widen", ["old-context-quality-gate-passed"]
     if verdict == "rollback":
-        return "rollback", ["old-context-quality-gate-rollback"]
+        return "rollback", _reason_codes(evidence.get("quality_gate_reason_codes")) or ["old-context-quality-gate-rollback"]
     if verdict == "hold":
-        return "hold", ["old-context-quality-gate-hold"]
+        return "hold", _reason_codes(evidence.get("quality_gate_reason_codes")) or ["old-context-quality-gate-hold"]
     if verdict in {"insufficient-evidence", "needs_eval"}:
-        return "needs_eval", ["old-context-quality-gate-insufficient-evidence"]
+        return "needs_eval", _reason_codes(evidence.get("quality_gate_reason_codes")) or ["old-context-quality-gate-insufficient-evidence"]
     return None, []
 
 
@@ -394,6 +396,48 @@ def _extra_report_evidence(reports: list[dict[str, Any]]) -> dict[str, dict[str,
                     "bypassed": {"count": actual.get("actual_bypassed_or_disabled_count")},
                 }
             }
+        for candidate in report.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_id = candidate.get("candidate_id") or candidate.get("target_candidate_id")
+            if not candidate_id:
+                continue
+            cohorts = candidate.get("cohort_metrics") if isinstance(candidate.get("cohort_metrics"), dict) else {}
+            applied = cohorts.get("canary_applied") if isinstance(cohorts.get("canary_applied"), dict) else {}
+            holdout = cohorts.get("canary_holdout") if isinstance(cohorts.get("canary_holdout"), dict) else {}
+            bypassed = cohorts.get("bypassed_or_disabled") if isinstance(cohorts.get("bypassed_or_disabled"), dict) else {}
+            safety = cohorts.get("safety_stopped") if isinstance(cohorts.get("safety_stopped"), dict) else {}
+            extra = {
+                "quality_gate_verdict": candidate.get("verdict"),
+                "quality_gate_reason_codes": _reason_codes(candidate.get("reason_codes")),
+                "canary_evidence": {
+                    "applied": {
+                        "count": applied.get("count"),
+                        "error_count": applied.get("error_count"),
+                        "retry_count": applied.get("retry_count"),
+                        "error_rate": applied.get("error_rate"),
+                        "retry_rate": applied.get("retry_rate"),
+                        "latency_avg_ms": applied.get("latency_avg_ms"),
+                        "net_savings_usd": applied.get("observed_savings_usd", candidate.get("observed_savings_usd")),
+                    },
+                    "holdout": {
+                        "count": holdout.get("count"),
+                        "error_count": holdout.get("error_count"),
+                        "retry_count": holdout.get("retry_count"),
+                        "error_rate": holdout.get("error_rate"),
+                        "retry_rate": holdout.get("retry_rate"),
+                        "latency_avg_ms": holdout.get("latency_avg_ms"),
+                        "net_savings_usd": holdout.get("observed_savings_usd"),
+                    },
+                    "bypassed": {
+                        "count": _as_int(bypassed.get("count")) + _as_int(safety.get("count")),
+                        "error_count": _as_int(bypassed.get("error_count")) + _as_int(safety.get("error_count")),
+                        "retry_count": _as_int(bypassed.get("retry_count")) + _as_int(safety.get("retry_count")),
+                        "safety_stop_count": safety.get("count"),
+                    },
+                },
+            }
+            by_candidate[str(candidate_id)] = extra
     return by_candidate
 
 

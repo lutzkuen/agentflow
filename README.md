@@ -153,6 +153,14 @@ agentflow-openai-routing-report --db ~/.agentflow/agentflow.sqlite3 --pretty
 
 The report groups recent OpenAI metadata by endpoint, model family, category, tool/stream flags, text/token buckets, cache status, and local safety blockers. It projects candidate savings without mutating requests, writing policy files, calling providers, or printing raw prompts, responses, tool payloads, request IDs, cache keys, session IDs, file paths, or secrets.
 
+After an OpenAI local routing canary has recorded applied and holdout cohorts, measure impact and promotion verdicts with:
+
+```bash
+agentflow-openai-canary-impact --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The impact report groups metadata by OpenAI canary candidate, compares applied and holdout cohorts, and emits `widen`, `hold`, `rollback`, or `needs_eval` verdicts without printing raw prompts, responses, tool payloads, request IDs, cache keys, session IDs, file paths, or secrets.
+
 To export family-agnostic optimization candidates for local evaluation, run:
 
 ```bash

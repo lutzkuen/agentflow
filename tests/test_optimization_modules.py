@@ -12,6 +12,7 @@ from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
 from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
+from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
 from agentflow_proxy.optimization_promotion_canary import (
     apply_optimization_promotion_canaries,
     evaluate_promotion_canary_safety_stop,
@@ -376,6 +377,211 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
         self._assert_privacy_clean(report)
+
+    def _log_openai_canary_call(
+        self,
+        store,
+        *,
+        candidate_id: str = "openai-canary-candidate",
+        cohort: str,
+        status_code: int = 200,
+        retry_count: int = 0,
+        latency_ms: int = 1000,
+        cost_est: float = 0.001,
+        cost_baseline: float = 0.003,
+        projected_savings: float = 0.002,
+        created_at: str = "2026-06-10T04:00:00+00:00",
+        suffix: str = "",
+        fallback_reason: str | None = None,
+    ):
+        status = "applied" if cohort == "canary_applied" else "holdout" if cohort == "canary_holdout" else "safety_stopped"
+        canary = {
+            "enabled": True,
+            "policy_id": "test-openai-canary-policy",
+            "rule_id": "test-openai-canary-policy",
+            "promotion_action_id": "test-openai-canary-action",
+            "target_candidate_id": candidate_id,
+            "candidate_id": candidate_id,
+            "status": status,
+            "cohort": cohort,
+            "reason": "selected-canary" if status == "applied" else "selected-holdout" if status == "holdout" else "safety-stop-tripped",
+            "original_model": "gpt-5-codex",
+            "requested_model": "gpt-5-codex",
+            "target_model": "gpt-5-mini",
+            "actual_forwarded_model": "gpt-5-mini" if status == "applied" and not fallback_reason else "gpt-5-codex",
+            "source_surface": "openai_provider_request",
+            "app_family": "generic_openai",
+            "category": "chat",
+            "text_bucket": "lt_2k",
+            "token_bucket": "lt_2k",
+            "projected_input_savings_usd": projected_savings,
+            "canary_fraction": 0.5,
+            "holdout_fraction": 0.25,
+            "policy_source": "local-manual",
+            "cohort_key_hash": f"sha256:test-{cohort}-{suffix}",
+        }
+        if fallback_reason:
+            canary["fallback_reason"] = fallback_reason
+            canary["fallback_model"] = "gpt-5-codex"
+        if status == "safety_stopped":
+            canary["safety_stop"] = {"tripped": True, "reason_codes": ["error-rate"]}
+        store.log_call(
+            id=f"openai-canary-impact-{cohort}-{suffix}",
+            created_at=created_at,
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routed_model=canary["actual_forwarded_model"],
+            stream=0,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            input_tokens_est=500,
+            output_tokens_est=100,
+            actual_input_tokens=500,
+            actual_output_tokens=100,
+            cost_est_usd=cost_est,
+            cost_baseline_usd=cost_baseline,
+            crunch_json=stable_json({"changed": suffix.endswith("crunch")}),
+            routing_json=stable_json({"openai_canary": canary}),
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+            error='{"error":{"message":"raw provider response secret"}}' if status_code >= 400 else None,
+            request_json=None,
+            response_json=None,
+            session_id="raw-openai-session-secret",
+            category="chat",
+            retry_count=retry_count,
+            provider="openai",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+        )
+
+    def test_openai_canary_impact_reports_verdicts_and_feeds_promotion_report(self):
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "candidate_id": "openai-canary-candidate",
+                    "optimization_family": "openai_local_routing",
+                    "action_family": "routing",
+                    "source_surface": "openai_provider_request",
+                    "app_family": "generic_openai",
+                    "granularity": "provider_request",
+                    "replayability_level": "features_only",
+                    "candidate_target_model": "gpt-5-mini",
+                    "sample_count": 3,
+                    "projected_savings_usd": 0.006,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                self._log_openai_canary_call(store, cohort="canary_applied", suffix="a1")
+                self._log_openai_canary_call(store, cohort="canary_applied", suffix="a2-crunch", latency_ms=900)
+                self._log_openai_canary_call(store, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h1")
+                store.log_optimization_eval_result(
+                    id="openai-canary-eval-pass",
+                    run_id="openai-canary-run",
+                    created_at="2026-06-10T04:05:00+00:00",
+                    candidate_id="openai-canary-candidate",
+                    source_surface="openai_provider_request",
+                    optimization_family="openai_local_routing",
+                    action_family="routing",
+                    status_class="pass",
+                    reason_codes_json=stable_json(["offline-fixture-passed"]),
+                    score_json=stable_json({"output_similarity": 0.98, "quality_score": 0.96}),
+                    cost_json=stable_json({"projected_savings_usd": 0.006}),
+                    result_json=stable_json({"metadata_only": True}),
+                )
+                impact = build_openai_canary_impact_report(
+                    store,
+                    limit=10,
+                    min_applied_samples=2,
+                    min_holdout_samples=1,
+                    now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                )
+                promotion = build_optimization_promotion_report(store, plan=plan, evidence_reports=[impact])
+            finally:
+                store.conn.close()
+
+        self.assertEqual(impact["schema"], "agentflow.openai_canary_impact.v1")
+        self.assertTrue(impact["read_only"])
+        self.assertFalse(impact["provider_calls_made"])
+        self.assertEqual(impact["summary"]["observed_openai_canary_metadata_row_count"], 3)
+        candidate = impact["candidates"][0]
+        self.assertEqual(candidate["candidate_id"], "openai-canary-candidate")
+        self.assertEqual(candidate["verdict"], "widen")
+        self.assertIn("target-savings-met", candidate["reason_codes"])
+        self.assertEqual(candidate["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(candidate["cohort_counts"]["canary_holdout"], 1)
+        self.assertEqual(candidate["crunch_interaction_counts"][0]["value"], "unchanged")
+        self.assertFalse(impact["privacy"]["raw_prompts_included"])
+        self.assertFalse(impact["privacy"]["request_ids_included"])
+        self._assert_privacy_clean(impact)
+
+        promoted = promotion["candidates"][0]
+        self.assertEqual(promoted["candidate_id"], "openai-canary-candidate")
+        self.assertEqual(promoted["verdict"], "widen")
+        self.assertEqual(promoted["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(promoted["cohort_counts"]["canary_holdout"], 1)
+        self.assertIn("target-savings-met", promoted["reason_codes"])
+        self._assert_privacy_clean(promotion)
+
+    def test_openai_canary_impact_verdicts_cover_regression_stale_and_insufficient(self):
+        scenarios = (
+            ("insufficient", "needs_eval", "insufficient-holdout-samples"),
+            ("error", "hold", "error-rate-regression"),
+            ("retry", "hold", "retry-rate-regression"),
+            ("latency", "hold", "latency-regression"),
+            ("stale", "hold", "stale-evidence"),
+        )
+        for scenario, expected_verdict, expected_reason in scenarios:
+            with self.subTest(scenario=scenario):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+                    try:
+                        if scenario == "insufficient":
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", suffix="a1")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", suffix="a2")
+                        elif scenario == "error":
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", status_code=500, cost_est=0.001, cost_baseline=0.003, suffix="a1")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", suffix="a2")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h1")
+                        elif scenario == "retry":
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", retry_count=1, suffix="a1")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", suffix="a2")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h1")
+                        elif scenario == "latency":
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", latency_ms=5000, suffix="a1")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", latency_ms=6000, suffix="a2")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_holdout", latency_ms=1000, cost_est=0.003, cost_baseline=0.003, suffix="h1")
+                        else:
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", created_at="2026-06-01T00:00:00+00:00", suffix="a1")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_applied", created_at="2026-06-01T00:00:01+00:00", suffix="a2")
+                            self._log_openai_canary_call(store, candidate_id=f"candidate-{scenario}", cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, created_at="2026-06-01T00:00:02+00:00", suffix="h1")
+                        report = build_openai_canary_impact_report(
+                            store,
+                            limit=10,
+                            since="2026-06-01T00:00:00+00:00" if scenario == "stale" else None,
+                            min_applied_samples=2,
+                            min_holdout_samples=1,
+                            max_evidence_age_hours=1,
+                            max_error_rate_delta=0.10,
+                            max_retry_rate_delta=0.10,
+                            max_latency_regression_ms=2000,
+                            rollback_error_rate=1.0,
+                            now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                        )
+                    finally:
+                        store.conn.close()
+                candidate = report["candidates"][0]
+                self.assertEqual(candidate["verdict"], expected_verdict)
+                self.assertIn(expected_reason, candidate["reason_codes"])
+                self._assert_privacy_clean(report)
 
     def test_promotion_actions_emit_local_rollout_actions_and_explicit_omissions(self):
         report = {
