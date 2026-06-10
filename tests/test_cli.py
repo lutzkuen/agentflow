@@ -112,6 +112,46 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(json.loads(stderr.getvalue())["error"]["type"], "unsafe_url")
         post.assert_not_called()
 
+    def test_policy_draft_apply_cli_rejects_non_loopback_reload_url(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = cli.policy_draft_apply_cli(
+            ["draft-one", "--reload-url", "http://192.168.1.20:4000/agentflow/admin/reload-policies"],
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.policy_draft_apply.v1")
+        self.assertEqual(payload["error"]["type"], "unsafe_url")
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+        self.assertFalse(payload["privacy"]["managed_server_calls_made"])
+        self.assertFalse(payload["privacy"]["loopback_admin_calls_made"])
+
+    def test_policy_rollback_apply_id_cli_rejects_non_loopback_reload_url(self):
+        stdout = io.StringIO()
+
+        code = cli.policy_rollback_cli(
+            [
+                "--apply-id",
+                "apply-one",
+                "--reload-url",
+                "http://192.168.1.20:4000/agentflow/admin/reload-policies",
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.policy_draft_rollback.v1")
+        self.assertEqual(payload["error"]["type"], "unsafe_url")
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+        self.assertFalse(payload["privacy"]["managed_server_calls_made"])
+        self.assertFalse(payload["privacy"]["loopback_admin_calls_made"])
+
     def test_policy_reload_cli_reports_non_success_response(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

@@ -252,6 +252,10 @@ class DashboardImportTests(unittest.TestCase):
                 "change_count": 2,
                 "workspace": str(draft_dir),
                 "bundle_path": str(draft_dir / "policy_bundle.json"),
+                "raw_prompt": "raw workbench prompt must not leak",
+                "request_id": "workbench-request-id-must-not-leak",
+                "session_id": "workbench-session-id-must-not-leak",
+                "cache_key": "workbench-cache-key-must-not-leak",
                 "sections": [{"section": "cache"}],
                 "privacy": {
                     "raw_prompts_included": False,
@@ -277,6 +281,10 @@ class DashboardImportTests(unittest.TestCase):
                     "draft_id": "draft-one",
                     "changed_sections": ["cache"],
                     "change_count": 2,
+                    "raw_prompt": "raw event prompt must not leak",
+                    "request_id": "event-request-id-must-not-leak",
+                    "session_id": "event-session-id-must-not-leak",
+                    "cache_key": "event-cache-key-must-not-leak",
                     "provider_calls_made": False,
                     "managed_server_calls_made": False,
                     "exit_code": 0,
@@ -380,6 +388,18 @@ class DashboardImportTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["absolute_paths_included"])
         self.assertFalse(payload["privacy"]["draft_bundle_contents_included"])
         self.assertFalse(payload["privacy"]["provider_calls_made"])
+        rendered = json.dumps(payload, sort_keys=True)
+        for sensitive in (
+            "raw workbench prompt must not leak",
+            "workbench-request-id-must-not-leak",
+            "workbench-session-id-must-not-leak",
+            "workbench-cache-key-must-not-leak",
+            "raw event prompt must not leak",
+            "event-request-id-must-not-leak",
+            "event-session-id-must-not-leak",
+            "event-cache-key-must-not-leak",
+        ):
+            self.assertNotIn(sensitive, rendered)
         self.assertEqual(policies.status_code, 200)
         self.assertEqual(policies.json()["workbench"]["staged_drafts"]["count"], 1)
         self.assertEqual(reload_required["status"], "reload-required")

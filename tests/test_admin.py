@@ -84,6 +84,31 @@ class AdminRouterTests(unittest.TestCase):
         self.assertFalse(payload["wrote_active_policy_files"])
         self.assertFalse(payload["provider_calls_made"])
 
+    def test_policy_workbench_mutating_routes_are_loopback_only(self):
+        app = FastAPI()
+        app.include_router(create_admin_router())
+
+        remote = TestClient(app, client=("192.168.1.50", 50000))
+        cases = [
+            ("/agentflow/admin/reload-policies", {}),
+            ("/agentflow/admin/policy-drafts/stage", {"section": "cache", "policy": {"semantic_cache": {"threshold": 0.91}}}),
+            ("/agentflow/admin/policy-drafts/validate", {"draft": "draft-one"}),
+            ("/agentflow/admin/policy-drafts/apply", {"draft": "draft-one"}),
+            ("/agentflow/admin/policy-drafts/rollback", {"apply_id": "apply-one"}),
+        ]
+
+        for path, payload in cases:
+            response = remote.post(path, json=payload)
+            with self.subTest(path=path):
+                self.assertEqual(response.status_code, 403)
+                data = response.json()
+                self.assertFalse(data["ok"])
+                self.assertEqual(data["error"]["type"], "forbidden")
+                if path != "/agentflow/admin/reload-policies":
+                    self.assertFalse(data["wrote_active_policy_files"])
+                    self.assertFalse(data["provider_calls_made"])
+                    self.assertFalse(data["managed_server_calls_made"])
+
     def test_policy_draft_stage_route_returns_structured_diff_for_loopback(self):
         app = FastAPI()
         app.include_router(create_admin_router())

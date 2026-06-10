@@ -28,6 +28,25 @@ from agentflow_proxy.policy_bundle import (
 )
 
 
+WORKBENCH_SENSITIVE_FIXTURES = (
+    "raw prompt fixture must not leak",
+    "raw response fixture must not leak",
+    "raw provider body fixture must not leak",
+    "raw tool payload fixture must not leak",
+    "raw file content fixture must not leak",
+    "request-id-fixture-must-not-leak",
+    "session-id-fixture-must-not-leak",
+    "cache-key-fixture-must-not-leak",
+    "api-key-fixture-must-not-leak",
+)
+
+
+def _assert_workbench_payload_is_metadata_only(testcase, payload):
+    rendered = json.dumps(payload, sort_keys=True)
+    for value in WORKBENCH_SENSITIVE_FIXTURES:
+        testcase.assertNotIn(value, rendered)
+
+
 def _provenance_env(secret: str | None = None) -> dict[str, str]:
     return {
         MANAGED_POLICY_VERIFICATION_SECRET_ENV: secret or "",
@@ -720,6 +739,93 @@ crunch:
             self.assertFalse(workspace.exists())
             self.assertIn("$.raw_request", {error["path"] for error in result["error"]["errors"]})
 
+    def test_policy_draft_rejects_privacy_sensitive_identifiers_payloads_and_secrets(self):
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            payload = {
+                "semantic_cache": {"enabled": True},
+                "request_id": "request-id-fixture-must-not-leak",
+                "session_id": "session-id-fixture-must-not-leak",
+                "cache_key": "cache-key-fixture-must-not-leak",
+                "api_key": "api-key-fixture-must-not-leak",
+                "tool_payload": {"content": "raw tool payload fixture must not leak"},
+                "file_contents": "raw file content fixture must not leak",
+                "nested": {
+                    "raw_prompt": "raw prompt fixture must not leak",
+                    "raw_response": "raw response fixture must not leak",
+                    "provider_body": "raw provider body fixture must not leak",
+                },
+            }
+
+            result = asyncio.run(stage_policy_draft(
+                payload,
+                section="cache",
+                draft_id="unsafe-fixtures",
+                workspace=workspace,
+            ))
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["type"], "raw_payload_rejected")
+            self.assertFalse(result["wrote_active_policy_files"])
+            self.assertFalse(result["provider_calls_made"])
+            self.assertFalse(result["managed_server_calls_made"])
+            self.assertFalse(workspace.exists())
+            paths = {error["path"] for error in result["error"]["errors"]}
+            for expected in (
+                "$.request_id",
+                "$.session_id",
+                "$.cache_key",
+                "$.api_key",
+                "$.tool_payload",
+                "$.file_contents",
+                "$.nested.raw_prompt",
+                "$.nested.raw_response",
+                "$.nested.provider_body",
+            ):
+                self.assertIn(expected, paths)
+            _assert_workbench_payload_is_metadata_only(self, result)
+
+    def test_policy_draft_validation_failure_fixture_blocks_apply_without_active_writes(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            draft_dir = workspace / "invalid-cache"
+            draft_dir.mkdir(parents=True)
+            exported = asyncio.run(build_policy_bundle())
+            exported["policies"]["cache"]["semantic_cache"]["threshold"] = "raw prompt fixture must not leak"
+            (draft_dir / "policy_bundle.json").write_text(json.dumps(exported), encoding="utf-8")
+            (draft_dir / "draft.json").write_text(
+                json.dumps({
+                    "schema": "agentflow.policy_draft.v1",
+                    "draft_id": "invalid-cache",
+                    "bundle_path": str(draft_dir / "policy_bundle.json"),
+                    "changed": True,
+                    "changed_sections": ["cache"],
+                    "sections": [{"section": "cache"}],
+                }),
+                encoding="utf-8",
+            )
+
+            validation = asyncio.run(apply_validated_policy_draft(
+                "invalid-cache",
+                workspace=workspace,
+                config_dir=config_dir,
+                sections=["cache"],
+            ))
+
+            self.assertFalse(validation["ok"])
+            self.assertEqual(validation["status"], "blocked")
+            self.assertEqual(validation["error"]["type"], "apply_blocked")
+            self.assertFalse(validation["reloaded_modules"])
+            self.assertFalse(validation["restored"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
+            self.assertFalse(list(config_dir.glob("cache_rules.yaml.bak-*")))
+            _assert_workbench_payload_is_metadata_only(self, validation)
+
     def test_policy_draft_apply_transaction_writes_backup_reloads_and_verifies(self):
         with TemporaryDirectory() as tmp:
             config_dir = Path(tmp) / ".agentflow"
@@ -867,6 +973,77 @@ crunch:
             self.assertTrue(result["restored"])
             self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
 
+    def test_policy_draft_apply_restores_prior_file_when_later_write_fails(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            crunch_path = config_dir / "crunch_rules.yaml"
+            cache_path = config_dir / "cache_rules.yaml"
+            crunch_original = (
+                "enabled: true\n"
+                "threshold_chars: 24000\n"
+                "prompt_cache:\n"
+                "  enabled: true\n"
+                "  min_chars: 4096\n"
+                "thinking_deduplication:\n"
+                "  enabled: true\n"
+                "  min_chars: 2000\n"
+                "  similarity_threshold: 0.95\n"
+            )
+            cache_original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            crunch_path.write_text(crunch_original, encoding="utf-8")
+            cache_path.write_text(cache_original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+
+            env = {
+                "AGENTFLOW_CRUNCH_RULES": str(crunch_path),
+                "AGENTFLOW_CACHE_RULES": str(cache_path),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    proposed = asyncio.run(build_policy_bundle())
+                    proposed["policies"]["crunch"]["threshold_chars"] = 12000
+                    proposed["policies"]["cache"]["semantic_cache"]["threshold"] = 0.91
+                    stage = asyncio.run(stage_policy_draft(
+                        proposed,
+                        draft_id="partial-write-failure",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+
+                    real_write = __import__("agentflow_proxy.policy_workbench", fromlist=["_atomic_write_policy_text"])._atomic_write_policy_text
+                    writes = []
+                    failed_cache_write = False
+
+                    def fail_second_write(path, text):
+                        nonlocal failed_cache_write
+                        writes.append(Path(path).name)
+                        if Path(path).name == "cache_rules.yaml" and not failed_cache_write:
+                            failed_cache_write = True
+                            raise OSError("cache write fixture failure")
+                        return real_write(path, text)
+
+                    with patch("agentflow_proxy.policy_workbench._atomic_write_policy_text", side_effect=fail_second_write):
+                        result = asyncio.run(apply_validated_policy_draft(
+                            "partial-write-failure",
+                            workspace=workspace,
+                            config_dir=config_dir,
+                            sections=["crunch", "cache"],
+                            reload_policy_state=reload_policy_modules,
+                        ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["type"], "write_failed")
+            self.assertEqual(writes[:2], ["crunch_rules.yaml", "cache_rules.yaml"])
+            self.assertTrue(result["restored"])
+            self.assertTrue(result["restore"]["ok"])
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), crunch_original)
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), cache_original)
+            _assert_workbench_payload_is_metadata_only(self, result)
+
     def test_policy_draft_rollback_by_apply_id_dry_run_reports_exact_files(self):
         with TemporaryDirectory() as tmp:
             config_dir = Path(tmp) / ".agentflow"
@@ -978,6 +1155,61 @@ crunch:
             self.assertTrue(event["ok"])
             self.assertEqual(event["details"]["apply_id"], apply_result["apply_id"])
             self.assertEqual(event["details"]["restored_sections"], ["cache"])
+
+    def test_policy_draft_rollback_restores_applied_file_when_reload_fails(self):
+        async def failing_reload():
+            raise RuntimeError("rollback reload unavailable")
+
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            event_log = Path(tmp) / "policy_events.jsonl"
+
+            env = {
+                "AGENTFLOW_CACHE_RULES": str(cache_path),
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-rollback-reload-fail",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+                    apply_result = asyncio.run(apply_validated_policy_draft(
+                        "cache-rollback-reload-fail",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                    ))
+                    self.assertTrue(apply_result["ok"])
+                    applied_text = cache_path.read_text(encoding="utf-8")
+
+                    rollback = asyncio.run(rollback_policy_apply(
+                        apply_result["apply_id"],
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=failing_reload,
+                        event_source="test",
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertFalse(rollback["ok"])
+            self.assertEqual(rollback["error"]["type"], "reload_failed")
+            self.assertTrue(rollback["restored"])
+            self.assertTrue(rollback["restore"]["ok"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), applied_text)
+            self.assertNotEqual(cache_path.read_text(encoding="utf-8"), original)
+            _assert_workbench_payload_is_metadata_only(self, rollback)
 
     def test_policy_draft_rollback_by_apply_id_missing_backup_fails_closed(self):
         with TemporaryDirectory() as tmp:
