@@ -446,7 +446,7 @@ rules: []
                     self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
                     self.assertEqual(meta["reason"], "phase canary selected Sonnet-to-Haiku route")
                     self.assertEqual(meta["phase_canary"]["status"], "applied")
-                    self.assertEqual(meta["phase_canary"]["cohort"], "applied")
+                    self.assertEqual(meta["phase_canary"]["cohort"], "canary_applied")
                     self.assertEqual(meta["phase_canary"]["policy_id"], "test-phase-canary")
                     self.assertEqual(meta["phase_canary"]["workflow_phase"], "tool-execution")
                     self.assertIn("cohort_hash", meta["phase_canary"])
@@ -487,7 +487,7 @@ rules: []
                     self.assertEqual(routed, manual_router.SONNET_DEFAULT)
                     self.assertEqual(meta["reason"], "phase canary holdout; keep requested model")
                     self.assertEqual(meta["phase_canary"]["status"], "holdout")
-                    self.assertEqual(meta["phase_canary"]["cohort"], "holdout")
+                    self.assertEqual(meta["phase_canary"]["cohort"], "canary_holdout")
             finally:
                 importlib.reload(router_module)
 

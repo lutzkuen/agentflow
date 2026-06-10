@@ -1,14 +1,22 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import yaml
 
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
 from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
+from agentflow_proxy.optimization_promotion_canary import (
+    apply_optimization_promotion_canaries,
+    evaluate_promotion_canary_safety_stop,
+    promotion_canary_decision,
+)
 from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
@@ -445,6 +453,92 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(result["omitted"][0]["target_candidate_id"], "blocked-action-candidate")
         self.assertEqual(result["omitted"][0]["reason"], "insufficient-eval-evidence")
         self._assert_privacy_clean(result)
+
+    def test_promotion_canary_apply_records_deterministic_holdout_and_safety_stop(self):
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "routing-canary-candidate",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "candidate_target_model": "claude-haiku-4-5-20251001",
+                    "projected_savings_usd": 0.05,
+                    "sample_count": 2,
+                    "cohort_counts": {"canary_applied": 0, "canary_holdout": 0, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"raw_prompts_included": False},
+                }
+            ],
+        }
+        bundle = build_optimization_promotion_actions(report, initial_canary_fraction=0.10, holdout_fraction=0.10)
+        action = bundle["actions"][0]
+
+        decisions = {}
+        for index in range(300):
+            metadata = {
+                "request_fingerprint": f"fixture-request-{index}",
+                "session_id_hash": f"sha256:session-{index % 11}",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "workflow_phase": "tool-execution",
+                "category": "tool-result",
+                "text_bucket": "2k-8k",
+                "requested_model": "claude-sonnet-4-6",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "has_tools": True,
+            }
+            first = promotion_canary_decision(action, metadata)
+            second = promotion_canary_decision(action, metadata)
+            self.assertEqual(first, second)
+            decisions.setdefault(first["cohort"], first)
+            if {"canary_applied", "canary_holdout", "skipped"}.issubset(decisions):
+                break
+
+        self.assertEqual(decisions["canary_applied"]["status"], "applied")
+        self.assertTrue(decisions["canary_applied"]["selected"])
+        self.assertEqual(decisions["canary_holdout"]["status"], "holdout")
+        self.assertFalse(decisions["canary_holdout"]["selected"])
+        self.assertEqual(decisions["skipped"]["reason"], "outside-canary-and-holdout")
+        rendered_decision = stable_json(decisions)
+        self.assertNotIn("raw prompt", rendered_decision)
+        self.assertNotIn("messages", rendered_decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            apply_result = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=False)
+            self.assertTrue(apply_result["ok"])
+            self.assertTrue(apply_result["wrote_policy_files"])
+            routing_yaml = Path(tmp) / "routing_rules.yaml"
+            data = yaml.safe_load(routing_yaml.read_text(encoding="utf-8"))
+            phase_canary = data["phase_canary"]
+            self.assertTrue(phase_canary["enabled"])
+            self.assertEqual(phase_canary["promotion_action_id"], action["action_id"])
+            self.assertEqual(phase_canary["target_candidate_id"], "routing-canary-candidate")
+            self.assertEqual(phase_canary["canary_fraction"], 0.1)
+            self.assertEqual(phase_canary["holdout_fraction"], 0.1)
+            self.assertEqual(phase_canary["policy_source"], "managed-recommended")
+
+        safety = evaluate_promotion_canary_safety_stop(
+            action,
+            [
+                {"cohort": "canary_applied", "status_code": 500, "error_bucket": "http_5xx"},
+                {"cohort": "canary_applied", "status_code": 400, "error_bucket": "unsupported_model"},
+                {"cohort": "canary_holdout", "status_code": 200},
+            ],
+            thresholds={"min_samples": 2, "max_error_rate": 0.5, "max_5xx_rate": 0.0, "max_unsupported_model_errors": 0},
+        )
+        self.assertTrue(safety["tripped"])
+        self.assertIn("error-rate", safety["reason_codes"])
+        self.assertIn("provider-5xx-rate", safety["reason_codes"])
+        self.assertIn("unsupported-model-errors", safety["reason_codes"])
+        stopped = promotion_canary_decision(action, {"request_fingerprint": "fixture-request-stop"}, safety_stop=safety)
+        self.assertEqual(stopped["status"], "safety_stopped")
+        self.assertEqual(stopped["cohort"], "bypassed_or_disabled")
+        self.assertEqual(stopped["reason"], "local-canary-safety-stop")
 
     def test_feedback_status_result_is_metadata_only(self):
         result = feedback.managed_feedback_status_result(

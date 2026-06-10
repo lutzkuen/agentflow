@@ -20,21 +20,21 @@ LOCAL_POLICY_SECTIONS = {
         "target_local_policy_section": "routing.rules",
         "rule_prefix": "promotion-routing",
         "review_command": "agentflow-policy-review",
-        "apply_command": "agentflow-policy-apply --dry-run",
+        "apply_command": "agentflow-optimization-promotion-canaries-apply --dry-run",
     },
     "cache": {
         "policy_section": "cache",
         "target_local_policy_section": "cache.rules",
         "rule_prefix": "promotion-cache",
         "review_command": "agentflow-managed-rollout-actions-review",
-        "apply_command": "agentflow-managed-rollout-actions-apply --dry-run",
+        "apply_command": "agentflow-optimization-promotion-canaries-apply --dry-run",
     },
     "crunch": {
         "policy_section": "crunch",
         "target_local_policy_section": "crunch.rules",
         "rule_prefix": "promotion-crunch",
         "review_command": "agentflow-managed-rollout-actions-review",
-        "apply_command": "agentflow-managed-rollout-actions-apply --dry-run",
+        "apply_command": "agentflow-optimization-promotion-canaries-apply --dry-run",
     },
 }
 

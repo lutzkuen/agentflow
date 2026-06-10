@@ -1269,6 +1269,70 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
         self.assertFalse(payload["privacy"]["request_ids_included"])
 
+    def test_optimization_promotion_canary_apply_cli_dry_run_and_apply_routing_yaml(self):
+        bundle = {
+            "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "actions": [
+                {
+                    "schema": "agentflow.optimization_promotion_rollout_action.v1",
+                    "action_id": "promotion-rollout-action:cli-routing",
+                    "status": "planned",
+                    "action_type": "widen",
+                    "target_candidate_id": "routing-cli-canary",
+                    "target_rule_id": "promotion-routing-cli",
+                    "action_family": "routing",
+                    "optimization_family": "phase_routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "policy_section": "routing",
+                    "target_local_policy_section": "routing.rules",
+                    "local_policy_update": {
+                        "kind": "yaml-rule-canary",
+                        "policy_source": "managed-recommended",
+                        "managed_enforced": False,
+                        "required_local_review": True,
+                        "candidate_target_model": "claude-haiku-4-5-20251001",
+                    },
+                    "canary_fraction": 0.1,
+                    "holdout_fraction": 0.1,
+                    "privacy": {"metadata_only": True},
+                }
+            ],
+        }
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.optimization_promotion_canary_apply_cli(
+                ["--config-dir", tmp, "--dry-run", "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            dry_run = json.loads(stdout.getvalue())
+            self.assertEqual(dry_run["schema"], "agentflow.optimization_promotion_canary_apply.v1")
+            self.assertTrue(dry_run["dry_run"])
+            self.assertFalse(dry_run["wrote_policy_files"])
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+
+            stdout = io.StringIO()
+            code = cli.optimization_promotion_canary_apply_cli(
+                ["--config-dir", tmp, "--write", "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            applied = json.loads(stdout.getvalue())
+            self.assertTrue(applied["ok"])
+            self.assertTrue(applied["wrote_policy_files"])
+            data = yaml.safe_load((Path(tmp) / "routing_rules.yaml").read_text(encoding="utf-8"))
+            self.assertEqual(data["phase_canary"]["policy_id"], "promotion-routing-cli")
+            self.assertEqual(data["phase_canary"]["promotion_action_id"], "promotion-rollout-action:cli-routing")
+            self.assertEqual(data["phase_canary"]["target_candidate_id"], "routing-cli-canary")
+            self.assertEqual(data["phase_canary"]["canary_fraction"], 0.1)
+            self.assertEqual(data["phase_canary"]["holdout_fraction"], 0.1)
+
     def test_optimization_shadow_eval_cli_requires_budget_for_execute(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

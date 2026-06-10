@@ -2800,6 +2800,82 @@ def optimization_promotion_actions_cli(
     return 0
 
 
+def optimization_promotion_canary_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Apply optimization promotion canaries to local routing policy files")
+    parser.add_argument(
+        "promotion_actions",
+        nargs="?",
+        default="-",
+        help="Optimization promotion rollout action bundle JSON path, or '-' for stdin.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["routing"],
+        help="Policy section to apply. May be repeated. Default: routing.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=True,
+        help="Preview changes without writing local YAML files.",
+    )
+    parser.add_argument(
+        "--write",
+        dest="dry_run",
+        action="store_false",
+        help="Write reviewed promotion canary edits to local YAML policy files.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    try:
+        bundle = _read_json_input(str(args.promotion_actions), stdin=stdin)
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_promotion_canary_apply_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.optimization_promotion_canary import apply_optimization_promotion_canaries
+
+    result = apply_optimization_promotion_canaries(
+        bundle,
+        config_dir=args.config_dir,
+        dry_run=args.dry_run,
+        sections=args.section,
+    )
+    stream = stdout if result.get("ok") else stderr
+    if args.pretty:
+        stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, result)
+    return 0 if result.get("ok") else 1
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -3542,6 +3618,10 @@ def optimization_promotion_report_main() -> None:
 
 def optimization_promotion_actions_main() -> None:
     raise SystemExit(optimization_promotion_actions_cli())
+
+
+def optimization_promotion_canary_apply_main() -> None:
+    raise SystemExit(optimization_promotion_canary_apply_cli())
 
 
 def managed_feedback_status_main() -> None:

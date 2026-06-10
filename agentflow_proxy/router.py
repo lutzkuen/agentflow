@@ -316,7 +316,16 @@ def _apply_phase_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, Any
     if not isinstance(data, dict):
         return policy
     policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
-    for key in ("policy_id", "model_pattern", "target_model", "min_workflow_phase_confidence", "salt"):
+    for key in (
+        "policy_id",
+        "promotion_action_id",
+        "target_candidate_id",
+        "policy_source",
+        "model_pattern",
+        "target_model",
+        "min_workflow_phase_confidence",
+        "salt",
+    ):
         if data.get(key) not in (None, ""):
             policy[key] = str(data[key])
     for key in (
@@ -420,6 +429,8 @@ def _phase_canary_base_meta(
     return {
         "enabled": bool(ROUTING_PHASE_CANARY.get("enabled")),
         "policy_id": str(ROUTING_PHASE_CANARY.get("policy_id") or "local-phase-sonnet-haiku-canary-v1"),
+        "promotion_action_id": ROUTING_PHASE_CANARY.get("promotion_action_id"),
+        "target_candidate_id": ROUTING_PHASE_CANARY.get("target_candidate_id"),
         "status": status,
         "cohort": "none",
         "reason": reason,
@@ -435,7 +446,7 @@ def _phase_canary_base_meta(
         "has_tools": tools,
         "canary_fraction": float(ROUTING_PHASE_CANARY.get("canary_fraction") or 0.0),
         "holdout_fraction": float(ROUTING_PHASE_CANARY.get("holdout_fraction") or 0.0),
-        "policy_source": ROUTING_RULES_SOURCE,
+        "policy_source": ROUTING_PHASE_CANARY.get("policy_source") or ROUTING_RULES_SOURCE,
     }
 
 
@@ -616,7 +627,7 @@ def phase_canary_decision(
     safety = _phase_canary_safety_status(meta["policy_id"], ROUTING_PHASE_CANARY.get("safety_stop") or {})
     meta["safety_stop"] = safety
     if safety.get("tripped"):
-        meta.update({"status": "safety_stopped", "reason": "safety-stop-tripped", "cohort": "stopped"})
+        meta.update({"status": "safety_stopped", "reason": "safety-stop-tripped", "cohort": "bypassed_or_disabled"})
         return requested, meta
 
     cohort_payload = {
@@ -639,12 +650,12 @@ def phase_canary_decision(
         "cohort_features": cohort_payload,
     })
     if score < holdout_fraction:
-        meta.update({"status": "holdout", "cohort": "holdout", "reason": "selected-holdout"})
+        meta.update({"status": "holdout", "cohort": "canary_holdout", "reason": "selected-holdout"})
         return requested, meta
     if score < holdout_fraction + canary_fraction:
-        meta.update({"status": "applied", "cohort": "applied", "reason": "selected-canary"})
+        meta.update({"status": "applied", "cohort": "canary_applied", "reason": "selected-canary"})
         return target_model, meta
-    meta.update({"status": "not_selected", "cohort": "not-selected", "reason": "outside-canary-fraction"})
+    meta.update({"status": "not_selected", "cohort": "skipped", "reason": "outside-canary-fraction"})
     return requested, meta
 
 

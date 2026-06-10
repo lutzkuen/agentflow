@@ -1553,14 +1553,16 @@ def _phase_canary_cohort(meta: dict[str, Any]) -> str:
     status = str(meta.get("status") or "unknown")
     cohort = str(meta.get("cohort") or "")
     reason = str(meta.get("reason") or "")
-    if status == "applied" or cohort == "applied":
+    if status == "applied" or cohort in {"applied", "canary_applied"}:
         return "applied"
-    if status == "holdout" or cohort == "holdout":
+    if status == "holdout" or cohort in {"holdout", "canary_holdout"}:
         return "holdout"
-    if status == "safety_stopped" or "safety-stop" in reason:
+    if status == "safety_stopped" or cohort == "bypassed_or_disabled" or "safety-stop" in reason:
         return "safety_stopped"
     if status in {"not_selected", "ineligible", "disabled"}:
         return status
+    if cohort == "skipped":
+        return "not_selected"
     return "unknown"
 
 
