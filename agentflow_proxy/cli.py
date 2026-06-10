@@ -2260,6 +2260,33 @@ def openai_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     return 0
 
 
+def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report local budgeted routing A/B experiment results from metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=20, help="Maximum candidate rows to include, default: 20.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.routing_experiments import build_routing_experiment_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_routing_experiment_report(store, limit=args.limit)
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure replay-safe cache opportunity and blockers from local metadata")
     parser.add_argument(
@@ -4058,6 +4085,10 @@ def openai_routing_report_main() -> None:
 
 def openai_canary_impact_main() -> None:
     raise SystemExit(openai_canary_impact_cli())
+
+
+def routing_experiment_report_main() -> None:
+    raise SystemExit(routing_experiment_report_cli())
 
 
 def phase_routing_report_main() -> None:

@@ -12,6 +12,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         "AGENTFLOW_ROUTING_EXPERIMENTS",
         "AGENTFLOW_ROUTING_EXPERIMENTS_ENABLED",
         "AGENTFLOW_ROUTING_EXPERIMENT_SAMPLE_RATE",
+        "AGENTFLOW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD",
         "AGENTFLOW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD",
         "HOME",
     )
@@ -62,6 +63,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
                 """
 enabled: true
 sample_rate: 1.0
+daily_budget_usd: 0.05
 categories:
   - tool-result
 max_text_chars: 5000
@@ -91,6 +93,125 @@ similarity_threshold: 0.9
             self.assertEqual(meta["policy_source"], "local-manual")
             self.assertEqual(meta["rule_path"], str(config / "routing_experiments.yaml"))
             self.assertEqual(meta["similarity_threshold"], 0.9)
+            self.assertEqual(meta["daily_budget_usd"], 0.05)
+            self.assertFalse(meta["budget_exhausted"])
+
+    def test_enabled_zero_budget_records_budget_reason_without_sampling(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 0.0
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+workflow_phases:
+  - tool-execution
+categories:
+  - tool-result
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            meta = manual.routing_experiment_decision(
+                {"model": "claude-haiku-4-5-20251001"},
+                {
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-haiku-4-5-20251001",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "text_chars": 1000,
+                },
+                stream=False,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                random_value=lambda: 0.0,
+            )
+
+            self.assertTrue(meta["enabled"])
+            self.assertFalse(meta["sampled"])
+            self.assertEqual(meta["reason"], "daily-budget-zero")
+            self.assertTrue(meta["budget_exhausted"])
+            self.assertEqual(meta["privacy"]["metadata_only"], True)
+
+    def test_budget_spend_blocks_after_cap_is_exhausted(self):
+        from agentflow_proxy.store import Store, stable_json, utc_now
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 0.01
+categories:
+  - tool-result
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            try:
+                store.log_routing_experiment(
+                    id="spent-budget",
+                    call_id="call-1",
+                    created_at=utc_now(),
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    primary_model="claude-haiku-4-5-20251001",
+                    shadow_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    routing_reason="fixture",
+                    input_tokens_est=100,
+                    primary_status_code=200,
+                    shadow_status_code=200,
+                    primary_latency_ms=10,
+                    shadow_latency_ms=20,
+                    primary_output_chars=1,
+                    shadow_output_chars=1,
+                    primary_output_sha256="a",
+                    shadow_output_sha256="b",
+                    output_similarity=1.0,
+                    passed_threshold=1,
+                    primary_cost_est_usd=0.001,
+                    shadow_cost_est_usd=0.01,
+                    routing_json=stable_json({}),
+                    experiment_json=stable_json({"sampled": True}),
+                )
+
+                meta = manual.routing_experiment_decision(
+                    {"model": "claude-haiku-4-5-20251001"},
+                    {
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                        "category": "tool-result",
+                        "text_chars": 1000,
+                    },
+                    stream=False,
+                    store_obj=store,
+                    random_value=lambda: 0.0,
+                )
+            finally:
+                store.conn.close()
+
+            self.assertFalse(meta["sampled"])
+            self.assertEqual(meta["reason"], "daily-budget-exhausted")
+            self.assertEqual(meta["budget_spent_usd"], 0.01)
 
     def test_response_comparison_produces_similarity_and_hashes(self):
         primary = {"content": [{"type": "text", "text": "summarize the build output"}]}
@@ -145,6 +266,8 @@ similarity_threshold: 0.9
         self.assertEqual(result["output_similarity"], 0.91)
         self.assertEqual(result["primary_output_sha256"], "primary-hash")
         self.assertNotIn("text", result)
+        self.assertEqual(result["reason_codes"], ["passed"])
+        self.assertTrue(result["privacy"]["metadata_only"])
 
 
 if __name__ == "__main__":

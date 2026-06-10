@@ -32,7 +32,7 @@ from agentflow_proxy.recommendations import (
     PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
     pattern_decision_summaries,
 )
-from agentflow_proxy.routing_experiments import ROUTING_EXPERIMENT_MIN_SAMPLES
+from agentflow_proxy.routing_experiments import build_routing_experiment_report
 from agentflow_proxy.store import utc_now
 
 CODEX_APP_PRICING_BASIS = codex_app_pricing_basis()
@@ -10006,69 +10006,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     error_breakdown = _error_breakdown(error_rows)
     today_error_breakdown = _error_breakdown(error_rows, today_only=True)
 
-    routing_experiment_rows = q("""
-        select requested_model,
-               routed_model,
-               coalesce(category, 'unknown') as category,
-               coalesce(routing_reason, 'unknown') as routing_reason,
-               count(*) as samples,
-               sum(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then 1 else 0 end) as compared_samples,
-               avg(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then output_similarity else null end) as avg_similarity,
-               avg(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then passed_threshold else null end) as pass_rate,
-               round(sum(coalesce(primary_cost_est_usd, 0)), 6) as primary_cost_usd,
-               round(sum(coalesce(shadow_cost_est_usd, 0)), 6) as shadow_cost_usd,
-               max(created_at) as last_sample_at
-        from routing_experiments
-        group by requested_model, routed_model, coalesce(category, 'unknown'), coalesce(routing_reason, 'unknown')
-        order by samples desc, last_sample_at desc
-        limit 20
-    """)
-    routing_experiment_summary = []
-    for row in routing_experiment_rows:
-        compared_samples = int(row["compared_samples"] or 0)
-        avg_similarity = row["avg_similarity"]
-        pass_rate = row["pass_rate"]
-        confidence_score = 0.0
-        if avg_similarity is not None and compared_samples > 0:
-            confidence_score = float(avg_similarity) * min(1.0, compared_samples / ROUTING_EXPERIMENT_MIN_SAMPLES)
-        row["compared_samples"] = compared_samples
-        row["avg_similarity"] = round(float(avg_similarity), 6) if avg_similarity is not None else None
-        row["pass_rate"] = round(float(pass_rate), 4) if pass_rate is not None else None
-        row["confidence_score"] = round(confidence_score, 6)
-        row["min_samples_for_confidence"] = ROUTING_EXPERIMENT_MIN_SAMPLES
-        routing_experiment_summary.append(row)
-    routing_experiment_samples = int(s("select count(*) from routing_experiments") or 0)
-    routing_experiment_compared = int(s("""
-        select count(*) from routing_experiments
-        where primary_status_code < 400
-          and shadow_status_code < 400
-          and output_similarity is not null
-    """) or 0)
-    routing_experiment_avg_similarity = s("""
-        select avg(output_similarity) from routing_experiments
-        where primary_status_code < 400
-          and shadow_status_code < 400
-          and output_similarity is not null
-    """)
-    routing_experiment_feedback_status_counts: dict[str, int] = {}
-    for row in q("select experiment_json from routing_experiments where experiment_json is not null"):
-        try:
-            experiment = json.loads(row["experiment_json"])
-        except Exception:
-            status = "invalid-json"
-        else:
-            feedback = experiment.get("managed_feedback") if isinstance(experiment, dict) else None
-            status = str((feedback or {}).get("status") or "not-exported") if isinstance(feedback, dict) else "not-exported"
-        routing_experiment_feedback_status_counts[status] = routing_experiment_feedback_status_counts.get(status, 0) + 1
+    routing_experiment_report = build_routing_experiment_report(store_obj, limit=20)
+    routing_experiment_summary = routing_experiment_report["candidates"]
+    routing_experiment_report_summary = routing_experiment_report["summary"]
 
     provider_breakdown = q("""
         select coalesce(provider, 'anthropic') as provider, count(*) as count,
@@ -10178,13 +10118,14 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "codex_app_model": CODEX_APP_MODEL,
             "codex_app_pricing_basis": CODEX_APP_PRICING_BASIS,
             "codex_app_avg_latency_ms": round(codex_app_avg_latency),
-            "routing_experiment_samples": routing_experiment_samples,
-            "routing_experiment_compared_samples": routing_experiment_compared,
-            "routing_experiment_avg_similarity": (
-                round(float(routing_experiment_avg_similarity), 6)
-                if routing_experiment_avg_similarity is not None else None
-            ),
-            "routing_experiment_feedback_status_counts": routing_experiment_feedback_status_counts,
+            "routing_experiment_samples": routing_experiment_report_summary["sample_count"],
+            "routing_experiment_compared_samples": routing_experiment_report_summary["comparison_count"],
+            "routing_experiment_avg_similarity": routing_experiment_report_summary["avg_similarity"],
+            "routing_experiment_pass_rate": routing_experiment_report_summary["pass_rate"],
+            "routing_experiment_cost_delta_usd": routing_experiment_report_summary["cost_delta_usd"],
+            "routing_experiment_avg_latency_delta_ms": routing_experiment_report_summary["avg_latency_delta_ms"],
+            "routing_experiment_daily_budget_exhausted": routing_experiment_report["policy"]["daily_budget_exhausted"],
+            "routing_experiment_feedback_status_counts": routing_experiment_report_summary["feedback_status_counts"],
         },
         "recent": recent,
         "routing_breakdown": routing_breakdown,
@@ -10199,6 +10140,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "error_breakdown": error_breakdown,
         "today_error_breakdown": today_error_breakdown,
         "routing_experiment_summary": routing_experiment_summary,
+        "routing_experiment_report": routing_experiment_report,
         "provider_breakdown": provider_breakdown,
         "codex_app_methods": codex_app_methods,
         "codex_app_recent": codex_app_recent,
@@ -11513,6 +11455,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Routing A/B experiments</h2>
+  <table class="activity-table" data-table-id="routing-experiments" data-filter-label="Filter routing A/B experiments">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Category</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="number">Similarity</th><th data-sort-type="money">Cost delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Budget</th><th data-sort-type="time">Last sample</th>
+    </tr></thead>
+    <tbody id="routing-experiments-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Phase-routing feedback and dry-run lifecycle</h2>
   <table data-table-id="phase-routing-feedback" data-filter-label="Filter phase-routing feedback">
     <thead><tr>
@@ -12419,6 +12370,7 @@ async function refreshPolicies(){
         settings:compactSettings([
           policyReloadSetting(d.routing_experiments&&d.routing_experiments.file),
           'sample '+(((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.sample_rate)||0)*100).toFixed(1)+'%',
+          'budget '+fmt((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.daily_budget_usd)||0,4),
           'similarity '+((d.routing_experiments&&d.routing_experiments.policy&&d.routing_experiments.policy.similarity_threshold)||0)
         ])
       }
@@ -13038,6 +12990,26 @@ async function refreshPhaseRouting(){
       <td class="latency">${fmtMs(row.applied_minus_holdout_latency_avg_ms)}</td>
       <td class="savings">${fmt(row.observed_savings_usd||0,6)}</td>
     </tr>`).join('')||'<tr><td colspan="13" style="color:#8b949e">No phase-routing canary cohorts observed yet</td></tr>';
+    const full=await loadFullStats();
+    const experimentReport=full.routing_experiment_report||{};
+    const experimentPolicy=experimentReport.policy||{};
+    const budgetBadge=experimentPolicy.daily_budget_exhausted
+      ? `<span class="badge err">budget exhausted</span>`
+      : `<span class="badge hit">budget available</span>`;
+    const experimentRows=experimentReport.candidates||[];
+    document.getElementById('routing-experiments-tbody').innerHTML=experimentRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortProvider(row.provider||'anthropic'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'anthropic_messages'))}</span></td>
+      <td class="model">${esc(shortModel(row.requested_model))} → ${esc(shortModel(row.routed_model))}</td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td class="tokens">${(row.samples||0).toLocaleString()}</td>
+      <td class="tokens">${(row.compared_samples||0).toLocaleString()}</td>
+      <td class="tokens">${row.pass_rate==null?'—':fmtPctValue(row.pass_rate)}</td>
+      <td class="tokens">${row.avg_similarity==null?'—':Number(row.avg_similarity).toFixed(3)}</td>
+      <td class="${(row.cost_delta_usd||0)<0?'cost':'savings'}">${fmt(row.cost_delta_usd||0,6)}</td>
+      <td class="latency">${fmtMs(row.avg_latency_delta_ms)}</td>
+      <td class="flags">${budgetBadge} <span class="badge provider">${fmt(experimentPolicy.today_shadow_spend_usd||0,6)} / ${fmt(experimentPolicy.daily_budget_usd||0,6)}</span> <span class="badge miss">${fmt(experimentPolicy.today_budget_remaining_usd||0,6)} left</span></td>
+      <td class="ts">${ago(row.last_sample_at)}</td>
+    </tr>`).join('')||`<tr><td colspan="11" style="color:#8b949e">No routing A/B samples recorded · ${experimentPolicy.enabled?'enabled':'disabled'} · ${budgetBadge}</td></tr>`;
     const latestLifecycle=lifecycle.latest||{};
     document.getElementById('phase-routing-feedback-tbody').innerHTML=`<tr>
       <td class="tokens">${(queueSummary.queued||0).toLocaleString()}</td>

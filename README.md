@@ -145,6 +145,14 @@ agentflow-phase-routing-report --db ~/.agentflow/agentflow.sqlite3 --dry-run-pol
 
 The dry-run reports matched counts, projected candidate counts and savings, exclusions such as thinking, high error rate, stale evidence, unsupported shadow/streaming evidence, missing baseline support, insufficient samples, candidate rule IDs, and metadata-only privacy flags.
 
+To opt into a local, budgeted routing A/B experiment for safe non-streaming routed-down provider requests, copy `routing_experiments.yaml` to `~/.agentflow/routing_experiments.yaml`, set `enabled: true`, a nonzero `daily_budget_usd`, an explicit `sample_rate`, and optional provider, source-surface, model-pair, workflow-phase, and category filters. With `daily_budget_usd: 0.0`, no shadow calls are made and the routing metadata records a budget reason.
+
+```bash
+agentflow-routing-experiment-report --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The report shows sample count, comparison count, pass rate, cost delta, latency delta, and daily budget state from local metadata only. It does not print raw prompts, responses, provider bodies, request IDs, session IDs, file paths, or secrets.
+
 To measure OpenAI local routing opportunity and blockers before enabling any OpenAI canary policy, run:
 
 ```bash
@@ -223,6 +231,7 @@ Common policy commands:
 | `agentflow-policy-review proposed.json --pretty` | Review changes and warnings before apply |
 | `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
 | `agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Measure replay-safe cache opportunity and blockers from local metadata |
+| `agentflow-routing-experiment-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Report local budgeted routing A/B sample counts, pass rate, cost/latency deltas, and budget state |
 | `agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run cache replay pattern rules against recent local metadata without mutating cache entries |
 | `agentflow-optimization-eval-plan --db ~/.agentflow/agentflow.sqlite3 --pretty` | Export metadata-only optimization candidates for local evaluation |
 | `agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Record metadata-only local shadow-eval pass/fail/blocked/unknown results without provider calls by default |

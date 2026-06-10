@@ -449,6 +449,9 @@ async def _run_anthropic_routing_experiment(
             "shadow_output_sha256": comparison["shadow_output_sha256"],
             "output_similarity": comparison["output_similarity"],
             "passed_threshold": comparison["passed_threshold"],
+            "reason_codes": feedback_features.get("reason_codes", []),
+            "cost_delta_usd": feedback_features.get("cost_delta_usd"),
+            "latency_delta_ms": feedback_features.get("latency_delta_ms"),
             "optimization_feedback": feedback_features,
             "managed_feedback": {
                 "enabled": False,
@@ -462,6 +465,8 @@ async def _run_anthropic_routing_experiment(
         id=experiment_id,
         call_id=call_id,
         created_at=utc_now(),
+        provider=experiment_meta.get("provider") or "anthropic",
+        source_surface=experiment_meta.get("source_surface") or "anthropic_messages",
         requested_model=routing_meta.get("requested_model"),
         routed_model=routing_meta.get("routed_model"),
         primary_model=primary_model,
@@ -481,6 +486,13 @@ async def _run_anthropic_routing_experiment(
         passed_threshold=1 if comparison["passed_threshold"] else 0,
         primary_cost_est_usd=primary_cost_est_usd,
         shadow_cost_est_usd=shadow_cost,
+        budget_limit_usd=experiment_meta.get("daily_budget_usd"),
+        budget_spent_before_usd=experiment_meta.get("budget_spent_usd"),
+        budget_remaining_before_usd=experiment_meta.get("budget_remaining_usd"),
+        budget_spent_after_usd=round(
+            float(experiment_meta.get("budget_spent_usd") or 0.0) + float(shadow_cost or 0.0),
+            6,
+        ),
         error=error,
         routing_json=stable_json(routing_meta),
         experiment_json=stable_json(experiment_meta),
@@ -1158,7 +1170,14 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cost += summary_extra_cost
         cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
-        experiment_meta = routing_experiment_decision(crunched, routing_meta, stream=False)
+        experiment_meta = routing_experiment_decision(
+            crunched,
+            routing_meta,
+            stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            store_obj=context.store,
+        )
         routing_meta["routing_experiment"] = experiment_meta
         if experiment_meta.get("sampled") and status_code < 400 and response_body is not None:
             await _run_anthropic_routing_experiment(

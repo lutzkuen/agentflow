@@ -265,6 +265,65 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])
 
+    def test_routing_experiment_report_cli_reads_metadata_only_metrics(self):
+        from agentflow_proxy.store import Store, stable_json, utc_now
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for idx, similarity in enumerate((0.95, 0.75), start=1):
+                    store.log_routing_experiment(
+                        id=f"exp-{idx}",
+                        call_id=f"call-{idx}",
+                        created_at=utc_now(),
+                        provider="anthropic",
+                        source_surface="anthropic_messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-haiku-4-5-20251001",
+                        primary_model="claude-haiku-4-5-20251001",
+                        shadow_model="claude-sonnet-4-6",
+                        category="tool-result",
+                        routing_reason="fixture route",
+                        input_tokens_est=100,
+                        primary_status_code=200,
+                        shadow_status_code=200,
+                        primary_latency_ms=40,
+                        shadow_latency_ms=90,
+                        primary_output_chars=12,
+                        shadow_output_chars=14,
+                        primary_output_sha256=f"primary-{idx}",
+                        shadow_output_sha256=f"shadow-{idx}",
+                        output_similarity=similarity,
+                        passed_threshold=1 if similarity >= 0.86 else 0,
+                        primary_cost_est_usd=0.001,
+                        shadow_cost_est_usd=0.003,
+                        budget_limit_usd=0.01,
+                        budget_spent_before_usd=0.0,
+                        budget_remaining_before_usd=0.01,
+                        budget_spent_after_usd=0.003,
+                        error=None,
+                        routing_json=stable_json({"routing_experiment": {"sampled": True}}),
+                        experiment_json=stable_json({"sampled": True}),
+                    )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.routing_experiment_report_cli(["--db", db_path], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.routing_experiment_report.v1")
+        self.assertEqual(payload["summary"]["sample_count"], 2)
+        self.assertEqual(payload["summary"]["comparison_count"], 2)
+        self.assertAlmostEqual(payload["summary"]["pass_rate"], 0.5, places=6)
+        self.assertAlmostEqual(payload["summary"]["cost_delta_usd"], -0.004, places=6)
+        self.assertAlmostEqual(payload["summary"]["avg_latency_delta_ms"], -50.0, places=6)
+        self.assertEqual(payload["candidates"][0]["provider"], "anthropic")
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertNotIn("private cli cache prompt", json.dumps(payload).lower())
+
     def test_cache_replayability_report_cli_reads_local_metadata_only(self):
         from agentflow_proxy.store import Store, stable_json
 

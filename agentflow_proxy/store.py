@@ -339,6 +339,8 @@ class SQLiteStore:
               id text primary key,
               call_id text not null,
               created_at text not null,
+              provider text,
+              source_surface text,
               requested_model text not null,
               routed_model text not null,
               primary_model text not null,
@@ -358,6 +360,10 @@ class SQLiteStore:
               passed_threshold integer,
               primary_cost_est_usd real,
               shadow_cost_est_usd real,
+              budget_limit_usd real,
+              budget_spent_before_usd real,
+              budget_remaining_before_usd real,
+              budget_spent_after_usd real,
               error text,
               routing_json text,
               experiment_json text,
@@ -365,6 +371,12 @@ class SQLiteStore:
               shadow_response_json text
             )
             """)
+            self._ensure_column("routing_experiments", "provider", "text")
+            self._ensure_column("routing_experiments", "source_surface", "text")
+            self._ensure_column("routing_experiments", "budget_limit_usd", "real")
+            self._ensure_column("routing_experiments", "budget_spent_before_usd", "real")
+            self._ensure_column("routing_experiments", "budget_remaining_before_usd", "real")
+            self._ensure_column("routing_experiments", "budget_spent_after_usd", "real")
             cur.execute("""
             create table if not exists codex_app_events (
               id text primary key,
@@ -882,13 +894,15 @@ class SQLiteStore:
 
     def log_routing_experiment(self, **kwargs: Any) -> None:
         cols = [
-            "id", "call_id", "created_at", "requested_model", "routed_model",
+            "id", "call_id", "created_at", "provider", "source_surface", "requested_model", "routed_model",
             "primary_model", "shadow_model", "category", "routing_reason",
             "input_tokens_est", "primary_status_code", "shadow_status_code",
             "primary_latency_ms", "shadow_latency_ms", "primary_output_chars",
             "shadow_output_chars", "primary_output_sha256", "shadow_output_sha256",
             "output_similarity", "passed_threshold", "primary_cost_est_usd",
-            "shadow_cost_est_usd", "error", "routing_json", "experiment_json",
+            "shadow_cost_est_usd", "budget_limit_usd", "budget_spent_before_usd",
+            "budget_remaining_before_usd", "budget_spent_after_usd",
+            "error", "routing_json", "experiment_json",
             "primary_response_json", "shadow_response_json",
         ]
         values = [kwargs.get(c) for c in cols]
@@ -1007,6 +1021,8 @@ class PostgresStore(SQLiteStore):
               id text primary key,
               call_id text not null,
               created_at timestamptz not null,
+              provider text,
+              source_surface text,
               requested_model text not null,
               routed_model text not null,
               primary_model text not null,
@@ -1026,6 +1042,10 @@ class PostgresStore(SQLiteStore):
               passed_threshold integer,
               primary_cost_est_usd numeric,
               shadow_cost_est_usd numeric,
+              budget_limit_usd numeric,
+              budget_spent_before_usd numeric,
+              budget_remaining_before_usd numeric,
+              budget_spent_after_usd numeric,
               error text,
               routing_json text,
               experiment_json text,
@@ -1096,6 +1116,15 @@ class PostgresStore(SQLiteStore):
             self.conn.execute(f"alter table codex_app_events add column if not exists {column} text")
         for column in ("source_surface", "endpoint", "requested_model_family", "routed_model_family"):
             self.conn.execute(f"alter table calls add column if not exists {column} text")
+        for column, definition in (
+            ("provider", "text"),
+            ("source_surface", "text"),
+            ("budget_limit_usd", "numeric"),
+            ("budget_spent_before_usd", "numeric"),
+            ("budget_remaining_before_usd", "numeric"),
+            ("budget_spent_after_usd", "numeric"),
+        ):
+            self.conn.execute(f"alter table routing_experiments add column if not exists {column} {definition}")
         self.conn.execute("""
             create index if not exists idx_codex_app_events_start_recent
             on codex_app_events(direction, method, created_at)
