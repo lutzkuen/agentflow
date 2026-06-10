@@ -1238,6 +1238,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as policy_file:
             policy_file.write("\n".join([
                 "profile_id: first-safe-openai-codex-ab-v1",
+                "mode: applied_routed_down",
                 "enabled: true",
                 "sample_rate: 1.0",
                 "daily_budget_usd: 0.05",

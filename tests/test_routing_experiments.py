@@ -44,29 +44,42 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.home.cleanup()
         importlib.reload(experiments)
 
-    def test_default_policy_skips_without_sampling(self):
-        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["profile_id"], "first-safe-openai-codex-ab-v1")
+    def test_default_policy_samples_anthropic_shadow_pass_through(self):
+        self.assertEqual(
+            experiments.ROUTING_EXPERIMENT_POLICY["profile_id"],
+            "first-safe-openai-codex-claude-shadow-pass-through-v1",
+        )
         self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["mode"], "shadow_candidate_pass_through")
-        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["providers"], ["openai"])
+        self.assertIn("anthropic", experiments.ROUTING_EXPERIMENT_POLICY["providers"])
+        self.assertIn("openai", experiments.ROUTING_EXPERIMENT_POLICY["providers"])
+        self.assertIn("anthropic_messages", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
         self.assertIn("openai_responses", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
         self.assertIn("codex_turn", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
 
-        # Anthropic provider is not in the openai-only policy — sampled must be False.
         meta = experiments.routing_experiment_decision(
-            {"model": "claude-haiku-4-5-20251001"},
+            {"model": "claude-sonnet-4-6"},
             {
                 "requested_model": "claude-sonnet-4-6",
-                "routed_model": "claude-haiku-4-5-20251001",
-                "category": "tool-result",
+                "routed_model": "claude-sonnet-4-6",
+                "category": "short-completion",
                 "text_chars": 1000,
             },
             stream=False,
+            provider="anthropic",
+            source_surface="anthropic_messages",
             random_value=lambda: 0.0,
         )
 
         self.assertTrue(meta["enabled"])
-        self.assertFalse(meta["sampled"])
-        self.assertEqual(meta["reason"], "provider-not-enabled")
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertTrue(meta["counterfactual"])
+        self.assertTrue(meta["shadow_only"])
+        self.assertEqual(meta["primary_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["user_visible_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["shadow_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(meta["routed_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(meta["source_surface"], "anthropic_messages")
         self.assertEqual(meta["policy_source"], "local-default")
 
     def test_default_policy_samples_codex_turn_shadow_pass_through(self):
@@ -106,6 +119,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
             (config / "routing_experiments.yaml").write_text(
                 """
 enabled: true
+mode: applied_routed_down
 sample_rate: 1.0
 daily_budget_usd: 0.05
 providers:
@@ -155,6 +169,7 @@ similarity_threshold: 0.9
             (config / "routing_experiments.yaml").write_text(
                 """
 enabled: true
+mode: applied_routed_down
 sample_rate: 1.0
 daily_budget_usd: 0.0
 providers:
@@ -203,6 +218,7 @@ categories:
             (config / "routing_experiments.yaml").write_text(
                 """
 profile_id: first-safe-openai-codex-ab-v1
+mode: applied_routed_down
 enabled: true
 sample_rate: 1.0
 daily_budget_usd: 0.05
@@ -297,6 +313,50 @@ max_text_chars: 8000
         self.assertEqual(meta["user_visible_model"], "gpt-5.4")
         self.assertEqual(meta["shadow_model"], "gpt-5.4-mini")
 
+    def test_shadow_candidate_pass_through_skips_unconfigured_anthropic_pair(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+mode: shadow_candidate_pass_through
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+categories:
+  - short-completion
+max_text_chars: 8000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            meta = manual.routing_experiment_decision(
+                {"model": "claude-opus-4-5"},
+                {
+                    "requested_model": "claude-opus-4-5",
+                    "routed_model": "claude-opus-4-5",
+                    "category": "short-completion",
+                    "text_chars": 1000,
+                },
+                stream=False,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                random_value=lambda: 0.0,
+            )
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "model-pair-not-enabled")
+
     def test_budget_spend_blocks_after_cap_is_exhausted(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -307,6 +367,7 @@ max_text_chars: 8000
             (config / "routing_experiments.yaml").write_text(
                 """
 enabled: true
+mode: applied_routed_down
 sample_rate: 1.0
 daily_budget_usd: 0.01
 providers:
@@ -438,13 +499,62 @@ categories:
             finally:
                 store.conn.close()
 
-        self.assertEqual(report["policy"]["profile_id"], "first-safe-openai-codex-ab-v1")
+        self.assertEqual(report["policy"]["profile_id"], "first-safe-openai-codex-claude-shadow-pass-through-v1")
         self.assertEqual(report["summary"]["sample_count"], 0)
         self.assertEqual(report["policy"]["mode"], experiments.ROUTING_EXPERIMENT_MODE)
         self.assertEqual(report["decision_reasons"][0]["provider"], "openai")
         self.assertEqual(report["decision_reasons"][0]["source_surface"], "openai_responses")
         self.assertEqual(report["decision_reasons"][0]["reason"], "streaming")
         self.assertEqual(report["decision_reasons"][0]["count"], 1)
+
+    def test_report_groups_anthropic_openai_and_codex_samples_separately(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for idx, (provider, surface, requested, routed, shadow) in enumerate([
+                    ("anthropic", "anthropic_messages", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+                    ("openai", "openai_responses", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-mini"),
+                    ("openai", "codex_turn", "gpt-5-codex", "gpt-5-mini", "gpt-5-mini"),
+                ]):
+                    store.log_routing_experiment(
+                        id=f"sample-{idx}",
+                        call_id=f"call-{idx}",
+                        created_at=utc_now(),
+                        provider=provider,
+                        source_surface=surface,
+                        requested_model=requested,
+                        routed_model=routed,
+                        primary_model=requested,
+                        shadow_model=shadow,
+                        category="short-completion" if surface != "codex_turn" else "codex-turn",
+                        routing_reason="sampled-shadow-candidate-pass-through",
+                        input_tokens_est=100,
+                        primary_status_code=200,
+                        shadow_status_code=200,
+                        primary_latency_ms=100,
+                        shadow_latency_ms=90,
+                        primary_output_chars=2,
+                        shadow_output_chars=2,
+                        primary_output_sha256=f"primary-{idx}",
+                        shadow_output_sha256=f"shadow-{idx}",
+                        output_similarity=1.0,
+                        passed_threshold=1,
+                        primary_cost_est_usd=0.003,
+                        shadow_cost_est_usd=0.001,
+                        routing_json=stable_json({}),
+                        experiment_json=stable_json({"mode": "shadow_candidate_pass_through"}),
+                    )
+                report = experiments.build_routing_experiment_report(store, limit=10)
+            finally:
+                store.conn.close()
+
+        surfaces = {
+            (item["provider"], item["source_surface"], item["requested_model"], item["routed_model"])
+            for item in report["candidates"]
+        }
+        self.assertIn(("anthropic", "anthropic_messages", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"), surfaces)
+        self.assertIn(("openai", "openai_responses", "gpt-5.4", "gpt-5.4-mini"), surfaces)
+        self.assertIn(("openai", "codex_turn", "gpt-5-codex", "gpt-5-mini"), surfaces)
 
     def test_feedback_features_are_metadata_only(self):
         comparison = {

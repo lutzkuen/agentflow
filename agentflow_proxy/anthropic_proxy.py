@@ -619,6 +619,33 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         if _n_stripped > 0:
             routing_meta["thinking_history_stripped"] = _n_stripped
         resolved_requested_model = crunched.get("model", requested_model)
+        experiment_meta = routing_experiment_decision(
+            crunched,
+            {
+                **routing_meta,
+                "requested_model": str(resolved_requested_model),
+                "routed_model": str(resolved_requested_model),
+            },
+            stream=stream,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            store_obj=context.store,
+        )
+        sampled_shadow_pass_through = (
+            experiment_meta.get("mode") == "shadow_candidate_pass_through"
+            and bool(experiment_meta.get("sampled"))
+        )
+        if experiment_meta.get("mode") == "shadow_candidate_pass_through":
+            routing_meta["routing_experiment"] = experiment_meta
+        if sampled_shadow_pass_through:
+            experiment_meta["local_route_candidate_model"] = routed_model
+            experiment_meta["local_route_candidate_reason"] = routing_meta.get("reason")
+            experiment_meta["primary_route_override_reason"] = "shadow-candidate-pass-through-primary-requested"
+            routing_meta["local_route_candidate_model"] = routed_model
+            routing_meta["local_route_candidate_reason"] = routing_meta.get("reason")
+            routing_meta["reason"] = "shadow experiment pass-through primary kept on requested model"
+            routed_model = str(resolved_requested_model)
+            routing_meta["routed_model"] = routed_model
         crunched["model"] = routed_model
         _strip_model_incompatible_params(crunched, routing_meta, str(resolved_requested_model))
         _thinking_param = crunched.get("thinking")
@@ -662,6 +689,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunched["model"] = normalized_model
             routing_meta["routed_model"] = normalized_model
         routing_meta["managed_recommendation"] = recommendation_meta
+        if sampled_shadow_pass_through:
+            managed_candidate_model = str(crunched.get("model") or "")
+            if managed_candidate_model and managed_candidate_model != str(resolved_requested_model):
+                experiment_meta["managed_route_candidate_model"] = managed_candidate_model
+                experiment_meta["managed_route_candidate_reason"] = recommendation_meta.get("reason")
+                experiment_meta["managed_route_override_reason"] = "shadow-candidate-pass-through-primary-requested"
+                recommendation_meta["applied"] = False
+                recommendation_meta["changed_model"] = False
+                recommendation_meta["apply_reason"] = "shadow-experiment-primary-pass-through"
+                recommendation_meta["fallback"] = "local-policy"
+                crunched["model"] = str(resolved_requested_model)
+            routing_meta["routed_model"] = str(resolved_requested_model)
         _strip_model_incompatible_params(crunched, routing_meta, str(resolved_requested_model))
         if prompt_cached or has_cache_control_blocks(crunched):
             existing = headers.get("anthropic-beta", "")
@@ -1201,14 +1240,16 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cost += summary_extra_cost
         cost_baseline = estimate_cost(requested_model, cost_in + cache_creation_in + cache_read_in, cost_out)
         latency_ms = int((time.time() - started) * 1000)
-        experiment_meta = routing_experiment_decision(
-            crunched,
-            routing_meta,
-            stream=False,
-            provider="anthropic",
-            source_surface="anthropic_messages",
-            store_obj=context.store,
-        )
+        experiment_meta = routing_meta.get("routing_experiment")
+        if not isinstance(experiment_meta, dict) or experiment_meta.get("mode") != "shadow_candidate_pass_through":
+            experiment_meta = routing_experiment_decision(
+                crunched,
+                routing_meta,
+                stream=False,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                store_obj=context.store,
+            )
         routing_meta["routing_experiment"] = experiment_meta
         if experiment_meta.get("sampled") and status_code < 400 and response_body is not None:
             await _run_anthropic_routing_experiment(

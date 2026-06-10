@@ -142,7 +142,10 @@ class SequencedAsyncClient:
             "json": json,
             "kwargs": kwargs,
         })
-        return SequencedAsyncClient.responses.pop(0)
+        response = SequencedAsyncClient.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class RecordingSemaphore:
@@ -204,6 +207,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.old_openai_upstream = server.OPENAI_UPSTREAM
         self.old_openai_auth_mode = server.OPENAI_AUTH_MODE
         self.old_log_bodies = server.LOG_BODIES
+        self.old_routing_experiment_enabled = routing_experiments.ROUTING_EXPERIMENT_ENABLED
         self.recommendation_env_keys = (
             "AGENTFLOW_RECOMMENDATION_ENABLED",
             "AGENTFLOW_RECOMMENDATION_SERVER_URL",
@@ -218,6 +222,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.LOG_BODIES = False
+        routing_experiments.ROUTING_EXPERIMENT_ENABLED = False
         CapturingAsyncClient.calls = []
         ManagedFeedbackAsyncClient.calls = []
         ManagedFeedbackAsyncClient.provider_body = {}
@@ -241,6 +246,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         server._limiter = self.old_limiter
         server._tier_backoff_until = self.old_tier_backoff_until
         server.LOG_BODIES = self.old_log_bodies
+        routing_experiments.ROUTING_EXPERIMENT_ENABLED = self.old_routing_experiment_enabled
         server.configure_provider(
             self.old_provider,
             anthropic_upstream=self.old_anthropic_upstream,
@@ -520,6 +526,182 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         experiment_json = json.loads(experiment_row["experiment_json"])
         self.assertEqual(experiment_json["managed_feedback"]["status"], "sent")
         self.assertEqual(experiment_json["optimization_feedback"]["output_similarity"], 1.0)
+
+    def test_anthropic_shadow_experiment_keeps_primary_requested_model(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        SequencedAsyncClient.responses = [
+            FakeJsonResponse({
+                "id": "msg_primary",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "primary safe output"}],
+                "usage": {"input_tokens": 8, "output_tokens": 4},
+            }),
+            FakeJsonResponse({
+                "id": "msg_shadow",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-haiku-4-5-20251001",
+                "content": [{"type": "text", "text": "primary safe output"}],
+                "usage": {"input_tokens": 8, "output_tokens": 3},
+            }),
+        ]
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "short prompt secret"}],
+        }
+
+        patches = [
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_MODE", "shadow_candidate_pass_through"),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 10.0),
+            patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {
+                "mode": "shadow_candidate_pass_through",
+                "providers": ["anthropic"],
+                "source_surfaces": ["anthropic_messages"],
+                "model_pairs": [
+                    {
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                    }
+                ],
+                "categories": ["short-completion"],
+                "min_text_chars": 0,
+                "max_text_chars": 30000,
+                "daily_budget_usd": 10.0,
+            }),
+        ]
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patch.object(server.httpx, "AsyncClient", SequencedAsyncClient),
+        ):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "msg_primary")
+        self.assertEqual([call["json"]["model"] for call in SequencedAsyncClient.calls], [
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ])
+        [call_row] = server.store.conn.execute(
+            "select requested_model, routed_model, routing_json from calls"
+        ).fetchall()
+        self.assertEqual(call_row["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(call_row["routed_model"], "claude-sonnet-4-6")
+        routing = json.loads(call_row["routing_json"])
+        experiment = routing["routing_experiment"]
+        self.assertTrue(experiment["sampled"])
+        self.assertEqual(experiment["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(experiment["counterfactual"])
+        self.assertTrue(experiment["shadow_only"])
+        self.assertEqual(experiment["provider"], "anthropic")
+        self.assertEqual(experiment["source_surface"], "anthropic_messages")
+        self.assertEqual(experiment["primary_model"], "claude-sonnet-4-6")
+        self.assertEqual(experiment["user_visible_model"], "claude-sonnet-4-6")
+        self.assertEqual(experiment["shadow_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(experiment["local_route_candidate_model"], "claude-haiku-4-5-20251001")
+        [experiment_row] = server.store.conn.execute(
+            "select provider, source_surface, requested_model, routed_model, primary_model, shadow_model, experiment_json "
+            "from routing_experiments"
+        ).fetchall()
+        self.assertEqual(experiment_row["provider"], "anthropic")
+        self.assertEqual(experiment_row["source_surface"], "anthropic_messages")
+        self.assertEqual(experiment_row["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(experiment_row["routed_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(experiment_row["primary_model"], "claude-sonnet-4-6")
+        self.assertEqual(experiment_row["shadow_model"], "claude-haiku-4-5-20251001")
+        experiment_json = json.loads(experiment_row["experiment_json"])
+        self.assertEqual(experiment_json["optimization_feedback"]["status"], "compared")
+        [queue_row] = server.store.conn.execute(
+            "select source_surface, status, payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        self.assertEqual(queue_row["source_surface"], "routing_experiment_outcome")
+        self.assertEqual(queue_row["status"], "queued")
+        payload = json.loads(queue_row["payload_json"])
+        self.assertEqual(payload["provider"], "anthropic")
+        self.assertEqual(payload["source_surface"], "anthropic_messages")
+        self.assertTrue(payload["candidate"]["counterfactual"])
+        self.assertTrue(payload["candidate"]["shadow_only"])
+        self.assertNotIn("short prompt secret", queue_row["payload_json"])
+        self.assertNotIn("primary safe output", queue_row["payload_json"])
+
+    def test_anthropic_shadow_failure_is_logged_without_affecting_primary(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        SequencedAsyncClient.responses = [
+            FakeJsonResponse({
+                "id": "msg_primary",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "primary ok"}],
+                "usage": {"input_tokens": 8, "output_tokens": 4},
+            }),
+            RuntimeError("shadow provider unavailable"),
+        ]
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "short prompt secret"}],
+        }
+
+        patches = [
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_MODE", "shadow_candidate_pass_through"),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 10.0),
+            patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {
+                "mode": "shadow_candidate_pass_through",
+                "providers": ["anthropic"],
+                "source_surfaces": ["anthropic_messages"],
+                "model_pairs": [
+                    {
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                    }
+                ],
+                "categories": ["short-completion"],
+                "min_text_chars": 0,
+                "max_text_chars": 30000,
+                "daily_budget_usd": 10.0,
+            }),
+        ]
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patch.object(server.httpx, "AsyncClient", SequencedAsyncClient),
+        ):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], "msg_primary")
+        self.assertEqual([call["json"]["model"] for call in SequencedAsyncClient.calls], [
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ])
+        [experiment_row] = server.store.conn.execute("select error, experiment_json from routing_experiments").fetchall()
+        self.assertIn("shadow provider unavailable", experiment_row["error"])
+        experiment_json = json.loads(experiment_row["experiment_json"])
+        self.assertEqual(experiment_json["optimization_feedback"]["status"], "shadow-error")
+        self.assertIn("shadow-exception", experiment_json["optimization_feedback"]["reason_codes"])
+        [queue_row] = server.store.conn.execute(
+            "select source_surface, status, payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        self.assertEqual(queue_row["source_surface"], "routing_experiment_outcome")
+        payload = json.loads(queue_row["payload_json"])
+        self.assertEqual(payload["outcome"]["status"], "shadow-error")
+        self.assertTrue(payload["outcome"]["error_present"])
+        self.assertNotIn("short prompt secret", queue_row["payload_json"])
+        self.assertNotIn("primary ok", queue_row["payload_json"])
 
     def test_anthropic_provider_failure_still_returns_and_sends_feedback(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

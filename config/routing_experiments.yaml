@@ -1,4 +1,4 @@
-profile_id: first-safe-openai-codex-shadow-pass-through-v1
+profile_id: first-safe-openai-codex-claude-shadow-pass-through-v1
 mode: shadow_candidate_pass_through
 enabled: true
 kill_switch: false
@@ -7,12 +7,18 @@ daily_budget_usd: 10.0
 min_text_chars: 0
 max_text_chars: 8000
 providers:
+  - anthropic
   - openai
 source_surfaces:
+  - anthropic_messages
   - openai_responses
   - openai_chat
   - codex_turn
 model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+  - requested_model: claude-opus-4-5
+    routed_model: claude-sonnet-4-6
   - requested_model: gpt-5.4
     routed_model: gpt-5.4-mini
   - requested_model: gpt-5-codex
