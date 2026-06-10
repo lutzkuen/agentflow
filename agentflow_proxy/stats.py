@@ -8515,6 +8515,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     managed_feedback_queue_counts: dict[str, int] = {}
     managed_pattern_fingerprint_rows = 0
     managed_pattern_hash_count = 0
+    safety_stop_rows = 0
+    safety_stop_reason_counts: dict[str, int] = {}
+    latest_safety_stop: dict[str, Any] | None = None
     summary_hint_buckets: dict[tuple[str, str], dict[str, Any]] = {}
     if hasattr(store_obj, "managed_outcome_feedback_summary"):
         try:
@@ -8595,6 +8598,48 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             for decision in (routing, crunch, cache)
             if isinstance(decision, dict)
         }
+        row_safety_stop: dict[str, Any] | None = None
+        for decision_name, decision in (("routing", routing), ("crunch", crunch), ("cache", cache)):
+            safety = decision.get("safety_stop") if isinstance(decision.get("safety_stop"), dict) else {}
+            stopped = (
+                bool(safety.get("tripped"))
+                or str(decision.get("status") or "") == "safety_stopped"
+            )
+            if not stopped:
+                continue
+            row_safety_stop = safety or {
+                "tripped": True,
+                "reason_codes": [str(decision.get("reason") or "local-canary-safety-stop")],
+            }
+            reason_codes = row_safety_stop.get("reason_codes") if isinstance(row_safety_stop.get("reason_codes"), list) else []
+            if not reason_codes:
+                reason_codes = [str(decision.get("reason") or "local-canary-safety-stop")]
+            for reason_code in reason_codes:
+                _increment_count(safety_stop_reason_counts, reason_code)
+            if latest_safety_stop is None:
+                latest_safety_stop = {
+                    "created_at": row.get("created_at"),
+                    "decision_type": decision_name,
+                    "status": row_safety_stop.get("status") or "stopped",
+                    "reason": row_safety_stop.get("reason") or "local-canary-safety-stop",
+                    "reason_codes": list(reason_codes),
+                    "source": row_safety_stop.get("source"),
+                    "policy_source": row_safety_stop.get("policy_source") or decision.get("policy_source"),
+                    "rule_id": row_safety_stop.get("rule_id"),
+                    "candidate_id": row_safety_stop.get("candidate_id"),
+                    "sample_count": _as_int(row_safety_stop.get("sample_count")),
+                    "applied_sample_count": _as_int(row_safety_stop.get("applied_sample_count")),
+                    "holdout_sample_count": _as_int(row_safety_stop.get("holdout_sample_count")),
+                    "privacy": {
+                        "metadata_only": True,
+                        "raw_params_included": False,
+                        "raw_prompts_included": False,
+                        "raw_responses_included": False,
+                        "cache_keys_included": False,
+                    },
+                }
+        if row_safety_stop is not None:
+            safety_stop_rows += 1
         if "action-like-params" in reasons:
             action_like_skips += 1
         if "unknown-param-shape" in reasons:
@@ -8709,6 +8754,11 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "managed_recommendation_status": (managed or {}).get("status") if isinstance(managed, dict) else "missing",
                 "managed_feedback_status": (feedback or {}).get("status") if isinstance(feedback, dict) else ("pending" if isinstance(managed, dict) else "missing"),
                 "managed_feedback_reason": (feedback or {}).get("reason") if isinstance(feedback, dict) else None,
+                "safety_stop": {
+                    "tripped": bool(row_safety_stop),
+                    "reason_codes": row_safety_stop.get("reason_codes") if isinstance(row_safety_stop, dict) else [],
+                    "source": row_safety_stop.get("source") if isinstance(row_safety_stop, dict) else None,
+                },
                 "managed_pattern_features": {
                     "present": bool((pattern_diagnostics or {}).get("present")) if isinstance(pattern_diagnostics, dict) else False,
                     "pattern_hash_count": _as_int((pattern_diagnostics or {}).get("pattern_hash_count")) if isinstance(pattern_diagnostics, dict) else 0,
@@ -8858,6 +8908,8 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 managed_feedback_queue_counts.get("retryable-error", 0)
                 + managed_feedback_queue_counts.get("dropped-after-limit", 0)
             ),
+            "safety_stop_rows": safety_stop_rows,
+            "active_safety_stop_count": safety_stop_rows,
             "repeated_context_plateau_candidate_count": plateau_candidate_report["summary"]["candidate_count"],
             "repeated_context_plateau_pairs": plateau_candidate_report["summary"]["plateau_pairs"],
             "repeated_context_plateau_opportunity_chars": plateau_candidate_report["summary"]["estimated_opportunity_saved_chars"],
@@ -8934,6 +8986,20 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
         "managed_feedback_breakdown": _count_breakdown(managed_feedback_status_counts),
         "managed_feedback_reason_breakdown": _count_breakdown(managed_feedback_reason_counts),
         "managed_feedback_queue_breakdown": _count_breakdown(managed_feedback_queue_counts),
+        "safety_stop": {
+            "schema": "agentflow.codex_app_safety_stop_state.v1",
+            "active": bool(safety_stop_rows),
+            "rows": safety_stop_rows,
+            "latest": latest_safety_stop,
+            "reason_code_breakdown": _count_breakdown(safety_stop_reason_counts),
+            "privacy": {
+                "metadata_only": True,
+                "raw_params_included": False,
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "cache_keys_included": False,
+            },
+        },
         "quota_and_token_usage": quota_token_usage,
         "repeated_context_plateau_candidates": plateau_candidate_report,
         "outcome_by_optimization": [
@@ -11970,6 +12036,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Codex safety stops</h2>
+  <table data-table-id="codex-safety-stop" data-filter-label="Filter Codex safety stops">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="number">Rows</th><th data-sort-type="text">Latest rule</th><th data-sort-type="text">Source</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="codex-safety-stop-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Summary model hint canary</h2>
   <table data-table-id="codex-summary-hint" data-filter-label="Filter Codex summary hint">
     <thead><tr>
@@ -12840,6 +12915,17 @@ async function refreshCodexQuota(){
       <td class="tokens">${(rec.total_drift_tokens||0).toLocaleString()}</td>
       <td><span class="badge miss">${esc(rec.status||rec.total_drift_bucket||'unknown')}</span> <span class="badge provider">${esc(rec.total_drift_size_bucket||'unknown')}</span></td>
       <td class="flags">${privacyBadges}</td>
+    </tr>`;
+    const stop=d.safety_stop||{};
+    const latestStop=stop.latest||{};
+    const stopReasons=(stop.reason_code_breakdown||[]).map(row=>`<span class="badge err">${esc(row.value||'unknown')} ${(row.count||0).toLocaleString()}</span>`).join(' ')||'<span class="badge hit">none</span>';
+    document.getElementById('codex-safety-stop-tbody').innerHTML=`<tr>
+      <td><span class="badge ${stop.active?'err':'hit'}">${stop.active?'active':'clear'}</span></td>
+      <td class="tokens">${(stop.rows||0).toLocaleString()}</td>
+      <td class="model">${esc(latestStop.rule_id||latestStop.candidate_id||'—')}</td>
+      <td><span class="badge provider">${esc(latestStop.source||'local-outcomes')}</span></td>
+      <td class="flags">${stopReasons}</td>
+      <td class="flags"><span class="badge hit">metadata only</span> <span class="badge hit">cache keys omitted</span></td>
     </tr>`;
     const hintRows=((d.summary_model_hint||{}).buckets)||d.summary_model_hint_buckets||[];
     document.getElementById('codex-summary-hint-tbody').innerHTML=hintRows.map(row=>{

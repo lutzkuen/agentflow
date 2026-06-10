@@ -941,6 +941,250 @@ rules:
         self.assertEqual(metadata["routing"]["codex_app_rule"]["rule_id"], "holdout-summary-rule")
         self.assertFalse(metadata["routing"]["applied"])
 
+    def test_codex_app_rule_explicit_safety_stop_fails_closed_with_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+            db_path = os.path.join(tmp, "codex.sqlite3")
+            with open(rules_path, "w", encoding="utf-8") as f:
+                f.write(
+                    """
+enabled: true
+rules:
+  - id: stopped-summary-rule
+    policy_source: managed-recommended
+    conditions:
+      app_family: codex
+      workflow_phase: summary
+      model_field_state: present
+      cache_eligible: true
+      has_action_like_params: false
+      stale_risk: false
+    action:
+      model_hint: gpt-5-mini
+      cache_eligible: true
+    canary:
+      fraction: 1.0
+      holdout_fraction: 0.2
+      salt: stopped-rule-test
+      unit: source_hash
+    safety_stop:
+      enabled: true
+      tripped: true
+      reason_codes:
+        - applied-error-rate-regression
+"""
+                )
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-rule-stopped",
+                "method": "turn/start",
+                "params": {
+                    "model": "gpt-5.3-codex",
+                    "input": [{"type": "text", "text": "Summarize the completed work."}],
+                    "temperature": 0,
+                },
+            }
+            raw = json.dumps(message)
+
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": rules_path, "AGENTFLOW_DB": db_path, "HOME": tmp}, clear=False):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(raw)
+                    pending = codex_app_proxy._attach_codex_canary_lifecycle_pending(forwarded, metadata)
+            finally:
+                importlib.reload(codex_app_policy_module)
+                importlib.reload(codex_app_proxy)
+
+        self.assertEqual(forwarded, raw)
+        self.assertEqual(metadata["routing"]["status"], "safety_stopped")
+        self.assertEqual(metadata["routing"]["reason"], "local-canary-safety-stop")
+        self.assertFalse(metadata["routing"]["applied"])
+        self.assertEqual(metadata["routing"]["canary_cohort"], "safety_stopped")
+        self.assertEqual(metadata["routing"]["codex_app_rule"]["rule_id"], "stopped-summary-rule")
+        self.assertEqual(metadata["routing"]["safety_stop"]["reason_codes"], ["applied-error-rate-regression"])
+        self.assertEqual(metadata["routing"]["safety_stop"]["source"], "policy-file")
+        self.assertEqual(metadata["cache"]["status"], "skipped")
+        self.assertEqual(metadata["cache"]["reason"], "local-canary-safety-stop")
+        self.assertNotIn("_agentflow_cache_key", metadata["cache"])
+        self.assertEqual(pending["actions"], ["routing", "cache"])
+        self.assertNotIn("turn-rule-stopped", json.dumps(metadata))
+
+    def test_codex_app_rule_missing_holdout_evidence_safety_stop_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+            db_path = os.path.join(tmp, "codex.sqlite3")
+            with open(rules_path, "w", encoding="utf-8") as f:
+                f.write(
+                    """
+enabled: true
+rules:
+  - id: missing-holdout-rule
+    policy_source: managed-recommended
+    conditions:
+      app_family: codex
+      workflow_phase: summary
+      model_field_state: present
+      cache_eligible: true
+      has_action_like_params: false
+      stale_risk: false
+    action:
+      model_hint: gpt-5-mini
+    canary:
+      fraction: 0.5
+      holdout_fraction: 0.5
+      salt: missing-holdout-test
+      unit: source_hash
+    safety_stop:
+      enabled: true
+      min_outcome_samples: 2
+      min_holdout_samples: 1
+      window: 10
+"""
+                )
+            test_store = Store(db_path)
+            try:
+                for idx in range(2):
+                    test_store.log_codex_app_event(
+                        id=f"start-missing-holdout-{idx}",
+                        created_at=f"2026-06-10T10:00:0{idx}+00:00",
+                        direction="client_to_server",
+                        method="turn/start",
+                        request_id=f"req-missing-holdout-{idx}",
+                        thread_id=f"thread-missing-holdout-{idx}",
+                        message_chars=100,
+                        params_chars=80,
+                        input_items=1,
+                        input_text_chars=48,
+                        session_id="session-missing-holdout",
+                        routing_json=json.dumps({
+                            "status": "applied",
+                            "reason": "managed summary rule",
+                            "canary": "codex-app-rule",
+                            "canary_cohort": "canary_applied",
+                            "codex_app_rule": {
+                                "rule_id": "missing-holdout-rule",
+                                "candidate_id": "missing-holdout-rule",
+                                "policy_source": "managed-recommended",
+                            },
+                        }),
+                        cache_json=json.dumps({
+                            "status": "skipped",
+                            "reason": "codex-app-rule-no-cache-action",
+                            "codex_app_rule": {
+                                "rule_id": "missing-holdout-rule",
+                                "candidate_id": "missing-holdout-rule",
+                            },
+                        }),
+                    )
+                    test_store.log_codex_app_event(
+                        id=f"end-missing-holdout-{idx}",
+                        created_at=f"2026-06-10T10:00:1{idx}+00:00",
+                        direction="server_to_client",
+                        method=None,
+                        request_id=f"req-missing-holdout-{idx}",
+                        thread_id=f"thread-missing-holdout-{idx}",
+                        message_chars=50,
+                        result_chars=20,
+                        latency_ms=20,
+                        session_id="session-missing-holdout",
+                    )
+            finally:
+                test_store.conn.close()
+
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-missing-holdout-stop",
+                "method": "turn/start",
+                "params": {
+                    "model": "gpt-5.3-codex",
+                    "input": [{"type": "text", "text": "Summarize the completed work."}],
+                    "temperature": 0,
+                },
+            }
+            raw = json.dumps(message)
+
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": rules_path, "AGENTFLOW_DB": db_path, "HOME": tmp}, clear=False):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(raw)
+            finally:
+                importlib.reload(codex_app_policy_module)
+                importlib.reload(codex_app_proxy)
+
+        self.assertEqual(forwarded, raw)
+        self.assertEqual(metadata["routing"]["status"], "safety_stopped")
+        self.assertIn("missing-holdout-evidence", metadata["routing"]["safety_stop"]["reason_codes"])
+        self.assertEqual(metadata["routing"]["safety_stop"]["source"], "recent-local-outcomes")
+        self.assertEqual(metadata["routing"]["safety_stop"]["applied_sample_count"], 2)
+        self.assertEqual(metadata["routing"]["safety_stop"]["holdout_sample_count"], 0)
+
+    def test_codex_effectiveness_reports_rule_safety_stop_state(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                test_store.log_codex_app_event(
+                    id="start-safety-stop-stats",
+                    created_at="2026-06-10T12:00:00+00:00",
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="req-safety-stop-stats",
+                    thread_id="thread-safety-stop-stats",
+                    message_chars=120,
+                    params_chars=80,
+                    input_items=1,
+                    input_text_chars=64,
+                    session_id="session-safety-stop-stats",
+                    routing_json=json.dumps({
+                        "status": "safety_stopped",
+                        "reason": "local-canary-safety-stop",
+                        "policy_source": "managed-recommended",
+                        "canary": "codex-app-rule",
+                        "canary_cohort": "safety_stopped",
+                        "codex_app_rule": {
+                            "rule_id": "stopped-stats-rule",
+                            "candidate_id": "stopped-stats-rule",
+                        },
+                        "safety_stop": {
+                            "tripped": True,
+                            "status": "stopped",
+                            "reason": "local-canary-safety-stop",
+                            "reason_codes": ["unsafe-cache-envelope"],
+                            "source": "recent-local-outcomes",
+                            "rule_id": "stopped-stats-rule",
+                            "candidate_id": "stopped-stats-rule",
+                            "sample_count": 3,
+                            "applied_sample_count": 3,
+                            "holdout_sample_count": 1,
+                        },
+                    }),
+                    crunch_json=json.dumps({"status": "skipped", "reason": "local-canary-safety-stop"}),
+                    cache_json=json.dumps({"status": "skipped", "reason": "local-canary-safety-stop"}),
+                )
+                test_store.log_codex_app_event(
+                    id="end-safety-stop-stats",
+                    created_at="2026-06-10T12:00:01+00:00",
+                    direction="server_to_client",
+                    method=None,
+                    request_id="req-safety-stop-stats",
+                    thread_id="thread-safety-stop-stats",
+                    message_chars=50,
+                    result_chars=20,
+                    latency_ms=20,
+                    session_id="session-safety-stop-stats",
+                )
+                payload = asyncio.run(stats_views.stats_codex_effectiveness(test_store, limit=10))
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(payload["summary"]["safety_stop_rows"], 1)
+        self.assertTrue(payload["safety_stop"]["active"])
+        self.assertEqual(payload["safety_stop"]["latest"]["rule_id"], "stopped-stats-rule")
+        self.assertEqual(payload["safety_stop"]["latest"]["reason_codes"], ["unsafe-cache-envelope"])
+        self.assertEqual(payload["safety_stop"]["reason_code_breakdown"], [{"value": "unsafe-cache-envelope", "count": 1}])
+        self.assertFalse(payload["safety_stop"]["privacy"]["raw_params_included"])
+
     def test_codex_app_rules_pass_through_unsafe_or_unsupported_turns_with_reasons(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "codex.sqlite3")

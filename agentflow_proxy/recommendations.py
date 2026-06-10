@@ -2333,6 +2333,9 @@ def _codex_lifecycle_outcome(
     if action_family == "routing":
         status = str(routing_meta.get("status") or "")
         reason = str(routing_meta.get("reason") or "")
+        safety_stop = routing_meta.get("safety_stop") if isinstance(routing_meta.get("safety_stop"), dict) else {}
+        if status == "safety_stopped" or reason == "local-canary-safety-stop" or safety_stop.get("tripped"):
+            return "safety_stopped"
         if status == "applied":
             return "applied"
         if status == "holdout" or reason == "summary-model-hint-canary-holdout":
@@ -2342,6 +2345,9 @@ def _codex_lifecycle_outcome(
         return status or "unknown"
     status = str(cache_meta.get("status") or "")
     reason = str(cache_meta.get("reason") or "")
+    safety_stop = cache_meta.get("safety_stop") if isinstance(cache_meta.get("safety_stop"), dict) else {}
+    if reason == "local-canary-safety-stop" or safety_stop.get("tripped"):
+        return "safety_stopped"
     if status == "hit":
         return "hit"
     if status == "miss":
@@ -2357,9 +2363,10 @@ def _codex_canary_for_action(action_family: str, routing_meta: dict[str, Any], c
     if action_family == "routing":
         sample = routing_meta.get("canary_sample") if isinstance(routing_meta.get("canary_sample"), dict) else {}
         policy = routing_meta.get("canary_policy") if isinstance(routing_meta.get("canary_policy"), dict) else {}
+        name = "codex-app-rule" if routing_meta.get("canary") == "codex-app-rule" else "codex-app-summary-model-hint"
         return {
-            "name": "codex-app-summary-model-hint",
-            "enabled": bool(routing_meta.get("canary_enabled") or sample.get("enabled")),
+            "name": name,
+            "enabled": bool(routing_meta.get("canary_enabled") or sample.get("enabled") or routing_meta.get("canary") == "codex-app-rule"),
             "cohort": routing_meta.get("canary_cohort") or sample.get("cohort"),
             "status": sample.get("status") or routing_meta.get("status"),
             "fraction": sample.get("fraction") if sample.get("fraction") is not None else policy.get("fraction"),
@@ -2399,9 +2406,15 @@ def build_codex_app_canary_lifecycle_feedback(
     if action_family not in {"routing", "cache"}:
         return None
     if action_family == "routing":
-        if routing_meta.get("canary") != "codex-app-summary-model-hint":
+        if routing_meta.get("canary") not in {"codex-app-summary-model-hint", "codex-app-rule"}:
             return None
-        policy_id = routing_meta.get("policy_id") or "local-codex-app-summary-model-hint-canary"
+        rule_meta = routing_meta.get("codex_app_rule") if isinstance(routing_meta.get("codex_app_rule"), dict) else {}
+        policy_id = (
+            routing_meta.get("policy_id")
+            or rule_meta.get("candidate_id")
+            or rule_meta.get("rule_id")
+            or "local-codex-app-summary-model-hint-canary"
+        )
         target_model = routing_meta.get("target_model") or routing_meta.get("routed_model")
         decision_status = routing_meta.get("status")
         decision_reason = routing_meta.get("reason")

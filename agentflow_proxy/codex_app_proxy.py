@@ -1457,6 +1457,282 @@ def _codex_rule_canary_sample(
     }
 
 
+def _safety_number(value: Any, default: float, *, minimum: float | None = None) -> float:
+    parsed = _as_float(value)
+    if parsed is None:
+        parsed = default
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    return parsed
+
+
+def _safety_int(value: Any, default: int, *, minimum: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, parsed)
+
+
+def _codex_rule_safety_policy(rule: dict[str, Any]) -> dict[str, Any]:
+    safety = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else {}
+    thresholds = safety.get("thresholds") if isinstance(safety.get("thresholds"), dict) else safety
+    return {
+        "enabled": _policy_value_as_bool(safety.get("enabled")) is not False,
+        "window": _safety_int(thresholds.get("window"), 200, minimum=1),
+        "min_outcome_samples": _safety_int(thresholds.get("min_outcome_samples"), 5, minimum=1),
+        "min_holdout_samples": _safety_int(thresholds.get("min_holdout_samples"), 1, minimum=0),
+        "max_error_rate": _safety_number(thresholds.get("max_error_rate"), 0.20, minimum=0.0),
+        "max_error_rate_delta": _safety_number(thresholds.get("max_error_rate_delta"), 0.05, minimum=0.0),
+        "max_retry_rate": _safety_number(thresholds.get("max_retry_rate"), 0.20, minimum=0.0),
+        "max_retry_rate_delta": _safety_number(thresholds.get("max_retry_rate_delta"), 0.05, minimum=0.0),
+        "max_latency_ms": _safety_number(thresholds.get("max_latency_ms"), 120_000.0, minimum=0.0),
+        "max_latency_delta_ms": _safety_number(thresholds.get("max_latency_delta_ms"), 30_000.0, minimum=0.0),
+        "max_stale_risk_rate": _safety_number(thresholds.get("max_stale_risk_rate"), 0.25, minimum=0.0),
+        "unsafe_cache_envelope_limit": _safety_int(thresholds.get("unsafe_cache_envelope_limit"), 1, minimum=1),
+        "cache_invalidation_failure_limit": _safety_int(thresholds.get("cache_invalidation_failure_limit"), 3, minimum=1),
+    }
+
+
+def _codex_rule_safety_stop_meta(
+    *,
+    rule_meta: dict[str, Any],
+    policy: dict[str, Any],
+    reason_codes: list[str],
+    trigger_metrics: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    clean_reasons = sorted({str(reason) for reason in reason_codes if str(reason or "").strip()})
+    return {
+        "schema": "agentflow.codex_app_rule_safety_stop.v1",
+        "enabled": bool(policy.get("enabled", True)),
+        "tripped": bool(clean_reasons),
+        "status": "stopped" if clean_reasons else "clear",
+        "reason": "local-canary-safety-stop" if clean_reasons else "clear",
+        "reason_codes": clean_reasons,
+        "source": source,
+        "policy_source": rule_meta.get("policy_source") or CODEX_APP_POLICY_SOURCE,
+        "rule_id": rule_meta.get("rule_id"),
+        "candidate_id": rule_meta.get("candidate_id"),
+        "sample_count": _as_int(trigger_metrics.get("sample_count")),
+        "applied_sample_count": _as_int(trigger_metrics.get("applied_sample_count")),
+        "holdout_sample_count": _as_int(trigger_metrics.get("holdout_sample_count")),
+        "trigger_metrics": trigger_metrics,
+        "thresholds": {key: value for key, value in policy.items() if key != "enabled"},
+        "clearance": "reviewed policy update, rollback, or a clean recent outcome window clears this runtime stop",
+        "privacy": {
+            "metadata_only": True,
+            "raw_params_included": False,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "cache_keys_included": False,
+        },
+    }
+
+
+def _codex_rule_explicit_safety_stop(
+    rule: dict[str, Any],
+    *,
+    rule_meta: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any] | None:
+    safety = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else {}
+    if not safety or not policy.get("enabled", True):
+        return None
+    status = str(safety.get("status") or "").strip().lower().replace("-", "_")
+    tripped = (
+        bool(safety.get("tripped"))
+        or bool(safety.get("stopped"))
+        or bool(safety.get("active"))
+        or status in {"stopped", "safety_stopped", "safety_stop"}
+    )
+    raw_reasons = safety.get("reason_codes") or safety.get("trigger_metrics") or safety.get("reasons") or []
+    reason_codes = [str(reason) for reason in raw_reasons] if isinstance(raw_reasons, list) else []
+    if safety.get("reason") and not reason_codes:
+        reason_codes = [str(safety.get("reason"))]
+    if not tripped and not reason_codes:
+        return None
+    trigger_metrics = {
+        "sample_count": _as_int(safety.get("sample_count")),
+        "applied_sample_count": _as_int(safety.get("applied_sample_count")),
+        "holdout_sample_count": _as_int(safety.get("holdout_sample_count")),
+    }
+    return _codex_rule_safety_stop_meta(
+        rule_meta=rule_meta,
+        policy=policy,
+        reason_codes=reason_codes or ["explicit-safety-stop"],
+        trigger_metrics=trigger_metrics,
+        source="policy-file",
+    )
+
+
+def _codex_rule_observed_safety_stop(
+    rule: dict[str, Any],
+    *,
+    rule_meta: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not policy.get("enabled", True) or not hasattr(store, "conn"):
+        return None
+    window = _as_int(policy.get("window")) or 200
+    try:
+        rows = store.conn.execute("""
+            select s.routing_json,
+                   s.cache_json,
+                   (
+                       select r.error_code from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_error_code,
+                   (
+                       select r.latency_ms from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_latency_ms
+            from codex_app_events s
+            where s.direction = 'client_to_server'
+              and s.method = 'turn/start'
+            order by s.created_at desc
+            limit ?
+        """, (window,)).fetchall()
+    except Exception:
+        return None
+
+    target_rule_id = str(rule_meta.get("rule_id") or "")
+    target_candidate_id = str(rule_meta.get("candidate_id") or "")
+    applied = {"count": 0, "errors": 0, "retries": 0, "latency_total": 0, "latency_count": 0}
+    holdout = {"count": 0, "errors": 0, "retries": 0, "latency_total": 0, "latency_count": 0}
+    unsafe_cache_envelopes = 0
+    stale_risk = 0
+    invalidated = 0
+    sample_count = 0
+    for row in rows:
+        routing = _json_obj(row["routing_json"])
+        cache = _json_obj(row["cache_json"])
+        rule_bits = []
+        for decision in (routing, cache):
+            meta = decision.get("codex_app_rule") if isinstance(decision.get("codex_app_rule"), dict) else {}
+            if meta:
+                rule_bits.append(meta)
+        if not any(
+            str(meta.get("rule_id") or "") == target_rule_id
+            or str(meta.get("candidate_id") or "") == target_candidate_id
+            for meta in rule_bits
+        ):
+            continue
+        sample_count += 1
+        cache_reason = str(cache.get("reason") or "")
+        cache_bucket = str(cache.get("outcome_bucket") or "")
+        if cache_reason == "unsafe-cached-envelope" or cache.get("status") == "unsafe-skip":
+            unsafe_cache_envelopes += 1
+        if cache_bucket == "stale-risk" or cache_reason in {
+            "stale-risk-blockers",
+            "file-dependency-missing",
+            "dependency-missing",
+            "dependency-cap-exceeded",
+            "file-watch-disabled",
+        }:
+            stale_risk += 1
+        if cache_bucket == "invalidated" or cache_reason in {
+            "dependency-changed",
+            "dependency-deleted",
+            "codex-cache-ttl-expired",
+        }:
+            invalidated += 1
+
+        cohort = str(routing.get("canary_cohort") or cache.get("canary_cohort") or "")
+        bucket = applied if cohort == "canary_applied" else holdout if cohort == "canary_holdout" else None
+        if bucket is None:
+            continue
+        bucket["count"] += 1
+        if row["response_error_code"] is not None:
+            bucket["errors"] += 1
+        retry_count = _as_int(routing.get("retry_count") or cache.get("retry_count"))
+        if retry_count:
+            bucket["retries"] += 1
+        latency = _as_int(row["response_latency_ms"])
+        if latency:
+            bucket["latency_total"] += latency
+            bucket["latency_count"] += 1
+
+    applied_count = _as_int(applied["count"])
+    holdout_count = _as_int(holdout["count"])
+    applied_error_rate = (applied["errors"] / applied_count) if applied_count else 0.0
+    holdout_error_rate = (holdout["errors"] / holdout_count) if holdout_count else 0.0
+    applied_retry_rate = (applied["retries"] / applied_count) if applied_count else 0.0
+    holdout_retry_rate = (holdout["retries"] / holdout_count) if holdout_count else 0.0
+    applied_latency = (applied["latency_total"] / applied["latency_count"]) if applied["latency_count"] else 0.0
+    holdout_latency = (holdout["latency_total"] / holdout["latency_count"]) if holdout["latency_count"] else 0.0
+    stale_rate = stale_risk / sample_count if sample_count else 0.0
+    reason_codes: list[str] = []
+    min_samples = _as_int(policy.get("min_outcome_samples")) or 1
+    min_holdout = _as_int(policy.get("min_holdout_samples"))
+    canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+    holdout_fraction = _as_float(canary.get("holdout_fraction")) if isinstance(canary, dict) else 0.0
+    if holdout_fraction and applied_count >= min_samples and holdout_count < min_holdout:
+        reason_codes.append("missing-holdout-evidence")
+    if applied_count >= min_samples and applied_error_rate > _as_float(policy.get("max_error_rate")):
+        reason_codes.append("applied-error-rate-above-threshold")
+    if holdout_count >= min_holdout and applied_error_rate - holdout_error_rate > _as_float(policy.get("max_error_rate_delta")):
+        reason_codes.append("applied-error-rate-regression")
+    if applied_count >= min_samples and applied_retry_rate > _as_float(policy.get("max_retry_rate")):
+        reason_codes.append("applied-retry-rate-above-threshold")
+    if holdout_count >= min_holdout and applied_retry_rate - holdout_retry_rate > _as_float(policy.get("max_retry_rate_delta")):
+        reason_codes.append("applied-retry-rate-regression")
+    if applied["latency_count"] >= min_samples and applied_latency > _as_float(policy.get("max_latency_ms")):
+        reason_codes.append("applied-latency-above-threshold")
+    if holdout["latency_count"] >= min_holdout and applied_latency - holdout_latency > _as_float(policy.get("max_latency_delta_ms")):
+        reason_codes.append("applied-latency-regression")
+    if unsafe_cache_envelopes >= _as_int(policy.get("unsafe_cache_envelope_limit")):
+        reason_codes.append("unsafe-cache-envelope")
+    if sample_count >= min_samples and stale_rate > _as_float(policy.get("max_stale_risk_rate")):
+        reason_codes.append("stale-risk-spike")
+    if invalidated >= _as_int(policy.get("cache_invalidation_failure_limit")):
+        reason_codes.append("cache-invalidation-failures")
+    if not reason_codes:
+        return None
+    trigger_metrics = {
+        "sample_count": sample_count,
+        "applied_sample_count": applied_count,
+        "holdout_sample_count": holdout_count,
+        "applied_error_rate": round(applied_error_rate, 6),
+        "holdout_error_rate": round(holdout_error_rate, 6),
+        "applied_retry_rate": round(applied_retry_rate, 6),
+        "holdout_retry_rate": round(holdout_retry_rate, 6),
+        "applied_avg_latency_ms": round(applied_latency, 3) if applied_latency else None,
+        "holdout_avg_latency_ms": round(holdout_latency, 3) if holdout_latency else None,
+        "unsafe_cache_envelope_count": unsafe_cache_envelopes,
+        "stale_risk_count": stale_risk,
+        "stale_risk_rate": round(stale_rate, 6),
+        "cache_invalidation_failure_count": invalidated,
+    }
+    return _codex_rule_safety_stop_meta(
+        rule_meta=rule_meta,
+        policy=policy,
+        reason_codes=reason_codes,
+        trigger_metrics={key: value for key, value in trigger_metrics.items() if value is not None},
+        source="recent-local-outcomes",
+    )
+
+
+def _codex_rule_runtime_safety_stop(
+    rule: dict[str, Any],
+    *,
+    rule_meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    policy = _codex_rule_safety_policy(rule)
+    explicit = _codex_rule_explicit_safety_stop(rule, rule_meta=rule_meta, policy=policy)
+    if explicit is not None:
+        return explicit
+    return _codex_rule_observed_safety_stop(rule, rule_meta=rule_meta, policy=policy)
+
+
 def _codex_rule_plan(params: dict[str, Any]) -> dict[str, Any]:
     features, safety_reason, eligibility_meta, file_dependency_audit_meta = _codex_rule_features(params)
     mismatch_counts: dict[str, int] = {}
@@ -1500,6 +1776,25 @@ def _codex_rule_plan(params: dict[str, Any]) -> dict[str, Any]:
                 "features": features,
                 "eligibility_meta": eligibility_meta,
                 "file_dependency_audit": file_dependency_audit_meta,
+            }
+        safety_stop = _codex_rule_runtime_safety_stop(rule, rule_meta=rule_meta)
+        if safety_stop is not None:
+            rule_meta["blockers"] = list(rule_meta.get("blockers") or []) + ["local-canary-safety-stop"]
+            rule_meta["safety_stop"] = {
+                "tripped": True,
+                "reason_codes": safety_stop.get("reason_codes") or [],
+                "source": safety_stop.get("source"),
+            }
+            return {
+                "status": "safety_stopped",
+                "reason": "local-canary-safety-stop",
+                "rule": rule,
+                "rule_index": index,
+                "rule_meta": rule_meta,
+                "features": features,
+                "eligibility_meta": eligibility_meta,
+                "file_dependency_audit": file_dependency_audit_meta,
+                "safety_stop": safety_stop,
             }
         candidate_id = str(rule_meta["candidate_id"])
         sample = _codex_rule_canary_sample(rule, candidate_id=candidate_id, params=params)
@@ -2145,6 +2440,56 @@ def _optimize_client_message_with_rules(
     model_field = features.get("model_field")
     target_model = str(action.get("recommended_model") or action.get("model_hint") or "").strip()
 
+    if plan.get("status") == "safety_stopped":
+        reason = "local-canary-safety-stop"
+        safety_stop = plan.get("safety_stop") if isinstance(plan.get("safety_stop"), dict) else {}
+        routing_meta = _policy_decision("routing", "safety_stopped", reason, enabled=True)
+        routing_meta.update({
+            "policy_source": policy_source,
+            "requested_model": requested_model or None,
+            "routed_model": requested_model or None,
+            "target_model": target_model or None,
+            "model_field": model_field,
+            "workflow_phase": workflow_phase,
+            "workflow_phase_reason": workflow_phase_reason,
+            "canary": "codex-app-rule",
+            "canary_cohort": "safety_stopped",
+            "applied": False,
+            "codex_app_rule": rule_meta,
+            "safety_stop": safety_stop,
+        })
+        crunch_meta = _policy_decision("crunch", "skipped", reason, enabled=True)
+        crunch_meta.update({
+            "policy_source": policy_source,
+            "workflow_phase": workflow_phase,
+            "workflow_phase_reason": workflow_phase_reason,
+            "applied": False,
+            "codex_app_rule": rule_meta,
+            "safety_stop": safety_stop,
+        })
+        cache_meta = _codex_cache_decision(
+            "skipped",
+            reason,
+            enabled=True,
+            eligible=bool(features.get("cache_eligible")),
+            replayability_level=str(features.get("replayability_level") or "features_only"),
+            file_dependency_audit_meta=plan.get("file_dependency_audit") if isinstance(plan.get("file_dependency_audit"), dict) else None,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="safety_stop",
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta.update({
+            "policy_source": policy_source,
+            "canary": "codex-app-rule",
+            "canary_cohort": "safety_stopped",
+            "codex_app_rule": rule_meta,
+            "safety_stop": safety_stop,
+        })
+        metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+        _attach_codex_local_pattern_features(raw, metadata)
+        return raw, metadata
+
     if plan.get("status") in {"blocked", "eligible-skipped"} or not rule:
         reason = str(plan.get("reason") or "no-matching-codex-app-rule")
         routing_meta = _policy_decision("routing", "skipped", reason, enabled=True)
@@ -2697,9 +3042,9 @@ def _attach_codex_canary_lifecycle_pending(
     crunch = metadata.get("crunch") if isinstance(metadata.get("crunch"), dict) else {}
     cache = metadata.get("cache") if isinstance(metadata.get("cache"), dict) else {}
     actions: list[str] = []
-    if routing.get("canary") == "codex-app-summary-model-hint":
+    if routing.get("canary") in {"codex-app-summary-model-hint", "codex-app-rule"}:
         actions.append("routing")
-    if cache.get("canary") == "codex-app-exact-cache" or isinstance(cache.get("canary_sample"), dict):
+    if cache.get("canary") in {"codex-app-exact-cache", "codex-app-rule"} or isinstance(cache.get("canary_sample"), dict):
         actions.append("cache")
     if not actions:
         return None
