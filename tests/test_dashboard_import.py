@@ -74,6 +74,7 @@ class DashboardImportTests(unittest.TestCase):
             health = client.get("/health")
             stats = client.get("/agentflow/stats")
             policies = client.get("/agentflow/stats/policies")
+            policy_workbench = client.get("/agentflow/stats/policy-workbench")
             policy_events = client.get("/agentflow/stats/policy-events")
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
             codex_readiness = client.get("/agentflow/stats/codex-readiness")
@@ -95,6 +96,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(stats.json()["db"], tmp.name)
             self.assertEqual(stats.json()["calls"], 0)
             self.assertEqual(policies.status_code, 200)
+            self.assertEqual(policy_workbench.status_code, 200)
+            self.assertEqual(policy_workbench.json()["schema"], "agentflow.policy_workbench_readiness.v1")
+            self.assertTrue(policy_workbench.json()["read_only"])
+            self.assertFalse(policy_workbench.json()["mutating_dashboard_endpoints"])
+            self.assertFalse(policy_workbench.json()["privacy"]["dashboard_mutations_available"])
+            self.assertFalse(policy_workbench.json()["privacy"]["provider_calls_made"])
             self.assertEqual(policy_events.status_code, 200)
             self.assertEqual(policy_events.json()["schema"], "agentflow.policy_events.v1")
             self.assertEqual(policy_events.json()["events"][0]["action"], "validate")
@@ -136,6 +143,9 @@ class DashboardImportTests(unittest.TestCase):
             policy_json = policies.json()
             self.assertEqual(policy_json["schema"], "agentflow.policy_state.v1")
             self.assertIn("summary", policy_json)
+            self.assertIn("workbench", policy_json)
+            self.assertEqual(policy_json["workbench"]["schema"], "agentflow.policy_workbench_readiness.v1")
+            self.assertFalse(policy_json["workbench"]["privacy"]["raw_prompts_included"])
             self.assertIn("reload_required", policy_json["summary"])
             self.assertIn("reload_required_sections", policy_json["summary"])
             self.assertEqual(policy_json["summary"]["policy_count"], 5)
@@ -171,7 +181,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("AgentFlow", dashboard.text)
             self.assertIn("Policies", dashboard.text)
             self.assertIn("/agentflow/stats/policies", dashboard.text)
+            self.assertIn("/agentflow/stats/policy-workbench", dashboard.text)
             self.assertIn("/agentflow/stats/policy-events", dashboard.text)
+            self.assertIn("Policy workbench readiness", dashboard.text)
+            self.assertIn("policy-workbench-tbody", dashboard.text)
+            self.assertIn("Policy workbench events", dashboard.text)
+            self.assertIn("policy-workbench-events-tbody", dashboard.text)
             self.assertIn("Policy reload summary", dashboard.text)
             self.assertIn("policy-summary-tbody", dashboard.text)
             self.assertIn("Codex rules", dashboard.text)
@@ -214,6 +229,165 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_policy_workbench_readiness_reports_staged_drafts_events_and_privacy(self):
+        from agentflow_proxy import stats as stats_views
+        from agentflow_proxy.policy_events import log_policy_event
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        work_tmp = tempfile.TemporaryDirectory()
+        store = Store(tmp.name)
+        workspace = Path(work_tmp.name) / "drafts"
+        event_log = Path(work_tmp.name) / "policy_events.jsonl"
+        draft_dir = workspace / "draft-one"
+        draft_dir.mkdir(parents=True)
+        (draft_dir / "draft.json").write_text(
+            json.dumps({
+                "schema": "agentflow.policy_draft.v1",
+                "draft_id": "draft-one",
+                "created_at": "2026-06-10T20:00:00+00:00",
+                "requested_section": "cache",
+                "changed": True,
+                "changed_sections": ["cache"],
+                "change_count": 2,
+                "workspace": str(draft_dir),
+                "bundle_path": str(draft_dir / "policy_bundle.json"),
+                "sections": [{"section": "cache"}],
+                "privacy": {
+                    "raw_prompts_included": False,
+                    "raw_responses_included": False,
+                    "provider_bodies_included": False,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        env = {
+            "AGENTFLOW_POLICY_DRAFT_DIR": str(workspace),
+            "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+        }
+        with patch.dict(os.environ, env, clear=False):
+            log_policy_event(
+                "draft-stage",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "draft_id": "draft-one",
+                    "changed_sections": ["cache"],
+                    "change_count": 2,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "exit_code": 0,
+                },
+            )
+            log_policy_event(
+                "draft-validate",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "draft": "draft-one",
+                    "status": "pass",
+                    "can_apply": True,
+                    "apply_blocked": False,
+                    "changed_sections": ["cache"],
+                    "section_verdicts": {"cache": "pass"},
+                    "blocker_reason_codes": [],
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "exit_code": 0,
+                },
+            )
+            log_policy_event(
+                "draft-apply",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "draft_id": "draft-one",
+                    "apply_id": "apply-123",
+                    "backup_id": "apply-123",
+                    "status": "applied",
+                    "changed_sections": ["cache"],
+                    "backup_paths": [str(Path(work_tmp.name) / "cache_rules.yaml.bak-apply-123")],
+                    "reloaded_modules": ["agentflow_proxy.cache"],
+                    "verification_ok": True,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "exit_code": 0,
+                },
+            )
+            log_policy_event(
+                "rollback",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "apply_id": "apply-123",
+                    "backup_id": "apply-123",
+                    "status": "rolled_back",
+                    "restored_sections": ["cache"],
+                    "reloaded_modules": ["agentflow_proxy.cache"],
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "exit_code": 0,
+                },
+            )
+            log_policy_event(
+                "reload",
+                ok=False,
+                details={
+                    "source": "cli",
+                    "error_type": "unsafe_url",
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "exit_code": 2,
+                },
+            )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={
+                    "min_request_interval_ms": 0,
+                    "max_tier_backoff_wait_s": 30,
+                    "max_concurrent_per_tier": 2,
+                },
+            )
+            client = TestClient(app)
+            response = client.get("/agentflow/stats/policy-workbench")
+            policies = client.get("/agentflow/stats/policies")
+            reload_required = asyncio.run(stats_views.stats_policy_workbench_readiness({
+                "summary": {"reload_required_sections": ["cache"]},
+            }))
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["schema"], "agentflow.policy_workbench_readiness.v1")
+        self.assertEqual(payload["staged_drafts"]["count"], 1)
+        self.assertEqual(payload["staged_drafts"]["latest"]["draft_id"], "draft-one")
+        self.assertFalse(payload["staged_drafts"]["latest"]["workspace_path_included"])
+        self.assertEqual(payload["validation"]["latest"]["status"], "pass")
+        self.assertTrue(payload["validation"]["can_apply"])
+        self.assertEqual(payload["apply"]["latest"]["apply_id"], "apply-123")
+        self.assertIn("apply-123", payload["apply"]["last_backup_ids"])
+        self.assertEqual(payload["rollback"]["latest"]["restored_sections"], ["cache"])
+        self.assertEqual(payload["events"]["latest_failure"]["error_type"], "unsafe_url")
+        self.assertFalse(payload["events"]["raw_path_included"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["mutating_dashboard_endpoints"])
+        self.assertFalse(payload["privacy"]["absolute_paths_included"])
+        self.assertFalse(payload["privacy"]["draft_bundle_contents_included"])
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+        self.assertEqual(policies.status_code, 200)
+        self.assertEqual(policies.json()["workbench"]["staged_drafts"]["count"], 1)
+        self.assertEqual(reload_required["status"], "reload-required")
+        self.assertEqual(reload_required["reload"]["required_sections"], ["cache"])
+
+        store.conn.close()
+        tmp.close()
+        work_tmp.cleanup()
 
     def test_optimization_eval_queue_endpoint_and_dashboard_are_metadata_only(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

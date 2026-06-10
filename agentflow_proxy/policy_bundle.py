@@ -67,6 +67,9 @@ async def build_policy_bundle() -> dict[str, Any]:
     from agentflow_proxy import stats
 
     policy_state = await stats.stats_policies()
+    export_policy_state = copy.deepcopy(policy_state)
+    if isinstance(export_policy_state, dict):
+        export_policy_state.pop("workbench", None)
     return {
         "schema": POLICY_BUNDLE_SCHEMA,
         "generated_at": utc_now(),
@@ -79,7 +82,7 @@ async def build_policy_bundle() -> dict[str, Any]:
             "enabled": False,
             "note": "Export only. No managed optimizer communication is performed by this command.",
         },
-        "policies": policy_state,
+        "policies": export_policy_state,
     }
 
 

@@ -7,6 +7,7 @@ import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 import ipaddress
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -192,11 +193,286 @@ def _policy_events_path_class() -> str:
     return "local-path"
 
 
+def _local_path_class(raw: str | os.PathLike[str] | None) -> str:
+    expanded = os.path.abspath(os.path.expanduser(str(raw or ""))) if raw else ""
+    home = os.path.abspath(os.path.expanduser("~"))
+    if not expanded:
+        return "unknown"
+    if expanded.startswith(os.path.join(home, ".agentflow") + os.sep):
+        return "local-agentflow-home"
+    if expanded.startswith("/tmp/") or expanded.startswith("/var/tmp/"):
+        return "local-temp"
+    return "local-path"
+
+
 def _breakdown_from_counts(counts: dict[str, int]) -> list[dict[str, Any]]:
     return [
         {"value": key, "count": value}
         for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
+
+
+def _read_workbench_draft_manifest(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _public_workbench_draft(manifest: dict[str, Any], *, mtime: float | None = None) -> dict[str, Any]:
+    sections = manifest.get("sections") if isinstance(manifest.get("sections"), list) else []
+    return {
+        "draft_id": manifest.get("draft_id"),
+        "created_at": manifest.get("created_at"),
+        "mtime_seconds": mtime,
+        "requested_section": manifest.get("requested_section"),
+        "changed": bool(manifest.get("changed")),
+        "changed_sections": manifest.get("changed_sections") if isinstance(manifest.get("changed_sections"), list) else [],
+        "change_count": _as_int(manifest.get("change_count")),
+        "section_count": len([section for section in sections if isinstance(section, dict)]),
+        "workspace_path_included": False,
+        "bundle_path_included": False,
+        "raw_payload_included": False,
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        },
+    }
+
+
+def _workbench_staged_drafts(limit: int = 10) -> tuple[list[dict[str, Any]], int]:
+    from agentflow_proxy.policy_files import _draft_workspace_root
+
+    raw_workspace = os.getenv("AGENTFLOW_POLICY_DRAFT_DIR")
+    workspace = _draft_workspace_root(raw_workspace)
+    if not workspace.exists() or not workspace.is_dir():
+        return [], 0
+
+    rows: list[tuple[float, dict[str, Any]]] = []
+    unreadable = 0
+    try:
+        children = list(workspace.iterdir())
+    except OSError:
+        return [], 1
+    for child in children:
+        manifest_path = child / "draft.json" if child.is_dir() else child
+        if not manifest_path.exists() or manifest_path.name != "draft.json":
+            continue
+        try:
+            mtime = manifest_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        manifest = _read_workbench_draft_manifest(manifest_path)
+        if manifest is None:
+            unreadable += 1
+            continue
+        rows.append((mtime, _public_workbench_draft(manifest, mtime=mtime)))
+    rows.sort(key=lambda item: ((item[1].get("created_at") or ""), item[0]), reverse=True)
+    return [row for _mtime, row in rows[: max(1, min(int(limit), 50))]], unreadable
+
+
+def _latest_policy_event(events: list[dict[str, Any]], *actions: str) -> dict[str, Any] | None:
+    wanted = set(actions)
+    for event in events:
+        if isinstance(event, dict) and event.get("action") in wanted:
+            return event
+    return None
+
+
+def _public_workbench_event(event: dict[str, Any] | None, *, now: datetime) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    action = str(event.get("action") or "")
+    changed_sections = details.get("changed_sections") if isinstance(details.get("changed_sections"), list) else []
+    requested_sections = details.get("requested_sections") if isinstance(details.get("requested_sections"), list) else []
+    restored_sections = details.get("restored_sections") if isinstance(details.get("restored_sections"), list) else []
+    reloaded_modules = details.get("reloaded_modules") if isinstance(details.get("reloaded_modules"), list) else []
+    blocker_codes = details.get("blocker_reason_codes") if isinstance(details.get("blocker_reason_codes"), list) else []
+    section_verdicts = details.get("section_verdicts") if isinstance(details.get("section_verdicts"), dict) else {}
+    return {
+        "created_at": event.get("created_at"),
+        "age_seconds": _seconds_since_iso(event.get("created_at"), now),
+        "action": action,
+        "ok": bool(event.get("ok")),
+        "source": details.get("source"),
+        "status": details.get("status"),
+        "draft_id": details.get("draft_id") or details.get("draft"),
+        "apply_id": details.get("apply_id"),
+        "backup_id": details.get("backup_id"),
+        "can_apply": details.get("can_apply"),
+        "apply_blocked": details.get("apply_blocked"),
+        "dry_run": details.get("dry_run"),
+        "force": details.get("force"),
+        "manifest_source": details.get("manifest_source"),
+        "apply_event_found": details.get("apply_event_found"),
+        "changed_sections": changed_sections,
+        "requested_sections": requested_sections,
+        "restored_sections": restored_sections,
+        "reloaded_module_count": len(reloaded_modules),
+        "reloaded_modules": reloaded_modules,
+        "change_count": _as_int(details.get("change_count")),
+        "validation_error_count": _as_int(details.get("error_count")),
+        "section_verdicts": dict(section_verdicts),
+        "blocker_reason_codes": [str(code) for code in blocker_codes if isinstance(code, str)],
+        "error_type": details.get("error_type"),
+        "exit_code": details.get("exit_code"),
+        "provider_calls_made": bool(details.get("provider_calls_made")),
+        "managed_server_calls_made": bool(details.get("managed_server_calls_made")),
+        "loopback_admin_calls_made": bool(details.get("loopback_admin_calls_made")),
+        "file_paths_included": False,
+        "raw_payload_included": False,
+    }
+
+
+def _workbench_readiness_state(
+    *,
+    reload_required_sections: list[str],
+    latest_validation: dict[str, Any] | None,
+    latest_apply: dict[str, Any] | None,
+    latest_rollback: dict[str, Any] | None,
+    staged_draft_count: int,
+) -> tuple[str, str]:
+    if reload_required_sections:
+        return "reload-required", "active policy files changed after load"
+    if latest_apply and not latest_apply.get("ok"):
+        return "attention", "latest apply failed or was blocked"
+    if latest_rollback and not latest_rollback.get("ok"):
+        return "attention", "latest rollback failed or was blocked"
+    if latest_validation:
+        if latest_validation.get("can_apply") is True:
+            return "draft-ready", "latest validation can be applied from CLI or loopback admin API"
+        if latest_validation.get("apply_blocked") is True or latest_validation.get("ok") is False:
+            return "draft-blocked", "latest validation blocks apply"
+    if staged_draft_count:
+        return "draft-needs-validation", "staged drafts exist without a passing latest validation"
+    return "loaded", "no staged draft is waiting"
+
+
+async def stats_policy_workbench_readiness(policy_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    from agentflow_proxy.policy_events import policy_events_enabled, recent_policy_events
+
+    state = policy_state if isinstance(policy_state, dict) else await stats_policies()
+    summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+    reload_sections = summary.get("reload_required_sections") if isinstance(summary.get("reload_required_sections"), list) else []
+    staged_drafts, unreadable_drafts = _workbench_staged_drafts(limit=10)
+    events_payload = recent_policy_events(limit=200)
+    raw_events = events_payload.get("events") if isinstance(events_payload.get("events"), list) else []
+    events = [event for event in raw_events if isinstance(event, dict)]
+    now = datetime.now(timezone.utc)
+
+    latest_stage = _public_workbench_event(_latest_policy_event(events, "draft-stage"), now=now)
+    latest_validation = _public_workbench_event(_latest_policy_event(events, "draft-validate"), now=now)
+    latest_apply = _public_workbench_event(_latest_policy_event(events, "draft-apply"), now=now)
+    latest_rollback = _public_workbench_event(_latest_policy_event(events, "rollback"), now=now)
+    latest_reload = _public_workbench_event(_latest_policy_event(events, "reload"), now=now)
+    public_events = [
+        row
+        for row in (
+            _public_workbench_event(event, now=now)
+            for event in events
+            if event.get("action") in {"draft-stage", "draft-validate", "draft-apply", "rollback", "reload"}
+        )
+        if row is not None
+    ][:25]
+    failures = [row for row in public_events if not row.get("ok")]
+    last_failure = failures[0] if failures else None
+    backup_ids = []
+    for row in public_events:
+        backup_id = row.get("backup_id")
+        if isinstance(backup_id, str) and backup_id and backup_id not in backup_ids:
+            backup_ids.append(backup_id)
+        if len(backup_ids) >= 5:
+            break
+    status, reason = _workbench_readiness_state(
+        reload_required_sections=[str(section) for section in reload_sections],
+        latest_validation=latest_validation,
+        latest_apply=latest_apply,
+        latest_rollback=latest_rollback,
+        staged_draft_count=len(staged_drafts),
+    )
+
+    return {
+        "schema": "agentflow.policy_workbench_readiness.v1",
+        "status": status,
+        "status_reason": reason,
+        "generated_at": utc_now(),
+        "read_only": True,
+        "mutating_dashboard_endpoints": False,
+        "loopback_admin_only": True,
+        "workspace": {
+            "configured": bool(os.getenv("AGENTFLOW_POLICY_DRAFT_DIR")),
+            "path_class": _local_path_class(os.getenv("AGENTFLOW_POLICY_DRAFT_DIR") or "~/.agentflow/policy_drafts"),
+            "raw_path_included": False,
+        },
+        "staged_drafts": {
+            "count": len(staged_drafts),
+            "changed_count": sum(1 for draft in staged_drafts if draft.get("changed")),
+            "unreadable_count": unreadable_drafts,
+            "latest": staged_drafts[0] if staged_drafts else None,
+            "recent": staged_drafts,
+        },
+        "validation": {
+            "latest": latest_validation,
+            "can_apply": latest_validation.get("can_apply") if latest_validation else None,
+            "status": latest_validation.get("status") if latest_validation else None,
+            "blocker_reason_codes": latest_validation.get("blocker_reason_codes") if latest_validation else [],
+        },
+        "apply": {
+            "latest": latest_apply,
+            "last_backup_ids": backup_ids,
+        },
+        "rollback": {
+            "latest": latest_rollback,
+        },
+        "reload": {
+            "required": bool(reload_sections),
+            "required_sections": [str(section) for section in reload_sections],
+            "latest": latest_reload,
+        },
+        "events": {
+            "enabled": policy_events_enabled(),
+            "path_class": _policy_events_path_class(),
+            "raw_path_included": False,
+            "latest_stage": latest_stage,
+            "latest_validation": latest_validation,
+            "latest_apply": latest_apply,
+            "latest_rollback": latest_rollback,
+            "latest_reload": latest_reload,
+            "latest_failure": last_failure,
+            "recent": public_events,
+        },
+        "operator_labels": {
+            "stage": "agentflow-policy-draft-stage",
+            "validate": "agentflow-policy-draft-validate",
+            "apply": "agentflow-policy-draft-apply",
+            "rollback": "agentflow-policy-rollback",
+            "reload": "agentflow-policy-reload",
+            "admin_reload_path": "/agentflow/admin/reload-policies",
+        },
+        "privacy": {
+            "local_only": True,
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_tool_payloads_included": False,
+            "raw_session_ids_included": False,
+            "raw_request_ids_included": False,
+            "cache_keys_included": False,
+            "draft_bundle_contents_included": False,
+            "policy_file_contents_included": False,
+            "absolute_paths_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "dashboard_mutations_available": False,
+        },
+    }
 
 
 def _managed_feedback_error_class(row: dict[str, Any]) -> str | None:
@@ -646,6 +922,7 @@ async def stats_policies() -> dict[str, Any]:
         "reload_required_sections": reload_required_sections,
         "source_surface_policy_count": len(state["source_surfaces"]),
     }
+    state["workbench"] = await stats_policy_workbench_readiness(state)
     return state
 
 
@@ -12675,6 +12952,24 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-policies">
 <div class="section">
+  <h2>Policy workbench readiness</h2>
+  <table data-table-id="policy-workbench" data-filter-label="Filter policy workbench">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="number">Drafts</th><th data-sort-type="text">Latest validation</th><th data-sort-type="text">Latest apply</th><th data-sort-type="text">Latest rollback</th><th data-sort-type="text">Reload</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="policy-workbench-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Policy workbench events</h2>
+  <table data-table-id="policy-workbench-events" data-filter-label="Filter workbench events">
+    <thead><tr>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Action</th><th data-sort-type="text">Status</th><th data-sort-type="text">Source</th><th data-sort-type="text">Draft/apply</th><th data-sort-type="text">Details</th>
+    </tr></thead>
+    <tbody id="policy-workbench-events-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Policy reload summary</h2>
   <table data-table-id="policy-summary" data-filter-label="Filter policy summary">
     <thead><tr>
@@ -14007,11 +14302,63 @@ function policyReloadBadge(summary){
   }
   return '<span class="badge hit">loaded</span>';
 }
+function workbenchStatusBadge(status){
+  if(status==='loaded'||status==='draft-ready')return'hit';
+  if(status==='reload-required'||status==='draft-blocked'||status==='attention')return'err';
+  if(status==='draft-needs-validation')return'routed';
+  return'provider';
+}
+function workbenchEventDetails(row){
+  row=row||{};
+  const parts=[];
+  if(row.status)parts.push(row.status);
+  if(row.can_apply===true)parts.push('can apply');
+  if(row.apply_blocked===true)parts.push('blocked');
+  if(row.changed_sections&&row.changed_sections.length)parts.push('changed '+row.changed_sections.join(', '));
+  if(row.requested_sections&&row.requested_sections.length)parts.push('requested '+row.requested_sections.join(', '));
+  if(row.restored_sections&&row.restored_sections.length)parts.push('restored '+row.restored_sections.join(', '));
+  if(row.reloaded_module_count)parts.push(row.reloaded_module_count+' reloads');
+  if(row.error_type)parts.push('error '+row.error_type);
+  return parts.map(p=>`<span class="badge miss">${esc(p)}</span>`).join(' ')||'<span class="badge miss">metadata only</span>';
+}
 async function refreshPolicies(){
   try{
     const r=await fetch('/agentflow/stats/policies');
     const d=await r.json();
     const summary=d.summary||{};
+    let wb=d.workbench||{};
+    try{
+      const wbr=await fetch('/agentflow/stats/policy-workbench');
+      if(wbr.ok)wb=await wbr.json();
+    }catch(_e){}
+    const drafts=wb.staged_drafts||{};
+    const validation=wb.validation||{};
+    const apply=wb.apply||{};
+    const rollback=wb.rollback||{};
+    const reload=wb.reload||{};
+    const privacy=wb.privacy||{};
+    const latestValidation=validation.latest||{};
+    const latestApply=apply.latest||{};
+    const latestRollback=rollback.latest||{};
+    const reloadSections=reload.required_sections||[];
+    document.getElementById('policy-workbench-tbody').innerHTML=`<tr>
+      <td><span class="badge ${workbenchStatusBadge(wb.status)}">${esc(wb.status||'unknown')}</span><div class="sub">${esc(wb.status_reason||'')}</div></td>
+      <td class="tokens">${drafts.count??0}<div class="sub">${drafts.changed_count??0} changed · ${drafts.unreadable_count??0} unreadable</div></td>
+      <td class="flags">${latestValidation.action?workbenchEventDetails(latestValidation):'<span class="badge miss">not recorded</span>'}</td>
+      <td class="flags">${latestApply.action?workbenchEventDetails(latestApply):'<span class="badge miss">not recorded</span>'}<div class="sub">${(apply.last_backup_ids||[]).slice(0,2).map(esc).join(', ')}</div></td>
+      <td class="flags">${latestRollback.action?workbenchEventDetails(latestRollback):'<span class="badge miss">not recorded</span>'}</td>
+      <td class="flags">${reload.required?`<span class="badge err">${esc(reloadSections.join(', ')||'reload required')}</span>`:'<span class="badge hit">current</span>'}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">check payload</span>'} ${privacy.dashboard_mutations_available?'<span class="badge err">mutable</span>':'<span class="badge hit">read-only</span>'} ${privacy.provider_calls_made?'<span class="badge err">provider calls</span>':'<span class="badge hit">no provider calls</span>'}</td>
+    </tr>`;
+    const wbEvents=((wb.events||{}).recent)||[];
+    document.getElementById('policy-workbench-events-tbody').innerHTML=wbEvents.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge provider">${esc(row.action||'unknown')}</span></td>
+      <td>${row.ok?'<span class="badge hit">ok</span>':'<span class="badge err">failed</span>'}</td>
+      <td><span class="badge stream">${esc(row.source||'unknown')}</span></td>
+      <td class="model">${esc(row.draft_id||row.apply_id||row.backup_id||'—')}</td>
+      <td class="flags">${workbenchEventDetails(row)}</td>
+    </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No policy workbench events recorded</td></tr>';
     const stale=(summary.reload_required_sections||[]).join(', ');
     document.getElementById('policy-summary-tbody').innerHTML=`<tr>
       <td>${policyReloadBadge(summary)}</td>

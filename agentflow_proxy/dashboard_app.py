@@ -149,6 +149,10 @@ def create_dashboard_router(
     async def stats_policies() -> dict[str, Any]:
         return await stats_views.stats_policies()
 
+    @router.get("/agentflow/stats/policy-workbench")
+    async def stats_policy_workbench() -> dict[str, Any]:
+        return await stats_views.stats_policy_workbench_readiness()
+
     @router.get("/agentflow/stats/policy-events")
     async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
         return await stats_views.stats_policy_events(limit=limit)
