@@ -389,12 +389,21 @@ class DashboardImportTests(unittest.TestCase):
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
         store = Store(tmp.name)
 
-        def plan_row(candidate_id, *, applied=0, holdout=0, projected=0.02):
+        def plan_row(
+            candidate_id,
+            *,
+            applied=0,
+            holdout=0,
+            projected=0.02,
+            action_family="routing",
+            optimization_family="phase_routing",
+            blocker_reason_codes=None,
+        ):
             return {
                 "schema": "agentflow.optimization_eval_plan_row.v1",
                 "candidate_id": candidate_id,
-                "optimization_family": "phase_routing",
-                "action_family": "routing",
+                "optimization_family": optimization_family,
+                "action_family": action_family,
                 "source_surface": "anthropic_messages",
                 "app_family": "claude_code",
                 "granularity": "provider_request",
@@ -405,7 +414,7 @@ class DashboardImportTests(unittest.TestCase):
                 "sample_count": max(1, applied + holdout),
                 "current_canary_count": applied,
                 "holdout_count": holdout,
-                "blocker_reason_codes": [],
+                "blocker_reason_codes": blocker_reason_codes or [],
                 "recommended_eval_mode": "score-canary-holdout",
                 "replayability_level": "features_only",
                 "evidence": {
@@ -426,7 +435,20 @@ class DashboardImportTests(unittest.TestCase):
             "plans": [
                 plan_row("promotion-widen", applied=2, holdout=1, projected=0.05),
                 plan_row("promotion-eval-passed", projected=0.03),
-                plan_row("promotion-canary-active", projected=0.02),
+                plan_row("promotion-crunch-pending", action_family="crunch", optimization_family="pattern_crunch", projected=0.02),
+                plan_row(
+                    "promotion-cache-invalidation",
+                    action_family="cache",
+                    optimization_family="cache_replay",
+                    projected=0.04,
+                    blocker_reason_codes=["missing-invalidation-evidence"],
+                ),
+                plan_row(
+                    "promotion-old-context-rollback",
+                    action_family="old_context_summarization",
+                    optimization_family="old_context_summarization",
+                    projected=0.025,
+                ),
                 plan_row("promotion-safety-stop", projected=0.01),
             ],
         }
@@ -515,15 +537,60 @@ class DashboardImportTests(unittest.TestCase):
                 cost_json=stable_json({"projected_savings_usd": 0.03}),
                 result_json=stable_json({"request_id": "promotion-eval-result-request-secret"}),
             )
-            log_canary_call("promotion-active-applied", "promotion-canary-active", status="applied", cohort="canary_applied")
-            log_canary_call("promotion-active-holdout", "promotion-canary-active", status="holdout", cohort="canary_holdout", baseline=0.03, cost=0.03)
+            store.log_optimization_eval_result(
+                id="promotion-old-context-rollback-eval",
+                run_id="promotion-funnel-run",
+                created_at="2026-06-10T04:10:00+00:00",
+                candidate_id="promotion-old-context-rollback",
+                source_surface="anthropic_messages",
+                optimization_family="old_context_summarization",
+                action_family="old_context_summarization",
+                status_class="fail",
+                reason_codes_json=stable_json(["offline-fixture-failed"]),
+                score_json=stable_json({"output_similarity": 0.25}),
+                cost_json=stable_json({"projected_savings_usd": 0.025}),
+                result_json=stable_json({"raw_response": "raw old-context promotion eval result must stay local"}),
+            )
+            log_canary_call("promotion-crunch-pending-applied", "promotion-crunch-pending", status="applied", cohort="canary_applied")
+            log_canary_call("promotion-crunch-pending-holdout", "promotion-crunch-pending", status="holdout", cohort="canary_holdout", baseline=0.03, cost=0.03)
             log_canary_call("promotion-safety-stopped", "promotion-safety-stop", status="safety_stopped", cohort="bypassed_or_disabled", status_code=500, retry_count=1)
+            store.enqueue_managed_outcome_feedback(
+                id="promotion-crunch-pending-feedback",
+                created_at="2026-06-10T05:15:00+00:00",
+                updated_at="2026-06-10T05:15:00+00:00",
+                source_surface="optimization_promotion_lifecycle",
+                endpoint="/v1/policy-events",
+                optimization_unit_id=0,
+                payload_json=json.dumps({
+                    "event_type": "impact",
+                    "occurred_at": "2026-06-10T05:15:00+00:00",
+                    "metadata": {
+                        "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+                        "command": "optimization-promotion-impact",
+                        "candidate_ids": ["promotion-crunch-pending"],
+                        "action_ids": ["promotion-action-promotion-crunch-pending"],
+                        "policy_section_counts": {"crunch": 1},
+                        "actual_canary_applied_count": 1,
+                        "actual_canary_holdout_count": 1,
+                        "raw_prompt": "raw queued lifecycle prompt must stay local",
+                        "privacy": {
+                            "metadata_only": True,
+                            "raw_prompts_included": False,
+                            "request_ids_included": False,
+                            "file_paths_included": False,
+                        },
+                    },
+                }),
+                status="queued",
+                attempts=0,
+                next_attempt_at="2000-01-01T00:00:00+00:00",
+            )
             log_policy_event(
                 "optimization-promotion-canary-impact",
                 ok=True,
                 details={
-                    "candidate_ids": ["promotion-canary-active"],
-                    "action_ids": ["promotion-action-promotion-canary-active"],
+                    "candidate_ids": ["promotion-crunch-pending"],
+                    "action_ids": ["promotion-action-promotion-crunch-pending"],
                     "actual_canary_applied_count": 1,
                     "actual_canary_holdout_count": 1,
                     "path": "/tmp/raw-promotion-action.json",
@@ -556,15 +623,37 @@ class DashboardImportTests(unittest.TestCase):
             by_candidate = {row["candidate_id"]: row for row in payload["candidates"]}
             self.assertEqual(by_candidate["promotion-widen"]["primary_state"], "widening-eligible")
             self.assertEqual(by_candidate["promotion-eval-passed"]["primary_state"], "eval-passed")
-            self.assertEqual(by_candidate["promotion-canary-active"]["primary_state"], "canary-active")
+            self.assertEqual(by_candidate["promotion-crunch-pending"]["primary_state"], "canary-active")
             self.assertEqual(by_candidate["promotion-safety-stop"]["primary_state"], "safety-stopped")
-            self.assertEqual(by_candidate["promotion-canary-active"]["canary"]["applied_count"], 1)
-            self.assertEqual(by_candidate["promotion-canary-active"]["canary"]["holdout_count"], 1)
-            self.assertGreater(by_candidate["promotion-canary-active"]["observed_savings_usd"], 0)
+            self.assertEqual(by_candidate["promotion-crunch-pending"]["canary"]["applied_count"], 1)
+            self.assertEqual(by_candidate["promotion-crunch-pending"]["canary"]["holdout_count"], 1)
+            self.assertGreater(by_candidate["promotion-crunch-pending"]["observed_savings_usd"], 0)
+            self.assertEqual(by_candidate["promotion-widen"]["policy_section"], "routing")
+            self.assertEqual(by_candidate["promotion-widen"]["executor_readiness"]["status"], "widening-eligible")
+            self.assertEqual(by_candidate["promotion-crunch-pending"]["policy_section"], "crunch")
+            self.assertEqual(by_candidate["promotion-crunch-pending"]["executor_readiness"]["status"], "pending-lifecycle-feedback")
+            self.assertEqual(by_candidate["promotion-cache-invalidation"]["policy_section"], "cache")
+            self.assertEqual(by_candidate["promotion-cache-invalidation"]["executor_readiness"]["status"], "missing-invalidation-evidence")
+            self.assertEqual(by_candidate["promotion-old-context-rollback"]["policy_section"], "old_context_summarization")
+            self.assertEqual(by_candidate["promotion-old-context-rollback"]["executor_readiness"]["status"], "rollback-recommended")
+            self.assertEqual(by_candidate["promotion-crunch-pending"]["next_command_kind"], "promotion-impact")
+            self.assertEqual(by_candidate["promotion-widen"]["next_command_kind"], "promotion-actions")
+            self.assertEqual(by_candidate["promotion-eval-passed"]["next_command_kind"], "promotion-canaries-apply --dry-run")
+            self.assertIn(
+                "routing:widening-eligible",
+                {row["value"] for row in payload["executor_readiness_by_policy_section"]},
+            )
+            self.assertIn(
+                "cache:missing-invalidation-evidence",
+                {row["value"] for row in payload["executor_readiness_by_policy_section"]},
+            )
             self.assertEqual(payload["summary"]["canary_applied_count"], 1)
             self.assertEqual(payload["summary"]["canary_holdout_count"], 1)
+            self.assertEqual(payload["summary"]["pending_lifecycle_feedback_count"], 1)
             self.assertIn("Optimization promotion canary impact", dashboard.text)
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
+            self.assertIn("Readiness", dashboard.text)
+            self.assertIn("Next command", dashboard.text)
 
             rendered = json.dumps(payload, sort_keys=True) + dashboard.text
             for forbidden in (
@@ -578,6 +667,8 @@ class DashboardImportTests(unittest.TestCase):
                 "promotion-funnel-session-secret",
                 "raw promotion eval result must stay local",
                 "promotion-eval-result-request-secret",
+                "raw old-context promotion eval result must stay local",
+                "raw queued lifecycle prompt must stay local",
                 "/tmp/raw-promotion-action.json",
                 "policy-event-request-secret",
                 "policy-event-cache-secret",

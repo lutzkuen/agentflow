@@ -27,6 +27,7 @@ from agentflow_proxy.quality import (
 )
 from agentflow_proxy.recommendations import (
     OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
+    OPTIMIZATION_PROMOTION_LIFECYCLE_SOURCE_SURFACE,
     PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE,
     PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
     pattern_decision_summaries,
@@ -6466,6 +6467,173 @@ def _promotion_primary_state(verdict: str, eval_evidence: dict[str, Any], observ
     return "needs-eval"
 
 
+def _promotion_policy_section(row: dict[str, Any]) -> str:
+    values = [
+        str(row.get("action_family") or ""),
+        str(row.get("optimization_family") or ""),
+    ]
+    normalized = [value.strip().lower().replace("_", "-") for value in values]
+    joined = " ".join(normalized)
+    if "old-context" in joined or "summarization" in joined or "summary" in joined:
+        return "old_context_summarization"
+    if "routing" in joined:
+        return "routing"
+    if "cache" in joined:
+        return "cache"
+    if "crunch" in joined or "pattern" in joined:
+        return "crunch"
+    return "unsupported"
+
+
+def _promotion_target_local_policy_section(policy_section: str) -> str | None:
+    if policy_section == "routing":
+        return "routing.rules"
+    if policy_section == "cache":
+        return "cache.rules"
+    if policy_section == "crunch":
+        return "crunch.rules"
+    if policy_section == "old_context_summarization":
+        return "crunch.old_context_summarization"
+    return None
+
+
+def _promotion_next_command(status: str) -> tuple[str, str]:
+    if status in {"pending-lifecycle-feedback", "impact-stale", "needs-more-samples"}:
+        return "promotion-impact", "agentflow-optimization-promotion-impact promotion-actions.json --pretty"
+    if status == "supported":
+        return "promotion-canaries-apply --dry-run", "agentflow-optimization-promotion-canaries-apply promotion-actions.json --dry-run --pretty"
+    return "promotion-actions", "agentflow-optimization-promotion-actions --pretty"
+
+
+def _promotion_impact_stale(last_evidence_at: Any, *, max_age_hours: int = 168) -> bool:
+    parsed = _parse_utc_datetime(last_evidence_at)
+    if parsed is None:
+        return False
+    age = datetime.now(timezone.utc) - parsed
+    return age.total_seconds() > max(1, max_age_hours) * 3600
+
+
+def _promotion_reason_has_any(reasons: list[str], *needles: str) -> bool:
+    haystack = " ".join(str(reason or "").lower() for reason in reasons)
+    return any(needle in haystack for needle in needles)
+
+
+def _promotion_pending_lifecycle_rows(store_obj: Any) -> dict[str, dict[str, Any]]:
+    if not hasattr(store_obj, "managed_outcome_feedback_payload_rows"):
+        return {}
+    try:
+        rows = store_obj.managed_outcome_feedback_payload_rows(
+            source_surface=OPTIMIZATION_PROMOTION_LIFECYCLE_SOURCE_SURFACE,
+            limit=1000,
+        )
+    except Exception:
+        return {}
+
+    pending_statuses = {"queued", "retryable-error", "claimed"}
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        status = str(row.get("status") or "")
+        if status not in pending_statuses:
+            continue
+        payload = _json_obj(row.get("payload_json"))
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        candidate_ids = metadata.get("candidate_ids")
+        if not isinstance(candidate_ids, list):
+            candidate_ids = []
+        action_ids = metadata.get("action_ids")
+        if not isinstance(action_ids, list):
+            action_ids = []
+        for candidate in candidate_ids:
+            candidate_id = str(candidate or "")
+            if not candidate_id:
+                continue
+            bucket = buckets.setdefault(
+                candidate_id,
+                {
+                    "candidate_id": candidate_id,
+                    "pending_count": 0,
+                    "statuses": {},
+                    "commands": {},
+                    "action_ids": set(),
+                    "latest_queued_at": None,
+                },
+            )
+            bucket["pending_count"] += 1
+            _increment_count(bucket["statuses"], status)
+            _increment_count(bucket["commands"], metadata.get("command") or payload.get("event_type") or "unknown")
+            for action_id in action_ids:
+                if action_id:
+                    bucket["action_ids"].add(str(action_id))
+            created_at = row.get("created_at") or row.get("updated_at") or payload.get("occurred_at")
+            if created_at and (not bucket.get("latest_queued_at") or str(created_at) > str(bucket.get("latest_queued_at"))):
+                bucket["latest_queued_at"] = str(created_at)
+    result: dict[str, dict[str, Any]] = {}
+    for candidate_id, bucket in buckets.items():
+        public = dict(bucket)
+        public["statuses"] = _count_breakdown(public["statuses"])
+        public["commands"] = _count_breakdown(public["commands"])
+        public["action_ids"] = sorted(public["action_ids"])
+        result[candidate_id] = public
+    return result
+
+
+def _promotion_executor_readiness(
+    *,
+    verdict_row: dict[str, Any],
+    primary_state: str,
+    observed_row: dict[str, Any],
+    lifecycle_row: dict[str, Any] | None,
+    pending_lifecycle_row: dict[str, Any] | None,
+    last_evidence_at: Any,
+) -> dict[str, Any]:
+    policy_section = _promotion_policy_section(verdict_row)
+    supported = policy_section in {"routing", "crunch", "cache", "old_context_summarization"}
+    reasons = _optimization_eval_reason_codes(verdict_row.get("reason_codes"))
+    status = "supported"
+    detail_reasons: list[str] = []
+    if not supported:
+        status = "unsupported"
+        detail_reasons.append("unsupported-local-policy-section")
+    elif policy_section == "cache" and _promotion_reason_has_any(reasons, "invalidation", "stale-risk"):
+        status = "missing-invalidation-evidence"
+        detail_reasons.append("cache-invalidation-evidence-required")
+    elif primary_state in {"rollback-recommended", "safety-stopped"} or str(verdict_row.get("verdict") or "") == "rollback":
+        status = "rollback-recommended"
+    elif pending_lifecycle_row:
+        status = "pending-lifecycle-feedback"
+    elif primary_state == "canary-active" and _promotion_impact_stale(last_evidence_at):
+        status = "impact-stale"
+    elif primary_state == "widening-eligible" or str(verdict_row.get("verdict") or "") == "widen":
+        status = "widening-eligible"
+    elif primary_state in {"needs-eval", "canary-active"} and (
+        _promotion_reason_has_any(reasons, "insufficient-")
+        or _as_int((observed_row or {}).get("applied_count"))
+        or _as_int((observed_row or {}).get("holdout_count"))
+    ):
+        status = "needs-more-samples"
+    elif primary_state == "needs-eval":
+        status = "missing-local-evidence"
+    elif primary_state == "eval-passed":
+        status = "supported"
+
+    command_kind, command = _promotion_next_command(status)
+    pending = pending_lifecycle_row or {}
+    return {
+        "status": status,
+        "supported": supported,
+        "policy_section": policy_section,
+        "target_local_policy_section": _promotion_target_local_policy_section(policy_section),
+        "next_command_kind": command_kind,
+        "next_command": command,
+        "reason_codes": sorted(set(detail_reasons + reasons)),
+        "pending_lifecycle_feedback_count": _as_int(pending.get("pending_count")),
+        "pending_lifecycle_feedback_statuses": pending.get("statuses") or [],
+        "pending_lifecycle_feedback_commands": pending.get("commands") or [],
+        "impact_stale": status == "impact-stale",
+        "privacy": _promotion_privacy_summary(),
+    }
+
+
 async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
     from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
@@ -6477,15 +6645,20 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
     observed = _promotion_observed_canary_rows(store_obj, capped_limit * 5)
     events = recent_policy_events(limit=500).get("events", [])
     lifecycle = _promotion_lifecycle_rows(events if isinstance(events, list) else [])
+    pending_lifecycle = _promotion_pending_lifecycle_rows(store_obj)
 
     candidates: list[dict[str, Any]] = []
     state_counts: dict[str, int] = {}
+    readiness_counts: dict[str, int] = {}
+    policy_section_counts: dict[str, int] = {}
+    readiness_policy_counts: dict[str, int] = {}
+    action_family_policy_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     all_candidate_ids = {
         str(row.get("candidate_id"))
         for row in promotion.get("candidates", [])
         if isinstance(row, dict) and row.get("candidate_id")
-    } | set(observed) | set(lifecycle)
+    } | set(observed) | set(lifecycle) | set(pending_lifecycle)
     verdicts = {
         str(row.get("candidate_id")): row
         for row in promotion.get("candidates", [])
@@ -6495,10 +6668,36 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
         verdict_row = verdicts.get(candidate_id, {"candidate_id": candidate_id, "verdict": "needs_eval", "eval_evidence": {}})
         observed_row = _promotion_finalize_observed(observed.get(candidate_id))
         lifecycle_row = lifecycle.get(candidate_id)
+        pending_lifecycle_row = pending_lifecycle.get(candidate_id)
         verdict = str(verdict_row.get("verdict") or "needs_eval")
         eval_evidence = verdict_row.get("eval_evidence") if isinstance(verdict_row.get("eval_evidence"), dict) else {}
         primary_state = _promotion_primary_state(verdict, eval_evidence, observed_row, lifecycle_row)
+        last_evidence_at = max(
+            (
+                str(value)
+                for value in (
+                    eval_evidence.get("latest_result_at"),
+                    observed_row.get("last_observed_at"),
+                    (lifecycle_row or {}).get("latest_event_at"),
+                    (pending_lifecycle_row or {}).get("latest_queued_at"),
+                )
+                if value
+            ),
+            default=None,
+        )
+        executor_readiness = _promotion_executor_readiness(
+            verdict_row=verdict_row,
+            primary_state=primary_state,
+            observed_row=observed_row,
+            lifecycle_row=lifecycle_row,
+            pending_lifecycle_row=pending_lifecycle_row,
+            last_evidence_at=last_evidence_at,
+        )
         _increment_count(state_counts, primary_state)
+        _increment_count(readiness_counts, executor_readiness["status"])
+        _increment_count(policy_section_counts, executor_readiness["policy_section"])
+        _increment_count(readiness_policy_counts, f"{executor_readiness['policy_section']}:{executor_readiness['status']}")
+        _increment_count(action_family_policy_counts, f"{verdict_row.get('action_family') or 'unknown'}:{executor_readiness['policy_section']}")
         row_reasons = _optimization_eval_reason_codes(verdict_row.get("reason_codes"))
         for reason in row_reasons:
             _increment_count(reason_counts, reason)
@@ -6517,26 +6716,21 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
             "observed_savings_usd": observed_row.get("observed_savings_usd", 0.0),
             "verdict": verdict,
             "primary_state": primary_state,
+            "policy_section": executor_readiness["policy_section"],
+            "target_local_policy_section": executor_readiness["target_local_policy_section"],
+            "executor_readiness": executor_readiness,
+            "next_command_kind": executor_readiness["next_command_kind"],
+            "next_command": executor_readiness["next_command"],
             "eval_pass_count": _as_int(eval_evidence.get("pass_count")),
             "eval_fail_count": _as_int(eval_evidence.get("fail_count")),
             "eval_result_count": _as_int(eval_evidence.get("result_count")),
             "eval_evidence_stale": bool(eval_evidence.get("stale")),
             "canary": observed_row,
             "lifecycle": lifecycle_row or {},
+            "pending_lifecycle_feedback": pending_lifecycle_row or {},
             "reason_codes": row_reasons,
             "top_reason_counts": observed_row.get("reason_counts") or [],
-            "last_evidence_at": max(
-                (
-                    str(value)
-                    for value in (
-                        eval_evidence.get("latest_result_at"),
-                        observed_row.get("last_observed_at"),
-                        (lifecycle_row or {}).get("latest_event_at"),
-                    )
-                    if value
-                ),
-                default=None,
-            ),
+            "last_evidence_at": last_evidence_at,
             "privacy": _promotion_privacy_summary(),
         })
 
@@ -6562,9 +6756,14 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
             "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in candidates), 8),
             "canary_applied_count": sum(_as_int((row.get("canary") or {}).get("applied_count")) for row in candidates),
             "canary_holdout_count": sum(_as_int((row.get("canary") or {}).get("holdout_count")) for row in candidates),
+            "pending_lifecycle_feedback_count": sum(_as_int((row.get("executor_readiness") or {}).get("pending_lifecycle_feedback_count")) for row in candidates),
             "last_evidence_at": max((str(row.get("last_evidence_at")) for row in candidates if row.get("last_evidence_at")), default=None),
         },
         "state_counts": _count_breakdown(state_counts),
+        "executor_readiness_counts": _count_breakdown(readiness_counts),
+        "policy_section_counts": _count_breakdown(policy_section_counts),
+        "executor_readiness_by_policy_section": _count_breakdown(readiness_policy_counts),
+        "action_family_policy_section_counts": _count_breakdown(action_family_policy_counts),
         "reason_counts": _count_breakdown(reason_counts),
         "candidates": candidates,
         "source_reports": {
@@ -11139,7 +11338,7 @@ def dashboard_html() -> str:
   <h2>Optimization promotion canary impact</h2>
   <table class="activity-table" data-table-id="optimization-promotion-funnel-candidates" data-filter-label="Filter promotion funnel candidates">
     <thead><tr>
-      <th data-sort-type="text">State</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Action</th><th data-sort-type="text">Family</th><th data-sort-type="text">Surface</th><th data-sort-type="money">Projected</th><th data-sort-type="money">Observed</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Reasons</th><th data-sort-type="time">Last evidence</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="text">State</th><th data-sort-type="text">Readiness</th><th data-sort-type="text">Policy section</th><th data-sort-type="text">Next command</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Action</th><th data-sort-type="text">Family</th><th data-sort-type="text">Surface</th><th data-sort-type="money">Projected</th><th data-sort-type="money">Observed</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Reasons</th><th data-sort-type="time">Last evidence</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="optimization-promotion-funnel-candidates-tbody"></tbody>
   </table>
@@ -12454,10 +12653,10 @@ async function refreshOpenAIScoreboard(){
   }catch(e){}
 }
 function evalQueueBadge(status){
-  if(status==='widen'||status==='widening-eligible'||status==='eval-passed')return'hit';
-  if(status==='rollback'||status==='rollback-recommended'||status==='privacy_blocked'||status==='safety-stopped')return'err';
-  if(status==='hold'||status==='canary-active')return'routed';
-  if(status==='needs_eval'||status==='needs-eval'||status==='missing'||status==='blocked')return'miss';
+  if(status==='widen'||status==='widening-eligible'||status==='eval-passed'||status==='supported')return'hit';
+  if(status==='rollback'||status==='rollback-recommended'||status==='privacy_blocked'||status==='safety-stopped'||status==='unsupported')return'err';
+  if(status==='hold'||status==='canary-active'||status==='pending-lifecycle-feedback'||status==='impact-stale')return'routed';
+  if(status==='needs_eval'||status==='needs-eval'||status==='needs-more-samples'||status==='missing'||status==='missing-local-evidence'||status==='missing-invalidation-evidence'||status==='blocked')return'miss';
   return'provider';
 }
 function evalEvidenceBadges(row){
@@ -12507,8 +12706,12 @@ async function refreshOptimizationPromotionFunnel(){
     document.getElementById('optimization-promotion-funnel-candidates-tbody').innerHTML=rows.map(row=>{
       const canary=row.canary||{};
       const action=row.action_id||canary.action_id||'—';
+      const readiness=row.executor_readiness||{};
       return `<tr>
         <td><span class="badge ${evalQueueBadge(row.primary_state)}">${esc(row.primary_state||'unknown')}</span></td>
+        <td><span class="badge ${evalQueueBadge(readiness.status)}">${esc(readiness.status||'unknown')}</span></td>
+        <td class="flags"><span class="badge provider">${esc(row.policy_section||readiness.policy_section||'unknown')}</span> <span class="badge miss">${esc(row.target_local_policy_section||readiness.target_local_policy_section||'—')}</span></td>
+        <td class="model">${esc(row.next_command_kind||readiness.next_command_kind||'—')}</td>
         <td><span class="badge ${evalQueueBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
         <td class="model">${esc(row.candidate_id||'unknown')}</td>
         <td class="model">${esc(action)}</td>
@@ -12526,7 +12729,7 @@ async function refreshOptimizationPromotionFunnel(){
         <td class="ts">${row.last_evidence_at?ago(row.last_evidence_at):'—'}</td>
         <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">payload omitted</span></td>
       </tr>`;
-    }).join('')||'<tr><td colspan="17" style="color:#8b949e">No optimization promotion canary impact rows found in local metadata</td></tr>';
+    }).join('')||'<tr><td colspan="20" style="color:#8b949e">No optimization promotion canary impact rows found in local metadata</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
