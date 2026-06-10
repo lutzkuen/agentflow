@@ -9022,6 +9022,330 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     }
 
 
+def _codex_rule_report_meta(decision: dict[str, Any], *, action_family: str) -> dict[str, Any] | None:
+    rule = decision.get("codex_app_rule") if isinstance(decision.get("codex_app_rule"), dict) else {}
+    if rule:
+        rule_id = str(rule.get("rule_id") or rule.get("candidate_id") or "unknown-codex-app-rule")
+        candidate_id = str(rule.get("candidate_id") or rule_id)
+        return {
+            "rule_id": rule_id,
+            "candidate_id": candidate_id,
+            "policy_id": rule.get("policy_id") or candidate_id,
+            "policy_source": rule.get("policy_source") or decision.get("policy_source") or "unknown",
+            "condition_keys": list(rule.get("condition_keys") or []),
+            "action_keys": list(rule.get("action_keys") or []),
+        }
+    if action_family == "routing" and decision.get("canary") == "codex-app-summary-model-hint":
+        policy_id = str(decision.get("policy_id") or "local-codex-app-summary-model-hint-canary")
+        return {
+            "rule_id": policy_id,
+            "candidate_id": policy_id,
+            "policy_id": policy_id,
+            "policy_source": decision.get("policy_source") or "local-default",
+            "condition_keys": [],
+            "action_keys": ["model_hint"],
+        }
+    if action_family == "cache" and (
+        decision.get("canary") == "codex-app-exact-cache" or isinstance(decision.get("canary_sample"), dict)
+    ):
+        policy_id = str(decision.get("policy_id") or "local-codex-app-exact-cache-canary")
+        return {
+            "rule_id": policy_id,
+            "candidate_id": policy_id,
+            "policy_id": policy_id,
+            "policy_source": decision.get("policy_source") or "local-default",
+            "condition_keys": [],
+            "action_keys": ["cache_eligible"],
+        }
+    return None
+
+
+def _codex_rule_report_cohort(decision: dict[str, Any]) -> str:
+    safety = decision.get("safety_stop") if isinstance(decision.get("safety_stop"), dict) else {}
+    if bool(safety.get("tripped")) or str(decision.get("status") or "") == "safety_stopped":
+        return "safety_stopped"
+    cohort = str(decision.get("canary_cohort") or "")
+    if cohort in {"canary_applied", "canary_holdout", "not_selected"}:
+        return cohort
+    status = str(decision.get("status") or "")
+    if status == "applied":
+        return "canary_applied"
+    if status == "holdout":
+        return "canary_holdout"
+    if status in {"skipped", "not-applied", "eligible-skipped"}:
+        return "skipped"
+    return status or "unknown"
+
+
+def _new_codex_rule_report_bucket(meta: dict[str, Any], *, action_family: str, rule_path: str | None) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.codex_app_canary_rule_impact.v1",
+        "action_family": action_family,
+        "rule_id": meta.get("rule_id"),
+        "candidate_id": meta.get("candidate_id"),
+        "policy_id": meta.get("policy_id"),
+        "policy_source": meta.get("policy_source"),
+        "rule_path": rule_path,
+        "condition_keys": list(meta.get("condition_keys") or []),
+        "action_keys": list(meta.get("action_keys") or []),
+        "observed_rows": 0,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "skipped_count": 0,
+        "error_count": 0,
+        "fallback_count": 0,
+        "pass_through_count": 0,
+        "safety_stopped_count": 0,
+        "pending_count": 0,
+        "completed_count": 0,
+        "estimated_cost_usd": 0.0,
+        "baseline_cost_usd": 0.0,
+        "estimated_savings_usd": 0.0,
+        "latency_values": [],
+        "cohorts": {
+            "canary_applied": {"count": 0, "error_count": 0, "latency_values": [], "cost_usd": 0.0, "baseline_cost_usd": 0.0},
+            "canary_holdout": {"count": 0, "error_count": 0, "latency_values": [], "cost_usd": 0.0, "baseline_cost_usd": 0.0},
+            "skipped": {"count": 0, "error_count": 0, "latency_values": [], "cost_usd": 0.0, "baseline_cost_usd": 0.0},
+            "safety_stopped": {"count": 0, "error_count": 0, "latency_values": [], "cost_usd": 0.0, "baseline_cost_usd": 0.0},
+            "unknown": {"count": 0, "error_count": 0, "latency_values": [], "cost_usd": 0.0, "baseline_cost_usd": 0.0},
+        },
+        "cache": {
+            "hit_count": 0,
+            "miss_count": 0,
+            "holdout_count": 0,
+            "invalidation_count": 0,
+            "stale_risk_count": 0,
+            "unsafe_skip_count": 0,
+        },
+        "reason_counts": {},
+        "cache_reason_counts": {},
+        "safety_stop_reason_counts": {},
+        "last_observed_at": None,
+    }
+
+
+def _finalize_codex_rule_report_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    cohorts: dict[str, Any] = {}
+    for name, cohort in bucket["cohorts"].items():
+        count = _as_int(cohort.get("count"))
+        latency_values = list(cohort.get("latency_values") or [])
+        cost = _as_float(cohort.get("cost_usd"))
+        baseline = _as_float(cohort.get("baseline_cost_usd"))
+        cohorts[name] = {
+            "count": count,
+            "error_count": _as_int(cohort.get("error_count")),
+            "error_rate": round(_as_int(cohort.get("error_count")) / count, 6) if count else 0.0,
+            "avg_latency_ms": _avg_or_none(latency_values),
+            "cost_usd": round(cost, 8),
+            "baseline_cost_usd": round(baseline, 8),
+            "estimated_savings_usd": round(max(baseline - cost, 0.0), 8),
+        }
+    applied = cohorts["canary_applied"]
+    holdout = cohorts["canary_holdout"]
+    latency_delta = None
+    if applied["avg_latency_ms"] is not None and holdout["avg_latency_ms"] is not None:
+        latency_delta = round(_as_float(applied["avg_latency_ms"]) - _as_float(holdout["avg_latency_ms"]), 2)
+    bucket = dict(bucket)
+    bucket["estimated_cost_usd"] = round(_as_float(bucket.get("estimated_cost_usd")), 8)
+    bucket["baseline_cost_usd"] = round(_as_float(bucket.get("baseline_cost_usd")), 8)
+    bucket["estimated_savings_usd"] = round(max(_as_float(bucket.get("baseline_cost_usd")) - _as_float(bucket.get("estimated_cost_usd")), 0.0), 8)
+    bucket["avg_latency_ms"] = _avg_or_none(list(bucket.pop("latency_values", []) or []))
+    bucket["applied_minus_holdout_latency_avg_ms"] = latency_delta
+    bucket["applied_minus_holdout_error_rate"] = round(_as_float(applied["error_rate"]) - _as_float(holdout["error_rate"]), 6)
+    bucket["cohorts"] = cohorts
+    bucket["reason_breakdown"] = _count_breakdown(bucket.pop("reason_counts", {}))
+    bucket["cache_reason_breakdown"] = _count_breakdown(bucket.pop("cache_reason_counts", {}))
+    bucket["safety_stop_reason_breakdown"] = _count_breakdown(bucket.pop("safety_stop_reason_counts", {}))
+    bucket["privacy"] = {
+        "metadata_only": True,
+        "raw_prompts_included": False,
+        "raw_params_included": False,
+        "raw_responses_included": False,
+        "raw_tool_payloads_included": False,
+        "request_ids_included": False,
+        "thread_ids_included": False,
+        "local_session_ids_included": False,
+        "cache_keys_included": False,
+        "provider_bodies_included": False,
+    }
+    return bucket
+
+
+async def stats_codex_canary_impact(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 1000), 10000))
+    conn = store_obj.conn
+    rows = conn.execute("""
+        select s.id as start_event_id,
+               s.created_at,
+               s.input_text_chars,
+               s.routing_json,
+               s.crunch_json,
+               s.cache_json,
+               (
+                   select r.error_code from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_error_code,
+               (
+                   select r.latency_ms from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_latency_ms,
+               (
+                   select r.result_chars from codex_app_events r
+                   where r.direction = 'server_to_client'
+                     and r.request_id = s.request_id
+                     and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                   order by r.created_at desc
+                   limit 1
+               ) as response_result_chars
+        from codex_app_events s
+        where s.direction = 'client_to_server'
+          and s.method = 'turn/start'
+        order by s.created_at desc
+        limit ?
+    """, (capped_limit,)).fetchall()
+    policy_state = codex_app_bundle_policy_state()
+    rule_path = policy_state.get("rule_path")
+    buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    total_rows = 0
+    for raw_row in rows:
+        row = dict(raw_row)
+        routing = _json_obj(row.get("routing_json"))
+        crunch = _json_obj(row.get("crunch_json"))
+        cache = _json_obj(row.get("cache_json"))
+        result_chars = _as_int(row.get("response_result_chars"))
+        latency = _as_int(row.get("response_latency_ms"))
+        has_error = row.get("response_error_code") is not None
+        has_response = row.get("response_error_code") is not None or result_chars > 0 or latency > 0
+        estimates = _codex_estimates_with_cache(row.get("input_text_chars"), result_chars, cache)
+        for action_family, decision in (("routing", routing), ("cache", cache)):
+            meta = _codex_rule_report_meta(decision, action_family=action_family)
+            if meta is None:
+                continue
+            key = (action_family, str(meta["rule_id"]), str(meta["candidate_id"]))
+            bucket = buckets.setdefault(
+                key,
+                _new_codex_rule_report_bucket(meta, action_family=action_family, rule_path=str(rule_path) if rule_path else None),
+            )
+            total_rows += 1
+            bucket["observed_rows"] += 1
+            bucket["last_observed_at"] = max(str(bucket.get("last_observed_at") or ""), str(row.get("created_at") or "")) or None
+            status = str(decision.get("status") or "")
+            reason = str(decision.get("reason") or "unknown")
+            _increment_count(bucket["reason_counts"], reason)
+            if has_error:
+                bucket["error_count"] += 1
+            elif has_response:
+                bucket["completed_count"] += 1
+            else:
+                bucket["pending_count"] += 1
+            if decision.get("fallback_reason"):
+                bucket["fallback_count"] += 1
+            if status in {"skipped", "not-applied"} and not decision.get("applied"):
+                bucket["pass_through_count"] += 1
+            if latency:
+                bucket["latency_values"].append(latency)
+            cost = _as_float(estimates.get("cost_est_usd"))
+            baseline = _as_float(estimates.get("baseline_cost_est_usd"))
+            bucket["estimated_cost_usd"] += cost
+            bucket["baseline_cost_usd"] += baseline
+
+            cohort_name = _codex_rule_report_cohort(decision)
+            if cohort_name == "canary_applied":
+                bucket["applied_count"] += 1
+            elif cohort_name == "canary_holdout":
+                bucket["holdout_count"] += 1
+            elif cohort_name == "safety_stopped":
+                bucket["safety_stopped_count"] += 1
+            elif cohort_name in {"skipped", "not_selected", "eligible-skipped"}:
+                bucket["skipped_count"] += 1
+                cohort_name = "skipped"
+            if cohort_name not in bucket["cohorts"]:
+                cohort_name = "unknown"
+            cohort = bucket["cohorts"][cohort_name]
+            cohort["count"] += 1
+            if has_error:
+                cohort["error_count"] += 1
+            if latency:
+                cohort["latency_values"].append(latency)
+            cohort["cost_usd"] += cost
+            cohort["baseline_cost_usd"] += baseline
+
+            safety = decision.get("safety_stop") if isinstance(decision.get("safety_stop"), dict) else {}
+            for reason_code in safety.get("reason_codes") or []:
+                _increment_count(bucket["safety_stop_reason_counts"], str(reason_code))
+
+            if action_family == "cache":
+                cache_status = str(cache.get("status") or "missing")
+                cache_reason = str(cache.get("reason") or "unknown")
+                cache_bucket = str(cache.get("outcome_bucket") or _codex_cache_readiness_cohort(cache))
+                _increment_count(bucket["cache_reason_counts"], cache_reason)
+                if cache_status == "hit":
+                    bucket["cache"]["hit_count"] += 1
+                elif cache_status == "miss":
+                    bucket["cache"]["miss_count"] += 1
+                if cache_status == "holdout" or cache_bucket == "holdout":
+                    bucket["cache"]["holdout_count"] += 1
+                if cache_bucket == "invalidated":
+                    bucket["cache"]["invalidation_count"] += 1
+                if cache_bucket == "stale-risk":
+                    bucket["cache"]["stale_risk_count"] += 1
+                if cache_bucket == "unsafe-skip":
+                    bucket["cache"]["unsafe_skip_count"] += 1
+
+    rules = [_finalize_codex_rule_report_bucket(bucket) for bucket in buckets.values()]
+    rules.sort(key=lambda item: (_as_int(item.get("observed_rows")), str(item.get("rule_id") or "")), reverse=True)
+    return {
+        "schema": "agentflow.codex_app_canary_impact_by_rule.v1",
+        "generated_at": utc_now(),
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "limit": capped_limit,
+        "summary": {
+            "rule_candidate_count": len(rules),
+            "observed_rule_action_rows": total_rows,
+            "applied_count": sum(_as_int(row.get("applied_count")) for row in rules),
+            "holdout_count": sum(_as_int(row.get("holdout_count")) for row in rules),
+            "skipped_count": sum(_as_int(row.get("skipped_count")) for row in rules),
+            "error_count": sum(_as_int(row.get("error_count")) for row in rules),
+            "fallback_count": sum(_as_int(row.get("fallback_count")) for row in rules),
+            "pass_through_count": sum(_as_int(row.get("pass_through_count")) for row in rules),
+            "safety_stopped_count": sum(_as_int(row.get("safety_stopped_count")) for row in rules),
+            "cache_hit_count": sum(_as_int(row.get("cache", {}).get("hit_count")) for row in rules),
+            "cache_miss_count": sum(_as_int(row.get("cache", {}).get("miss_count")) for row in rules),
+            "cache_holdout_count": sum(_as_int(row.get("cache", {}).get("holdout_count")) for row in rules),
+            "cache_invalidation_count": sum(_as_int(row.get("cache", {}).get("invalidation_count")) for row in rules),
+            "estimated_savings_usd": round(sum(_as_float(row.get("estimated_savings_usd")) for row in rules), 8),
+        },
+        "policy": {
+            "policy_source": policy_state.get("policy_source"),
+            "rule_path": rule_path,
+            "reload_required": bool(((policy_state.get("file") or {}) if isinstance(policy_state.get("file"), dict) else {}).get("reload_required")),
+        },
+        "rules": rules,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_params_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "request_ids_included": False,
+            "thread_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+            "provider_bodies_included": False,
+            "managed_server_calls_made": False,
+        },
+    }
+
+
 def _breakdown_lookup(rows: list[dict[str, Any]], key: str = "value") -> dict[str, int]:
     return {str(row.get(key) or "unknown"): _as_int(row.get("count")) for row in rows if isinstance(row, dict)}
 
@@ -12027,6 +12351,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Codex canary impact by rule</h2>
+  <table data-table-id="codex-canary-impact" data-filter-label="Filter Codex canary rule impact">
+    <thead><tr>
+      <th data-sort-type="text">Rule</th><th data-sort-type="text">Action</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Skipped</th><th data-sort-type="number">Errors</th><th data-sort-type="number">Fallback</th><th data-sort-type="number">Pass-through</th><th data-sort-type="money">Savings</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Cache</th><th data-sort-type="text">Safety</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="codex-canary-impact-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Codex quota and token usage</h2>
   <table data-table-id="codex-quota" data-filter-label="Filter Codex quota">
     <thead><tr>
@@ -12958,6 +13291,41 @@ async function refreshCodexQuota(){
       <td><span class="badge miss">${esc(scope.remaining_bucket||'—')}</span></td>
       <td><span class="badge miss">${esc(scope.reset_bucket||'—')}</span></td>
     </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No Codex rate-limit metadata recorded yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+
+async function refreshCodexCanaryImpact(){
+  try{
+    const r=await fetch('/agentflow/stats/codex-canary-impact?limit=1000');
+    const d=await r.json();
+    const rows=d.rules||[];
+    document.getElementById('codex-canary-impact-tbody').innerHTML=rows.map(row=>{
+      const cache=row.cache||{};
+      const safety=(row.safety_stop_reason_breakdown||[]).map(item=>`<span class="badge err">${esc(item.value)} ${(item.count||0).toLocaleString()}</span>`).join(' ')||'<span class="badge hit">clear</span>';
+      const privacy=row.privacy||{};
+      const privacyBadges=[
+        privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>',
+        privacy.request_ids_included?'<span class="badge err">request IDs</span>':'<span class="badge hit">request IDs omitted</span>',
+        privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'
+      ].join(' ');
+      return `<tr>
+        <td class="model">${esc(row.rule_id||'unknown')}<div class="sub">${esc(row.candidate_id||'unknown')}</div></td>
+        <td><span class="badge provider">${esc(row.action_family||'unknown')}</span></td>
+        <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.skipped_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.error_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.fallback_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.pass_through_count||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.estimated_savings_usd||0,6)}</td>
+        <td class="latency">${row.applied_minus_holdout_latency_avg_ms==null?'—':fmtMs(row.applied_minus_holdout_latency_avg_ms)}</td>
+        <td class="flags"><span class="badge hit">hit ${(cache.hit_count||0).toLocaleString()}</span> <span class="badge miss">miss ${(cache.miss_count||0).toLocaleString()}</span> <span class="badge routed">holdout ${(cache.holdout_count||0).toLocaleString()}</span> <span class="badge err">invalid ${(cache.invalidation_count||0).toLocaleString()}</span></td>
+        <td class="flags">${safety}</td>
+        <td class="flags"><span class="badge provider">${esc(row.policy_source||'unknown')}</span> <span class="badge miss" title="${esc(row.rule_path||'')}">${esc(row.rule_path?'rule file':'no rule file')}</span></td>
+        <td class="flags">${privacyBadges}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="14" style="color:#8b949e">No Codex canary rule metadata recorded yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -14421,6 +14789,7 @@ refreshActivity();
 refreshUsage();
 refreshCodexReadiness();
 refreshCodexQuota();
+refreshCodexCanaryImpact();
 refresh();
 refreshWeekly();
 refreshCategories();
@@ -14441,6 +14810,7 @@ setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
 setInterval(refreshCodexReadiness,30000);
 setInterval(refreshCodexQuota,30000);
+setInterval(refreshCodexCanaryImpact,30000);
 setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);

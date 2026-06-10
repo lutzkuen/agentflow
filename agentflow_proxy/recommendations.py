@@ -2379,8 +2379,13 @@ def _codex_canary_for_action(action_family: str, routing_meta: dict[str, Any], c
             "raw_basis_included": False,
         }
     sample = cache_meta.get("canary_sample") if isinstance(cache_meta.get("canary_sample"), dict) else {}
+    name = (
+        "codex-app-rule"
+        if cache_meta.get("canary") == "codex-app-rule" or isinstance(cache_meta.get("codex_app_rule"), dict)
+        else "codex-app-exact-cache"
+    )
     return {
-        "name": "codex-app-exact-cache",
+        "name": name,
         "enabled": bool(sample.get("enabled")),
         "cohort": cache_meta.get("canary_cohort") or sample.get("cohort"),
         "status": sample.get("status") or cache_meta.get("status"),
@@ -2410,11 +2415,14 @@ def build_codex_app_canary_lifecycle_feedback(
             return None
         rule_meta = routing_meta.get("codex_app_rule") if isinstance(routing_meta.get("codex_app_rule"), dict) else {}
         policy_id = (
-            routing_meta.get("policy_id")
+            rule_meta.get("policy_id")
+            or routing_meta.get("policy_id")
             or rule_meta.get("candidate_id")
             or rule_meta.get("rule_id")
             or "local-codex-app-summary-model-hint-canary"
         )
+        rule_id = rule_meta.get("rule_id")
+        candidate_id = rule_meta.get("candidate_id") or policy_id
         target_model = routing_meta.get("target_model") or routing_meta.get("routed_model")
         decision_status = routing_meta.get("status")
         decision_reason = routing_meta.get("reason")
@@ -2423,7 +2431,15 @@ def build_codex_app_canary_lifecycle_feedback(
     else:
         if cache_meta.get("canary") != "codex-app-exact-cache" and not isinstance(cache_meta.get("canary_sample"), dict):
             return None
-        policy_id = "local-codex-app-exact-cache-canary"
+        rule_meta = cache_meta.get("codex_app_rule") if isinstance(cache_meta.get("codex_app_rule"), dict) else {}
+        policy_id = (
+            rule_meta.get("policy_id")
+            or rule_meta.get("candidate_id")
+            or rule_meta.get("rule_id")
+            or "local-codex-app-exact-cache-canary"
+        )
+        rule_id = rule_meta.get("rule_id")
+        candidate_id = rule_meta.get("candidate_id") or policy_id
         target_model = routing_meta.get("routed_model") or routing_meta.get("requested_model")
         decision_status = cache_meta.get("status")
         decision_reason = cache_meta.get("reason")
@@ -2465,7 +2481,8 @@ def build_codex_app_canary_lifecycle_feedback(
         "lifecycle_kind": "codex_app_canary",
         "action_family": action_family,
         "policy_id": policy_id,
-        "candidate_id": f"{policy_id}:{canary.get('cohort') or 'unknown'}",
+        "rule_id": rule_id,
+        "candidate_id": candidate_id,
         "workflow_phase": (
             routing_meta.get("workflow_phase")
             or cache_meta.get("workflow_phase")
@@ -2494,6 +2511,7 @@ def build_codex_app_canary_lifecycle_feedback(
                 if action_family == "routing"
                 else cache_meta.get("policy_source")
             ),
+            "rule_path_included": False,
             "applied": bool(routing_meta.get("applied") if action_family == "routing" else cache_meta.get("status") == "hit"),
             "cache_key_included": False,
         },

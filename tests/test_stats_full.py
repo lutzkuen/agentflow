@@ -139,6 +139,147 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(surface["cache"]["exact_cache"]["cache_url"], "codex-app://turn/start")
         self.assertEqual(surface["cache"]["exact_cache"]["replayability_level"], "local-exact-response")
 
+    def test_codex_canary_impact_reports_rule_candidate_counts_and_privacy(self):
+        rule_meta = {
+            "schema": "agentflow.codex_app_rule_execution.v1",
+            "rule_id": "codex-rule-a",
+            "candidate_id": "candidate-a",
+            "policy_id": "policy-a",
+            "policy_source": "managed-recommended",
+            "condition_keys": ["workflow_phase"],
+            "action_keys": ["model_hint", "cache_eligible"],
+            "raw_conditions_included": False,
+            "raw_actions_included": False,
+            "raw_params_included": False,
+        }
+
+        def log_turn(suffix, routing, cache, *, error_code=None, latency=100, result_chars=80):
+            server.store.log_codex_app_event(
+                id=f"start-{suffix}",
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=f"raw-request-{suffix}",
+                thread_id=f"raw-thread-{suffix}",
+                session_id=f"raw-session-{suffix}",
+                message_chars=100,
+                params_chars=80,
+                input_items=1,
+                input_text_chars=400,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                routing_json=stable_json(routing),
+                crunch_json=stable_json({"status": "skipped", "policy_source": "managed-recommended"}),
+                cache_json=stable_json(cache),
+            )
+            server.store.log_codex_app_event(
+                id=f"end-{suffix}",
+                created_at=utc_now(),
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=f"raw-request-{suffix}",
+                thread_id=f"raw-thread-{suffix}",
+                session_id=f"raw-session-{suffix}",
+                message_chars=120,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=result_chars,
+                error_code=error_code,
+                error_message="raw error body must not leak" if error_code else None,
+                latency_ms=latency,
+            )
+
+        applied_routing = {
+            "status": "applied",
+            "reason": "codex-app-rule-canary-applied",
+            "applied": True,
+            "canary": "codex-app-rule",
+            "canary_cohort": "canary_applied",
+            "requested_model": "gpt-5.4",
+            "routed_model": "gpt-5.4-mini",
+            "target_model": "gpt-5.4-mini",
+            "policy_source": "managed-recommended",
+            "codex_app_rule": rule_meta,
+        }
+        holdout_routing = {
+            **applied_routing,
+            "status": "skipped",
+            "reason": "codex-app-rule-canary-holdout",
+            "applied": False,
+            "canary_cohort": "canary_holdout",
+            "routed_model": "gpt-5.4",
+        }
+        stopped_routing = {
+            **applied_routing,
+            "status": "safety_stopped",
+            "reason": "local-canary-safety-stop",
+            "applied": False,
+            "canary_cohort": "safety_stopped",
+            "safety_stop": {
+                "tripped": True,
+                "reason_codes": ["applied-error-rate-above-threshold"],
+                "rule_id": "codex-rule-a",
+                "candidate_id": "candidate-a",
+            },
+        }
+        applied_cache = {
+            "status": "miss",
+            "reason": "exact-miss",
+            "eligible": True,
+            "canary": "codex-app-rule",
+            "canary_cohort": "canary_applied",
+            "outcome_bucket": "miss",
+            "policy_source": "managed-recommended",
+            "codex_app_rule": rule_meta,
+        }
+        holdout_cache = {
+            **applied_cache,
+            "status": "holdout",
+            "reason": "codex-app-rule-canary-holdout",
+            "canary_cohort": "canary_holdout",
+            "outcome_bucket": "holdout",
+        }
+        invalidated_cache = {
+            **applied_cache,
+            "status": "miss",
+            "reason": "dependency-changed",
+            "outcome_bucket": "invalidated",
+        }
+        log_turn("applied", applied_routing, applied_cache, latency=100)
+        log_turn("holdout", holdout_routing, holdout_cache, latency=60)
+        log_turn("stopped", stopped_routing, invalidated_cache, error_code=500, latency=130)
+
+        result = asyncio.run(stats_views.stats_codex_canary_impact(server.store, limit=10))
+
+        self.assertEqual(result["schema"], "agentflow.codex_app_canary_impact_by_rule.v1")
+        self.assertEqual(result["summary"]["rule_candidate_count"], 2)
+        self.assertEqual(result["summary"]["applied_count"], 3)
+        self.assertEqual(result["summary"]["holdout_count"], 2)
+        self.assertEqual(result["summary"]["safety_stopped_count"], 1)
+        routing = next(row for row in result["rules"] if row["action_family"] == "routing")
+        cache = next(row for row in result["rules"] if row["action_family"] == "cache")
+        self.assertEqual(routing["rule_id"], "codex-rule-a")
+        self.assertEqual(routing["candidate_id"], "candidate-a")
+        self.assertEqual(routing["policy_source"], "managed-recommended")
+        self.assertEqual(routing["applied_count"], 1)
+        self.assertEqual(routing["holdout_count"], 1)
+        self.assertEqual(routing["error_count"], 1)
+        self.assertEqual(routing["safety_stopped_count"], 1)
+        self.assertEqual(routing["applied_minus_holdout_latency_avg_ms"], 40)
+        self.assertEqual(cache["cache"]["miss_count"], 2)
+        self.assertEqual(cache["cache"]["holdout_count"], 1)
+        self.assertEqual(cache["cache"]["invalidation_count"], 1)
+        encoded = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw-request", encoded)
+        self.assertNotIn("raw-session", encoded)
+        self.assertNotIn("raw error body", encoded)
+        self.assertTrue(result["privacy"]["metadata_only"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+
     def test_full_stats_include_executive_summary_for_top_dashboard_tiles(self):
         server.store.log_call(
             id=str(uuid.uuid4()),

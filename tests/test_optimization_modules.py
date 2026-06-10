@@ -1408,6 +1408,16 @@ class OptimizationModuleTests(unittest.TestCase):
             {"value": "cache", "count": 1},
             {"value": "routing", "count": 1},
         ])
+        self.assertEqual(codex_status["rule_id_breakdown"], [
+            {"value": "local-codex-app-exact-cache-canary", "count": 1},
+            {"value": "local-codex-app-summary-model-hint-canary", "count": 1},
+        ])
+        self.assertEqual(codex_status["candidate_id_breakdown"], [
+            {"value": "local-codex-app-exact-cache-canary", "count": 1},
+            {"value": "local-codex-app-summary-model-hint-canary", "count": 1},
+        ])
+        self.assertEqual(len(codex_status["rule_candidate_breakdown"]), 2)
+        self.assertFalse(codex_status["rule_candidate_breakdown"][0].get("payload_json_included", False))
         self.assertFalse(codex_status["payload_json_included"])
 
     def test_openai_outcome_summary_is_feature_only(self):

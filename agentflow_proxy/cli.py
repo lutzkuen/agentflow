@@ -964,6 +964,84 @@ def policy_apply_cli(
     return 0 if result["ok"] else 1
 
 
+async def _queue_codex_app_dry_run_lifecycle_events(store: Any, result: dict[str, Any]) -> dict[str, Any]:
+    from agentflow_proxy.recommendations import queue_policy_event_feedback
+
+    queued: dict[str, Any] = {
+        "schema": "agentflow.codex_app_canary_lifecycle_queue_meta.v1",
+        "source_surface": "codex_app_canary_lifecycle",
+        "event_phase": "dry_run",
+        "results": {},
+        "payload_included": False,
+    }
+    candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        rule_id = str(candidate.get("rule_id") or candidate.get("candidate_id") or "unknown-codex-app-rule")
+        candidate_id = str(candidate.get("candidate_id") or rule_id)
+        event = {
+            "schema": "agentflow.codex_app_canary_lifecycle_feedback.v1",
+            "event_type": "codex_app_canary_lifecycle",
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+            "source_surface": "codex_turn",
+            "app_family": "codex",
+            "lifecycle_kind": "codex_app_canary",
+            "lifecycle_phase": "dry_run",
+            "action_family": "codex_app",
+            "policy_id": candidate.get("policy_id") or candidate_id,
+            "rule_id": rule_id,
+            "candidate_id": candidate_id,
+            "canary_cohort": "projected",
+            "decision": {
+                "status": "dry_run",
+                "reason": "codex-app-policy-dry-run",
+                "policy_source": candidate.get("policy_source") or "managed-recommended",
+                "applied": False,
+                "rule_path_included": False,
+                "cache_key_included": False,
+            },
+            "outcome": {
+                "status": "dry_run",
+                "status_class": "metadata",
+                "projected_applied_count": candidate.get("projected_applied_count"),
+                "projected_holdout_count": candidate.get("projected_holdout_count"),
+                "projected_skip_count": candidate.get("projected_skip_count"),
+                "projected_savings_usd": candidate.get("projected_savings_usd"),
+            },
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_params_included": False,
+                "raw_transcripts_included": False,
+                "raw_commands_included": False,
+                "raw_responses_included": False,
+                "request_ids_included": False,
+                "thread_ids_included": False,
+                "local_session_ids_included": False,
+                "cache_keys_included": False,
+                "rule_path_included": False,
+            },
+        }
+        meta = await queue_policy_event_feedback(
+            store,
+            event,
+            source_surface="codex_app_canary_lifecycle",
+            queue_when_disabled=True,
+            flush_immediately=False,
+        )
+        queued["results"][candidate_id] = {
+            "enabled": bool(meta.get("enabled")),
+            "status": meta.get("status"),
+            "reason": meta.get("reason"),
+            "endpoint": meta.get("endpoint"),
+            "queue_id": meta.get("queue_id"),
+            "attempts": meta.get("attempts"),
+            "payload_included": False,
+        }
+    return queued
+
+
 def codex_app_policy_dry_run_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -1100,6 +1178,9 @@ def codex_app_policy_dry_run_cli(
             recent_limit=max(0, args.recent_limit),
             fixture_features=fixture_features,
             include_synthetic=not args.no_synthetic,
+        )
+        result["managed_lifecycle_feedback"] = asyncio.run(
+            _queue_codex_app_dry_run_lifecycle_events(store, result)
         )
     finally:
         store.conn.close()
@@ -2456,6 +2537,42 @@ def codex_diagnose_cli(argv: Sequence[str] | None = None, *, stdout: Any = None)
     store = _open_store_for_db(str(args.db))
     try:
         result = asyncio.run(stats_codex_effectiveness(store, limit=args.limit))
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
+def codex_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report managed Codex app canary impact and lifecycle evidence by rule")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent turn/start rows to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.stats import stats_codex_canary_impact
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = asyncio.run(stats_codex_canary_impact(store, limit=args.limit))
     finally:
         store.conn.close()
     if args.pretty:
@@ -4423,6 +4540,10 @@ def policy_rollback_main() -> None:
 
 def codex_diagnose_main() -> None:
     raise SystemExit(codex_diagnose_cli())
+
+
+def codex_canary_impact_main() -> None:
+    raise SystemExit(codex_canary_impact_cli())
 
 
 def openai_scoreboard_main() -> None:

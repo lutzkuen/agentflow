@@ -265,6 +265,84 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])
 
+    def test_codex_canary_impact_cli_reports_rule_lifecycle_metadata_only(self):
+        from agentflow_proxy.store import Store, stable_json, utc_now
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            rule_meta = {
+                "schema": "agentflow.codex_app_rule_execution.v1",
+                "rule_id": "cli-codex-rule",
+                "candidate_id": "cli-candidate",
+                "policy_source": "managed-recommended",
+                "condition_keys": ["workflow_phase"],
+                "action_keys": ["model_hint"],
+                "raw_params_included": False,
+            }
+            try:
+                store.log_codex_app_event(
+                    id="cli-canary-start",
+                    created_at=utc_now(),
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="raw-cli-request-must-not-leak",
+                    thread_id="raw-cli-thread-must-not-leak",
+                    session_id="raw-cli-session-must-not-leak",
+                    message_chars=100,
+                    params_chars=80,
+                    input_items=1,
+                    input_text_chars=120,
+                    result_chars=None,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=None,
+                    routing_json=stable_json({
+                        "status": "applied",
+                        "reason": "codex-app-rule-canary-applied",
+                        "applied": True,
+                        "canary": "codex-app-rule",
+                        "canary_cohort": "canary_applied",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4-mini",
+                        "policy_source": "managed-recommended",
+                        "codex_app_rule": rule_meta,
+                    }),
+                    crunch_json=stable_json({"status": "skipped"}),
+                    cache_json=stable_json({"status": "skipped", "reason": "codex-app-rule-no-cache-action"}),
+                )
+                store.log_codex_app_event(
+                    id="cli-canary-end",
+                    created_at=utc_now(),
+                    direction="server_to_client",
+                    method="turn/completed",
+                    request_id="raw-cli-request-must-not-leak",
+                    thread_id="raw-cli-thread-must-not-leak",
+                    session_id="raw-cli-session-must-not-leak",
+                    message_chars=80,
+                    params_chars=None,
+                    input_items=None,
+                    input_text_chars=None,
+                    result_chars=40,
+                    error_code=None,
+                    error_message=None,
+                    latency_ms=25,
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.codex_canary_impact_cli(["--db", db_path, "--limit", "10"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.codex_app_canary_impact_by_rule.v1")
+        self.assertEqual(payload["summary"]["applied_count"], 1)
+        self.assertEqual(payload["rules"][0]["rule_id"], "cli-codex-rule")
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw-cli-request-must-not-leak", encoded)
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+
     def test_routing_experiment_report_cli_reads_metadata_only_metrics(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -5325,6 +5403,9 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["cache_table_mutated"])
         self.assertFalse(payload["provider_calls_made"])
         self.assertFalse(payload["managed_server_calls_made"])
+        self.assertEqual(payload["managed_lifecycle_feedback"]["event_phase"], "dry_run")
+        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+        self.assertIn("candidate-codex-summary", payload["managed_lifecycle_feedback"]["results"])
         self.assertEqual(payload["summary"]["synthetic_rows"], 1)
         self.assertEqual(payload["summary"]["fixture_rows"], 1)
         self.assertEqual(payload["summary"]["recent_rows"], 1)

@@ -166,6 +166,9 @@ def _codex_app_canary_lifecycle_status(
     action_counts: dict[str, int] = {}
     outcome_counts: dict[str, int] = {}
     cohort_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    rule_candidate_counts: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         payload = _safe_payload_json(row)
         if payload.get("schema") != "agentflow.codex_app_canary_lifecycle_feedback.v1":
@@ -188,6 +191,46 @@ def _codex_app_canary_lifecycle_status(
         outcome_counts[outcome_status] = outcome_counts.get(outcome_status, 0) + 1
         cohort = str(payload.get("canary_cohort") or "unknown")
         cohort_counts[cohort] = cohort_counts.get(cohort, 0) + 1
+        rule_id = str(payload.get("rule_id") or payload.get("policy_id") or "unknown")
+        candidate_id = str(payload.get("candidate_id") or payload.get("policy_id") or "unknown")
+        rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
+        candidate_counts[candidate_id] = candidate_counts.get(candidate_id, 0) + 1
+        key = (rule_id, candidate_id)
+        bucket = rule_candidate_counts.setdefault(
+            key,
+            {
+                "rule_id": rule_id,
+                "candidate_id": candidate_id,
+                "queue_rows": 0,
+                "action_family_breakdown": {},
+                "queue_state_breakdown": {},
+                "outcome_status_breakdown": {},
+                "canary_cohort_breakdown": {},
+            },
+        )
+        bucket["queue_rows"] += 1
+        for target, value in (
+            ("action_family_breakdown", action),
+            ("queue_state_breakdown", queue_state),
+            ("outcome_status_breakdown", outcome_status),
+            ("canary_cohort_breakdown", cohort),
+        ):
+            counts = bucket[target]
+            counts[value] = counts.get(value, 0) + 1
+    rule_candidate_breakdown: list[dict[str, Any]] = []
+    for bucket in rule_candidate_counts.values():
+        item = dict(bucket)
+        for key in (
+            "action_family_breakdown",
+            "queue_state_breakdown",
+            "outcome_status_breakdown",
+            "canary_cohort_breakdown",
+        ):
+            item[key] = breakdown_from_counts(item[key])
+        rule_candidate_breakdown.append(item)
+    rule_candidate_breakdown.sort(
+        key=lambda item: (-int(item["queue_rows"]), str(item["rule_id"]), str(item["candidate_id"]))
+    )
     return {
         "schema": "agentflow.codex_app_canary_lifecycle_queue_status.v1",
         "queue_rows": row_count,
@@ -195,6 +238,9 @@ def _codex_app_canary_lifecycle_status(
         "action_family_breakdown": breakdown_from_counts(action_counts),
         "outcome_status_breakdown": breakdown_from_counts(outcome_counts),
         "canary_cohort_breakdown": breakdown_from_counts(cohort_counts),
+        "rule_id_breakdown": breakdown_from_counts(rule_counts),
+        "candidate_id_breakdown": breakdown_from_counts(candidate_counts),
+        "rule_candidate_breakdown": rule_candidate_breakdown,
         "payload_json_included": False,
     }
 
