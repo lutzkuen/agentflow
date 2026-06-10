@@ -121,6 +121,14 @@ agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --prett
 
 The report groups local metadata by replay fingerprint and includes stream/tool flags, workflow phase, cacheability bucket, safe invalidation evidence, current cache decision, blocker counts, and projected repeated-call cost. It does not print raw prompts, responses, tool payloads, request IDs, cache keys, file paths, transcripts, or raw session IDs.
 
+To smoke-check whether existing exact local cache rows can produce hits, and why recent traffic did or did not hit them, run:
+
+```bash
+agentflow-cache-smoke-diagnostic --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The diagnostic reports cache row counts, model breakdowns, newest row metadata, lookup/miss/hit/skip/invalidation counts, and duplicate-shape opportunity. It does not print raw prompts, responses, tool payloads, request IDs, cache keys, file paths, transcripts, or raw session IDs.
+
 To dry-run proposed cache replay pattern rules against recent local traffic without writing cache rows, replaying responses, or calling providers, run:
 
 ```bash

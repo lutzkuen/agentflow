@@ -391,6 +391,168 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
         self.assertFalse(payload["privacy"]["cache_keys_included"])
 
+    def test_cache_smoke_diagnostic_cli_explains_exact_cache_hits_and_skips(self):
+        from agentflow_proxy.cache import cache_key_for
+        from agentflow_proxy.store import Store, stable_json
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_path = str(tmp_path / "agentflow.sqlite3")
+            dep_path = tmp_path / "watched.txt"
+            dep_path.write_text("old", encoding="utf-8")
+            stat = dep_path.stat()
+            hit_body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": "raw exact hit prompt must not leak"}],
+            }
+            hit_key = cache_key_for(hit_body, "/v1/messages", provider="anthropic")
+            no_hit_key = "cache-present-no-hit-secret"
+            invalidated_key = "cache-invalidated-secret"
+            store = Store(db_path)
+            try:
+                store.set_cache(hit_key, "claude-sonnet-4-6", 80, {"content": "raw cached response must not leak"})
+                store.set_cache(no_hit_key, "claude-haiku-4-5-20251001", 30, {"content": "unused"})
+                store.set_cache(
+                    invalidated_key,
+                    "claude-sonnet-4-6",
+                    120,
+                    {"content": "invalidated"},
+                    file_deps=[{
+                        "path": str(dep_path),
+                        "exists": True,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "size": stat.st_size,
+                    }],
+                )
+                dep_path.write_text("new text that changes the dependency", encoding="utf-8")
+                for index in range(2):
+                    store.log_call(
+                        id=f"cache-smoke-miss-{index}",
+                        created_at=f"2026-06-10T03:0{index}:00+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=100,
+                        input_tokens_est=300,
+                        output_tokens_est=20,
+                        cost_est_usd=0.002,
+                        cost_baseline_usd=0.002,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({"category": "chat", "has_tools": False, "text_chars": 1000}),
+                        cache_json=stable_json({"status": "miss", "reason": "exact-miss", "exact_enabled": True}),
+                        request_json=stable_json({"messages": [{"content": "raw miss prompt must not leak"}]}),
+                        session_id="cache-smoke-session-secret",
+                        category="chat",
+                        provider="anthropic",
+                    )
+                store.log_call(
+                    id="cache-smoke-streaming",
+                    created_at="2026-06-10T03:10:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=120,
+                    input_tokens_est=500,
+                    output_tokens_est=40,
+                    cost_est_usd=0.003,
+                    cost_baseline_usd=0.003,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"category": "chat", "has_tools": False, "text_chars": 2000}),
+                    cache_json=stable_json({"status": "skipped", "reason": "streaming", "exact_enabled": False}),
+                    request_json=stable_json({"messages": [{"content": "raw streaming prompt must not leak"}]}),
+                    session_id="cache-smoke-session-secret",
+                    category="chat",
+                    provider="anthropic",
+                )
+                store.log_call(
+                    id="cache-smoke-tools-disabled",
+                    created_at="2026-06-10T03:20:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=130,
+                    input_tokens_est=600,
+                    output_tokens_est=50,
+                    cost_est_usd=0.004,
+                    cost_baseline_usd=0.004,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"category": "tool-result", "has_tools": True, "text_chars": 4000}),
+                    cache_json=stable_json({"status": "skipped", "reason": "tools-disabled", "exact_enabled": False}),
+                    request_json=stable_json({"messages": [{"content": "raw tools prompt must not leak"}]}),
+                    session_id="cache-smoke-session-secret",
+                    category="tool-result",
+                    provider="anthropic",
+                )
+                store.log_call(
+                    id="cache-smoke-hit",
+                    created_at="2026-06-10T03:30:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=1,
+                    status_code=200,
+                    latency_ms=3,
+                    input_tokens_est=80,
+                    output_tokens_est=10,
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=0.001,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"category": "chat", "has_tools": False, "text_chars": 1000}),
+                    cache_json=stable_json({"status": "hit", "reason": "exact-match", "hit_type": "exact", "exact_enabled": True}),
+                    request_json=stable_json(hit_body),
+                    session_id="cache-smoke-session-secret",
+                    category="chat",
+                    provider="anthropic",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.cache_smoke_diagnostic_cli(["--db", db_path, "--scan-limit", "20"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.cache_smoke_diagnostic.v1")
+        self.assertEqual(payload["summary"]["cache_rows"], 3)
+        self.assertEqual(payload["summary"]["eligible_lookup_count"], 3)
+        self.assertEqual(payload["summary"]["exact_miss_count"], 2)
+        self.assertEqual(payload["summary"]["cache_hit_count"], 1)
+        self.assertEqual(payload["summary"]["invalidated_cache_row_count"], 1)
+        self.assertEqual(payload["duplicate_key_opportunity"]["candidate_group_count"], 1)
+        self.assertEqual(payload["selected_cache_row_reconstruction"]["status"], "matched")
+        skip_reasons = {row["value"] for row in payload["skip_reason_breakdown"]}
+        self.assertIn("streaming", skip_reasons)
+        self.assertIn("tools-disabled", skip_reasons)
+        invalidation_reasons = {row["value"] for row in payload["invalidation_breakdown"]}
+        self.assertIn("dependency-changed", invalidation_reasons)
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            hit_key,
+            no_hit_key,
+            invalidated_key,
+            str(dep_path),
+            "raw exact hit prompt must not leak",
+            "raw cached response must not leak",
+            "raw miss prompt must not leak",
+            "raw streaming prompt must not leak",
+            "raw tools prompt must not leak",
+            "cache-smoke-session-secret",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertFalse(payload["privacy"]["cache_keys_included"])
+        self.assertFalse(payload["privacy"]["file_paths_included"])
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+
     def test_cache_replay_dry_run_cli_reads_policy_without_mutating_cache(self):
         from agentflow_proxy.store import Store, stable_json
 

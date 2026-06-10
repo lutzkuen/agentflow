@@ -2457,6 +2457,48 @@ def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def cache_smoke_diagnostic_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Diagnose whether the local exact cache can serve hits from metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Newest cache rows to summarize, default: 10",
+    )
+    parser.add_argument(
+        "--scan-limit",
+        type=int,
+        default=5000,
+        help="Recent call rows to inspect for cache decisions, default: 5000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_cache_smoke_diagnostic(store, limit=args.limit, scan_limit=args.scan_limit)
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "agentflow.cache_replay_dry_run.v1",
@@ -4235,6 +4277,10 @@ def phase_routing_report_main() -> None:
 
 def cache_replayability_report_main() -> None:
     raise SystemExit(cache_replayability_report_cli())
+
+
+def cache_smoke_diagnostic_main() -> None:
+    raise SystemExit(cache_smoke_diagnostic_cli())
 
 
 def cache_replay_dry_run_main() -> None:
