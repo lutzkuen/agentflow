@@ -586,6 +586,202 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("raw local fingerprint prompt must stay local", encoded)
         self.assertNotIn("local-fingerprint-session-secret", encoded)
 
+    def test_optimization_eval_plan_cli_exports_family_agnostic_metadata_only_plans(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        pattern_hash = "sha256:" + "8" * 64
+        cache_pattern_hash = "sha256:" + "6" * 64
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="eval-routing-call",
+                    created_at="2026-06-10T01:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=100,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.0045,
+                    cost_baseline_usd=0.0045,
+                    crunch_json=stable_json({"tokens_saved_est": 0}),
+                    routing_json=stable_json({"category": "tool-result", "workflow_phase": "tool-execution", "has_tools": True, "text_chars": 4000}),
+                    cache_json=stable_json({"status": "skipped", "reason": "tool-cache-disabled", "policy_source": "local-default"}),
+                    request_json=stable_json({"messages": [{"content": "raw eval routing prompt must stay local"}]}),
+                    session_id="eval-routing-session-secret",
+                    category="tool-result",
+                    retry_count=0,
+                    provider="anthropic",
+                )
+                for index in range(2):
+                    store.log_call(
+                        id=f"eval-cache-call-{index}",
+                        created_at=f"2026-06-10T01:1{index}:00+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=100,
+                        input_tokens_est=1000,
+                        output_tokens_est=100,
+                        actual_input_tokens=1000,
+                        actual_output_tokens=100,
+                        cost_est_usd=0.01,
+                        cost_baseline_usd=0.01,
+                        crunch_json=stable_json({
+                            "pattern_modules": {
+                                "server_features": {
+                                    "features": [
+                                        {
+                                            "family": "cacheability",
+                                            "features": {
+                                                "cacheability_bucket": "high",
+                                                "static_information_hint": True,
+                                                "exact_cache_candidate_hint": True,
+                                            },
+                                        }
+                                    ],
+                                },
+                            },
+                        }),
+                        routing_json=stable_json({
+                            "category": "chat",
+                            "workflow_phase": "summary",
+                            "has_tools": False,
+                            "text_chars": 1200,
+                            "managed_pattern_features": {
+                                "present": True,
+                                "pattern_hash": cache_pattern_hash,
+                                "pattern_hashes": [cache_pattern_hash],
+                                "source_surface": "anthropic_messages",
+                                "app_family": "claude_code",
+                                "category": "chat",
+                                "workflow_phase": "summary",
+                                "text_bucket": "lt_2k_chars",
+                                "token_bucket": "lt_1k_tokens",
+                                "raw_pattern_strings_included": False,
+                            },
+                        }),
+                        cache_json=stable_json({
+                            "status": "miss",
+                            "reason": "exact-miss",
+                            "policy_source": "local-default",
+                            "replayability_level": "local-exact-response",
+                        }),
+                        request_json=stable_json({"prompt": "raw eval cache prompt must stay local"}),
+                        session_id="eval-cache-session-secret",
+                        category="chat",
+                        retry_count=0,
+                        provider="anthropic",
+                    )
+                store.log_call(
+                    id="eval-old-context-call",
+                    created_at="2026-06-10T01:30:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=100,
+                    input_tokens_est=4000,
+                    output_tokens_est=100,
+                    actual_input_tokens=4000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.02,
+                    cost_baseline_usd=0.03,
+                    crunch_json=stable_json({
+                        "old_context_summarization": {
+                            "status": "applied",
+                            "enabled": True,
+                            "reason": "summary-created",
+                            "candidate_id": "eval-old-context-candidate",
+                            "rule_id": "eval-old-context-rule",
+                            "policy_source": "managed-recommended",
+                            "model": "claude-haiku-4-5-20251001",
+                            "tokens_saved_est": 1200,
+                            "summary_input_tokens": 500,
+                            "summary_output_tokens": 100,
+                            "summary_cost_est_usd": 0.0002,
+                            "estimated_net_savings_usd": 0.009,
+                            "canary": {
+                                "enabled": True,
+                                "fraction": 0.5,
+                                "unit": "session",
+                                "cohort": "canary_applied",
+                            },
+                        },
+                        "pattern_rules": {
+                            "configured_count": 1,
+                            "policy_source": "managed-recommended",
+                            "rules": [
+                                {
+                                    "rule_id": "eval-crunch-rule",
+                                    "candidate_id": "eval-crunch-candidate",
+                                    "policy_source": "managed-recommended",
+                                    "matched_hashes": [pattern_hash],
+                                    "applied_count": 1,
+                                    "saved_chars": 800,
+                                    "canary": {
+                                        "enabled": True,
+                                        "selected": True,
+                                        "status": "applied",
+                                        "cohort": "canary_applied",
+                                    },
+                                }
+                            ],
+                        },
+                    }),
+                    routing_json=stable_json({"category": "chat", "workflow_phase": "summary"}),
+                    cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                    request_json=stable_json({"prompt": "raw eval old context prompt must stay local"}),
+                    session_id="eval-old-context-session-secret",
+                    category="chat",
+                    retry_count=0,
+                    provider="anthropic",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.optimization_eval_plan_cli(["--db", db_path, "--limit", "20", "--min-samples", "1"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_eval_plan.v1")
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertGreaterEqual(payload["summary"]["candidate_count"], 4)
+        family_counts = {row["value"]: row["count"] for row in payload["summary"]["family_counts"]}
+        self.assertIn("phase_routing", family_counts)
+        self.assertIn("cache_replayability", family_counts)
+        self.assertIn("old_context_summarization", family_counts)
+        self.assertIn("managed_pattern_candidate", family_counts)
+        self.assertIn("eval-old-context-candidate", {row["candidate_id"] for row in payload["plans"]})
+        self.assertIn("eval-crunch-candidate", {row["candidate_id"] for row in payload["plans"]})
+        self.assertTrue(any(row["blocker_reason_codes"] for row in payload["plans"]))
+        self.assertTrue({row["recommended_eval_mode"] for row in payload["plans"]})
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw eval routing prompt must stay local",
+            "raw eval cache prompt must stay local",
+            "raw eval old context prompt must stay local",
+            "eval-routing-session-secret",
+            "eval-cache-session-secret",
+            "eval-old-context-session-secret",
+            pattern_hash,
+            cache_pattern_hash,
+        ):
+            self.assertNotIn(forbidden, encoded)
+
     def test_policy_validate_cli_accepts_exported_bundle_from_stdin(self):
         exported = io.StringIO()
         cli.policy_export_cli([], stdout=exported)

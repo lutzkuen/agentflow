@@ -2324,6 +2324,54 @@ def managed_pattern_rollups_cli(argv: Sequence[str] | None = None, *, stdout: An
     return 0
 
 
+def optimization_eval_plan_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Export family-agnostic optimization eval plans from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider and Codex rows to inspect per source report, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=1,
+        help="Minimum samples for managed pattern readiness normalization, default: 1",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = asyncio.run(
+            build_optimization_eval_plan(
+                store,
+                limit=args.limit,
+                min_samples=args.min_samples,
+            )
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -3046,6 +3094,10 @@ def cache_replay_dry_run_main() -> None:
 
 def managed_pattern_rollups_main() -> None:
     raise SystemExit(managed_pattern_rollups_cli())
+
+
+def optimization_eval_plan_main() -> None:
+    raise SystemExit(optimization_eval_plan_cli())
 
 
 def managed_feedback_status_main() -> None:
