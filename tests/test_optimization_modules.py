@@ -1420,6 +1420,143 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(codex_status["rule_candidate_breakdown"][0].get("payload_json_included", False))
         self.assertFalse(codex_status["payload_json_included"])
 
+    def test_feedback_status_includes_routing_promotion_lifecycle_summary(self):
+        base_event = {
+            "event_type": "impact",
+            "metadata": {
+                "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+                "lifecycle_kind": "optimization_promotion_canary",
+                "command": "optimization-promotion-impact",
+                "local_result_status": "ok",
+                "action_snapshots": [
+                    {
+                        "action_id": "promotion-rollout-action:routing-status",
+                        "action_type": "widen",
+                        "status": "matched",
+                        "action_family": "routing",
+                        "optimization_family": "phase_routing",
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude_code",
+                        "policy_section": "routing",
+                        "policy_source": "managed-recommended",
+                        "target_candidate_id": "routing-status-candidate",
+                        "target_rule_id": "promotion-routing-status",
+                        "requested_model_family": "sonnet",
+                        "routed_model_family": "haiku",
+                        "model_family_pair": "sonnet->haiku",
+                        "actual_cohort_counts": {
+                            "canary_applied": 2,
+                            "canary_holdout": 1,
+                            "safety_stopped": 1,
+                        },
+                        "observed_savings_usd": 0.012,
+                        "error_rate_delta": 0.25,
+                        "retry_rate_delta": 0.5,
+                        "latency_avg_delta_ms": 1200,
+                        "error_buckets": [{"value": "rate_limited", "count": 1}],
+                        "reason_buckets": [{"value": "local-canary-safety-stop", "count": 1}],
+                        "next_step_verdict": "rollback",
+                        "next_step_reason_codes": ["safety-stop-observed", "rollback-error-rate"],
+                    }
+                ],
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "raw_responses_included": False,
+                    "request_ids_included": False,
+                    "local_session_ids_included": False,
+                    "file_paths_included": False,
+                    "cache_keys_included": False,
+                },
+            },
+        }
+
+        disable_event = {
+            "event_type": "apply",
+            "metadata": {
+                "schema": "agentflow.optimization_promotion_lifecycle_feedback.v1",
+                "lifecycle_kind": "optimization_promotion_canary",
+                "command": "optimization-promotion-apply",
+                "local_result_status": "ok",
+                "action_snapshots": [
+                    {
+                        "action_id": "promotion-rollout-action:routing-disable",
+                        "action_type": "disable",
+                        "status": "planned",
+                        "action_family": "routing",
+                        "source_surface": "openai_responses",
+                        "policy_section": "routing",
+                        "policy_source": "managed-recommended",
+                        "target_candidate_id": "routing-disable-candidate",
+                        "target_rule_id": "promotion-routing-disable",
+                        "requested_model_family": "gpt-5",
+                        "routed_model_family": "gpt-5-mini",
+                        "model_family_pair": "gpt-5->gpt-5-mini",
+                        "projected_cohort_counts": {"canary_applied": 3, "canary_holdout": 2},
+                    }
+                ],
+                "privacy": {"metadata_only": True},
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                now = utc_now()
+                store.enqueue_managed_outcome_feedback(
+                    id="routing-promotion-queued",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface="optimization_promotion_lifecycle",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(base_event),
+                    status="retryable-error",
+                    attempts=1,
+                    next_attempt_at=now,
+                )
+                store.enqueue_managed_outcome_feedback(
+                    id="routing-promotion-sent",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface="optimization_promotion_lifecycle",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(disable_event),
+                    status="sent",
+                    attempts=1,
+                    next_attempt_at=now,
+                    sent_at=now,
+                )
+                result = feedback.managed_feedback_status_result(
+                    store,
+                    source_surface="optimization_promotion_lifecycle",
+                    sample_limit=5,
+                )
+            finally:
+                store.conn.close()
+
+        lifecycle = result["routing_promotion_lifecycle"]
+        self.assertEqual(lifecycle["schema"], "agentflow.routing_promotion_lifecycle_queue_status.v1")
+        self.assertEqual(lifecycle["queue_rows"], 2)
+        self.assertEqual(lifecycle["action_count"], 2)
+        self.assertEqual(lifecycle["queue_state_breakdown"], [
+            {"value": "pending", "count": 1},
+            {"value": "sent", "count": 1},
+        ])
+        self.assertIn({"value": "rollback", "count": 1}, lifecycle["outcome_status_breakdown"])
+        self.assertIn({"value": "disable", "count": 1}, lifecycle["action_type_breakdown"])
+        self.assertIn({"value": "safety_stopped", "count": 1}, lifecycle["cohort_count_breakdown"])
+        self.assertIn({"value": "rate_limited", "count": 1}, lifecycle["error_bucket_breakdown"])
+        self.assertIn({"value": "sonnet->haiku", "count": 1}, lifecycle["model_family_pair_breakdown"])
+        by_candidate = {item["candidate_id"]: item for item in lifecycle["candidate_breakdown"]}
+        self.assertEqual(by_candidate["routing-status-candidate"]["safety_stopped_count"], 1)
+        self.assertEqual(by_candidate["routing-status-candidate"]["applied_minus_holdout_error_rate"], 0.25)
+        self.assertFalse(lifecycle["payload_json_included"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("session_id", rendered)
+        self.assertNotIn("raw prompt", rendered)
+
     def test_openai_outcome_summary_is_feature_only(self):
         routing_meta = {"reason": "test"}
         openai_outcomes.attach_openai_outcome_summary(

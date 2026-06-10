@@ -1187,6 +1187,7 @@ def apply_optimization_promotion_canaries(
                 continue
             plan = _file_plan(section)
             if section == "routing":
+                local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
                 target_key = "openai_canary" if _is_openai_routing_action(action) else "phase_canary"
                 existing_canary = plan["data"].get(target_key)
                 if (
@@ -1212,10 +1213,18 @@ def apply_optimization_promotion_canaries(
                     "policy_section": "routing",
                     "target_local_policy": target_key,
                     "action_type": action.get("action_type"),
+                    "action_family": action.get("action_family"),
+                    "optimization_family": action.get("optimization_family"),
+                    "source_surface": action.get("source_surface"),
+                    "app_family": action.get("app_family"),
+                    "policy_source": action.get("policy_source") or local_update.get("policy_source") or "managed-recommended",
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": action.get("target_rule_id"),
                     "action_id": action.get("action_id"),
                     "rule_id": canary_policy.get("policy_id"),
+                    "requested_model_family": action.get("requested_model_family") or action.get("requested_model") or local_update.get("model_pattern"),
+                    "routed_model_family": action.get("routed_model_family") or action.get("candidate_target_model") or canary_policy.get("target_model"),
+                    "target_model": canary_policy.get("target_model"),
                     "canary_fraction": canary_policy["canary_fraction"],
                     "holdout_fraction": canary_policy["holdout_fraction"],
                 })

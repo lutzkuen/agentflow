@@ -245,6 +245,222 @@ def _codex_app_canary_lifecycle_status(
     }
 
 
+def _queue_state(status: Any) -> str:
+    raw_status = str(status or "unknown")
+    if raw_status == "sent":
+        return "sent"
+    if raw_status in {"queued", "sending", "retryable-error"}:
+        return "pending"
+    if raw_status in {"error", "dropped-after-limit"}:
+        return "error"
+    return raw_status
+
+
+def _add_count(counts: dict[str, int], value: Any, increment: int = 1) -> None:
+    key = str(value or "unknown")
+    counts[key] = counts.get(key, 0) + int(increment or 0)
+
+
+def _breakdown_items(items: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(items, list):
+        return counts
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        count = int(item.get("count") or 0)
+        if count:
+            _add_count(counts, value, count)
+    return counts
+
+
+def _numeric_sum(source: dict[str, Any], keys: tuple[str, ...]) -> int:
+    total = 0
+    for key in keys:
+        try:
+            total += int(source.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _routing_promotion_lifecycle_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    action_count = 0
+    queue_state_counts: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
+    action_type_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    model_pair_counts: dict[str, int] = {}
+    policy_source_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    error_bucket_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    candidate_status: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        payload = _safe_payload_json(row)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if metadata.get("schema") != "agentflow.optimization_promotion_lifecycle_feedback.v1":
+            continue
+        snapshots = [
+            item
+            for item in metadata.get("action_snapshots") or []
+            if isinstance(item, dict) and str(item.get("policy_section") or "") == "routing"
+        ]
+        if not snapshots:
+            continue
+        row_count += 1
+        queue_state = _queue_state(row.get("status"))
+        event_type = str(payload.get("event_type") or metadata.get("command") or "unknown")
+        _add_count(queue_state_counts, queue_state)
+        _add_count(event_counts, event_type)
+        for snapshot in snapshots:
+            action_count += 1
+            candidate_id = str(snapshot.get("target_candidate_id") or "unknown")
+            rule_id = str(snapshot.get("target_rule_id") or "unknown")
+            action_type = str(snapshot.get("action_type") or "unknown")
+            policy_source = str(snapshot.get("policy_source") or "unknown")
+            model_pair = str(snapshot.get("model_family_pair") or "unknown")
+            source = str(snapshot.get("source_surface") or "unknown")
+            verdict = str(snapshot.get("next_step_verdict") or snapshot.get("status") or metadata.get("local_result_status") or "unknown")
+
+            _add_count(action_type_counts, action_type)
+            _add_count(outcome_counts, verdict)
+            _add_count(candidate_counts, candidate_id)
+            _add_count(rule_counts, rule_id)
+            _add_count(source_counts, source)
+            _add_count(model_pair_counts, model_pair)
+            _add_count(policy_source_counts, policy_source)
+            actual_counts = snapshot.get("actual_cohort_counts") if isinstance(snapshot.get("actual_cohort_counts"), dict) else {}
+            projected_counts = snapshot.get("projected_cohort_counts") if isinstance(snapshot.get("projected_cohort_counts"), dict) else {}
+            for cohort_key in ("canary_applied", "canary_holdout", "skipped", "bypassed_or_disabled", "safety_stopped"):
+                count = int(actual_counts.get(cohort_key) or 0)
+                if count:
+                    _add_count(cohort_counts, cohort_key, count)
+            for bucket, count in _breakdown_items(snapshot.get("error_buckets")).items():
+                _add_count(error_bucket_counts, bucket, count)
+            for reason in snapshot.get("next_step_reason_codes") or []:
+                _add_count(reason_counts, reason)
+            for bucket, count in _breakdown_items(snapshot.get("reason_buckets")).items():
+                _add_count(reason_counts, bucket, count)
+
+            candidate = candidate_status.setdefault(
+                candidate_id,
+                {
+                    "candidate_id": candidate_id,
+                    "queue_rows": 0,
+                    "action_count": 0,
+                    "rule_id_breakdown": {},
+                    "queue_state_breakdown": {},
+                    "event_type_breakdown": {},
+                    "action_type_breakdown": {},
+                    "outcome_status_breakdown": {},
+                    "source_surface_breakdown": {},
+                    "model_family_pair_breakdown": {},
+                    "policy_source_breakdown": {},
+                    "cohort_count_breakdown": {},
+                    "error_bucket_breakdown": {},
+                    "reason_code_breakdown": {},
+                    "observed_savings_usd": 0.0,
+                    "safety_stopped_count": 0,
+                    "applied_minus_holdout_error_rate": None,
+                    "applied_minus_holdout_retry_rate": None,
+                    "applied_minus_holdout_latency_avg_ms": None,
+                    "payload_json_included": False,
+                },
+            )
+            candidate["queue_rows"] += 1
+            candidate["action_count"] += 1
+            for key, value in (
+                ("rule_id_breakdown", rule_id),
+                ("queue_state_breakdown", queue_state),
+                ("event_type_breakdown", event_type),
+                ("action_type_breakdown", action_type),
+                ("outcome_status_breakdown", verdict),
+                ("source_surface_breakdown", source),
+                ("model_family_pair_breakdown", model_pair),
+                ("policy_source_breakdown", policy_source),
+            ):
+                _add_count(candidate[key], value)
+            for cohort_key in ("canary_applied", "canary_holdout", "skipped", "bypassed_or_disabled", "safety_stopped"):
+                count = int(actual_counts.get(cohort_key) or projected_counts.get(cohort_key) or 0)
+                if count:
+                    _add_count(candidate["cohort_count_breakdown"], cohort_key, count)
+            for bucket, count in _breakdown_items(snapshot.get("error_buckets")).items():
+                _add_count(candidate["error_bucket_breakdown"], bucket, count)
+            for reason in snapshot.get("next_step_reason_codes") or []:
+                _add_count(candidate["reason_code_breakdown"], reason)
+            for bucket, count in _breakdown_items(snapshot.get("reason_buckets")).items():
+                _add_count(candidate["reason_code_breakdown"], bucket, count)
+            try:
+                candidate["observed_savings_usd"] += float(snapshot.get("observed_savings_usd") or 0.0)
+            except (TypeError, ValueError):
+                pass
+            candidate["safety_stopped_count"] += _numeric_sum(actual_counts, ("safety_stopped",))
+            for source_key, target_key in (
+                ("error_rate_delta", "applied_minus_holdout_error_rate"),
+                ("retry_rate_delta", "applied_minus_holdout_retry_rate"),
+                ("latency_avg_delta_ms", "applied_minus_holdout_latency_avg_ms"),
+            ):
+                if snapshot.get(source_key) is not None:
+                    candidate[target_key] = snapshot.get(source_key)
+
+    candidate_breakdown: list[dict[str, Any]] = []
+    for bucket in candidate_status.values():
+        item = dict(bucket)
+        for key in (
+            "rule_id_breakdown",
+            "queue_state_breakdown",
+            "event_type_breakdown",
+            "action_type_breakdown",
+            "outcome_status_breakdown",
+            "source_surface_breakdown",
+            "model_family_pair_breakdown",
+            "policy_source_breakdown",
+            "cohort_count_breakdown",
+            "error_bucket_breakdown",
+            "reason_code_breakdown",
+        ):
+            item[key] = breakdown_from_counts(item[key])
+        item["observed_savings_usd"] = round(float(item["observed_savings_usd"]), 8)
+        candidate_breakdown.append(item)
+    candidate_breakdown.sort(key=lambda item: (-int(item["action_count"]), str(item["candidate_id"])))
+
+    return {
+        "schema": "agentflow.routing_promotion_lifecycle_queue_status.v1",
+        "queue_rows": row_count,
+        "action_count": action_count,
+        "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
+        "event_type_breakdown": breakdown_from_counts(event_counts),
+        "action_type_breakdown": breakdown_from_counts(action_type_counts),
+        "outcome_status_breakdown": breakdown_from_counts(outcome_counts),
+        "candidate_id_breakdown": breakdown_from_counts(candidate_counts),
+        "rule_id_breakdown": breakdown_from_counts(rule_counts),
+        "source_surface_breakdown": breakdown_from_counts(source_counts),
+        "model_family_pair_breakdown": breakdown_from_counts(model_pair_counts),
+        "policy_source_breakdown": breakdown_from_counts(policy_source_counts),
+        "cohort_count_breakdown": breakdown_from_counts(cohort_counts),
+        "error_bucket_breakdown": breakdown_from_counts(error_bucket_counts),
+        "reason_code_breakdown": breakdown_from_counts(reason_counts),
+        "candidate_breakdown": candidate_breakdown,
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -335,6 +551,7 @@ def managed_feedback_status_result(
     pattern_evidence = _pattern_evidence_status(store, source_surface=source_surface)
     routing_experiments = _routing_experiment_status(store, source_surface=source_surface)
     codex_app_canaries = _codex_app_canary_lifecycle_status(store, source_surface=source_surface)
+    routing_promotion_lifecycle = _routing_promotion_lifecycle_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -345,6 +562,7 @@ def managed_feedback_status_result(
         "pattern_evidence": pattern_evidence,
         "routing_experiments": routing_experiments,
         "codex_app_canaries": codex_app_canaries,
+        "routing_promotion_lifecycle": routing_promotion_lifecycle,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,

@@ -4550,21 +4550,65 @@ def _optimization_promotion_reason_counts(actions: list[dict[str, Any]]) -> dict
 
 
 def _optimization_promotion_action_snapshot(action: dict[str, Any]) -> dict[str, Any]:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
     projection = action.get("projection") if isinstance(action.get("projection"), dict) else {}
     actual = action.get("actual") if isinstance(action.get("actual"), dict) else {}
     next_step = action.get("next_step") if isinstance(action.get("next_step"), dict) else {}
+    cohorts = actual.get("cohorts") if isinstance(actual.get("cohorts"), dict) else {}
+    evidence = action.get("evidence_summary") if isinstance(action.get("evidence_summary"), dict) else {}
+    evidence_counts = evidence.get("cohort_counts") if isinstance(evidence.get("cohort_counts"), dict) else {}
+    policy_source = (
+        action.get("policy_source")
+        or local_update.get("policy_source")
+        or "managed-recommended"
+    )
+    requested_model_family = (
+        action.get("requested_model_family")
+        or action.get("requested_model")
+        or local_update.get("model_pattern")
+    )
+    routed_model_family = (
+        action.get("routed_model_family")
+        or action.get("candidate_target_model")
+        or action.get("target_model")
+        or local_update.get("candidate_target_model")
+        or local_update.get("target_model")
+    )
+    actual_counts = {
+        "canary_applied": actual.get("actual_canary_applied_count"),
+        "canary_holdout": actual.get("actual_canary_holdout_count"),
+        "skipped": actual.get("actual_skipped_count"),
+        "bypassed_or_disabled": actual.get("actual_bypassed_or_disabled_count"),
+        "safety_stopped": actual.get("actual_safety_stopped_count"),
+    }
+    projected_counts = {
+        "canary_applied": projection.get("current_canary_applied_count", evidence_counts.get("canary_applied")),
+        "canary_holdout": projection.get("current_canary_holdout_count", evidence_counts.get("canary_holdout")),
+        "bypassed_or_disabled": projection.get("current_bypassed_or_disabled_count", evidence_counts.get("bypassed_or_disabled")),
+    }
     snapshot = {
         "action_id": action.get("action_id"),
         "action_type": action.get("action_type"),
         "status": action.get("status"),
         "reason": action.get("reason"),
+        "action_family": action.get("action_family"),
+        "optimization_family": action.get("optimization_family"),
+        "source_surface": action.get("source_surface"),
+        "app_family": action.get("app_family"),
         "policy_section": action.get("policy_section"),
+        "policy_source": policy_source,
         "target_candidate_id": action.get("target_candidate_id"),
         "target_rule_id": action.get("target_rule_id") or action.get("rule_id"),
+        "requested_model_family": requested_model_family,
+        "routed_model_family": routed_model_family,
+        "model_family_pair": f"{requested_model_family or 'unknown'}->{routed_model_family}" if routed_model_family else None,
+        "target_model": routed_model_family,
         "canary_fraction": action.get("canary_fraction") or projection.get("target_canary_fraction"),
         "holdout_fraction": action.get("holdout_fraction") or projection.get("target_holdout_fraction"),
         "projected_savings_usd": projection.get("projected_savings_usd"),
         "observed_savings_usd": actual.get("observed_savings_usd"),
+        "projected_cohort_counts": {key: value for key, value in projected_counts.items() if value not in (None, "", [], {})},
+        "actual_cohort_counts": {key: value for key, value in actual_counts.items() if value not in (None, "", [], {})},
         "actual_canary_applied_count": actual.get("actual_canary_applied_count"),
         "actual_canary_holdout_count": actual.get("actual_canary_holdout_count"),
         "actual_skipped_count": actual.get("actual_skipped_count"),
@@ -4573,6 +4617,14 @@ def _optimization_promotion_action_snapshot(action: dict[str, Any]) -> dict[str,
         "error_rate_delta": actual.get("applied_minus_holdout_error_rate"),
         "retry_rate_delta": actual.get("applied_minus_holdout_retry_rate"),
         "latency_avg_delta_ms": actual.get("applied_minus_holdout_latency_avg_ms"),
+        "applied_error_rate": (cohorts.get("canary_applied") or {}).get("error_rate") if isinstance(cohorts.get("canary_applied"), dict) else None,
+        "holdout_error_rate": (cohorts.get("canary_holdout") or {}).get("error_rate") if isinstance(cohorts.get("canary_holdout"), dict) else None,
+        "applied_retry_rate": (cohorts.get("canary_applied") or {}).get("retry_rate") if isinstance(cohorts.get("canary_applied"), dict) else None,
+        "holdout_retry_rate": (cohorts.get("canary_holdout") or {}).get("retry_rate") if isinstance(cohorts.get("canary_holdout"), dict) else None,
+        "status_buckets": actual.get("status_buckets") or [],
+        "reason_buckets": actual.get("reason_buckets") or [],
+        "error_buckets": actual.get("error_buckets") or [],
+        "latency_buckets": actual.get("latency_buckets") or [],
         "next_step_verdict": next_step.get("verdict"),
         "next_step_reason_codes": next_step.get("reason_codes") or [],
         "next_step_warning_codes": next_step.get("warning_codes") or [],
@@ -4595,6 +4647,8 @@ def _optimization_promotion_lifecycle_payload(command: str, result: dict[str, An
     candidate_ids = sorted({str(item.get("target_candidate_id")) for item in snapshots if item.get("target_candidate_id")})
     rule_ids = sorted({str(item.get("target_rule_id")) for item in snapshots if item.get("target_rule_id")})
     policy_sections = sorted(_optimization_promotion_counts(actions, "policy_section"))
+    source_surface_counts = _optimization_promotion_counts(snapshots, "source_surface")
+    model_family_pair_counts = _optimization_promotion_counts(snapshots, "model_family_pair")
     event_type = _optimization_promotion_event_type(command, result)
     basis = {
         "command": command,
@@ -4619,6 +4673,8 @@ def _optimization_promotion_lifecycle_payload(command: str, result: dict[str, An
         "error_count": summary.get("error_count"),
         "action_type_counts": _optimization_promotion_counts(actions, "action_type"),
         "policy_section_counts": _optimization_promotion_counts(actions, "policy_section"),
+        "source_surface_counts": source_surface_counts,
+        "model_family_pair_counts": model_family_pair_counts,
         "local_status_counts": _optimization_promotion_counts(actions, "status"),
         "reason_code_counts": _optimization_promotion_reason_counts(actions),
         "action_ids": action_ids,

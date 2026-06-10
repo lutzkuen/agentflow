@@ -1737,10 +1737,20 @@ class PolicyReloadCliTests(unittest.TestCase):
         status_payload = json.loads(status_stdout.getvalue())
         self.assertEqual(status_payload["summary"]["queued"], 1)
         self.assertEqual(status_payload["oldest_pending"]["source_surface"], "optimization_promotion_lifecycle")
+        lifecycle = status_payload["routing_promotion_lifecycle"]
+        self.assertEqual(lifecycle["queue_rows"], 1)
+        self.assertEqual(lifecycle["action_count"], 1)
+        self.assertEqual(lifecycle["candidate_id_breakdown"], [{"value": "routing-cli-disabled-queue", "count": 1}])
+        self.assertEqual(lifecycle["action_type_breakdown"], [{"value": "widen", "count": 1}])
+        self.assertEqual(lifecycle["model_family_pair_breakdown"], [{"value": "unknown->claude-haiku-4-5-20251001", "count": 1}])
+        self.assertFalse(lifecycle["payload_json_included"])
         self.assertFalse(status_payload["privacy"]["payload_json_included"])
         self.assertEqual(queued_payload["event_type"], "dry-run")
         self.assertEqual(queued_payload["metadata"]["schema"], "agentflow.optimization_promotion_lifecycle_feedback.v1")
         self.assertEqual(queued_payload["metadata"]["candidate_ids"], ["routing-cli-disabled-queue"])
+        self.assertEqual(queued_payload["metadata"]["action_snapshots"][0]["source_surface"], "anthropic_messages")
+        self.assertEqual(queued_payload["metadata"]["action_snapshots"][0]["policy_source"], "managed-recommended")
+        self.assertEqual(queued_payload["metadata"]["action_snapshots"][0]["routed_model_family"], "claude-haiku-4-5-20251001")
         self.assertFalse(queued_payload["metadata"]["privacy"]["file_paths_included"])
 
     def test_optimization_promotion_canary_apply_retries_lifecycle_feedback_without_payload_output(self):
@@ -1811,6 +1821,10 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(output["managed_lifecycle_feedback"]["payload_included"])
         status_payload = json.loads(status_stdout.getvalue())
         self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        lifecycle = status_payload["routing_promotion_lifecycle"]
+        self.assertEqual(lifecycle["queue_state_breakdown"], [{"value": "pending", "count": 1}])
+        self.assertEqual(lifecycle["candidate_id_breakdown"], [{"value": "routing-cli-retry", "count": 1}])
+        self.assertFalse(lifecycle["payload_json_included"])
         self.assertFalse(status_payload["privacy"]["payload_json_included"])
 
     def test_optimization_promotion_canary_apply_rejects_raw_like_input_without_leaking_feedback(self):
@@ -2095,6 +2109,14 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("raw impact secret", rendered)
         status_payload = json.loads(status_stdout.getvalue())
         self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        lifecycle = status_payload["routing_promotion_lifecycle"]
+        self.assertEqual(lifecycle["queue_rows"], 1)
+        self.assertEqual(lifecycle["cohort_count_breakdown"], [
+            {"value": "canary_applied", "count": 1},
+            {"value": "canary_holdout", "count": 1},
+        ])
+        self.assertEqual(lifecycle["outcome_status_breakdown"], [{"value": "widen", "count": 1}])
+        self.assertEqual(lifecycle["candidate_breakdown"][0]["observed_savings_usd"], 0.002)
         self.assertFalse(status_payload["privacy"]["payload_json_included"])
 
     def test_optimization_rollout_actions_review_cli_accepts_signed_bundle_and_logs_event(self):
