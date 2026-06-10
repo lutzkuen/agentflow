@@ -9,6 +9,10 @@ from typing import Any
 import yaml
 
 from agentflow_proxy.optimization_promotion_actions import ACTION_SCHEMA, SCHEMA as PROMOTION_ACTIONS_SCHEMA
+from agentflow_proxy.optimization_rollout_review import (
+    OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA,
+    validate_optimization_rollout_bundle,
+)
 from agentflow_proxy.store import utc_now
 
 
@@ -20,6 +24,12 @@ _POLICY_SECTION_FILES = {
     "routing": "routing_rules.yaml",
     "crunch": "crunch_rules.yaml",
     "cache": "cache_rules.yaml",
+}
+_OPENAI_SOURCE_SURFACES = {
+    "openai",
+    "openai_provider_request",
+    "openai_responses",
+    "openai_chat_completions",
 }
 _COHORT_SAFE_KEYS = (
     "request_fingerprint",
@@ -76,6 +86,8 @@ _ALLOWED_RAW_LIKE_KEYS = {
     "apply_preview_command",
     "review_command",
     "content_free",
+    "api_endpoint",
+    "provider_endpoint",
 }
 
 
@@ -116,6 +128,204 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"", "0", "false", "no", "off"}
     return default
+
+
+def _nested_get(source: Any, *path: str) -> Any:
+    value = source
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _as_float_default(value: Any, default: float) -> float:
+    if value in (None, ""):
+        return default
+    return _as_float(value, default)
+
+
+def _is_openai_routing_action(action: dict[str, Any]) -> bool:
+    values = [
+        action.get("provider"),
+        action.get("provider_family"),
+        action.get("source_surface"),
+        action.get("provider_endpoint"),
+        _nested_get(action, "local_policy_update", "provider"),
+        _nested_get(action, "local_policy_update", "provider_family"),
+        _nested_get(action, "local_policy_update", "source_surface"),
+        _nested_get(action, "action", "schema"),
+    ]
+    normalized = {str(value or "").strip().lower() for value in values if value not in (None, "")}
+    return (
+        bool(normalized & _OPENAI_SOURCE_SURFACES)
+        or "responses" in normalized
+        or "chat_completions" in normalized
+        or any("openai" in value for value in normalized)
+    )
+
+
+def _nested_rollout_action(action: dict[str, Any]) -> dict[str, Any]:
+    nested = action.get("action") if isinstance(action.get("action"), dict) else {}
+    proposed = nested.get("proposed_edit") if isinstance(nested.get("proposed_edit"), dict) else {}
+    proposed_action = proposed.get("action") if isinstance(proposed.get("action"), dict) else {}
+    return {
+        "nested": nested,
+        "proposed": proposed,
+        "proposed_action": proposed_action,
+    }
+
+
+def _rollout_target_rule_id(action: dict[str, Any]) -> str:
+    nested = _nested_rollout_action(action)
+    return str(
+        _first_present(
+            action.get("target_rule_id"),
+            nested["nested"].get("target_rule_id"),
+            nested["proposed"].get("rule_id"),
+            action.get("target_candidate_id"),
+        )
+        or "optimization-rollout-routing-canary"
+    )
+
+
+def _rollout_target_model(action: dict[str, Any]) -> Any:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    nested = _nested_rollout_action(action)
+    return _first_present(
+        local_update.get("candidate_target_model"),
+        local_update.get("target_model"),
+        action.get("candidate_target_model"),
+        action.get("target_model"),
+        nested["proposed_action"].get("route_to"),
+        nested["nested"].get("target_model"),
+        nested["nested"].get("route_to"),
+    )
+
+
+def _optimization_rollout_to_promotion_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    actions: list[dict[str, Any]] = []
+    for action in bundle.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+        nested = _nested_rollout_action(action)
+        target_rule_id = _rollout_target_rule_id(action)
+        target_model = _rollout_target_model(action)
+        canary = local_update.get("canary") if isinstance(local_update.get("canary"), dict) else {}
+        canary_fraction = _as_float_default(
+            _first_present(
+                action.get("canary_fraction"),
+                action.get("rollout_fraction"),
+                local_update.get("canary_fraction"),
+                canary.get("fraction"),
+                canary.get("canary_fraction"),
+                _nested_get(action, "evidence_summary", "suggested_canary_fraction"),
+            ),
+            0.10,
+        )
+        holdout_fraction = _as_float_default(
+            _first_present(
+                action.get("holdout_fraction"),
+                local_update.get("holdout_fraction"),
+                canary.get("holdout_fraction"),
+            ),
+            0.10,
+        )
+        if str(action.get("action_type") or "") in {"rollback", "retire", "disable"}:
+            canary_fraction = 0.0
+            holdout_fraction = 0.0
+
+        update = {
+            **local_update,
+            "kind": "yaml-rule-canary",
+            "policy_source": "managed-recommended",
+            "managed_enforced": False,
+            "candidate_target_model": target_model,
+            "target_model": target_model,
+            "source_surface": _first_present(local_update.get("source_surface"), action.get("source_surface")),
+            "provider_endpoint": _first_present(local_update.get("provider_endpoint"), action.get("provider_endpoint")),
+            "category": _first_present(local_update.get("category"), action.get("category")),
+            "model_pattern": _first_present(
+                local_update.get("model_pattern"),
+                action.get("requested_model"),
+                action.get("requested_model_family"),
+                nested["proposed"].get("model_pattern"),
+            ),
+            "canary": {
+                **canary,
+                "enabled": canary_fraction > 0.0,
+                "fraction": canary_fraction,
+                "holdout_fraction": holdout_fraction,
+                "salt": str(_first_present(canary.get("salt"), action.get("action_id"), target_rule_id)),
+                "unit": str(_first_present(canary.get("unit"), canary.get("canary_unit"), "request_fingerprint")),
+            },
+        }
+        if isinstance(action.get("evidence_summary"), dict):
+            update["evidence_summary"] = action["evidence_summary"]
+        if isinstance(action.get("privacy_summary"), dict):
+            update["privacy_summary"] = action["privacy_summary"]
+
+        actions.append({
+            "schema": ACTION_SCHEMA,
+            "action_id": str(action.get("action_id") or f"optimization-rollout:{target_rule_id}"),
+            "action_type": str(action.get("action_type") or "widen"),
+            "target_candidate_id": str(action.get("target_candidate_id") or target_rule_id),
+            "target_rule_id": target_rule_id,
+            "action_family": action.get("action_family"),
+            "candidate_family": action.get("candidate_family"),
+            "policy_section": action.get("policy_section"),
+            "source_surface": action.get("source_surface"),
+            "app_family": action.get("app_family"),
+            "candidate_target_model": target_model,
+            "canary_fraction": canary_fraction,
+            "holdout_fraction": holdout_fraction,
+            "policy_source": "managed-recommended",
+            "managed_enforced": False,
+            "local_policy_update": update,
+            "evidence_summary": action.get("evidence_summary"),
+            "privacy_summary": action.get("privacy_summary"),
+        })
+    return {
+        "schema": PROMOTION_ACTIONS_SCHEMA,
+        "generated_at": bundle.get("generated_at") or utc_now(),
+        "source_schema": bundle.get("schema"),
+        "source_generated_at": bundle.get("generated_at"),
+        "source_expires_at": bundle.get("expires_at"),
+        "actions": actions,
+        "omitted": bundle.get("omitted_actions", []),
+        "privacy": {
+            "metadata_only": True,
+            "feature_only": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+        },
+    }
+
+
+def normalize_promotion_canary_bundle(bundle: Any) -> tuple[Any, dict[str, Any] | None]:
+    if not isinstance(bundle, dict):
+        return bundle, None
+    if bundle.get("schema") != OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA:
+        return bundle, None
+    validation = validate_optimization_rollout_bundle(bundle)
+    if not validation.get("ok"):
+        return None, validation
+    converted = _optimization_rollout_to_promotion_bundle(bundle)
+    converted["source_optimization_rollout_validation"] = validation
+    return converted, validation
 
 
 def _safe_cohort_features(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -362,26 +572,34 @@ def _safe_string_list(value: Any) -> list[str]:
 
 def _routing_phase_canary(action: dict[str, Any]) -> dict[str, Any]:
     local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
-    target_model = local_update.get("candidate_target_model") or action.get("candidate_target_model") or "haiku"
+    canary = local_update.get("canary") if isinstance(local_update.get("canary"), dict) else {}
+    target_model = _first_present(local_update.get("candidate_target_model"), local_update.get("target_model"), action.get("candidate_target_model"), "haiku")
     disabled = str(action.get("action_type") or "") == "rollback" or _as_float(action.get("canary_fraction")) <= 0
+    category = _first_present(local_update.get("category"), action.get("category"))
+    eligible_categories = _safe_string_list(local_update.get("eligible_categories"))
+    if not eligible_categories and category:
+        eligible_categories = [str(category)]
+    excluded_categories = _safe_string_list(local_update.get("excluded_categories"))
+    if not excluded_categories:
+        excluded_categories = ["code-gen"]
     return {
         "enabled": not disabled,
         "policy_id": str(action.get("target_rule_id") or action.get("target_candidate_id") or "promotion-routing-canary"),
         "promotion_action_id": action.get("action_id"),
         "target_candidate_id": action.get("target_candidate_id"),
         "policy_source": "managed-recommended",
-        "model_pattern": "sonnet",
+        "model_pattern": str(_first_present(local_update.get("model_pattern"), action.get("requested_model_family"), "sonnet")),
         "target_model": target_model,
-        "eligible_workflow_phases": ["tool-execution", "summary"],
-        "excluded_workflow_phases": ["planning", "thinking", "unknown"],
-        "eligible_categories": [],
-        "excluded_categories": ["code-gen"],
-        "min_workflow_phase_confidence": "medium",
-        "min_text_chars": 0,
-        "max_text_chars": 30000,
+        "eligible_workflow_phases": _safe_string_list(local_update.get("eligible_workflow_phases")) or ["tool-execution", "summary"],
+        "excluded_workflow_phases": _safe_string_list(local_update.get("excluded_workflow_phases")) or ["planning", "thinking", "unknown"],
+        "eligible_categories": eligible_categories,
+        "excluded_categories": excluded_categories,
+        "min_workflow_phase_confidence": str(local_update.get("min_workflow_phase_confidence") or "medium"),
+        "min_text_chars": _as_int(local_update.get("min_text_chars"), 0),
+        "max_text_chars": _as_int(local_update.get("max_text_chars"), 30000),
         "canary_fraction": 0.0 if disabled else _as_float(action.get("canary_fraction")),
         "holdout_fraction": 0.0 if disabled else _as_float(action.get("holdout_fraction")),
-        "salt": str(action.get("action_id") or action.get("target_candidate_id") or "promotion-routing-canary"),
+        "salt": str(_first_present(canary.get("salt"), action.get("action_id"), action.get("target_candidate_id"), "promotion-routing-canary")),
         "safety_stop": {
             "enabled": True,
             "window_hours": 24,
@@ -392,6 +610,57 @@ def _routing_phase_canary(action: dict[str, Any]) -> dict[str, Any]:
             "max_fallback_rate": 0.20,
             "max_latency_regression_ratio": 1.50,
             "limit": 500,
+        },
+    }
+
+
+def _routing_openai_canary(action: dict[str, Any]) -> dict[str, Any]:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    canary = local_update.get("canary") if isinstance(local_update.get("canary"), dict) else {}
+    target_model = _first_present(local_update.get("candidate_target_model"), local_update.get("target_model"), action.get("candidate_target_model"), "gpt-5-mini")
+    disabled = str(action.get("action_type") or "") in {"rollback", "retire", "disable"} or _as_float(action.get("canary_fraction")) <= 0
+    category = _first_present(local_update.get("category"), action.get("category"))
+    eligible_categories = _safe_string_list(local_update.get("eligible_categories"))
+    if not eligible_categories and category:
+        eligible_categories = [str(category)]
+    if not eligible_categories:
+        eligible_categories = ["chat", "short-completion"]
+    excluded_categories = _safe_string_list(local_update.get("excluded_categories")) or [
+        "tool-result",
+        "tool-heavy",
+        "tool-light",
+        "code-gen",
+        "long-context",
+    ]
+    return {
+        "enabled": not disabled,
+        "policy_id": str(action.get("target_rule_id") or action.get("target_candidate_id") or "promotion-openai-routing-canary"),
+        "promotion_action_id": action.get("action_id"),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "policy_source": "managed-recommended",
+        "model_pattern": str(_first_present(local_update.get("model_pattern"), action.get("requested_model_family"), "gpt-5")),
+        "target_model": target_model,
+        "eligible_categories": eligible_categories,
+        "excluded_categories": excluded_categories,
+        "allow_tools": _as_bool(local_update.get("allow_tools"), False),
+        "allow_stream": _as_bool(local_update.get("allow_stream"), False),
+        "min_text_chars": _as_int(local_update.get("min_text_chars"), 0),
+        "max_text_chars": _as_int(local_update.get("max_text_chars"), 8000),
+        "min_input_tokens_est": _as_int(local_update.get("min_input_tokens_est"), 0),
+        "max_input_tokens_est": _as_int(local_update.get("max_input_tokens_est"), 2000),
+        "canary_fraction": 0.0 if disabled else _as_float(action.get("canary_fraction")),
+        "holdout_fraction": 0.0 if disabled else _as_float(action.get("holdout_fraction")),
+        "salt": str(_first_present(canary.get("salt"), action.get("action_id"), action.get("target_candidate_id"), "promotion-openai-routing-canary")),
+        "safety_stop": {
+            "enabled": True,
+            "window_hours": 24,
+            "min_samples": 20,
+            "min_holdout_samples": 10,
+            "max_error_rate": 0.03,
+            "max_retry_rate": 0.10,
+            "max_fallback_rate": 0.10,
+            "max_latency_regression_ratio": 1.50,
+            "limit": 1000,
         },
     }
 
@@ -851,6 +1120,15 @@ def apply_optimization_promotion_canaries(
     errors: list[dict[str, str]] = []
     actions: list[dict[str, Any]] = []
     files: list[dict[str, Any]] = []
+    source_validation: dict[str, Any] | None = None
+    normalized, validation = normalize_promotion_canary_bundle(bundle)
+    if validation is not None:
+        source_validation = validation
+        if normalized is None:
+            errors.extend(validation.get("errors", []))
+            raw_actions = []
+        else:
+            bundle = normalized
     if not isinstance(bundle, dict) or bundle.get("schema") != PROMOTION_ACTIONS_SCHEMA:
         errors.append({"path": "$.schema", "message": f"expected {PROMOTION_ACTIONS_SCHEMA}"})
     raw_actions = bundle.get("actions") if isinstance(bundle, dict) else None
@@ -909,17 +1187,37 @@ def apply_optimization_promotion_canaries(
                 continue
             plan = _file_plan(section)
             if section == "routing":
-                plan["data"]["phase_canary"] = _routing_phase_canary(action)
+                target_key = "openai_canary" if _is_openai_routing_action(action) else "phase_canary"
+                existing_canary = plan["data"].get(target_key)
+                if (
+                    isinstance(existing_canary, dict)
+                    and _as_bool(existing_canary.get("enabled"), False)
+                    and str(existing_canary.get("policy_source") or "") not in {"", "managed-recommended"}
+                ):
+                    errors.append({"path": f"$.actions[{index}]", "message": "routing canary targets an enabled non-managed local rule"})
+                    actions.append({
+                        "path": f"$.actions[{index}]",
+                        "status": "rejected",
+                        "reason": "unsafe-policy-source",
+                        "policy_section": "routing",
+                        "target_candidate_id": action.get("target_candidate_id"),
+                        "target_rule_id": action.get("target_rule_id"),
+                    })
+                    continue
+                plan["data"][target_key] = _routing_openai_canary(action) if target_key == "openai_canary" else _routing_phase_canary(action)
+                canary_policy = plan["data"][target_key]
                 actions.append({
                     "path": f"$.actions[{index}]",
                     "status": "planned",
                     "policy_section": "routing",
+                    "target_local_policy": target_key,
                     "action_type": action.get("action_type"),
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": action.get("target_rule_id"),
                     "action_id": action.get("action_id"),
-                    "canary_fraction": plan["data"]["phase_canary"]["canary_fraction"],
-                    "holdout_fraction": plan["data"]["phase_canary"]["holdout_fraction"],
+                    "rule_id": canary_policy.get("policy_id"),
+                    "canary_fraction": canary_policy["canary_fraction"],
+                    "holdout_fraction": canary_policy["holdout_fraction"],
                 })
                 continue
 
@@ -1065,6 +1363,7 @@ def apply_optimization_promotion_canaries(
         "config_dir": str(config_path),
         "actions": actions,
         "files": files,
+        "source_optimization_rollout_validation": source_validation,
         "summary": {
             "action_count": len(raw_actions),
             "planned_action_count": sum(1 for action in actions if action.get("status") == "planned"),

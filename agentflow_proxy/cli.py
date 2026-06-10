@@ -1244,6 +1244,140 @@ def optimization_rollout_actions_review_cli(
     return 0 if review["ok"] else 1
 
 
+def optimization_rollout_actions_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Apply managed optimization rollout actions as local canary policy files")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Optimization rollout action bundle JSON path, or '-' for stdin. Ignored when --url is set.",
+    )
+    parser.add_argument(
+        "--url",
+        default=None,
+        help=f"Managed optimization rollout actions URL. May also be set with {OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV}.",
+    )
+    parser.add_argument("--api-key", help="Managed optimizer API key. Prefer --api-key-env for shell history safety.")
+    parser.add_argument(
+        "--api-key-env",
+        default=MANAGED_POLICY_API_KEY_ENV,
+        help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
+    )
+    parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
+    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
+    parser.add_argument("--limit", type=int, default=50, help="Maximum actions to request when fetching.")
+    parser.add_argument("--source-surface", help="Optional managed server source_surface filter.")
+    parser.add_argument("--app-family", help="Optional managed server app_family filter.")
+    parser.add_argument("--category", help="Optional managed server category filter.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        help="HTTP timeout in seconds, default: 10.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queued managed lifecycle feedback, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["routing", "crunch", "cache"],
+        help="Policy section to apply. May be repeated. Default: routing, crunch, and cache.",
+    )
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Preview changes without writing local YAML files.")
+    parser.add_argument("--write", dest="dry_run", action="store_false", help="Write reviewed canary edits to local YAML policy files.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print apply JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    fetch = None
+    fetch_url = args.url or os.getenv(OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV)
+    if fetch_url:
+        args.url = fetch_url
+        bundle, fetch, fetch_exit = _read_rollout_actions_from_url(args)
+        if fetch_exit is not None:
+            result = {
+                "schema": "agentflow.optimization_rollout_actions_apply.v1",
+                "ok": False,
+                "dry_run": bool(args.dry_run),
+                "fetch": fetch,
+                "actions": [],
+                "files": [],
+                "wrote_policy_files": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": fetch.get("status") != "skipped" if isinstance(fetch, dict) else False,
+                "error": fetch.get("error") if isinstance(fetch, dict) else None,
+            }
+            _write_rollout_actions_result(stderr, result, pretty=args.pretty)
+            return fetch_exit
+    else:
+        bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+        if read_error:
+            bundle = {"schema": "invalid"}
+            fetch = {"status": "skipped", "reason": "local-input", "error": read_error}
+
+    from agentflow_proxy.optimization_promotion_canary import apply_optimization_promotion_canaries
+
+    result = apply_optimization_promotion_canaries(
+        bundle,
+        config_dir=args.config_dir,
+        dry_run=args.dry_run,
+        sections=args.section,
+    )
+    result["schema"] = "agentflow.optimization_rollout_actions_apply.v1"
+    result["source_command"] = "agentflow-optimization-rollout-actions-apply"
+    if fetch:
+        result["fetch"] = fetch
+    _attach_optimization_promotion_lifecycle_feedback(
+        result,
+        command="dry-run" if args.dry_run else "apply",
+        db_path=str(args.db),
+    )
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "optimization-rollout-actions-apply",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": None if fetch_url else args.path,
+            "url": _redact_url(fetch_url),
+            "config_dir": args.config_dir,
+            "dry_run": args.dry_run,
+            "planned_action_count": (result.get("summary") or {}).get("planned_action_count"),
+            "changed_files": [
+                file.get("path")
+                for file in result.get("files", [])
+                if isinstance(file, dict) and file.get("changed")
+            ],
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
 def managed_rollout_actions_apply_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -4029,6 +4163,10 @@ def managed_rollout_actions_review_main() -> None:
 
 def optimization_rollout_actions_review_main() -> None:
     raise SystemExit(optimization_rollout_actions_review_cli())
+
+
+def optimization_rollout_actions_apply_main() -> None:
+    raise SystemExit(optimization_rollout_actions_apply_cli())
 
 
 def managed_rollout_actions_apply_main() -> None:

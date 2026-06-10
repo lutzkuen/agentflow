@@ -29,6 +29,7 @@ SUPPORTED_LOCAL_ACTION_FAMILIES = {"routing", "crunch", "cache", "old_context_su
 SUPPORTED_POLICY_SECTIONS = {"routing", "crunch", "cache", "old_context_summarization"}
 ACTIONABLE_ACTION_TYPES = {"widen", "hold", "rollback", "retire", "disable"}
 PASSING_EVAL_VERDICTS = {"widen"}
+PASSING_ROLLBACK_VERDICTS = {"rollback", "hold", "widen"}
 RAW_LIKE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -347,8 +348,12 @@ def _validate_action(action: Any, path: str, errors: list[dict[str, str]], *, no
         _add_error(errors, f"{path}.expires_at", "optimization rollout action is expired")
     _validate_compatibility(action.get("local_executor_compatibility"), f"{path}.local_executor_compatibility", errors, family=family)
     verdict = _local_eval_verdict(action)
+    action_type = str(action.get("action_type") or "")
     if not verdict:
         _add_error(errors, f"{path}.evidence_summary.local_eval_verdict", "local eval verdict evidence is required")
+    elif action_type in {"rollback", "retire", "disable"}:
+        if str(verdict.get("verdict") or "") not in PASSING_ROLLBACK_VERDICTS:
+            _add_error(errors, f"{path}.evidence_summary.local_eval_verdict.verdict", "rollback action requires rollback, hold, or widen local eval verdict")
     elif str(verdict.get("verdict") or "") not in PASSING_EVAL_VERDICTS:
         _add_error(errors, f"{path}.evidence_summary.local_eval_verdict.verdict", "local eval verdict must be widen")
     privacy = action.get("privacy_summary") if isinstance(action.get("privacy_summary"), dict) else {}

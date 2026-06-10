@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -25,6 +26,7 @@ from agentflow_proxy.optimization_rollout_review import (
     attach_optimization_rollout_provenance,
     review_optimization_rollout_actions,
 )
+from agentflow_proxy.cli import optimization_rollout_actions_apply_cli
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
 from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -396,13 +398,15 @@ class OptimizationModuleTests(unittest.TestCase):
         created_at: str = "2026-06-10T04:00:00+00:00",
         suffix: str = "",
         fallback_reason: str | None = None,
+        action_id: str = "test-openai-canary-action",
+        rule_id: str = "test-openai-canary-policy",
     ):
         status = "applied" if cohort == "canary_applied" else "holdout" if cohort == "canary_holdout" else "safety_stopped"
         canary = {
             "enabled": True,
-            "policy_id": "test-openai-canary-policy",
-            "rule_id": "test-openai-canary-policy",
-            "promotion_action_id": "test-openai-canary-action",
+            "policy_id": rule_id,
+            "rule_id": rule_id,
+            "promotion_action_id": action_id,
             "target_candidate_id": candidate_id,
             "candidate_id": candidate_id,
             "status": status,
@@ -1129,6 +1133,140 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertIn("privacy summary reports raw payloads or local identifiers", messages)
         self.assertIn("raw or local-identifier rollout payloads are not accepted", messages)
         self.assertEqual(result["provenance"]["status"], "missing")
+
+    def _signed_optimization_rollout_bundle(self, bundle=None):
+        return attach_optimization_rollout_provenance(
+            bundle or self._optimization_rollout_bundle(),
+            secret="review-secret",
+            issuer="agentflow-server",
+            server_id="managed-test",
+            key_id="review-key",
+            generated_at="2026-06-10T05:00:00+00:00",
+        )
+
+    def test_optimization_rollout_apply_writes_openai_canary_and_rolls_back(self):
+        signed = self._signed_optimization_rollout_bundle()
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            dry_run = apply_optimization_promotion_canaries(signed, config_dir=tmp, dry_run=True)
+            self.assertTrue(dry_run["ok"])
+            self.assertFalse(dry_run["wrote_policy_files"])
+            self.assertEqual(dry_run["actions"][0]["target_local_policy"], "openai_canary")
+            self.assertEqual(dry_run["actions"][0]["canary_fraction"], 0.1)
+            self.assertEqual(dry_run["actions"][0]["holdout_fraction"], 0.1)
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+
+            applied = apply_optimization_promotion_canaries(signed, config_dir=tmp, dry_run=False)
+            self.assertTrue(applied["ok"])
+            self.assertTrue(applied["wrote_policy_files"])
+            data = yaml.safe_load((Path(tmp) / "routing_rules.yaml").read_text(encoding="utf-8"))
+            canary = data["openai_canary"]
+            self.assertTrue(canary["enabled"])
+            self.assertEqual(canary["policy_id"], "openai-routing-rule")
+            self.assertEqual(canary["promotion_action_id"], "optimization-rollout-action:routing")
+            self.assertEqual(canary["target_candidate_id"], "routing-policy-candidate")
+            self.assertEqual(canary["target_model"], "gpt-5-mini")
+            self.assertEqual(canary["policy_source"], "managed-recommended")
+            self.assertEqual(canary["canary_fraction"], 0.1)
+            self.assertEqual(canary["holdout_fraction"], 0.1)
+
+            rollback_bundle = self._optimization_rollout_bundle()
+            rollback_bundle["actions"][0]["action_type"] = "rollback"
+            rollback_bundle["actions"][0]["evidence_summary"]["local_eval_verdict"]["verdict"] = "rollback"
+            rollback = self._signed_optimization_rollout_bundle(rollback_bundle)
+            rollback_result = apply_optimization_promotion_canaries(rollback, config_dir=tmp, dry_run=False)
+            self.assertTrue(rollback_result["ok"])
+            rolled_back = yaml.safe_load((Path(tmp) / "routing_rules.yaml").read_text(encoding="utf-8"))["openai_canary"]
+            self.assertFalse(rolled_back["enabled"])
+            self.assertEqual(rolled_back["canary_fraction"], 0.0)
+            self.assertEqual(rolled_back["holdout_fraction"], 0.0)
+
+    def test_optimization_rollout_apply_rejects_raw_payloads_and_enabled_manual_policy(self):
+        raw_bundle = self._optimization_rollout_bundle()
+        raw_bundle["actions"][0]["raw_request"] = {"prompt": "raw managed prompt must not be written"}
+        signed_raw = self._signed_optimization_rollout_bundle(raw_bundle)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            rejected = apply_optimization_promotion_canaries(signed_raw, config_dir=tmp, dry_run=False)
+            self.assertFalse(rejected["ok"])
+            self.assertFalse(rejected["wrote_policy_files"])
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+            rendered = stable_json(rejected)
+            self.assertNotIn("raw managed prompt", rendered)
+
+            routing_yaml = Path(tmp) / "routing_rules.yaml"
+            routing_yaml.write_text(
+                yaml.safe_dump({
+                    "rules": [],
+                    "openai_canary": {
+                        "enabled": True,
+                        "policy_id": "manual-openai-canary",
+                        "policy_source": "local-manual",
+                        "target_model": "gpt-5-mini",
+                        "canary_fraction": 0.2,
+                    },
+                }),
+                encoding="utf-8",
+            )
+            blocked = apply_optimization_promotion_canaries(self._signed_optimization_rollout_bundle(), config_dir=tmp, dry_run=False)
+            self.assertFalse(blocked["ok"])
+            self.assertFalse(blocked["wrote_policy_files"])
+            self.assertIn("unsafe-policy-source", stable_json(blocked))
+            preserved = yaml.safe_load(routing_yaml.read_text(encoding="utf-8"))["openai_canary"]
+            self.assertEqual(preserved["policy_id"], "manual-openai-canary")
+
+    def test_optimization_rollout_cli_and_impact_are_metadata_only(self):
+        signed = self._signed_optimization_rollout_bundle()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            bundle_path = Path(tmp) / "rollout.json"
+            bundle_path.write_text(json.dumps(signed), encoding="utf-8")
+            out = io.StringIO()
+            code = optimization_rollout_actions_apply_cli(
+                [str(bundle_path), "--config-dir", tmp, "--pretty"],
+                stdout=out,
+            )
+            self.assertEqual(code, 0)
+            cli_result = json.loads(out.getvalue())
+            self.assertTrue(cli_result["ok"])
+            self.assertTrue(cli_result["dry_run"])
+            self.assertFalse(cli_result["wrote_policy_files"])
+            self.assertEqual(cli_result["actions"][0]["target_local_policy"], "openai_canary")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            db_path = Path(tmp) / "agentflow.sqlite3"
+            store = Store(str(db_path))
+            try:
+                self._log_openai_canary_call(
+                    store,
+                    candidate_id="routing-policy-candidate",
+                    cohort="canary_applied",
+                    action_id="optimization-rollout-action:routing",
+                    rule_id="openai-routing-rule",
+                    created_at="2026-06-10T06:00:00+00:00",
+                    suffix="apply",
+                )
+                self._log_openai_canary_call(
+                    store,
+                    candidate_id="routing-policy-candidate",
+                    cohort="canary_holdout",
+                    action_id="optimization-rollout-action:routing",
+                    rule_id="openai-routing-rule",
+                    cost_est=0.003,
+                    cost_baseline=0.003,
+                    created_at="2026-06-10T06:01:00+00:00",
+                    suffix="holdout",
+                )
+                impact = measure_optimization_promotion_impact(signed, store_obj=store, limit=10, min_applied_samples=1, min_holdout_samples=1)
+            finally:
+                store.conn.close()
+
+        self.assertTrue(impact["ok"])
+        self.assertEqual(impact["summary"]["actual_matched_metadata_row_count"], 2)
+        self.assertEqual(impact["summary"]["actual_canary_applied_count"], 1)
+        self.assertEqual(impact["summary"]["actual_canary_holdout_count"], 1)
+        self.assertFalse(impact["privacy"]["raw_prompts_included"])
+        self.assertFalse(impact["privacy"]["request_ids_included"])
+        self._assert_privacy_clean(impact)
 
     def test_feedback_status_result_is_metadata_only(self):
         result = feedback.managed_feedback_status_result(

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agentflow_proxy.optimization_promotion_actions import SCHEMA as PROMOTION_ACTIONS_SCHEMA
+from agentflow_proxy.optimization_promotion_canary import normalize_promotion_canary_bundle
 from agentflow_proxy.store import utc_now
 
 
@@ -218,7 +219,7 @@ def _cohort_from_meta(meta: dict[str, Any]) -> str:
 
 
 def _promotion_meta_from_decision(decision: dict[str, Any]) -> dict[str, Any] | None:
-    for key in ("phase_canary", "promotion_canary", "optimization_promotion_canary"):
+    for key in ("phase_canary", "openai_canary", "promotion_canary", "optimization_promotion_canary"):
         value = decision.get(key)
         if isinstance(value, dict) and (value.get("target_candidate_id") or value.get("promotion_action_id") or value.get("action_id")):
             return value
@@ -544,6 +545,17 @@ def measure_optimization_promotion_impact(
     if not isinstance(promotion_actions, dict):
         result["error"] = {"type": "invalid_promotion_actions", "message": "promotion action bundle must be a JSON object"}
         return result
+    normalized, validation = normalize_promotion_canary_bundle(promotion_actions)
+    if validation is not None:
+        result["source_optimization_rollout_validation"] = validation
+        if normalized is None:
+            result.update({
+                "status": "invalid",
+                "error": {"type": "invalid_optimization_rollout_actions", "message": "optimization rollout action bundle did not pass local validation"},
+            })
+            result["warnings"].extend(validation.get("errors", []))
+            return result
+        promotion_actions = normalized
     if promotion_actions.get("schema") != PROMOTION_ACTIONS_SCHEMA:
         result["warnings"].append({"code": "unexpected-action-bundle-schema", "schema": promotion_actions.get("schema")})
     violations: list[dict[str, str]] = []
