@@ -16,6 +16,20 @@
 #   category        — exact match: tool-result | tool-heavy | tool-light | long-context | short-completion | code-gen | chat
 #   category_not_in — category name or list of category names to exclude
 #   workflow_phase  — exact match against routing metadata: planning | tool-execution | verification | summary | thinking | chat | unknown
+#   session_memory  — optional conservative per-session metadata gate:
+#     enabled: true
+#     window_size: 8
+#     min_call_count: 8
+#     dominant_phase: tool-execution
+#     dominant_phase_in: [tool-execution, summary]
+#     min_dominant_phase_count: 8
+#     stable_phase: true
+#     blocked_phases: [planning, verification, thinking, unknown]
+#     max_error_count: 0
+#     max_retry_count: 0
+#     max_fallback_count: 0
+#     allow_thinking: false
+#     model_family_floor: sonnet
 #
 # Action:
 #   route_to  — "haiku", "sonnet", "opus" (resolves to current default model), or a full model ID

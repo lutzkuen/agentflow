@@ -459,3 +459,64 @@ def build_session_phase_memory(
             "error_text_included": False,
         },
     }
+
+
+def build_session_phase_memory_for_session(
+    store_obj: Any,
+    session_id: str,
+    *,
+    limit: int = DEFAULT_WINDOW_SIZE,
+    window_size: int = DEFAULT_WINDOW_SIZE,
+    min_plateau_chars: int = DEFAULT_MIN_PLATEAU_CHARS,
+    max_plateau_delta_ratio: float = DEFAULT_MAX_PLATEAU_DELTA_RATIO,
+    plateau_pairs_for_classification: int = DEFAULT_PLATEAU_PAIRS_FOR_CLASSIFICATION,
+) -> dict[str, Any] | None:
+    """Build the metadata-only recent phase memory for one raw local session id."""
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    limit = max(1, min(int(limit), 10_000))
+    window_size = max(1, min(int(window_size), 200))
+    rows = store_obj.conn.execute(
+        """
+        SELECT created_at,
+               session_id,
+               coalesce(provider, 'anthropic') as provider,
+               source_surface,
+               path,
+               requested_model,
+               routed_model,
+               stream,
+               status_code,
+               input_tokens_est,
+               output_tokens_est,
+               actual_input_tokens,
+               actual_output_tokens,
+               cost_est_usd,
+               cost_baseline_usd,
+               crunch_json,
+               routing_json,
+               cache_json,
+               category,
+               cache_creation_input_tokens,
+               cache_read_input_tokens,
+               retry_count,
+               thinking_output_tokens
+        FROM calls
+        WHERE session_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (session_id, limit),
+    ).fetchall()
+    if not rows:
+        return None
+    features = [_row_features(dict(row)) for row in reversed(rows)]
+    return _session_memory(
+        session_id,
+        features,
+        window_size=window_size,
+        min_plateau_chars=min_plateau_chars,
+        max_plateau_delta_ratio=max_plateau_delta_ratio,
+        plateau_pairs_for_classification=plateau_pairs_for_classification,
+    )

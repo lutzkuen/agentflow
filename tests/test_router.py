@@ -10,6 +10,53 @@ from agentflow_proxy.store import Store, stable_json, utc_now
 from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
 
 
+def _log_memory_call(
+    store: Store,
+    suffix: int,
+    *,
+    session_id: str = "secret-session-router",
+    phase: str = "tool-execution",
+    category: str = "tool-result",
+    status_code: int = 200,
+    retry_count: int = 0,
+    fallback: bool = False,
+    requested_model: str = SONNET_DEFAULT,
+    routed_model: str = SONNET_DEFAULT,
+) -> None:
+    routing = {
+        "workflow_phase": phase,
+        "category": category,
+        "text_chars": 12000,
+        "has_tools": category.startswith("tool"),
+    }
+    if fallback:
+        routing["fallback_reason"] = "rate_limited"
+    store.log_call(
+        id=f"memory-call-{suffix}",
+        created_at=f"2026-06-10T10:00:{suffix:02d}+00:00",
+        path="/v1/messages",
+        requested_model=requested_model,
+        routed_model=routed_model,
+        stream=1,
+        cache_hit=0,
+        status_code=status_code,
+        latency_ms=1000,
+        input_tokens_est=3000,
+        output_tokens_est=100,
+        actual_input_tokens=3000,
+        actual_output_tokens=100,
+        cost_est_usd=0.01,
+        cost_baseline_usd=0.02,
+        routing_json=stable_json(routing),
+        crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+        cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+        session_id=session_id,
+        category=category,
+        retry_count=retry_count,
+        provider="anthropic",
+    )
+
+
 class RouterTest(unittest.TestCase):
     def _reload_with_routing_yaml(self, tmp: str, yaml_text: str, extra_env: dict[str, str] | None = None):
         rules_path = Path(tmp) / "routing_rules.yaml"
@@ -757,6 +804,263 @@ rules:
                     self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
                     self.assertEqual(meta["workflow_phase"], "summary")
                     self.assertEqual(meta["reason"], "summary phase routed to Haiku")
+            finally:
+                importlib.reload(router_module)
+
+    def test_session_memory_rule_routes_stable_tool_execution_window(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for index in range(1, 4):
+                    _log_memory_call(store, index)
+            finally:
+                store.conn.close()
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+      workflow_phase: tool-execution
+      session_memory:
+        enabled: true
+        window_size: 3
+        min_call_count: 3
+        dominant_phase: tool-execution
+        min_dominant_phase_count: 3
+        max_error_count: 0
+        max_retry_count: 0
+        max_fallback_count: 0
+        blocked_phases: [planning, verification, thinking, unknown]
+        model_family_floor: sonnet
+    action:
+      route_to: haiku
+      reason: stable tool execution memory routed to Haiku
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="secret-session-router")
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["reason"], "stable tool execution memory routed to Haiku")
+                    memory = meta["session_phase_memory"]
+                    self.assertEqual(memory["status"], "used")
+                    self.assertEqual(memory["memory"]["dominant_phase"], "tool-execution")
+                    self.assertEqual(memory["memory"]["window"]["call_count"], 3)
+                    self.assertFalse(memory["memory"]["raw_session_id_included"])
+                    self.assertNotIn("secret-session-router", stable_json(memory))
+            finally:
+                importlib.reload(router_module)
+
+    def test_session_memory_rule_blocks_missing_memory(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            store.conn.close()
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+      session_memory:
+        enabled: true
+        min_call_count: 3
+        dominant_phase: tool-execution
+    action:
+      route_to: haiku
+      reason: stable memory route
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="unknown-session")
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["session_phase_memory"]["status"], "blocked")
+                    self.assertEqual(meta["session_phase_memory"]["reason"], "memory-missing")
+                    self.assertEqual(meta["reason"], "session phase memory blocked: memory-missing")
+            finally:
+                importlib.reload(router_module)
+
+    def test_session_memory_rule_blocks_recent_errors_retries_and_fallbacks(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                _log_memory_call(store, 1)
+                _log_memory_call(store, 2, status_code=429, retry_count=1, fallback=True)
+                _log_memory_call(store, 3)
+            finally:
+                store.conn.close()
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+      session_memory:
+        enabled: true
+        window_size: 3
+        min_call_count: 3
+        dominant_phase: tool-execution
+        max_error_count: 0
+        max_retry_count: 0
+        max_fallback_count: 0
+    action:
+      route_to: haiku
+      reason: stable memory route
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="secret-session-router")
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    reasons = set(meta["session_phase_memory"]["reason_codes"])
+                    self.assertIn("recent_errors", reasons)
+                    self.assertIn("recent_retries", reasons)
+                    self.assertIn("recent_routing_fallback", reasons)
+            finally:
+                importlib.reload(router_module)
+
+    def test_session_memory_rule_blocks_thinking_and_planning_windows(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                _log_memory_call(store, 1, phase="planning", category="tool-light")
+                _log_memory_call(store, 2, phase="thinking", category="tool-result")
+                _log_memory_call(store, 3, phase="thinking", category="tool-result")
+            finally:
+                store.conn.close()
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+      session_memory:
+        enabled: true
+        window_size: 3
+        min_call_count: 3
+        dominant_phase_in: [tool-execution, summary]
+        blocked_phases: [planning, verification, thinking, unknown]
+        allow_thinking: false
+    action:
+      route_to: haiku
+      reason: stable memory route
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="secret-session-router")
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    reasons = set(meta["session_phase_memory"]["reason_codes"])
+                    self.assertIn("dominant_phase_mismatch", reasons)
+                    self.assertIn("blocked_phase_present", reasons)
+                    self.assertIn("thinking_present", reasons)
+            finally:
+                importlib.reload(router_module)
+
+    def test_session_memory_rule_routes_stable_summary_when_per_call_rule_agrees(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for index in range(1, 4):
+                    _log_memory_call(store, index, phase="summary", category="short-completion")
+            finally:
+                store.conn.close()
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      has_tools: false
+      workflow_phase: summary
+      text_chars_lt: 10000
+      session_memory:
+        enabled: true
+        window_size: 3
+        min_call_count: 3
+        dominant_phase: summary
+        stable_phase: true
+        model_family_floor: sonnet
+    action:
+      route_to: haiku
+      reason: stable summary memory routed to Haiku
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {"role": "user", "content": "Make the change."},
+                            {"role": "assistant", "content": "Done."},
+                            {"role": "user", "content": "Summarize the result."},
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="secret-session-router")
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["workflow_phase"], "summary")
+                    self.assertEqual(meta["session_phase_memory"]["status"], "used")
             finally:
                 importlib.reload(router_module)
 

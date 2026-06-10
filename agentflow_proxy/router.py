@@ -12,6 +12,7 @@ from typing import Any
 
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.pricing import estimate_cost
+from agentflow_proxy.session_phase_memory import build_session_phase_memory_for_session
 from agentflow_proxy.store import stable_json
 
 HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
@@ -462,6 +463,7 @@ ROUTING_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_RULES_PATH)
 
 _TIER_MAP = {"haiku": HAIKU_DEFAULT, "sonnet": SONNET_DEFAULT, "opus": OPUS_DEFAULT}
 _CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2}
+_MODEL_FAMILY_RANK = {"unknown": 0, "other": 0, "haiku": 1, "gpt": 1, "sonnet": 2, "opus": 3}
 
 
 def _text_bucket(text_chars: int) -> str:
@@ -491,6 +493,193 @@ def _cohort_score(payload: dict[str, Any], salt: str) -> tuple[str, float]:
 
 def _input_tokens_est(text_chars: int) -> int:
     return max(1, text_chars // 4)
+
+
+def _model_family(model: Any) -> str:
+    value = str(model or "").lower()
+    if "haiku" in value:
+        return "haiku"
+    if "sonnet" in value:
+        return "sonnet"
+    if "opus" in value:
+        return "opus"
+    if value.startswith("gpt-"):
+        return "gpt"
+    if not value:
+        return "unknown"
+    return "other"
+
+
+def _count_value(rows: Any, value: str) -> int:
+    if not isinstance(rows, list):
+        return 0
+    return sum(int(row.get("count") or 0) for row in rows if isinstance(row, dict) and row.get("value") == value)
+
+
+def _dominant_count(memory: dict[str, Any], key: str, value: str) -> int:
+    return _count_value(memory.get(key), value)
+
+
+def _memory_policy_summary(policy: dict[str, Any]) -> dict[str, Any]:
+    allow_blockers = sorted({"context_plateau_active", *_string_list(policy.get("allow_blockers"))})
+    return {
+        "enabled": True,
+        "required": True,
+        "window_size": _int_min(policy.get("window_size"), DEFAULT_SESSION_MEMORY_WINDOW, 1),
+        "min_call_count": _int_min(policy.get("min_call_count"), 3, 1),
+        "min_dominant_phase_count": _int_min(policy.get("min_dominant_phase_count"), 0, 0),
+        "max_error_count": _int_min(policy.get("max_error_count"), 0, 0),
+        "max_retry_count": _int_min(policy.get("max_retry_count"), 0, 0),
+        "max_fallback_count": _int_min(policy.get("max_fallback_count"), 0, 0),
+        "allow_thinking": _as_bool(policy.get("allow_thinking"), False),
+        "allow_blockers": allow_blockers,
+        "model_family_floor": str(policy.get("model_family_floor") or "").strip().lower() or None,
+    }
+
+
+DEFAULT_SESSION_MEMORY_WINDOW = 20
+
+
+def _session_memory_db_path() -> str | None:
+    return _phase_canary_db_path()
+
+
+def _load_session_memory(session_id: str | None, *, limit: int, window_size: int) -> tuple[dict[str, Any] | None, str | None]:
+    if not session_id:
+        return None, "missing-session-id"
+    db_path = _session_memory_db_path()
+    if not db_path:
+        return None, "non-sqlite-db"
+    path = Path(db_path).expanduser()
+    if not path.exists():
+        return None, "db-missing"
+    try:
+        from agentflow_proxy.store import Store
+
+        store = Store(str(path))
+        try:
+            memory = build_session_phase_memory_for_session(store, session_id, limit=limit, window_size=window_size)
+        finally:
+            store.conn.close()
+    except (OSError, sqlite3.Error) as exc:
+        return None, f"db-error:{exc.__class__.__name__}"
+    if not memory:
+        return None, "memory-missing"
+    return memory, None
+
+
+def _matches_session_memory_condition(
+    policy: Any,
+    *,
+    session_id: str | None,
+    requested_model: str,
+    current_phase: str,
+) -> tuple[bool, dict[str, Any]]:
+    if not isinstance(policy, dict):
+        return True, {}
+    if not _as_bool(policy.get("enabled"), True):
+        return True, {"enabled": False, "status": "ignored", "reason": "condition-disabled"}
+
+    window_size = _int_min(policy.get("window_size"), DEFAULT_SESSION_MEMORY_WINDOW, 1)
+    limit = _int_min(policy.get("limit"), window_size, window_size)
+    meta = {
+        "enabled": True,
+        "status": "evaluating",
+        "reason": "evaluating",
+        "policy": _memory_policy_summary(policy),
+    }
+    memory, load_error = _load_session_memory(session_id, limit=limit, window_size=window_size)
+    if load_error:
+        meta.update({"status": "blocked", "reason": load_error})
+        return False, meta
+    assert memory is not None
+
+    window = memory.get("window") if isinstance(memory.get("window"), dict) else {}
+    blockers: list[str] = []
+    call_count = int(window.get("call_count") or 0)
+    dominant_phase = str(memory.get("dominant_phase") or "unknown")
+    allowed_blockers = {"context_plateau_active", *_string_list(policy.get("allow_blockers"))}
+    memory_blockers = [str(reason) for reason in memory.get("blocker_reasons") or []]
+    effective_memory_blockers = [reason for reason in memory_blockers if reason not in allowed_blockers]
+    if effective_memory_blockers:
+        blockers.extend(effective_memory_blockers)
+
+    min_call_count = _int_min(policy.get("min_call_count"), 3, 1)
+    if call_count < min_call_count:
+        blockers.append("stable_window_too_small")
+
+    dominant_phase_expected = str(policy.get("dominant_phase") or "").strip()
+    dominant_phase_in = _string_list(policy.get("dominant_phase_in"))
+    if dominant_phase_expected and dominant_phase != dominant_phase_expected:
+        blockers.append("dominant_phase_mismatch")
+    if dominant_phase_in and dominant_phase not in set(dominant_phase_in):
+        blockers.append("dominant_phase_mismatch")
+
+    min_dominant_count = _int_min(policy.get("min_dominant_phase_count"), 0, 0)
+    if min_dominant_count and _dominant_count(memory, "phase_counts", dominant_phase) < min_dominant_count:
+        blockers.append("dominant_phase_window_too_short")
+
+    stable_phase = policy.get("stable_phase")
+    if stable_phase is not None and _as_bool(stable_phase):
+        if call_count <= 0 or _dominant_count(memory, "phase_counts", dominant_phase) < call_count:
+            blockers.append("phase_not_stable")
+
+    blocked_phases = set(_string_list(policy.get("blocked_phases")))
+    if current_phase in blocked_phases or dominant_phase in blocked_phases:
+        blockers.append("blocked_phase_present")
+
+    if not _as_bool(policy.get("allow_thinking"), False) and (
+        dominant_phase == "thinking" or _count_value(memory.get("phase_counts"), "thinking") > 0
+    ):
+        blockers.append("thinking_present")
+
+    max_error_count = _int_min(policy.get("max_error_count"), 0, 0)
+    max_retry_count = _int_min(policy.get("max_retry_count"), 0, 0)
+    max_fallback_count = _int_min(policy.get("max_fallback_count"), 0, 0)
+    if int(memory.get("error_count") or 0) > max_error_count:
+        blockers.append("recent_errors")
+    if int(memory.get("retry_count") or 0) > max_retry_count:
+        blockers.append("recent_retries")
+    if int(memory.get("fallback_count") or 0) > max_fallback_count:
+        blockers.append("recent_routing_fallback")
+
+    floor = str(policy.get("model_family_floor") or "").strip().lower()
+    if floor:
+        floor_rank = _MODEL_FAMILY_RANK.get(floor, 0)
+        requested_rank = _MODEL_FAMILY_RANK.get(_model_family(requested_model), 0)
+        dominant_requested = str((memory.get("requested_model_family_counts") or [{}])[0].get("value") or "unknown")
+        dominant_rank = _MODEL_FAMILY_RANK.get(dominant_requested, 0)
+        if requested_rank < floor_rank or dominant_rank < floor_rank:
+            blockers.append("model_family_floor_not_met")
+
+    compact_memory = {
+        "session_key": memory.get("session_key"),
+        "session_key_kind": memory.get("session_key_kind"),
+        "raw_session_id_included": False,
+        "window": window,
+        "dominant_phase": dominant_phase,
+        "phase_counts": memory.get("phase_counts"),
+        "category_counts": memory.get("category_counts"),
+        "requested_model_family_counts": memory.get("requested_model_family_counts"),
+        "routed_model_family_counts": memory.get("routed_model_family_counts"),
+        "retry_count": memory.get("retry_count"),
+        "fallback_count": memory.get("fallback_count"),
+        "error_count": memory.get("error_count"),
+        "blocker_reasons": memory_blockers,
+        "privacy": {
+            "metadata_only": True,
+            "raw_session_ids_included": False,
+            "request_json_read": False,
+            "response_json_read": False,
+            "error_text_included": False,
+        },
+    }
+    meta["memory"] = compact_memory
+    if blockers:
+        meta.update({"status": "blocked", "reason": blockers[0], "reason_codes": sorted(set(blockers))})
+        return False, meta
+    meta.update({"status": "used", "reason": "matched", "reason_codes": []})
+    return True, meta
 
 
 def _safe_openai_target_model(target_model: Any) -> tuple[str | None, str | None]:
@@ -1037,7 +1226,7 @@ def openai_canary_decision(
     return requested, meta
 
 
-def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     text_chars = len(extract_text(body))
     tools = has_tools(body)
@@ -1104,9 +1293,10 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "policy_source": ROUTING_RULES_SOURCE,
         }
 
+    last_session_memory_meta: dict[str, Any] | None = None
     for rule in ROUTING_RULES:
         cond = rule.get("conditions") or {}
-        if "model_pattern" in cond and cond["model_pattern"].lower() not in requested_l:
+        if "model_pattern" in cond and str(cond["model_pattern"]).lower() not in requested_l:
             continue
         if "text_chars_lt" in cond and not (text_chars < int(cond["text_chars_lt"])):
             continue
@@ -1134,12 +1324,23 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 continue
         if "workflow_phase" in cond and cond["workflow_phase"] != phase_meta.get("workflow_phase"):
             continue
+        session_memory_meta: dict[str, Any] | None = None
+        if "session_memory" in cond:
+            matched_memory, session_memory_meta = _matches_session_memory_condition(
+                cond.get("session_memory"),
+                session_id=session_id,
+                requested_model=requested,
+                current_phase=str(phase_meta.get("workflow_phase") or "unknown"),
+            )
+            last_session_memory_meta = session_memory_meta
+            if not matched_memory:
+                continue
 
         action = rule.get("action") or {}
         route_key = str(action.get("route_to", ""))
         routed = _TIER_MAP.get(route_key, route_key) if route_key else requested
         reason = str(action.get("reason", "matched routing rule"))
-        return routed, {
+        meta = {
             "enabled": True,
             "requested_model": requested,
             "routed_model": routed,
@@ -1150,8 +1351,11 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             **phase_meta,
             "policy_source": ROUTING_RULES_SOURCE,
         }
+        if session_memory_meta:
+            meta["session_phase_memory"] = session_memory_meta
+        return routed, meta
 
-    return requested, {
+    meta = {
         "enabled": True,
         "requested_model": requested,
         "routed_model": requested,
@@ -1162,6 +1366,11 @@ def route_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         **phase_meta,
         "policy_source": ROUTING_RULES_SOURCE,
     }
+    if last_session_memory_meta:
+        meta["session_phase_memory"] = last_session_memory_meta
+        if last_session_memory_meta.get("status") == "blocked":
+            meta["reason"] = f"session phase memory blocked: {last_session_memory_meta.get('reason')}"
+    return requested, meta
 
 
 def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:

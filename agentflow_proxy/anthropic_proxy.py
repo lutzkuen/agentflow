@@ -615,7 +615,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 print(f"strip_thinking_history: blocks={_n_stripped} tokens_before={tokens_before} tokens_after={tokens_after}", flush=True)
         else:
             _n_stripped = 0
-        routed_model, routing_meta = route_model(crunched)
+        routed_model, routing_meta = route_model(crunched, session_id=session_id)
         if _n_stripped > 0:
             routing_meta["thinking_history_stripped"] = _n_stripped
         resolved_requested_model = crunched.get("model", requested_model)
