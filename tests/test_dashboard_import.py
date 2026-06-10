@@ -77,6 +77,7 @@ class DashboardImportTests(unittest.TestCase):
             policy_events = client.get("/agentflow/stats/policy-events")
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
             openai_scoreboard = client.get("/agentflow/stats/openai-scoreboard")
+            optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
             local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
             phase_routing = client.get("/agentflow/stats/phase-routing")
@@ -99,6 +100,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(openai_scoreboard.status_code, 200)
             self.assertEqual(openai_scoreboard.json()["schema"], "agentflow.openai_optimization_scoreboard.v1")
             self.assertFalse(openai_scoreboard.json()["privacy"]["provider_calls_made"])
+            self.assertEqual(optimization_eval_queue.status_code, 200)
+            self.assertEqual(optimization_eval_queue.json()["schema"], "agentflow.optimization_eval_queue.v1")
+            self.assertFalse(optimization_eval_queue.json()["privacy"]["provider_calls_made"])
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
@@ -166,6 +170,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/phase-routing", dashboard.text)
             self.assertIn("Phase-routing rollout health", dashboard.text)
             self.assertIn("phase-routing-health-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/optimization-eval-queue", dashboard.text)
+            self.assertIn("Optimization eval and promotion candidates", dashboard.text)
+            self.assertIn("optimization-eval-candidates-tbody", dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
@@ -174,6 +181,160 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_optimization_eval_queue_endpoint_and_dashboard_are_metadata_only(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+
+        def plan_row(
+            candidate_id,
+            *,
+            action_family="routing",
+            optimization_family="phase_routing",
+            applied=2,
+            holdout=1,
+            applied_error_rate=0.0,
+            holdout_error_rate=0.0,
+            blockers=None,
+        ):
+            return {
+                "schema": "agentflow.optimization_eval_plan_row.v1",
+                "candidate_id": candidate_id,
+                "optimization_family": optimization_family,
+                "action_family": action_family,
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "granularity": "provider_request",
+                "workflow_phase": "tool_execution",
+                "category": "tool-result",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "candidate_profile": "fixture-profile",
+                "projected_savings_usd": 0.0123,
+                "sample_count": applied + holdout,
+                "current_canary_count": applied,
+                "holdout_count": holdout,
+                "blocker_reason_codes": blockers or [],
+                "recommended_eval_mode": "score-canary-holdout" if applied or holdout else "run-local-shadow-eval",
+                "replayability_level": "features_only",
+                "evidence": {
+                    "canary_evidence": {
+                        "applied": {
+                            "count": applied,
+                            "error_rate": applied_error_rate,
+                            "retry_rate": 0.0,
+                            "latency_avg_ms": 100,
+                            "net_savings_usd": 0.0123,
+                        },
+                        "holdout": {
+                            "count": holdout,
+                            "error_rate": holdout_error_rate,
+                            "retry_rate": 0.0,
+                            "latency_avg_ms": 110,
+                        },
+                    },
+                    "raw_prompt": "raw eval queue prompt must stay local",
+                    "request_json": {"body": "raw provider body must stay local"},
+                    "session_id": "eval-queue-session-secret",
+                    "file_path": "/tmp/eval-queue-secret.py",
+                },
+                "privacy": {"metadata_only": True},
+            }
+
+        fake_plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                plan_row("queue-widen"),
+                plan_row("queue-hold", applied_error_rate=0.1),
+                plan_row("queue-rollback"),
+                plan_row("queue-needs-eval", applied=0, holdout=0),
+                plan_row("queue-privacy", applied=0, holdout=0, blockers=["raw-provider-body-present"]),
+            ],
+        }
+
+        async def fake_build_optimization_eval_plan(store_obj, *, limit=500, min_samples=1):
+            self.assertIs(store_obj, store)
+            self.assertEqual(min_samples, 1)
+            return fake_plan
+
+        try:
+            for candidate_id, status in (
+                ("queue-widen", "pass"),
+                ("queue-hold", "pass"),
+                ("queue-rollback", "fail"),
+            ):
+                store.log_optimization_eval_result(
+                    id=f"eval-queue-{candidate_id}",
+                    run_id="eval-queue-run",
+                    created_at="2026-06-10T04:00:00+00:00",
+                    candidate_id=candidate_id,
+                    source_surface="anthropic_messages",
+                    optimization_family="phase_routing",
+                    action_family="routing",
+                    status_class=status,
+                    reason_codes_json=stable_json([
+                        "offline-fixture-passed" if status == "pass" else "output-similarity-below-threshold"
+                    ]),
+                    score_json=stable_json({"output_similarity": 0.99 if status == "pass" else 0.1}),
+                    cost_json=stable_json({"projected_savings_usd": 0.0123}),
+                    result_json=stable_json({
+                        "candidate_id": candidate_id,
+                        "status_class": status,
+                        "prompt": "raw eval result prompt must stay local",
+                        "response": "raw eval result response must stay local",
+                        "request_id": "eval-queue-request-secret",
+                        "session_id": "eval-queue-result-session-secret",
+                    }),
+                )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            with patch("agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
+                response = client.get("/agentflow/stats/optimization-eval-queue?limit=50")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.optimization_eval_queue.v1")
+            by_candidate = {row["candidate_id"]: row for row in payload["candidates"]}
+            self.assertEqual(by_candidate["queue-widen"]["verdict"], "widen")
+            self.assertEqual(by_candidate["queue-hold"]["verdict"], "hold")
+            self.assertEqual(by_candidate["queue-rollback"]["verdict"], "rollback")
+            self.assertEqual(by_candidate["queue-needs-eval"]["verdict"], "needs_eval")
+            self.assertEqual(by_candidate["queue-privacy"]["queue_status"], "privacy_blocked")
+            self.assertEqual(by_candidate["queue-widen"]["workflow_phase"], "tool_execution")
+            self.assertEqual(by_candidate["queue-widen"]["category"], "tool-result")
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["raw_provider_bodies_included"])
+            self.assertFalse(payload["privacy"]["provider_calls_made"])
+            self.assertIn("optimization-eval-candidates-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            for forbidden in (
+                "raw eval queue prompt must stay local",
+                "raw provider body must stay local",
+                "raw eval result prompt must stay local",
+                "raw eval result response must stay local",
+                "eval-queue-session-secret",
+                "eval-queue-result-session-secret",
+                "eval-queue-request-secret",
+                "/tmp/eval-queue-secret.py",
+                '"request_json"',
+                '"raw_prompt"',
+                '"prompt"',
+                '"response"',
+                '"session_id"',
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            store.conn.close()
+            tmp.close()
 
     def test_local_pattern_coverage_endpoint_summarizes_family_readiness(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

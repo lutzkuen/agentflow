@@ -6001,6 +6001,196 @@ async def stats_openai_scoreboard(store_obj: Any, limit: int = 1000) -> dict[str
     }
 
 
+def _optimization_eval_reason_codes(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    result: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if len(text) > 80 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-" for ch in text):
+            result.add("unsanitized-reason-code")
+        else:
+            result.add(text)
+    return sorted(result)
+
+
+def _optimization_eval_is_privacy_blocked(reason_codes: list[str], replayability_level: Any) -> bool:
+    text = " ".join(reason_codes + [str(replayability_level or "")]).lower()
+    return any(
+        marker in text
+        for marker in (
+            "privacy",
+            "raw",
+            "prompt",
+            "body",
+            "payload",
+            "secret",
+            "identifier",
+            "filesystem",
+            "file-path",
+            "api-key",
+            "egress",
+        )
+    )
+
+
+def _optimization_eval_status(evidence: dict[str, Any]) -> str:
+    result_count = _as_int(evidence.get("result_count"))
+    if result_count <= 0:
+        return "missing"
+    if _as_int(evidence.get("fail_count")):
+        return "fail"
+    if _as_int(evidence.get("blocked_count")) and not _as_int(evidence.get("pass_count")):
+        return "blocked"
+    if _as_int(evidence.get("unknown_count")) and not _as_int(evidence.get("pass_count")):
+        return "unknown"
+    if _as_int(evidence.get("pass_count")):
+        return "pass"
+    return "mixed"
+
+
+def _optimization_eval_candidate_row(plan_row: dict[str, Any], verdict_row: dict[str, Any]) -> dict[str, Any]:
+    evidence = verdict_row.get("eval_evidence") if isinstance(verdict_row.get("eval_evidence"), dict) else {}
+    blockers = _optimization_eval_reason_codes(plan_row.get("blocker_reason_codes"))
+    reasons = _optimization_eval_reason_codes(verdict_row.get("reason_codes"))
+    privacy_blocked = _optimization_eval_is_privacy_blocked(blockers + reasons, plan_row.get("replayability_level"))
+    eval_status = _optimization_eval_status(evidence)
+    verdict = str(verdict_row.get("verdict") or "needs_eval")
+    queue_status = "privacy_blocked" if privacy_blocked else verdict
+    return {
+        "candidate_id": str(plan_row.get("candidate_id") or verdict_row.get("candidate_id") or "unknown"),
+        "action_family": str(plan_row.get("action_family") or verdict_row.get("action_family") or "unknown"),
+        "optimization_family": str(plan_row.get("optimization_family") or verdict_row.get("optimization_family") or "unknown"),
+        "source_surface": str(plan_row.get("source_surface") or verdict_row.get("source_surface") or "unknown"),
+        "app_family": str(plan_row.get("app_family") or verdict_row.get("app_family") or "unknown"),
+        "workflow_phase": str(plan_row.get("workflow_phase") or "unknown"),
+        "category": str(plan_row.get("category") or "unknown"),
+        "candidate_target_model": plan_row.get("candidate_target_model") or verdict_row.get("candidate_target_model"),
+        "candidate_profile": plan_row.get("candidate_profile") or verdict_row.get("candidate_profile"),
+        "projected_savings_usd": round(_as_float(plan_row.get("projected_savings_usd") or verdict_row.get("projected_savings_usd")), 8),
+        "sample_count": _as_int(plan_row.get("sample_count") or verdict_row.get("sample_count")),
+        "current_canary_count": _as_int(plan_row.get("current_canary_count")),
+        "holdout_count": _as_int(plan_row.get("holdout_count")),
+        "recommended_eval_mode": str(plan_row.get("recommended_eval_mode") or "collect-baseline-evidence"),
+        "replayability_level": str(plan_row.get("replayability_level") or "metadata_only"),
+        "eval_status": eval_status,
+        "eval_result_count": _as_int(evidence.get("result_count")),
+        "eval_pass_count": _as_int(evidence.get("pass_count")),
+        "eval_fail_count": _as_int(evidence.get("fail_count")),
+        "eval_blocked_count": _as_int(evidence.get("blocked_count")),
+        "last_evidence_at": evidence.get("latest_result_at"),
+        "eval_evidence_stale": bool(evidence.get("stale")),
+        "verdict": verdict,
+        "queue_status": queue_status,
+        "privacy_blocked": privacy_blocked,
+        "blocker_reason_codes": blockers,
+        "reason_codes": reasons,
+        "next_action": str(verdict_row.get("next_action") or "run_local_shadow_eval_or_collect_canary_holdout_evidence"),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+        },
+    }
+
+
+async def stats_optimization_eval_queue(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
+    from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+
+    capped_limit = max(1, min(int(limit or 500), 10_000))
+    plan = await build_optimization_eval_plan(store_obj, limit=capped_limit, min_samples=1)
+    promotion = build_optimization_promotion_report(store_obj, plan=plan, limit=capped_limit)
+    verdicts = {
+        str(row.get("candidate_id") or "unknown"): row
+        for row in promotion.get("candidates", [])
+        if isinstance(row, dict)
+    }
+    rows: list[dict[str, Any]] = []
+    for plan_row in plan.get("plans") or []:
+        if not isinstance(plan_row, dict):
+            continue
+        candidate_id = str(plan_row.get("candidate_id") or "unknown")
+        verdict_row = verdicts.get(candidate_id, {"candidate_id": candidate_id, "verdict": "needs_eval"})
+        rows.append(_optimization_eval_candidate_row(plan_row, verdict_row))
+
+    rows.sort(
+        key=lambda row: (
+            str(row.get("action_family") or ""),
+            str(row.get("optimization_family") or ""),
+            str(row.get("candidate_id") or ""),
+        )
+    )
+
+    verdict_counts: dict[str, int] = {}
+    queue_status_counts: dict[str, int] = {}
+    eval_status_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    for row in rows:
+        _increment_count(verdict_counts, row.get("verdict"))
+        _increment_count(queue_status_counts, row.get("queue_status"))
+        _increment_count(eval_status_counts, row.get("eval_status"))
+        _increment_count(action_counts, row.get("action_family"))
+        for blocker in row.get("blocker_reason_codes") or []:
+            _increment_count(blocker_counts, blocker)
+
+    return {
+        "schema": "agentflow.optimization_eval_queue.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "summary": {
+            "candidate_count": len(rows),
+            "needs_eval_count": queue_status_counts.get("needs_eval", 0),
+            "hold_count": queue_status_counts.get("hold", 0),
+            "widen_count": queue_status_counts.get("widen", 0),
+            "rollback_count": queue_status_counts.get("rollback", 0),
+            "privacy_blocked_count": queue_status_counts.get("privacy_blocked", 0),
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in rows), 8),
+            "last_evidence_at": max((str(row.get("last_evidence_at")) for row in rows if row.get("last_evidence_at")), default=None),
+        },
+        "verdict_counts": _count_breakdown(verdict_counts),
+        "queue_status_counts": _count_breakdown(queue_status_counts),
+        "eval_status_counts": _count_breakdown(eval_status_counts),
+        "action_family_counts": _count_breakdown(action_counts),
+        "blocker_counts": _count_breakdown(blocker_counts),
+        "candidates": rows,
+        "source_reports": {
+            "eval_plan_schema": plan.get("schema"),
+            "promotion_report_schema": promotion.get("schema"),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "optimization eval plan metadata plus sanitized promotion verdicts only",
+        },
+    }
+
+
 def _increment_count(grouped: dict[str, int], key: Any) -> None:
     label = str(key or "unknown")
     grouped[label] = grouped.get(label, 0) + 1
@@ -10254,6 +10444,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('openai')">OpenAI optimization</button>
+  <button class="tab-btn" onclick="showTab('evalqueue')">Eval queue</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
   <button class="tab-btn" onclick="showTab('phaserouting')">Phase routing</button>
   <button class="tab-btn" onclick="showTab('oldcontext')">Old-context summary</button>
@@ -10545,6 +10736,27 @@ def dashboard_html() -> str:
       <th data-sort-type="time">Time</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Requested</th><th data-sort-type="text">Routed</th><th data-sort-type="number">Status</th><th data-sort-type="text">State</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Quality gate</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="text">Cache</th><th data-sort-type="number">Retries</th>
     </tr></thead>
     <tbody id="openai-scoreboard-recent-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-evalqueue">
+<div class="section">
+  <h2>Optimization eval queue summary</h2>
+  <table data-table-id="optimization-eval-summary" data-filter-label="Filter eval queue summary">
+    <thead><tr>
+      <th data-sort-type="number">Candidates</th><th data-sort-type="number">Needs eval</th><th data-sort-type="number">Hold</th><th data-sort-type="number">Widen</th><th data-sort-type="number">Rollback</th><th data-sort-type="number">Privacy blocked</th><th data-sort-type="money">Projected savings</th><th data-sort-type="time">Last evidence</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-eval-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Optimization eval and promotion candidates</h2>
+  <table class="activity-table" data-table-id="optimization-eval-candidates" data-filter-label="Filter eval queue candidates">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Family</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Phase / category</th><th data-sort-type="text">Target / profile</th><th data-sort-type="money">Projected savings</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Canary</th><th data-sort-type="number">Holdout</th><th data-sort-type="text">Eval</th><th data-sort-type="time">Last evidence</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-eval-candidates-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -11038,7 +11250,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','managed','phaserouting','oldcontext','sessions'];
+  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -11838,6 +12050,71 @@ async function refreshOpenAIScoreboard(){
     applyAllDataTables();
   }catch(e){}
 }
+function evalQueueBadge(status){
+  if(status==='widen')return'hit';
+  if(status==='rollback'||status==='privacy_blocked')return'err';
+  if(status==='hold')return'routed';
+  if(status==='needs_eval'||status==='missing'||status==='blocked')return'miss';
+  return'provider';
+}
+function evalEvidenceBadges(row){
+  const parts=[
+    `results ${(row.eval_result_count||0).toLocaleString()}`,
+    `pass ${(row.eval_pass_count||0).toLocaleString()}`,
+    `fail ${(row.eval_fail_count||0).toLocaleString()}`,
+    `blocked ${(row.eval_blocked_count||0).toLocaleString()}`
+  ];
+  if(row.eval_evidence_stale)parts.push('stale');
+  return parts.map(part=>`<span class="badge ${part.startsWith('fail')&&row.eval_fail_count?'err':part==='stale'?'routed':'provider'}">${esc(part)}</span>`).join(' ');
+}
+function reasonBadges(reasons,emptyLabel){
+  reasons=reasons||[];
+  if(!reasons.length)return`<span class="badge hit">${esc(emptyLabel||'none')}</span>`;
+  return reasons.slice(0,5).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
+}
+async function refreshOptimizationEvalQueue(){
+  try{
+    const r=await fetch('/agentflow/stats/optimization-eval-queue?limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('optimization-eval-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.needs_eval_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.hold_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.widen_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.rollback_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.privacy_blocked_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.projected_savings_usd||0,6)}</td>
+      <td class="ts">${s.last_evidence_at?ago(s.last_evidence_at):'—'}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">provider bodies omitted</span></td>
+    </tr>`;
+    const rows=d.candidates||[];
+    document.getElementById('optimization-eval-candidates-tbody').innerHTML=rows.map(row=>{
+      const target=[shortModel(row.candidate_target_model),row.candidate_profile].filter(value=>value&&value!=='—').join(' / ')||'—';
+      const phase=[row.workflow_phase,row.category].filter(Boolean).join(' / ');
+      return `<tr>
+        <td><span class="badge ${evalQueueBadge(row.queue_status)}">${esc(row.queue_status||'unknown')}</span></td>
+        <td><span class="badge ${evalQueueBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.candidate_id||'unknown')}</td>
+        <td class="flags"><span class="badge provider">${esc(row.action_family||'unknown')}</span> <span class="badge miss">${esc(row.optimization_family||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="model">${esc(phase||'unknown')}</td>
+        <td class="model">${esc(target)}</td>
+        <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.current_canary_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="flags"><span class="badge ${evalQueueBadge(row.eval_status)}">${esc(row.eval_status||'unknown')}</span> ${evalEvidenceBadges(row)}</td>
+        <td class="ts">${row.last_evidence_at?ago(row.last_evidence_at):'—'}</td>
+        <td class="flags">${reasonBadges(row.blocker_reason_codes,'none')} ${row.privacy_blocked?'<span class="badge err">privacy blocked</span>':''}</td>
+        <td class="flags"><span class="badge provider">${esc(row.next_action||'—')}</span> ${reasonBadges(row.reason_codes,'no verdict reasons')}</td>
+        <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">payload omitted</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="16" style="color:#8b949e">No optimization eval candidates found in local metadata</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshManaged(){
   try{
     const [managedResponse,safetyResponse,rolloutResponse,coverageResponse]=await Promise.all([
@@ -12280,6 +12557,7 @@ refreshLimiter();
 refreshSafety();
 refreshPolicies();
 refreshOpenAIScoreboard();
+refreshOptimizationEvalQueue();
 refreshManaged();
 refreshPhaseRouting();
 refreshSessions();
@@ -12295,6 +12573,7 @@ setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
 setInterval(refreshOpenAIScoreboard,30000);
+setInterval(refreshOptimizationEvalQueue,30000);
 setInterval(refreshManaged,30000);
 setInterval(refreshPhaseRouting,30000);
 setInterval(refreshSessions,30000);
