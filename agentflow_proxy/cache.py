@@ -285,6 +285,35 @@ def cache_decision_meta(
     return meta
 
 
+def _dependency_count_bucket(count: int) -> str:
+    if count <= 0:
+        return "0"
+    if count == 1:
+        return "1"
+    if count <= 5:
+        return "2_5"
+    if count <= 20:
+        return "6_20"
+    if count <= 128:
+        return "21_128"
+    return "128_plus"
+
+
+def _dependency_root_policy(root: Path) -> str:
+    cwd = Path.cwd().resolve(strict=False)
+    home = Path.home().resolve(strict=False)
+    try:
+        root.relative_to(cwd)
+        return "cwd-relative"
+    except ValueError:
+        pass
+    try:
+        root.relative_to(home)
+        return "home-relative"
+    except ValueError:
+        return "configured-local-root"
+
+
 def _feature_hashes(pattern_features: dict[str, Any] | None) -> list[str]:
     if not isinstance(pattern_features, dict):
         return []
@@ -629,27 +658,29 @@ def _resolve_under_root(token: str, root: Path) -> Path | None:
     return resolved
 
 
-def cache_file_dependency_snapshots(
+def _cache_file_dependency_scan(
     body: dict[str, Any],
     *,
     root: str | Path | None = None,
     max_paths: int | None = None,
-) -> list[dict[str, Any]]:
-    if not CACHE_FILE_WATCH_ENABLED:
-        return []
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     watch_root = Path(root if root is not None else CACHE_FILE_WATCH_ROOT).expanduser().resolve(strict=False)
-    limit = CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else max_paths
+    limit = max(0, CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else int(max_paths))
     paths: dict[str, Path] = {}
+    candidate_count = 0
+    seen: set[str] = set()
     for text in _walk_strings(body):
         for token in _candidate_path_tokens(text):
             resolved = _resolve_under_root(token, watch_root)
             if resolved is None:
                 continue
-            paths[str(resolved)] = resolved
-            if len(paths) >= limit:
-                break
-        if len(paths) >= limit:
-            break
+            resolved_key = str(resolved)
+            if resolved_key in seen:
+                continue
+            seen.add(resolved_key)
+            candidate_count += 1
+            if len(paths) < limit:
+                paths[resolved_key] = resolved
 
     snapshots: list[dict[str, Any]] = []
     for path in sorted(paths):
@@ -666,7 +697,81 @@ def cache_file_dependency_snapshots(
             "mtime_ns": int(stat.st_mtime_ns) if stat and exists else None,
             "size": int(stat.st_size) if stat and exists else None,
         })
+    audit = cache_file_dependency_audit(
+        snapshots=snapshots,
+        enabled=CACHE_FILE_WATCH_ENABLED,
+        candidate_count=candidate_count,
+        max_paths=limit,
+        root=watch_root,
+    )
+    return snapshots, audit
+
+
+def cache_file_dependency_snapshots(
+    body: dict[str, Any],
+    *,
+    root: str | Path | None = None,
+    max_paths: int | None = None,
+) -> list[dict[str, Any]]:
+    if not CACHE_FILE_WATCH_ENABLED:
+        return []
+    snapshots, _audit = _cache_file_dependency_scan(body, root=root, max_paths=max_paths)
     return snapshots
+
+
+def cache_file_dependency_audit(
+    body: dict[str, Any] | None = None,
+    *,
+    snapshots: list[dict[str, Any]] | None = None,
+    enabled: bool | None = None,
+    candidate_count: int | None = None,
+    max_paths: int | None = None,
+    root: str | Path | None = None,
+) -> dict[str, Any]:
+    watch_enabled = CACHE_FILE_WATCH_ENABLED if enabled is None else bool(enabled)
+    watch_root = Path(root if root is not None else CACHE_FILE_WATCH_ROOT).expanduser().resolve(strict=False)
+    limit = max(0, CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else int(max_paths))
+    if snapshots is None:
+        if not watch_enabled or body is None:
+            snapshots = []
+        else:
+            snapshots, scanned = _cache_file_dependency_scan(body, root=watch_root, max_paths=limit)
+            return scanned
+    snapshot_count = len(snapshots or [])
+    candidate_total = snapshot_count if candidate_count is None else max(0, int(candidate_count))
+    cap_exceeded = candidate_total > limit
+    missing_count = sum(1 for dep in snapshots or [] if not bool(dep.get("exists")))
+    present_count = snapshot_count - missing_count
+    safe = bool(watch_enabled and snapshot_count > 0 and not cap_exceeded and missing_count == 0)
+    reason = "safe"
+    if not watch_enabled:
+        reason = "file-watch-disabled"
+    elif cap_exceeded:
+        reason = "dependency-cap-exceeded"
+    elif snapshot_count <= 0:
+        reason = "file-dependency-missing"
+    elif missing_count:
+        reason = "dependency-missing"
+    return {
+        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "file_watch_enabled": bool(watch_enabled),
+        "snapshot_root_policy": _dependency_root_policy(watch_root),
+        "root_path_included": False,
+        "snapshot_count": snapshot_count,
+        "snapshot_count_bucket": _dependency_count_bucket(snapshot_count),
+        "candidate_path_count_bucket": _dependency_count_bucket(candidate_total),
+        "max_paths": limit,
+        "cap_exceeded": bool(cap_exceeded),
+        "present_path_count": present_count,
+        "missing_path_count": missing_count,
+        "changed_path_count": 0,
+        "deleted_path_count": 0,
+        "created_path_count": 0,
+        "invalidation_reason": None if reason == "safe" else reason,
+        "safe_invalidation_evidence": safe,
+        "file_dependency_evidence_available": safe,
+        "paths_included": False,
+    }
 
 
 def cache_lookup_meta(

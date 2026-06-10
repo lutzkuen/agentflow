@@ -3620,7 +3620,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(groups[("tools-disabled", "tool-result", "unknown")]["sessions"], 2)
         self.assertEqual(groups[("tools-disabled", "tool-result", "unknown")]["replay_candidate_class"], "blocked-tool-result-invalidation")
         self.assertIn("tool-call-disabled", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
-        self.assertIn("file-dependency-unknown", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
+        self.assertIn("file-dependency-missing", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
         self.assertIn("session-context-changed", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
         self.assertEqual(groups[("exact-miss", "chat", "high")]["replay_candidate_class"], "replay-safe-exact-candidate")
         self.assertEqual(groups[("exact-miss", "chat", "low")]["replay_candidate_class"], "blocked-low-cacheability")
@@ -3632,6 +3632,7 @@ class StatsFullTest(unittest.TestCase):
         by_blocker = {row["blocker"]: row["calls"] for row in result["blocker_breakdown"]}
         self.assertEqual(by_blocker["streaming"], 2)
         self.assertEqual(by_blocker["tool-call-disabled"], 2)
+        self.assertEqual(by_blocker["file-dependency-missing"], 2)
         self.assertEqual(by_blocker["true-one-off-miss"], 1)
         self.assertEqual(by_blocker["current-state"], 1)
 
@@ -3684,6 +3685,86 @@ class StatsFullTest(unittest.TestCase):
             html = client.get("/agentflow/dashboard").text
             self.assertIn("Skipped cache replayability", html)
             self.assertIn("cache-replayability-tbody", html)
+
+    def test_cache_replayability_report_surfaces_file_dependency_audit_reasons_without_paths(self):
+        def log_tool_candidate(name, audit):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.01,
+                cost_baseline_usd=0.01,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"text_chars": 8000, "category": "tool-result", "has_tools": True}),
+                cache_json=stable_json({
+                    "status": "miss",
+                    "reason": audit["invalidation_reason"] or name,
+                    "policy_source": "local-default",
+                    "tool_cache_enabled": True,
+                    "file_dependency_audit": audit,
+                    "file_dependency_count": audit["snapshot_count"],
+                    "file_dependency_evidence_available": audit["file_dependency_evidence_available"],
+                    "safe_invalidation_evidence": audit["safe_invalidation_evidence"],
+                }),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "tool payload secret /tmp/private.py"}]}),
+                response_json=None,
+                session_id=f"session-{name}",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        base_audit = {
+            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "file_watch_enabled": True,
+            "snapshot_root_policy": "cwd-relative",
+            "root_path_included": False,
+            "snapshot_count": 2,
+            "snapshot_count_bucket": "2_5",
+            "candidate_path_count_bucket": "2_5",
+            "max_paths": 128,
+            "cap_exceeded": False,
+            "present_path_count": 2,
+            "missing_path_count": 0,
+            "changed_path_count": 0,
+            "deleted_path_count": 0,
+            "created_path_count": 0,
+            "invalidation_reason": None,
+            "safe_invalidation_evidence": True,
+            "file_dependency_evidence_available": True,
+            "paths_included": False,
+        }
+        log_tool_candidate("changed", {**base_audit, "changed_path_count": 1, "invalidation_reason": "dependency-changed", "safe_invalidation_evidence": False, "file_dependency_evidence_available": False})
+        log_tool_candidate("deleted", {**base_audit, "deleted_path_count": 1, "invalidation_reason": "dependency-deleted", "safe_invalidation_evidence": False, "file_dependency_evidence_available": False})
+        log_tool_candidate("cap", {**base_audit, "cap_exceeded": True, "invalidation_reason": "dependency-cap-exceeded", "safe_invalidation_evidence": False, "file_dependency_evidence_available": False})
+
+        result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
+        rendered = json.dumps(result, sort_keys=True)
+        blockers = {item["blocker"] for item in result["blocker_breakdown"]}
+
+        self.assertIn("dependency-changed", blockers)
+        self.assertIn("dependency-deleted", blockers)
+        self.assertIn("dependency-cap-exceeded", blockers)
+        for row in result["groups"]:
+            if row["category"] == "tool-result":
+                self.assertFalse(row["file_dependency_audit"]["paths_included"])
+                self.assertFalse(row["file_dependency_audit"]["root_path_included"])
+        self.assertNotIn("tool payload secret", rendered)
+        self.assertNotIn("/tmp/private.py", rendered)
+        self.assertFalse(result["privacy"]["file_paths_included"])
 
     def test_cache_replay_dry_run_projects_policy_hits_and_blockers_without_cache_mutation(self):
         hashes = {
@@ -3933,7 +4014,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(stale["reason"], "stale-risk-blockers")
         self.assertIn("current-state", stale["stale_risk_blockers"])
         tool = next(row for row in result["rows"] if row["candidate_id"] == "candidate-tool")
-        self.assertEqual(tool["reason"], "file-dependency-evidence-absent")
+        self.assertEqual(tool["reason"], "file-dependency-missing")
         self.assertTrue(tool["requires_file_dependency_evidence"])
         self.assertFalse(tool["file_dependency_evidence_available"])
         rendered = json.dumps(result, sort_keys=True)

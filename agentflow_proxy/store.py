@@ -22,6 +22,83 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right))
 
 
+def _dependency_count_bucket(count: int) -> str:
+    if count <= 0:
+        return "0"
+    if count == 1:
+        return "1"
+    if count <= 5:
+        return "2_5"
+    if count <= 20:
+        return "6_20"
+    if count <= 128:
+        return "21_128"
+    return "128_plus"
+
+
+def _cache_file_dependency_audit_from_rows(rows: list[Any]) -> dict[str, Any]:
+    changed = 0
+    deleted = 0
+    created = 0
+    missing = 0
+    for row in rows:
+        expected_exists = bool(row["exists_flag"])
+        if not expected_exists:
+            missing += 1
+        path = Path(row["path"])
+        try:
+            stat = path.stat()
+            current_exists = path.is_file()
+        except OSError:
+            stat = None
+            current_exists = False
+        if expected_exists and not current_exists:
+            deleted += 1
+        elif not expected_exists and current_exists:
+            created += 1
+        elif expected_exists and current_exists and stat is not None:
+            if row["mtime_ns"] != stat.st_mtime_ns or row["size"] != stat.st_size:
+                changed += 1
+    count = len(rows)
+    invalidation_reason = None
+    if deleted:
+        invalidation_reason = "dependency-deleted"
+    elif changed or created:
+        invalidation_reason = "dependency-changed"
+    elif not rows:
+        invalidation_reason = "file-dependency-missing"
+    elif missing:
+        invalidation_reason = "dependency-missing"
+    safe = bool(count > 0 and not (changed or deleted or created or missing))
+    return {
+        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "file_watch_enabled": True,
+        "snapshot_root_policy": "stored-local-paths",
+        "root_path_included": False,
+        "snapshot_count": count,
+        "snapshot_count_bucket": _dependency_count_bucket(count),
+        "candidate_path_count_bucket": _dependency_count_bucket(count),
+        "max_paths": None,
+        "cap_exceeded": False,
+        "present_path_count": max(0, count - missing),
+        "missing_path_count": missing,
+        "changed_path_count": changed + created,
+        "deleted_path_count": deleted,
+        "created_path_count": created,
+        "invalidation_reason": invalidation_reason if not safe else None,
+        "safe_invalidation_evidence": safe,
+        "file_dependency_evidence_available": safe,
+        "paths_included": False,
+    }
+
+
+def _cache_file_dependency_invalidation_reason(audit: dict[str, Any]) -> str | None:
+    reason = audit.get("invalidation_reason")
+    if reason in {"dependency-changed", "dependency-deleted"}:
+        return str(reason)
+    return None
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -358,9 +435,11 @@ class SQLiteStore:
 
     def get_cache_with_reason(self, key: str) -> tuple[Optional[dict[str, Any]], str | None]:
         with self._lock:
-            if self._cache_file_deps_changed(key):
+            audit = self.cache_file_dependency_audit(key)
+            invalidation_reason = _cache_file_dependency_invalidation_reason(audit)
+            if invalidation_reason:
                 self.delete_cache(key)
-                return None, "file-dependency-changed"
+                return None, invalidation_reason
             row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
             if not row:
                 return None, None
@@ -407,24 +486,16 @@ class SQLiteStore:
             self.conn.execute("delete from cache_file_deps where cache_key = ?", (key,))
             self.conn.commit()
 
-    def _cache_file_deps_changed(self, key: str) -> bool:
+    def cache_file_dependency_audit(self, key: str) -> dict[str, Any]:
         rows = self.conn.execute(
             "select path, exists_flag, mtime_ns, size from cache_file_deps where cache_key = ?",
             (key,),
         ).fetchall()
-        for row in rows:
-            path = Path(row["path"])
-            try:
-                stat = path.stat()
-                exists = path.is_file()
-            except OSError:
-                stat = None
-                exists = False
-            if bool(row["exists_flag"]) != bool(exists):
-                return True
-            if exists and stat is not None and (row["mtime_ns"] != stat.st_mtime_ns or row["size"] != stat.st_size):
-                return True
-        return False
+        return _cache_file_dependency_audit_from_rows(rows)
+
+    def _cache_file_deps_changed(self, key: str) -> bool:
+        audit = self.cache_file_dependency_audit(key)
+        return _cache_file_dependency_invalidation_reason(audit) is not None
 
     def get_semantic_cache(self, embedding: list[float], model: str, threshold: float) -> Optional[dict[str, Any]]:
         with self._lock:
@@ -1037,6 +1108,32 @@ class PostgresStore(SQLiteStore):
                     dep.get("size"),
                 ),
             )
+
+    def cache_file_dependency_audit(self, key: str) -> dict[str, Any]:
+        rows = self.conn.execute(
+            "select path, exists_flag, mtime_ns, size from cache_file_deps where cache_key = ?",
+            (key,),
+        ).fetchall()
+        return _cache_file_dependency_audit_from_rows(rows)
+
+    def get_cache_with_reason(self, key: str) -> tuple[Optional[dict[str, Any]], str | None]:
+        audit = self.cache_file_dependency_audit(key)
+        invalidation_reason = _cache_file_dependency_invalidation_reason(audit)
+        if invalidation_reason:
+            self.delete_cache(key)
+            return None, invalidation_reason
+        row = self.conn.execute("select response_json from cache where cache_key = ?", (key,)).fetchone()
+        if not row:
+            return None, None
+        return json.loads(row["response_json"]), None
+
+    def get_cache(self, key: str) -> Optional[dict[str, Any]]:
+        response, _reason = self.get_cache_with_reason(key)
+        return response
+
+    def delete_cache(self, key: str) -> None:
+        self.conn.execute("delete from cache where cache_key = ?", (key,))
+        self.conn.execute("delete from cache_file_deps where cache_key = ?", (key,))
 
     def set_semantic_cache(self, key: str, model: str, embedding: list[float], response: dict[str, Any], request_chars: int) -> None:
         self.conn.execute(

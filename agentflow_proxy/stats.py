@@ -3341,18 +3341,32 @@ def _cache_replayability_blockers(unit: dict[str, Any]) -> list[str]:
     ):
         blockers.add("semantic-cache-disabled")
     tool_like = bool(unit.get("has_tools")) or category.startswith("tool")
-    if tool_like and not bool(unit.get("file_dependency_evidence_available")):
-        blockers.add("file-dependency-unknown")
     if bool(cacheability.get("time_sensitive_hint")):
         blockers.add("current-state")
     if bool(cacheability.get("user_specific_hint")):
         blockers.add("user-specific")
     if str(unit.get("cacheability_bucket") or "") == "low":
         blockers.add("low-cacheability")
+    audit = unit.get("file_dependency_audit") if isinstance(unit.get("file_dependency_audit"), dict) else {}
     if is_codex_turn_source_surface(str(unit.get("source_surface") or "")):
         blockers.add("turn-level-only")
     if unit["cache_status"] == "missing":
         blockers.add("missing-cache-metadata")
+    if tool_like:
+        audit_reason = audit.get("invalidation_reason")
+        if audit.get("cap_exceeded"):
+            blockers.add("dependency-cap-exceeded")
+        elif audit_reason in {
+            "file-dependency-missing",
+            "dependency-missing",
+            "dependency-changed",
+            "dependency-deleted",
+            "dependency-created",
+            "file-watch-disabled",
+        }:
+            blockers.add(str(audit_reason))
+        elif not bool(unit.get("safe_invalidation_evidence")):
+            blockers.add("file-dependency-missing")
     return sorted(blockers)
 
 
@@ -3491,6 +3505,57 @@ def _file_dependency_count(cache: dict[str, Any]) -> int:
     return 0
 
 
+def _cache_file_dependency_audit_from_cache(cache: dict[str, Any]) -> dict[str, Any]:
+    audit = cache.get("file_dependency_audit")
+    if isinstance(audit, dict):
+        safe = bool(audit.get("safe_invalidation_evidence"))
+        return {
+            "schema": str(audit.get("schema") or "agentflow.cache_file_dependency_audit.v1"),
+            "file_watch_enabled": bool(audit.get("file_watch_enabled")),
+            "snapshot_root_policy": str(audit.get("snapshot_root_policy") or "unknown"),
+            "root_path_included": False,
+            "snapshot_count": _as_int(audit.get("snapshot_count")),
+            "snapshot_count_bucket": str(audit.get("snapshot_count_bucket") or _size_bucket(audit.get("snapshot_count"))),
+            "candidate_path_count_bucket": str(audit.get("candidate_path_count_bucket") or "unknown"),
+            "max_paths": audit.get("max_paths"),
+            "cap_exceeded": bool(audit.get("cap_exceeded")),
+            "present_path_count": _as_int(audit.get("present_path_count")),
+            "missing_path_count": _as_int(audit.get("missing_path_count")),
+            "changed_path_count": _as_int(audit.get("changed_path_count")),
+            "deleted_path_count": _as_int(audit.get("deleted_path_count")),
+            "created_path_count": _as_int(audit.get("created_path_count")),
+            "invalidation_reason": audit.get("invalidation_reason"),
+            "safe_invalidation_evidence": safe,
+            "file_dependency_evidence_available": bool(audit.get("file_dependency_evidence_available") or safe),
+            "paths_included": False,
+        }
+    count = _file_dependency_count(cache)
+    evidence = bool(count > 0 or cache.get("file_dependency_evidence_available") or cache.get("safe_invalidation_evidence") or cache.get("safe_invalidation"))
+    reason = cache.get("invalidation_reason")
+    if reason is None and not evidence:
+        reason = "file-dependency-missing"
+    return {
+        "schema": "agentflow.cache_file_dependency_audit.v1",
+        "file_watch_enabled": bool(cache.get("file_watch_enabled")),
+        "snapshot_root_policy": "unknown",
+        "root_path_included": False,
+        "snapshot_count": count,
+        "snapshot_count_bucket": _size_bucket(count),
+        "candidate_path_count_bucket": _size_bucket(count),
+        "max_paths": None,
+        "cap_exceeded": False,
+        "present_path_count": count,
+        "missing_path_count": 0,
+        "changed_path_count": 1 if reason in {"dependency-changed", "file-dependency-changed"} else 0,
+        "deleted_path_count": 1 if reason == "dependency-deleted" else 0,
+        "created_path_count": 0,
+        "invalidation_reason": reason,
+        "safe_invalidation_evidence": bool(cache.get("safe_invalidation_evidence") or cache.get("safe_invalidation")),
+        "file_dependency_evidence_available": evidence,
+        "paths_included": False,
+    }
+
+
 def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granularity: str) -> dict[str, Any] | None:
     decision = _cache_decision_for_breakdown({**row, "source_surface": source_surface})
     status = str(decision.get("status") or "missing")
@@ -3517,13 +3582,9 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         or "unknown"
     )
     has_tools = bool(routing.get("has_tools") or category.startswith("tool"))
-    file_dependency_count = _file_dependency_count(cache)
-    file_dependency_evidence_available = bool(
-        file_dependency_count > 0
-        or cache.get("file_dependency_evidence_available")
-        or cache.get("safe_invalidation_evidence")
-        or cache.get("safe_invalidation")
-    )
+    file_dependency_audit = _cache_file_dependency_audit_from_cache(cache)
+    file_dependency_count = _as_int(file_dependency_audit.get("snapshot_count"))
+    file_dependency_evidence_available = bool(file_dependency_audit.get("file_dependency_evidence_available"))
     unit = {
         "source_surface": canonical_source_surface(source_surface),
         "granularity": granularity,
@@ -3547,6 +3608,8 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "cacheability_bucket": cacheability["bucket"],
         "file_dependency_evidence_available": file_dependency_evidence_available,
         "file_dependency_count": file_dependency_count,
+        "safe_invalidation_evidence": bool(file_dependency_audit.get("safe_invalidation_evidence")),
+        "file_dependency_audit": file_dependency_audit,
         "text_size_bucket": _size_bucket(text_chars),
         "input_items_bucket": _size_bucket(row.get("input_items")),
         "cost_est_usd": _as_float(row.get("cost_est_usd")),
@@ -3592,6 +3655,16 @@ def _cache_replayability_fingerprint_basis(unit: dict[str, Any]) -> dict[str, An
         "current_state": bool((unit.get("cacheability") or {}).get("time_sensitive_hint")),
         "user_specific": bool((unit.get("cacheability") or {}).get("user_specific_hint")),
         "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+        "file_dependency_audit_reason": (
+            (unit.get("file_dependency_audit") or {}).get("invalidation_reason")
+            if isinstance(unit.get("file_dependency_audit"), dict)
+            else None
+        ),
+        "file_dependency_snapshot_count_bucket": (
+            (unit.get("file_dependency_audit") or {}).get("snapshot_count_bucket")
+            if isinstance(unit.get("file_dependency_audit"), dict)
+            else "unknown"
+        ),
         "eligible": unit["eligible"],
     }
 
@@ -3630,6 +3703,8 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
                 "cacheability": unit["cacheability"],
                 "file_dependency_evidence_available": unit["file_dependency_evidence_available"],
                 "file_dependency_count": 0,
+                "safe_invalidation_evidence": bool(unit.get("safe_invalidation_evidence")),
+                "file_dependency_audit": unit.get("file_dependency_audit"),
                 "policy_source": unit["policy_source"],
                 "count": 0,
                 "sessions": set(),
@@ -3656,6 +3731,31 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
         bucket["input_tokens"] += _as_int(unit.get("input_tokens"))
         bucket["text_chars"] += _as_int(unit.get("text_chars"))
         bucket["file_dependency_count"] += _as_int(unit.get("file_dependency_count"))
+        bucket["safe_invalidation_evidence"] = bool(
+            bucket.get("safe_invalidation_evidence") or unit.get("safe_invalidation_evidence")
+        )
+        existing_audit = bucket.get("file_dependency_audit") if isinstance(bucket.get("file_dependency_audit"), dict) else {}
+        unit_audit = unit.get("file_dependency_audit") if isinstance(unit.get("file_dependency_audit"), dict) else {}
+        if unit_audit:
+            bucket["file_dependency_audit"] = {
+                **unit_audit,
+                "snapshot_count": _as_int(existing_audit.get("snapshot_count")) + _as_int(unit_audit.get("snapshot_count")),
+                "present_path_count": _as_int(existing_audit.get("present_path_count")) + _as_int(unit_audit.get("present_path_count")),
+                "missing_path_count": _as_int(existing_audit.get("missing_path_count")) + _as_int(unit_audit.get("missing_path_count")),
+                "changed_path_count": _as_int(existing_audit.get("changed_path_count")) + _as_int(unit_audit.get("changed_path_count")),
+                "deleted_path_count": _as_int(existing_audit.get("deleted_path_count")) + _as_int(unit_audit.get("deleted_path_count")),
+                "created_path_count": _as_int(existing_audit.get("created_path_count")) + _as_int(unit_audit.get("created_path_count")),
+                "cap_exceeded": bool(existing_audit.get("cap_exceeded") or unit_audit.get("cap_exceeded")),
+                "safe_invalidation_evidence": bool(
+                    existing_audit.get("safe_invalidation_evidence") or unit_audit.get("safe_invalidation_evidence")
+                ),
+                "file_dependency_evidence_available": bool(
+                    existing_audit.get("file_dependency_evidence_available")
+                    or unit_audit.get("file_dependency_evidence_available")
+                ),
+                "paths_included": False,
+                "root_path_included": False,
+            }
         for blocker in unit.get("blockers") or []:
             bucket["_blockers"].add(str(blocker))
         if str(unit.get("created_at") or "") < str(bucket.get("first_seen_at") or unit.get("created_at") or ""):
@@ -3696,7 +3796,15 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             and bucket.get("cacheability_bucket") in {"high", "medium", "unknown"}
         ):
             replay_candidate_class = "streaming-non-tool-exact-candidate"
-        elif bool(bucket.get("has_tools")) and "file-dependency-unknown" in blocker_list:
+        elif bool(bucket.get("has_tools")) and {
+            "file-dependency-missing",
+            "dependency-missing",
+            "dependency-cap-exceeded",
+            "dependency-changed",
+            "dependency-deleted",
+            "dependency-created",
+            "file-watch-disabled",
+        } & set(blocker_list):
             replay_candidate_class = "blocked-tool-result-invalidation"
         elif not blocker_list and bucket.get("cacheability_bucket") in {"high", "medium", "unknown"}:
             replay_candidate_class = "replay-safe-exact-candidate"
@@ -3994,6 +4102,34 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
                 "requires_file_dependency_evidence": True,
                 "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
             }
+        if bool(unit.get("has_tools")):
+            audit = unit.get("file_dependency_audit") if isinstance(unit.get("file_dependency_audit"), dict) else {}
+            audit_reason = str(audit.get("invalidation_reason") or "")
+            audit_blocker = None
+            if audit.get("cap_exceeded"):
+                audit_blocker = "dependency-cap-exceeded"
+            elif audit_reason in {
+                "file-dependency-missing",
+                "dependency-missing",
+                "dependency-changed",
+                "dependency-deleted",
+                "dependency-created",
+                "file-watch-disabled",
+            }:
+                audit_blocker = audit_reason
+            elif not bool(unit.get("safe_invalidation_evidence")):
+                audit_blocker = "file-dependency-missing"
+            if audit_blocker:
+                return {
+                    **base,
+                    "status": "invalidation-required",
+                    "reason": audit_blocker,
+                    "blockers": [audit_blocker],
+                    "requires_file_dependency_evidence": True,
+                    "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+                    "safe_invalidation_evidence": bool(unit.get("safe_invalidation_evidence")),
+                    "file_dependency_audit": audit,
+                }
         if bool(unit.get("has_tools")) and not bool(unit.get("file_dependency_evidence_available")):
             return {
                 **base,
@@ -4085,6 +4221,8 @@ def _cache_replay_dry_run_from_units(
                 "replayability_level": unit.get("replayability_level"),
                 "cacheability_bucket": unit.get("cacheability_bucket"),
                 "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+                "safe_invalidation_evidence": bool(unit.get("safe_invalidation_evidence")),
+                "file_dependency_audit": unit.get("file_dependency_audit"),
                 "requires_file_dependency_evidence": bool(decision.get("requires_file_dependency_evidence")),
                 "matched_pattern_hash_count": _as_int(decision.get("matched_pattern_hash_count")),
                 "matched_pattern_hashes_included": False,

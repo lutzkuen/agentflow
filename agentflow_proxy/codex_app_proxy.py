@@ -18,7 +18,7 @@ import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from agentflow_proxy.cache import cache_file_dependency_snapshots, cache_key_for
+from agentflow_proxy.cache import cache_file_dependency_audit, cache_file_dependency_snapshots, cache_key_for
 from agentflow_proxy.codex_app_policy import (
     CODEX_ACTION_KEY_HINTS,
     CODEX_ACTION_VALUE_HINTS,
@@ -533,6 +533,7 @@ def _codex_cache_decision(
     cache_key: str | None = None,
     replayability_level: str = "features_only",
     file_dependencies: list[dict[str, Any]] | None = None,
+    file_dependency_audit_meta: dict[str, Any] | None = None,
     invalidation_reason: str | None = None,
     workflow_phase: str | None = None,
     workflow_phase_reason: str | None = None,
@@ -546,13 +547,15 @@ def _codex_cache_decision(
     })
     if cache_key:
         meta["cache_key"] = cache_key
-    if file_dependencies:
-        meta["file_dependency_count"] = len(file_dependencies)
-        meta["file_dependencies"] = [
-            {"path": dep.get("path"), "exists": bool(dep.get("exists"))}
-            for dep in file_dependencies
-            if dep.get("path")
-        ]
+    if file_dependency_audit_meta is None and file_dependencies:
+        file_dependency_audit_meta = cache_file_dependency_audit(snapshots=file_dependencies)
+    if file_dependency_audit_meta:
+        meta["file_dependency_audit"] = file_dependency_audit_meta
+        meta["file_dependency_count"] = file_dependency_audit_meta.get("snapshot_count", 0)
+        meta["file_dependency_evidence_available"] = bool(
+            file_dependency_audit_meta.get("file_dependency_evidence_available")
+        )
+        meta["safe_invalidation_evidence"] = bool(file_dependency_audit_meta.get("safe_invalidation_evidence"))
     if invalidation_reason:
         meta["invalidation_reason"] = invalidation_reason
     if workflow_phase:
@@ -1360,6 +1363,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
     else:
         cache_key = _codex_cache_key_for_message(optimized)
         file_deps = cache_file_dependency_snapshots(routed_params)
+        file_dependency_audit_meta = cache_file_dependency_audit(routed_params)
         cached, invalidation_reason = store.get_cache_with_reason(cache_key)
         if cached is not None:
             replay_frame = _codex_cached_response(cached, msg.get("id"))
@@ -1373,6 +1377,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                     cache_key=cache_key,
                     replayability_level="local-exact-response",
                     file_dependencies=file_deps,
+                    file_dependency_audit_meta=file_dependency_audit_meta,
                     workflow_phase=workflow_phase,
                     workflow_phase_reason=workflow_phase_reason,
                 )
@@ -1387,6 +1392,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                     cache_key=cache_key,
                     replayability_level="local-exact-response",
                     file_dependencies=file_deps,
+                    file_dependency_audit_meta=file_dependency_audit_meta,
                     workflow_phase=workflow_phase,
                     workflow_phase_reason=workflow_phase_reason,
                 )
@@ -1400,6 +1406,7 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                 cache_key=cache_key,
                 replayability_level="local-exact-response",
                 file_dependencies=file_deps,
+                file_dependency_audit_meta=file_dependency_audit_meta,
                 invalidation_reason=invalidation_reason,
                 workflow_phase=workflow_phase,
                 workflow_phase_reason=workflow_phase_reason,

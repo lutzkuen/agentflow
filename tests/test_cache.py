@@ -570,6 +570,29 @@ pattern_rules:
 
         self.assertEqual(snapshots, [])
 
+    def test_file_dependency_audit_reports_cap_exceeded_without_paths(self):
+        os.environ["AGENTFLOW_CACHE_WATCH_MAX_PATHS"] = "1"
+        capped = importlib.reload(cache_module)
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+            (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            audit = capped.cache_file_dependency_audit({
+                "messages": [{"role": "user", "content": "Read ./a.txt and ./b.txt"}],
+            })
+            snapshots = capped.cache_file_dependency_snapshots({
+                "messages": [{"role": "user", "content": "Read ./a.txt and ./b.txt"}],
+            })
+
+        self.assertTrue(audit["cap_exceeded"])
+        self.assertEqual(audit["invalidation_reason"], "dependency-cap-exceeded")
+        self.assertEqual(audit["snapshot_count"], 1)
+        self.assertEqual(len(snapshots), 1)
+        self.assertFalse(audit["paths_included"])
+        self.assertNotIn("a.txt", json.dumps(audit))
+
     def test_exact_cache_entry_is_invalidated_when_watched_file_changes(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -589,14 +612,43 @@ pattern_rules:
 
                 watched.write_text("print('newer content')\n", encoding="utf-8")
 
+                audit = store.cache_file_dependency_audit("cache-key")
+                self.assertEqual(audit["changed_path_count"], 1)
+                self.assertEqual(audit["invalidation_reason"], "dependency-changed")
+                self.assertFalse(audit["paths_included"])
+
                 cached, reason = store.get_cache_with_reason("cache-key")
                 self.assertIsNone(cached)
-                self.assertEqual(reason, "file-dependency-changed")
+                self.assertEqual(reason, "dependency-changed")
                 cache_row = store.conn.execute(
                     "select 1 from cache where cache_key = ?",
                     ("cache-key",),
                 ).fetchone()
                 self.assertIsNone(cache_row)
+            finally:
+                store.conn.close()
+
+    def test_exact_cache_entry_is_invalidated_when_watched_file_is_deleted(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('old')\n", encoding="utf-8")
+            body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
+            os.chdir(tmp_path)
+            deps = cache_module.cache_file_dependency_snapshots(body)
+            store = Store(str(tmp_path / "cache.sqlite3"))
+            try:
+                store.set_cache("cache-key", "model", 10, {"content": "old"}, file_deps=deps)
+                watched.unlink()
+
+                audit = store.cache_file_dependency_audit("cache-key")
+                self.assertEqual(audit["deleted_path_count"], 1)
+                self.assertEqual(audit["invalidation_reason"], "dependency-deleted")
+
+                cached, reason = store.get_cache_with_reason("cache-key")
+                self.assertIsNone(cached)
+                self.assertEqual(reason, "dependency-deleted")
             finally:
                 store.conn.close()
 
@@ -613,7 +665,9 @@ pattern_rules:
 
                 (tmp_path / "missing.txt").write_text("created\n", encoding="utf-8")
 
-                self.assertIsNone(store.get_cache("cache-key"))
+                cached, reason = store.get_cache_with_reason("cache-key")
+                self.assertIsNone(cached)
+                self.assertEqual(reason, "dependency-changed")
             finally:
                 store.conn.close()
 

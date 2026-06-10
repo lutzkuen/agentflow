@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from agentflow_proxy.cache import (
     SEMANTIC_CACHE_THRESHOLD,
     cache_decision_meta,
+    cache_file_dependency_audit,
     cache_file_dependency_snapshots,
     cache_hit_decision_meta,
     cache_key_for,
@@ -493,6 +494,16 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             store_obj=context.store,
             managed_profile=managed_cache_profile,
         )
+        file_deps = cache_file_dependency_snapshots(crunched) if (can_cache or has_tool_blocks) else []
+        if can_cache or has_tool_blocks:
+            cache_meta["file_dependency_audit"] = cache_file_dependency_audit(crunched)
+            cache_meta["file_dependency_count"] = cache_meta["file_dependency_audit"]["snapshot_count"]
+            cache_meta["file_dependency_evidence_available"] = bool(
+                cache_meta["file_dependency_audit"]["file_dependency_evidence_available"]
+            )
+            cache_meta["safe_invalidation_evidence"] = bool(
+                cache_meta["file_dependency_audit"]["safe_invalidation_evidence"]
+            )
         key = cache_key_for(
             crunched,
             path,
@@ -505,6 +516,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             if invalidated_reason:
                 cache_meta["reason"] = invalidated_reason
                 cache_meta["invalidated"] = True
+                cache_meta["invalidation_reason"] = invalidated_reason
             if cached is not None:
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(cached))
@@ -768,7 +780,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 str(crunched.get("model")),
                 len(stable_json(crunched)),
                 response_body,
-                file_deps=cache_file_dependency_snapshots(crunched),
+                file_deps=file_deps,
             )
         if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
             context.store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))

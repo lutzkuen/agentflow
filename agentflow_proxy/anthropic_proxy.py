@@ -39,7 +39,7 @@ from agentflow_proxy.crunch import (
 )
 from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
-    cache_decision_meta, cache_hit_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
+    cache_decision_meta, cache_file_dependency_audit, cache_hit_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
     is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
     streaming_cache_lookup_meta, cache_file_dependency_snapshots,
 )
@@ -632,6 +632,16 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 pattern_features=routing_meta.get("managed_pattern_features"),
                 store_obj=context.store,
             )
+            file_deps = cache_file_dependency_snapshots(crunched) if (can_stream_cache or has_tool_blocks) else []
+            if can_stream_cache or has_tool_blocks:
+                cache_meta["file_dependency_audit"] = cache_file_dependency_audit(crunched)
+                cache_meta["file_dependency_count"] = cache_meta["file_dependency_audit"]["snapshot_count"]
+                cache_meta["file_dependency_evidence_available"] = bool(
+                    cache_meta["file_dependency_audit"]["file_dependency_evidence_available"]
+                )
+                cache_meta["safe_invalidation_evidence"] = bool(
+                    cache_meta["file_dependency_audit"]["safe_invalidation_evidence"]
+                )
             key = cache_key_for(
                 crunched,
                 path,
@@ -643,6 +653,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 if invalidated_reason:
                     cache_meta["reason"] = invalidated_reason
                     cache_meta["invalidated"] = True
+                    cache_meta["invalidation_reason"] = invalidated_reason
                 if is_stream_cache_payload(cached, provider="anthropic"):
                     cached_frames = stream_cache_frames(cached)
                     cached_usage = cached.get("usage") or {}
@@ -848,7 +859,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 usage=stream_usage,
                                 output_text="".join(output_text_parts),
                             ),
-                            file_deps=cache_file_dependency_snapshots(crunched),
+                            file_deps=file_deps,
                         )
                     thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
                     context.store.log_call(
@@ -905,6 +916,16 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             pattern_features=routing_meta.get("managed_pattern_features"),
             store_obj=context.store,
         )
+        file_deps = cache_file_dependency_snapshots(crunched) if (can_cache or has_tool_blocks) else []
+        if can_cache or has_tool_blocks:
+            cache_meta["file_dependency_audit"] = cache_file_dependency_audit(crunched)
+            cache_meta["file_dependency_count"] = cache_meta["file_dependency_audit"]["snapshot_count"]
+            cache_meta["file_dependency_evidence_available"] = bool(
+                cache_meta["file_dependency_audit"]["file_dependency_evidence_available"]
+            )
+            cache_meta["safe_invalidation_evidence"] = bool(
+                cache_meta["file_dependency_audit"]["safe_invalidation_evidence"]
+            )
         key = cache_key_for(
             crunched,
             path,
@@ -917,6 +938,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             if invalidated_reason:
                 cache_meta["reason"] = invalidated_reason
                 cache_meta["invalidated"] = True
+                cache_meta["invalidation_reason"] = invalidated_reason
             if cached is not None:
                 cache_hit = True
                 response_body = cached
@@ -1115,7 +1137,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 str(crunched.get("model")),
                 len(stable_json(crunched)),
                 response_body,
-                file_deps=cache_file_dependency_snapshots(crunched),
+                file_deps=file_deps,
             )
         if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
             context.store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))

@@ -1045,7 +1045,10 @@ exact_cache:
                 _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(second))
 
             self.assertEqual(metadata["cache"]["status"], "miss")
-            self.assertEqual(metadata["cache"]["reason"], "file-dependency-changed")
+            self.assertEqual(metadata["cache"]["reason"], "dependency-changed")
+            self.assertEqual(metadata["cache"]["file_dependency_audit"]["invalidation_reason"], None)
+            self.assertFalse(metadata["cache"]["file_dependency_audit"]["paths_included"])
+            self.assertNotIn(path, json.dumps(metadata["cache"]))
             self.assertNotIn("_agentflow_replay_frame", metadata["cache"])
             test_store.conn.close()
 
