@@ -3415,6 +3415,73 @@ def _cacheability_meta_from_row(
     return result
 
 
+_CACHE_PATTERN_SAFE_FEATURE_KEYS = (
+    "pattern_hashes",
+    "pattern_hash",
+    "normalized_pattern_hash",
+    "cache_pattern_hash",
+    "source_surface",
+    "app_family",
+    "category",
+    "workflow_phase",
+    "text_bucket",
+    "token_bucket",
+    "requested_model",
+    "candidate_target_model",
+    "replayability_level",
+    "has_tools",
+    "stream",
+    "request_fingerprint",
+    "session_id_hash",
+    "workflow_id_hash",
+)
+
+
+def _cache_pattern_features_from_row(
+    *,
+    source_surface: str,
+    routing: dict[str, Any],
+    cache: dict[str, Any],
+    category: str,
+    workflow_phase: str,
+    requested_model: str,
+    routed_model: str,
+    stream: bool,
+    has_tools: bool,
+    text_chars: int,
+    input_tokens: int,
+    replayability_level: str,
+) -> dict[str, Any]:
+    features: dict[str, Any] = {}
+    for source in (
+        routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {},
+        cache.get("managed_pattern_features") if isinstance(cache.get("managed_pattern_features"), dict) else {},
+        cache.get("pattern_features") if isinstance(cache.get("pattern_features"), dict) else {},
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in _CACHE_PATTERN_SAFE_FEATURE_KEYS:
+            value = source.get(key)
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                features[key] = value
+            elif isinstance(value, list):
+                features[key] = [item for item in value if isinstance(item, (str, int, float, bool))]
+    features.setdefault("source_surface", canonical_source_surface(source_surface))
+    features.setdefault("category", category)
+    features.setdefault("workflow_phase", workflow_phase)
+    features.setdefault("requested_model", requested_model)
+    features.setdefault("candidate_target_model", routed_model)
+    features.setdefault("replayability_level", replayability_level)
+    features.setdefault("has_tools", bool(has_tools))
+    features.setdefault("stream", bool(stream))
+    features.setdefault("text_bucket", f"{_size_bucket(text_chars)}_chars")
+    features.setdefault("token_bucket", f"{_size_bucket(input_tokens)}_tokens")
+    features["raw_pattern_strings_included"] = False
+    return features
+
+
 def _file_dependency_count(cache: dict[str, Any]) -> int:
     if cache.get("file_dependency_count") is not None:
         return _as_int(cache.get("file_dependency_count"))
@@ -3442,6 +3509,14 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
     replayability_level = str(cache.get("replayability_level") or ("features_only" if granularity == "agent_turn" else "metadata_shape"))
     pattern_diagnostics = routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {}
     cacheability = _cacheability_meta_from_row(routing=routing, crunch=crunch, cache=cache)
+    workflow_phase = str(
+        cache.get("workflow_phase")
+        or routing.get("workflow_phase")
+        or pattern_diagnostics.get("workflow_phase")
+        or category
+        or "unknown"
+    )
+    has_tools = bool(routing.get("has_tools") or category.startswith("tool"))
     file_dependency_count = _file_dependency_count(cache)
     file_dependency_evidence_available = bool(
         file_dependency_count > 0
@@ -3460,16 +3535,12 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "hit_type": str(decision.get("hit_type") or ""),
         "policy_source": str(decision.get("policy_source") or "unknown"),
         "category": category,
-        "workflow_phase": str(
-            cache.get("workflow_phase")
-            or routing.get("workflow_phase")
-            or pattern_diagnostics.get("workflow_phase")
-            or category
-            or "unknown"
-        ),
+        "workflow_phase": workflow_phase,
+        "requested_model": requested_model,
+        "routed_model": routed_model,
         "requested_tier": model_tier(requested_model) if requested_model else "unknown",
         "target_tier": model_tier(routed_model) if routed_model else "unknown",
-        "has_tools": bool(routing.get("has_tools") or category.startswith("tool")),
+        "has_tools": has_tools,
         "eligible": bool(cache.get("eligible")),
         "replayability_level": replayability_level,
         "cacheability": cacheability,
@@ -3484,6 +3555,20 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "text_chars": text_chars,
         "cache": cache,
     }
+    unit["pattern_features"] = _cache_pattern_features_from_row(
+        source_surface=source_surface,
+        routing=routing,
+        cache=cache,
+        category=category,
+        workflow_phase=workflow_phase,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        stream=bool(_as_int(row.get("stream"))),
+        has_tools=has_tools,
+        text_chars=text_chars,
+        input_tokens=input_tokens,
+        replayability_level=replayability_level,
+    )
     unit["blockers"] = _cache_replayability_blockers(unit)
     return unit
 
@@ -3689,7 +3774,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
     }
 
 
-async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str, Any]:
+def _cache_replayability_units_from_store(store_obj: Any, *, row_limit: int | None = None) -> list[dict[str, Any]]:
     conn = store_obj.conn
     provider_rows = [
         dict(row)
@@ -3705,6 +3790,8 @@ async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str
             order by created_at desc
         """).fetchall()
     ]
+    if row_limit is not None:
+        provider_rows = provider_rows[: max(0, int(row_limit))]
     units: list[dict[str, Any]] = []
     for row in provider_rows:
         surface = _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
@@ -3737,6 +3824,8 @@ async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str
             order by s.created_at desc
         """).fetchall()
     ]
+    if row_limit is not None:
+        codex_rows = codex_rows[: max(0, int(row_limit))]
     for row in codex_rows:
         estimates = _codex_estimates_with_cache(row.get("text_chars"), row.get("response_result_chars"), _json_obj(row.get("cache_json")))
         prepared = {
@@ -3755,7 +3844,394 @@ async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str
         if unit is not None:
             units.append(unit)
 
+    return units
+
+
+async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str, Any]:
+    units = _cache_replayability_units_from_store(store_obj)
     return _cache_replayability_report_from_units(units, limit=limit)
+
+
+def _cache_table_count(conn: Any) -> int | None:
+    try:
+        row = conn.execute("select count(*) as c from cache").fetchone()
+        return _as_int(row["c"] if row is not None else 0)
+    except Exception:
+        return None
+
+
+def _dry_run_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if isinstance(item, (str, int, float, bool))]
+    return []
+
+
+def _dry_run_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return False
+
+
+def _dry_run_condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> bool:
+    if key not in conditions:
+        return True
+    expected = {item.lower() for item in _dry_run_values(conditions.get(key))}
+    if not expected:
+        return True
+    return str(actual or "").lower() in expected
+
+
+def _cache_dry_run_public_canary(canary: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(canary, dict):
+        return None
+    public = dict(canary)
+    pattern_hash_count = len(public.get("pattern_hashes") or []) if isinstance(public.get("pattern_hashes"), list) else 0
+    public.pop("pattern_hashes", None)
+    public["pattern_hash_count"] = pattern_hash_count
+    public["pattern_hashes_included"] = False
+    return public
+
+
+def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, Any]]) -> dict[str, Any]:
+    from agentflow_proxy.cache import cache_pattern_hashes_from_features
+    from agentflow_proxy.pattern_rollout import pattern_canary_decision, pattern_rollout_public_meta
+
+    features = unit.get("pattern_features") if isinstance(unit.get("pattern_features"), dict) else {}
+    feature_hashes = set(cache_pattern_hashes_from_features(features))
+    last_reason = "no-matching-rule"
+    saw_source_surface_mismatch = False
+    saw_replayability_mismatch = False
+    if not feature_hashes:
+        last_reason = "pattern-features-missing"
+
+    for rule in rules:
+        rule_id = str(rule.get("id") or "cache-pattern-rule")
+        candidate_id = rule.get("candidate_id")
+        policy_source = str(rule.get("policy_source") or "managed-recommended")
+        if not rule.get("enabled", True):
+            last_reason = "disabled"
+            continue
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        rule_hashes = {str(item) for item in conditions.get("pattern_hashes") or []}
+        matched_hashes = sorted(feature_hashes.intersection(rule_hashes))
+        if not matched_hashes:
+            last_reason = "pattern-hash-mismatch"
+            continue
+        model_pattern = conditions.get("model_pattern")
+        if isinstance(model_pattern, str) and model_pattern.strip():
+            requested_model = str(features.get("requested_model") or unit.get("requested_model") or "").lower()
+            routed_model = str(features.get("candidate_target_model") or unit.get("routed_model") or "").lower()
+            pattern = model_pattern.strip().lower()
+            if pattern not in requested_model and pattern not in routed_model:
+                last_reason = "model-pattern-mismatch"
+                continue
+        if "has_tools" in conditions and _dry_run_bool(conditions.get("has_tools")) != bool(unit.get("has_tools")):
+            last_reason = "has-tools-mismatch"
+            continue
+        if "stream" in conditions and _dry_run_bool(conditions.get("stream")) != bool(unit.get("stream")):
+            last_reason = "stream-mismatch"
+            continue
+        if not _dry_run_condition_matches(conditions, "category", unit.get("category")):
+            last_reason = "category-mismatch"
+            continue
+        excluded_categories = {item.lower() for item in _dry_run_values(conditions.get("category_not_in"))}
+        if excluded_categories and str(unit.get("category") or "").lower() in excluded_categories:
+            last_reason = "category-excluded"
+            continue
+        mismatched_key = None
+        for key in ("workflow_phase", "source_surface", "app_family", "text_bucket", "token_bucket"):
+            actual = features.get(key)
+            if key == "source_surface":
+                actual = unit.get("source_surface")
+            if not _dry_run_condition_matches(conditions, key, actual):
+                mismatched_key = key
+                break
+        if mismatched_key:
+            last_reason = f"{mismatched_key}-mismatch"
+            if mismatched_key == "source_surface":
+                saw_source_surface_mismatch = True
+            continue
+        replayability_levels = {item.lower() for item in _dry_run_values(conditions.get("replayability_levels"))}
+        if replayability_levels and str(unit.get("replayability_level") or "").lower() not in replayability_levels:
+            last_reason = "replayability-gate-mismatch"
+            saw_replayability_mismatch = True
+            continue
+
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        base = {
+            "rule_id": rule_id,
+            "candidate_id": candidate_id,
+            "policy_source": policy_source,
+            "matched_pattern_hash_count": len(matched_hashes),
+            "matched_pattern_hashes_included": False,
+            "rollout": pattern_rollout_public_meta(rule.get("rollout")),
+        }
+        if action.get("type") not in {"exact_cache", "exact_cache_pattern"}:
+            return {**base, "status": "blocked", "reason": "unsupported-action", "blockers": ["unsupported-action"]}
+        if bool(unit.get("stream")) and not bool(action.get("streaming")):
+            return {**base, "status": "blocked", "reason": "streaming-not-allowed", "blockers": ["streaming-not-allowed"]}
+        if bool(unit.get("has_tools")) and not bool(action.get("allow_tool_calls")):
+            return {
+                **base,
+                "status": "invalidation-required",
+                "reason": "tool-cache-rule-requires-safe-invalidation",
+                "blockers": ["tool-call-disabled", "safe-invalidation-required"],
+                "requires_file_dependency_evidence": True,
+                "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+            }
+        if bool(unit.get("has_tools")) and not bool(action.get("safe_invalidation")):
+            return {
+                **base,
+                "status": "invalidation-required",
+                "reason": "tool-cache-rule-missing-safe-invalidation",
+                "blockers": ["safe-invalidation-required"],
+                "requires_file_dependency_evidence": True,
+                "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+            }
+        if bool(unit.get("has_tools")) and not bool(unit.get("file_dependency_evidence_available")):
+            return {
+                **base,
+                "status": "invalidation-required",
+                "reason": "file-dependency-evidence-absent",
+                "blockers": ["file-dependency-evidence-absent"],
+                "requires_file_dependency_evidence": True,
+                "file_dependency_evidence_available": False,
+            }
+        stale_blockers = [
+            blocker
+            for blocker in unit.get("blockers") or []
+            if blocker in {"current-state", "user-specific", "low-cacheability"}
+        ]
+        if stale_blockers:
+            return {
+                **base,
+                "status": "blocked",
+                "reason": "stale-risk-blockers",
+                "blockers": stale_blockers,
+                "stale_risk_blockers": stale_blockers,
+            }
+        canary = pattern_canary_decision(
+            rollout=rule.get("rollout"),
+            rule_id=rule_id,
+            candidate_id=candidate_id,
+            pattern_hashes=matched_hashes,
+            features=features,
+        )
+        if canary.get("enabled") and not canary.get("selected", True):
+            return {
+                **base,
+                "status": "holdout",
+                "reason": "canary_holdout",
+                "blockers": ["canary_holdout"],
+                "canary": _cache_dry_run_public_canary(canary),
+            }
+        return {
+            **base,
+            "status": "projected-streaming-candidate" if bool(unit.get("stream")) else "projected-exact-candidate",
+            "reason": "rule-match",
+            "blockers": [],
+            "canary": _cache_dry_run_public_canary(canary) if canary.get("enabled") else None,
+            "requires_file_dependency_evidence": bool(unit.get("has_tools")),
+            "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+        }
+
+    if saw_source_surface_mismatch:
+        return {"status": "unsupported-source-surface", "reason": "source_surface-mismatch", "blockers": ["unsupported-source-surface"]}
+    if saw_replayability_mismatch:
+        return {"status": "blocked", "reason": "replayability-gate-mismatch", "blockers": ["replayability-gate-mismatch"]}
+    return {"status": "unmatched", "reason": last_reason, "blockers": [last_reason] if last_reason else []}
+
+
+def _cache_replay_dry_run_from_units(
+    units: list[dict[str, Any]],
+    *,
+    rules: list[dict[str, Any]],
+    limit: int,
+    cache_rows_before: int | None,
+    cache_rows_after: int | None,
+) -> dict[str, Any]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    for unit in units:
+        decision = _cache_replay_dry_run_decision(unit, rules)
+        status = str(decision.get("status") or "unknown")
+        reason = str(decision.get("reason") or "unknown")
+        fingerprint, basis = _cache_replayability_fingerprint(unit)
+        key = (status, str(decision.get("rule_id") or ""), fingerprint)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "status": status,
+                "reason": reason,
+                "rule_id": decision.get("rule_id"),
+                "candidate_id": decision.get("candidate_id"),
+                "policy_source": decision.get("policy_source"),
+                "replay_fingerprint": f"sha256:{fingerprint}",
+                "fingerprint_basis": basis,
+                "source_surface": unit.get("source_surface"),
+                "granularity": unit.get("granularity"),
+                "category": unit.get("category"),
+                "workflow_phase": unit.get("workflow_phase"),
+                "stream": bool(unit.get("stream")),
+                "has_tools": bool(unit.get("has_tools")),
+                "replayability_level": unit.get("replayability_level"),
+                "cacheability_bucket": unit.get("cacheability_bucket"),
+                "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+                "requires_file_dependency_evidence": bool(decision.get("requires_file_dependency_evidence")),
+                "matched_pattern_hash_count": _as_int(decision.get("matched_pattern_hash_count")),
+                "matched_pattern_hashes_included": False,
+                "count": 0,
+                "estimated_cost_usd": 0.0,
+                "projected_hits": 0,
+                "estimated_saved_cost_usd": 0.0,
+                "first_seen_at": unit.get("created_at"),
+                "last_seen_at": unit.get("created_at"),
+                "_blockers": set(decision.get("blockers") or []),
+                "_stale": set(decision.get("stale_risk_blockers") or []),
+            },
+        )
+        bucket["count"] += 1
+        bucket["estimated_cost_usd"] += _as_float(unit.get("cost_est_usd"))
+        if str(unit.get("created_at") or "") < str(bucket.get("first_seen_at") or unit.get("created_at") or ""):
+            bucket["first_seen_at"] = unit.get("created_at")
+        if str(unit.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+            bucket["last_seen_at"] = unit.get("created_at")
+        if decision.get("canary") and not bucket.get("canary"):
+            bucket["canary"] = decision.get("canary")
+        if decision.get("rollout") and not bucket.get("rollout"):
+            bucket["rollout"] = decision.get("rollout")
+        for blocker in decision.get("blockers") or []:
+            bucket["_blockers"].add(str(blocker))
+        for blocker in decision.get("stale_risk_blockers") or []:
+            bucket["_stale"].add(str(blocker))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        for blocker in decision.get("blockers") or []:
+            label = str(blocker)
+            blocker_counts[label] = blocker_counts.get(label, 0) + 1
+
+    rows: list[dict[str, Any]] = []
+    projected_exact_hits = 0
+    projected_streaming_hits = 0
+    estimated_saved = 0.0
+    for bucket in grouped.values():
+        status = str(bucket.get("status") or "")
+        candidate = status in {"projected-exact-candidate", "projected-streaming-candidate"}
+        if candidate and _as_int(bucket.get("count")) > 1:
+            projected_hits = _as_int(bucket.get("count")) - 1
+            avg_cost = float(bucket["estimated_cost_usd"]) / _as_int(bucket.get("count"))
+            saved = max(0.0, float(bucket["estimated_cost_usd"]) - avg_cost)
+            bucket["projected_hits"] = projected_hits
+            bucket["estimated_saved_cost_usd"] = saved
+            estimated_saved += saved
+            if status == "projected-streaming-candidate":
+                projected_streaming_hits += projected_hits
+            else:
+                projected_exact_hits += projected_hits
+        finalized = {
+            key: value
+            for key, value in bucket.items()
+            if key not in {"_blockers", "_stale"}
+        }
+        finalized["blockers"] = sorted(bucket["_blockers"])
+        finalized["stale_risk_blockers"] = sorted(bucket["_stale"])
+        finalized["estimated_cost_usd"] = round(float(finalized["estimated_cost_usd"]), 6)
+        finalized["estimated_saved_cost_usd"] = round(float(finalized["estimated_saved_cost_usd"]), 6)
+        rows.append(finalized)
+
+    rows.sort(
+        key=lambda row: (
+            _as_float(row.get("estimated_saved_cost_usd")),
+            _as_int(row.get("projected_hits")),
+            _as_int(row.get("count")),
+            _as_float(row.get("estimated_cost_usd")),
+        ),
+        reverse=True,
+    )
+    candidate_rows = status_counts.get("projected-exact-candidate", 0) + status_counts.get("projected-streaming-candidate", 0)
+    holdout_rows = status_counts.get("holdout", 0)
+    invalidation_rows = status_counts.get("invalidation-required", 0)
+    unsupported_rows = status_counts.get("unsupported-source-surface", 0)
+    stale_rows = sum(_as_int(row.get("count")) for row in rows if row.get("stale_risk_blockers"))
+    blocked_rows = sum(
+        count
+        for status, count in status_counts.items()
+        if status in {"blocked", "invalidation-required", "unsupported-source-surface"}
+    )
+    return {
+        "schema": "agentflow.cache_replay_dry_run.v1",
+        "generated_at": utc_now(),
+        "summary": {
+            "rows_considered": len(units),
+            "policy_rule_count": len(rules),
+            "matched_rows": len(units) - status_counts.get("unmatched", 0),
+            "candidate_rows": candidate_rows,
+            "projected_exact_hits": projected_exact_hits,
+            "projected_streaming_hits": projected_streaming_hits,
+            "projected_total_hits": projected_exact_hits + projected_streaming_hits,
+            "holdout_rows": holdout_rows,
+            "blocked_rows": blocked_rows,
+            "invalidation_required_rows": invalidation_rows,
+            "unsupported_source_surface_rows": unsupported_rows,
+            "stale_risk_blocked_rows": stale_rows,
+            "estimated_saved_cost_usd": round(estimated_saved, 6),
+            "cache_rows_before": cache_rows_before,
+            "cache_rows_after": cache_rows_after,
+            "cache_table_mutated": cache_rows_before != cache_rows_after,
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+        },
+        "status_breakdown": _breakdown_from_counts(status_counts),
+        "reason_breakdown": _breakdown_from_counts(reason_counts),
+        "blocker_breakdown": _breakdown_from_counts(blocker_counts),
+        "rows": rows[: max(1, int(limit or 50))],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
+            "pattern_hashes_included": False,
+            "basis": "proposed cache pattern rules evaluated against metadata-derived replay fingerprints only",
+        },
+    }
+
+
+async def stats_cache_replay_dry_run(
+    store_obj: Any,
+    proposed_policy: Any,
+    *,
+    limit: int = 1000,
+    row_limit: int | None = None,
+) -> dict[str, Any]:
+    from agentflow_proxy.cache import cache_pattern_rules_from_policy_payload
+
+    rules = cache_pattern_rules_from_policy_payload(proposed_policy)
+    scan_limit = max(1, min(_as_int(row_limit if row_limit is not None else limit) or 1000, 10000))
+    output_limit = max(1, min(_as_int(limit) or 50, 1000))
+    cache_rows_before = _cache_table_count(store_obj.conn)
+    units = _cache_replayability_units_from_store(store_obj, row_limit=scan_limit)
+    cache_rows_after = _cache_table_count(store_obj.conn)
+    return _cache_replay_dry_run_from_units(
+        units,
+        rules=rules,
+        limit=output_limit,
+        cache_rows_before=cache_rows_before,
+        cache_rows_after=cache_rows_after,
+    )
 
 
 def _managed_error_class(meta: dict[str, Any]) -> str | None:

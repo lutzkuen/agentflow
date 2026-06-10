@@ -121,6 +121,14 @@ agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --prett
 
 The report groups local metadata by replay fingerprint and includes stream/tool flags, workflow phase, cacheability bucket, safe invalidation evidence, current cache decision, blocker counts, and projected repeated-call cost. It does not print raw prompts, responses, tool payloads, request IDs, cache keys, file paths, transcripts, or raw session IDs.
 
+To dry-run proposed cache replay pattern rules against recent local traffic without writing cache rows, replaying responses, or calling providers, run:
+
+```bash
+agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The dry-run reports projected exact and streaming hits, canary holdouts, blocked rows, invalidation-required rows, unsupported source surfaces, stale-risk blockers, rule IDs, candidate IDs, and estimated repeated-call savings from metadata-derived replay fingerprints only.
+
 To measure Anthropic phase-routing opportunity and blockers before changing routing behavior, run:
 
 ```bash
@@ -185,6 +193,7 @@ Common policy commands:
 | `agentflow-policy-review proposed.json --pretty` | Review changes and warnings before apply |
 | `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
 | `agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Measure replay-safe cache opportunity and blockers from local metadata |
+| `agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run cache replay pattern rules against recent local metadata without mutating cache entries |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
 | `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
 | `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |

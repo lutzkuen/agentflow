@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -330,6 +331,115 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertNotIn("cli-cache-session-secret", encoded)
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
         self.assertFalse(payload["privacy"]["cache_keys_included"])
+
+    def test_cache_replay_dry_run_cli_reads_policy_without_mutating_cache(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        pattern_hash = "sha256:" + "a" * 64
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            policy_path = Path(tmp) / "proposed-cache-policy.json"
+            policy_path.write_text(
+                json.dumps({
+                    "policies": {
+                        "cache": {
+                            "pattern_rules": [
+                                {
+                                    "id": "cli-cache-dry-run-rule",
+                                    "candidate_id": "cli-cache-candidate",
+                                    "conditions": {
+                                        "pattern_hashes": [pattern_hash],
+                                        "source_surface": "anthropic_messages",
+                                        "category": "chat",
+                                        "has_tools": False,
+                                        "stream": False,
+                                    },
+                                    "action": {"type": "exact_cache_pattern"},
+                                }
+                            ],
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            store = Store(db_path)
+            try:
+                store.set_cache("existing-cli-cache-key", "claude-sonnet-4-6", 10, {"content": "cached"})
+                for index, cost in enumerate((0.01, 0.03)):
+                    store.log_call(
+                        id=f"cli-cache-dry-{index}",
+                        created_at=f"2026-06-10T02:0{index}:00+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=100,
+                        input_tokens_est=100,
+                        output_tokens_est=10,
+                        actual_input_tokens=100,
+                        actual_output_tokens=10,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({
+                            "text_chars": 1200,
+                            "category": "chat",
+                            "has_tools": False,
+                            "managed_pattern_features": {
+                                "pattern_hashes": [pattern_hash],
+                                "source_surface": "anthropic_messages",
+                                "app_family": "claude_code",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "text_bucket": "lt_2k_chars",
+                                "token_bucket": "lt_1k_tokens",
+                                "raw_pattern_strings_included": False,
+                            },
+                        }),
+                        cache_json=stable_json({
+                            "status": "miss",
+                            "reason": "exact-miss",
+                            "policy_source": "local-default",
+                            "replayability_level": "local-exact-response",
+                        }),
+                        request_json=stable_json({"messages": [{"content": "raw cli dry run prompt must not leak"}]}),
+                        session_id="cli-dry-run-session-secret",
+                        category="chat",
+                        retry_count=0,
+                        provider="anthropic",
+                    )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.cache_replay_dry_run_cli(
+                [str(policy_path), "--db", db_path, "--scan-limit", "10", "--limit", "10"],
+                stdout=stdout,
+            )
+
+            with sqlite3.connect(db_path) as conn:
+                cache_rows = conn.execute("select count(*) from cache").fetchone()[0]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(cache_rows, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.cache_replay_dry_run.v1")
+        self.assertEqual(payload["summary"]["cache_rows_before"], 1)
+        self.assertEqual(payload["summary"]["cache_rows_after"], 1)
+        self.assertFalse(payload["summary"]["cache_table_mutated"])
+        self.assertEqual(payload["summary"]["projected_exact_hits"], 1)
+        self.assertEqual(payload["summary"]["projected_streaming_hits"], 0)
+        self.assertAlmostEqual(payload["summary"]["estimated_saved_cost_usd"], 0.02)
+        self.assertEqual(payload["rows"][0]["rule_id"], "cli-cache-dry-run-rule")
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("raw cli dry run prompt must not leak", encoded)
+        self.assertNotIn("cli-dry-run-session-secret", encoded)
+        self.assertNotIn(pattern_hash, encoded)
+        self.assertFalse(payload["privacy"]["cache_keys_included"])
+        self.assertFalse(payload["privacy"]["pattern_hashes_included"])
 
     def test_managed_pattern_rollups_cli_exports_metadata_only_cohorts(self):
         from agentflow_proxy.store import Store, stable_json

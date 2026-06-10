@@ -169,6 +169,42 @@ def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
     return rules
 
 
+def normalize_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
+    """Normalize cache pattern rules for offline review and dry-run tools."""
+    return _load_cache_pattern_rules(value)
+
+
+def cache_pattern_rules_from_policy_payload(payload: Any) -> list[dict[str, Any]]:
+    """Extract normalized cache pattern rules from a policy bundle or cache section."""
+    if isinstance(payload, list):
+        return normalize_cache_pattern_rules(payload)
+    if not isinstance(payload, dict):
+        return []
+
+    candidates: list[Any] = []
+    if "pattern_rules" in payload:
+        candidates.append(payload.get("pattern_rules"))
+    cache_section = payload.get("cache")
+    if isinstance(cache_section, dict):
+        candidates.append(cache_section.get("pattern_rules"))
+    policies = payload.get("policies")
+    if isinstance(policies, dict):
+        policy_cache = policies.get("cache")
+        if isinstance(policy_cache, dict):
+            candidates.append(policy_cache.get("pattern_rules"))
+
+    for candidate in candidates:
+        rules = normalize_cache_pattern_rules(candidate)
+        if rules:
+            return rules
+    return []
+
+
+def cache_pattern_hashes_from_features(pattern_features: dict[str, Any] | None) -> list[str]:
+    """Return normalized pattern hashes from metadata-only pattern features."""
+    return _feature_hashes(pattern_features)
+
+
 def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
     for path in _manual_rule_candidates("cache_rules.yaml", "AGENTFLOW_CACHE_RULES"):
         if not path.exists():

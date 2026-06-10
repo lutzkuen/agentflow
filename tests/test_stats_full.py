@@ -3685,6 +3685,266 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("Skipped cache replayability", html)
             self.assertIn("cache-replayability-tbody", html)
 
+    def test_cache_replay_dry_run_projects_policy_hits_and_blockers_without_cache_mutation(self):
+        hashes = {
+            name: "sha256:" + char * 64
+            for name, char in (
+                ("stream", "1"),
+                ("exact", "2"),
+                ("tool", "3"),
+                ("stale", "4"),
+                ("surface", "5"),
+                ("holdout", "6"),
+            )
+        }
+
+        def log_candidate(
+            name,
+            *,
+            stream,
+            has_tools,
+            category,
+            cost,
+            cache_json=None,
+            crunch_json=None,
+            provider="anthropic",
+            path="/v1/messages",
+        ):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path=path,
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1 if stream else 0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost,
+                crunch_json=stable_json(crunch_json or {"changed": False}),
+                routing_json=stable_json({
+                    "text_chars": 4200,
+                    "category": category,
+                    "workflow_phase": category,
+                    "has_tools": has_tools,
+                    "managed_pattern_features": {
+                        "pattern_hashes": [hashes[name]],
+                        "source_surface": "openai_responses" if provider == "openai" else "anthropic_messages",
+                        "app_family": "claude_code",
+                        "category": category,
+                        "workflow_phase": category,
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "lt_1k_tokens",
+                        "requested_model": "claude-sonnet-4-6",
+                        "candidate_target_model": "claude-sonnet-4-6",
+                        "raw_pattern_strings_included": False,
+                    },
+                }),
+                cache_json=stable_json(cache_json or {
+                    "status": "miss",
+                    "reason": "exact-miss",
+                    "policy_source": "local-default",
+                    "replayability_level": "local-exact-response",
+                }),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw dry run prompt must not leak"}]}),
+                response_json=None,
+                session_id=f"session-{name}-secret",
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider=provider,
+            )
+
+        streaming_cache = {
+            "status": "skipped",
+            "reason": "streaming",
+            "policy_source": "local-default",
+            "replayability_level": "local-exact-response",
+        }
+        log_candidate("stream", stream=True, has_tools=False, category="chat", cost=0.01, cache_json=streaming_cache)
+        log_candidate("stream", stream=True, has_tools=False, category="chat", cost=0.03, cache_json=streaming_cache)
+        log_candidate("exact", stream=False, has_tools=False, category="chat", cost=0.02)
+        log_candidate("exact", stream=False, has_tools=False, category="chat", cost=0.04)
+        log_candidate(
+            "tool",
+            stream=False,
+            has_tools=True,
+            category="tool-result",
+            cost=0.05,
+            cache_json={
+                "status": "skipped",
+                "reason": "tools-disabled",
+                "policy_source": "local-default",
+                "replayability_level": "local-exact-response",
+            },
+        )
+        log_candidate(
+            "stale",
+            stream=False,
+            has_tools=False,
+            category="chat",
+            cost=0.06,
+            crunch_json={
+                "changed": False,
+                "pattern_modules": {
+                    "server_features": {
+                        "features": [{
+                            "family": "cacheability",
+                            "features": {
+                                "cacheability_bucket": "low",
+                                "time_sensitive_hint": True,
+                                "user_specific_hint": True,
+                            },
+                        }],
+                    },
+                },
+            },
+        )
+        log_candidate(
+            "surface",
+            stream=False,
+            has_tools=False,
+            category="chat",
+            cost=0.07,
+            provider="openai",
+            path="/v1/responses",
+        )
+        log_candidate("holdout", stream=False, has_tools=False, category="chat", cost=0.08)
+        server.store.set_cache("existing-cache-key", "claude-sonnet-4-6", 10, {"content": "cached"})
+
+        proposed = {
+            "cache": {
+                "pattern_rules": [
+                    {
+                        "id": "dry-stream-rule",
+                        "candidate_id": "candidate-stream",
+                        "conditions": {
+                            "pattern_hashes": [hashes["stream"]],
+                            "source_surface": "anthropic_messages",
+                            "category": "chat",
+                            "has_tools": False,
+                            "stream": True,
+                        },
+                        "action": {"type": "exact_cache_pattern", "streaming": True},
+                    },
+                    {
+                        "id": "dry-exact-rule",
+                        "candidate_id": "candidate-exact",
+                        "conditions": {
+                            "pattern_hashes": [hashes["exact"]],
+                            "source_surface": "anthropic_messages",
+                            "category": "chat",
+                            "has_tools": False,
+                            "stream": False,
+                        },
+                        "action": {"type": "exact_cache_pattern"},
+                    },
+                    {
+                        "id": "dry-tool-rule",
+                        "candidate_id": "candidate-tool",
+                        "conditions": {
+                            "pattern_hashes": [hashes["tool"]],
+                            "source_surface": "anthropic_messages",
+                            "category": "tool-result",
+                            "has_tools": True,
+                            "stream": False,
+                        },
+                        "action": {
+                            "type": "exact_cache_pattern",
+                            "allow_tool_calls": True,
+                            "safe_invalidation": True,
+                        },
+                    },
+                    {
+                        "id": "dry-stale-rule",
+                        "candidate_id": "candidate-stale",
+                        "conditions": {
+                            "pattern_hashes": [hashes["stale"]],
+                            "source_surface": "anthropic_messages",
+                            "category": "chat",
+                            "has_tools": False,
+                            "stream": False,
+                        },
+                        "action": {"type": "exact_cache_pattern"},
+                    },
+                    {
+                        "id": "dry-surface-rule",
+                        "candidate_id": "candidate-surface",
+                        "conditions": {
+                            "pattern_hashes": [hashes["surface"]],
+                            "source_surface": "anthropic_messages",
+                            "category": "chat",
+                            "has_tools": False,
+                            "stream": False,
+                        },
+                        "action": {"type": "exact_cache_pattern"},
+                    },
+                    {
+                        "id": "dry-holdout-rule",
+                        "candidate_id": "candidate-holdout",
+                        "conditions": {
+                            "pattern_hashes": [hashes["holdout"]],
+                            "source_surface": "anthropic_messages",
+                            "category": "chat",
+                            "has_tools": False,
+                            "stream": False,
+                        },
+                        "rollout": {
+                            "schema": "agentflow.pattern_policy_rollout.v1",
+                            "canary_enabled": True,
+                            "canary_fraction": 0.0,
+                            "canary_salt": "dry-run-test",
+                        },
+                        "action": {"type": "exact_cache_pattern"},
+                    },
+                ],
+            }
+        }
+
+        result = asyncio.run(stats_views.stats_cache_replay_dry_run(server.store, proposed, limit=20))
+
+        self.assertEqual(result["schema"], "agentflow.cache_replay_dry_run.v1")
+        self.assertFalse(result["summary"]["cache_table_mutated"])
+        self.assertEqual(result["summary"]["cache_rows_before"], 1)
+        self.assertEqual(result["summary"]["cache_rows_after"], 1)
+        self.assertEqual(result["summary"]["provider_calls_made"], 0)
+        self.assertEqual(result["summary"]["cache_entries_written"], 0)
+        self.assertEqual(result["summary"]["candidate_rows"], 4)
+        self.assertEqual(result["summary"]["projected_exact_hits"], 1)
+        self.assertEqual(result["summary"]["projected_streaming_hits"], 1)
+        self.assertEqual(result["summary"]["holdout_rows"], 1)
+        self.assertEqual(result["summary"]["invalidation_required_rows"], 1)
+        self.assertEqual(result["summary"]["unsupported_source_surface_rows"], 1)
+        self.assertEqual(result["summary"]["stale_risk_blocked_rows"], 1)
+        self.assertAlmostEqual(result["summary"]["estimated_saved_cost_usd"], 0.05)
+        statuses = {row["status"] for row in result["rows"]}
+        self.assertIn("projected-streaming-candidate", statuses)
+        self.assertIn("projected-exact-candidate", statuses)
+        self.assertIn("invalidation-required", statuses)
+        self.assertIn("unsupported-source-surface", statuses)
+        stale = next(row for row in result["rows"] if row["candidate_id"] == "candidate-stale")
+        self.assertEqual(stale["reason"], "stale-risk-blockers")
+        self.assertIn("current-state", stale["stale_risk_blockers"])
+        tool = next(row for row in result["rows"] if row["candidate_id"] == "candidate-tool")
+        self.assertEqual(tool["reason"], "file-dependency-evidence-absent")
+        self.assertTrue(tool["requires_file_dependency_evidence"])
+        self.assertFalse(tool["file_dependency_evidence_available"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw dry run prompt must not leak", rendered)
+        self.assertNotIn("session-stream-secret", rendered)
+        for pattern_hash in hashes.values():
+            self.assertNotIn(pattern_hash, rendered)
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["pattern_hashes_included"])
+
     def test_codex_effectiveness_counts_direct_derived_absent_and_unknown_model_state(self):
         rows = [
             (

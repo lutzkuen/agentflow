@@ -2105,6 +2105,102 @@ def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def _cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.cache_replay_dry_run.v1",
+        "ok": False,
+        "summary": {
+            "rows_considered": 0,
+            "policy_rule_count": 0,
+            "candidate_rows": 0,
+            "projected_exact_hits": 0,
+            "projected_streaming_hits": 0,
+            "estimated_saved_cost_usd": 0.0,
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+        },
+        "read_error": read_error,
+        "rows": [],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "cache_keys_included": False,
+            "pattern_hashes_included": False,
+        },
+    }
+
+
+def cache_replay_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run proposed cache replay pattern rules against recent local metadata")
+    parser.add_argument(
+        "path",
+        help="Proposed cache policy JSON path, policy bundle JSON path, or '-' for stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--scan-limit",
+        type=int,
+        default=1000,
+        help="Recent provider and Codex rows per surface to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Dry-run aggregate rows to return, default: 50",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    proposed, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = _cache_replay_dry_run_read_error_result(read_error)
+        if args.pretty:
+            stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        else:
+            _write_json(stdout, result)
+        return 1
+
+    from agentflow_proxy.stats import stats_cache_replay_dry_run
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = asyncio.run(
+            stats_cache_replay_dry_run(
+                store,
+                proposed,
+                limit=args.limit,
+                row_limit=args.scan_limit,
+            )
+        )
+    finally:
+        store.conn.close()
+    result["ok"] = True
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def phase_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure or dry-run Anthropic phase-routing policy from local metadata")
     parser.add_argument(
@@ -2942,6 +3038,10 @@ def phase_routing_report_main() -> None:
 
 def cache_replayability_report_main() -> None:
     raise SystemExit(cache_replayability_report_cli())
+
+
+def cache_replay_dry_run_main() -> None:
+    raise SystemExit(cache_replay_dry_run_cli())
 
 
 def managed_pattern_rollups_main() -> None:
