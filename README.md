@@ -162,11 +162,16 @@ curl http://127.0.0.1:4000/v1/messages \
 
 ## Run VS Code so Codex and Claude use AgentFlow
 
-Start the relevant proxy first, then launch VS Code from the same terminal so extensions inherit the environment:
+VS Code extensions usually read environment variables from the VS Code process. If you open VS Code from the desktop launcher, it may not know about variables you exported in a terminal.
 
-```bash
-code .
-```
+Use this pattern:
+
+1. Start AgentFlow in one terminal and leave it running.
+2. Open a second terminal.
+3. In the second terminal, export the variables the extension needs.
+4. Launch VS Code from that same second terminal with `code .`.
+
+`code .` means "open the current folder in VS Code." Because VS Code was started from that shell, its extensions can inherit that shell's environment.
 
 ### Codex VS Code extension
 
