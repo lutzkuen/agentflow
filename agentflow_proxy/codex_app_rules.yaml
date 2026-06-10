@@ -7,6 +7,11 @@ enabled: true
 summary_model_hint:
   enabled: false
   target_model: gpt-5-codex
+  canary:
+    fraction: 1.0
+    holdout_fraction: 0.0
+    salt: codex-app-summary-model-hint
+    unit: source_hash
 exact_cache:
   enabled: false
   namespace: default

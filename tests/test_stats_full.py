@@ -1569,6 +1569,35 @@ class StatsFullTest(unittest.TestCase):
             with_response=False,
         )
         log_hint_turn(
+            "holdout",
+            routing={
+                "status": "skipped",
+                "reason": "summary-model-hint-canary-holdout",
+                "applied": False,
+                "canary": "codex-app-summary-model-hint",
+                "canary_enabled": True,
+                "canary_cohort": "canary_holdout",
+                "model_field": "model",
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5.3-codex",
+                "target_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "summary_model_hint": {
+                    "status": "holdout",
+                    "eligible": True,
+                    "skip_reason": "summary-model-hint-canary-holdout",
+                    "canary_cohort": "canary_holdout",
+                    "requested_model": "gpt-5.3-codex",
+                    "target_model": "gpt-5-codex",
+                    "model_field_state": "present",
+                    "workflow_phase": "summary",
+                    "estimated_cost_delta": {"delta_usd": 0.0004, "cost_known": True},
+                },
+            },
+            cache={"status": "miss", "reason": "exact-miss", "eligible": True, "workflow_phase": "summary"},
+            response_latency_ms=180,
+        )
+        log_hint_turn(
             "unsafe",
             routing={
                 "status": "skipped",
@@ -1600,14 +1629,26 @@ class StatsFullTest(unittest.TestCase):
         hint = result["summary_model_hint"]
         by_key = {(row["workflow_phase"], row["status"]): row for row in hint["buckets"]}
 
-        self.assertEqual(hint["summary"]["turns"], 3)
+        self.assertEqual(hint["summary"]["turns"], 4)
         self.assertEqual(hint["summary"]["applied"], 1)
+        self.assertEqual(hint["summary"]["holdout"], 1)
         self.assertEqual(hint["summary"]["eligible_skipped"], 1)
         self.assertEqual(hint["summary"]["unsafe_skipped"], 1)
         self.assertEqual(hint["summary"]["pending"], 1)
         self.assertEqual(hint["summary"]["errors"], 1)
         self.assertGreater(hint["summary"]["estimated_savings_usd"], 0)
+        self.assertEqual(hint["summary"]["candidate_count"], 3)
+        self.assertEqual(hint["summary"]["unsafe_skip_count"], 1)
+        self.assertEqual(hint["canary"]["candidate_count"], 3)
+        self.assertEqual(hint["canary"]["applied_count"], 1)
+        self.assertEqual(hint["canary"]["holdout_count"], 1)
+        self.assertEqual(hint["canary"]["unsafe_skip_count"], 1)
+        self.assertGreater(hint["canary"]["candidate_projected_savings_usd"], 0)
+        self.assertGreater(hint["canary"]["holdout_projected_savings_usd"], 0)
+        self.assertEqual(hint["canary"]["applied_minus_holdout_error_rate"], 0)
+        self.assertEqual(hint["canary"]["applied_minus_holdout_latency_avg_ms"], -80)
         self.assertGreater(by_key[("summary", "applied")]["estimated_savings_usd"], 0)
+        self.assertGreater(by_key[("summary", "holdout")]["projected_savings_usd"], 0)
         self.assertEqual(by_key[("summary", "applied")]["crunch_applied"], 1)
         self.assertEqual(by_key[("summary", "applied")]["cache_eligible"], 1)
         self.assertEqual(by_key[("summary", "eligible-skipped")]["pending"], 1)
@@ -1615,9 +1656,11 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(by_key[("tool_execution", "unsafe-skipped")]["error_rate"], 1.0)
         self.assertEqual(by_key[("tool_execution", "unsafe-skipped")]["avg_latency_ms"], 250)
         self.assertEqual(result["summary"]["summary_model_hint_applied"], 1)
+        self.assertEqual(result["summary"]["summary_model_hint_holdout"], 1)
         self.assertEqual(result["summary"]["summary_model_hint_eligible_skipped"], 1)
         self.assertEqual(result["summary"]["summary_model_hint_unsafe_skipped"], 1)
         self.assertFalse(hint["privacy"]["raw_params_included"])
+        self.assertFalse(hint["privacy"]["raw_request_ids_included"])
 
         app = create_dashboard_app(
             store_obj=server.store,
@@ -1630,7 +1673,7 @@ class StatsFullTest(unittest.TestCase):
         with TestClient(app) as client:
             response = client.get("/agentflow/stats/codex-effectiveness?limit=10")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["summary_model_hint"]["summary"]["turns"], 3)
+        self.assertEqual(response.json()["summary_model_hint"]["summary"]["turns"], 4)
         html = stats_views.dashboard_html()
         self.assertIn("<h2>Summary model hint canary</h2>", html)
         self.assertIn("id=\"codex-summary-hint-tbody\"", html)

@@ -124,6 +124,18 @@ def _as_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def _bounded_fraction(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed != parsed:
+        return default
+    return min(max(parsed, 0.0), 1.0)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     fallback = "1" if default else "0"
     return os.getenv(name, fallback).strip().lower() not in {"0", "false", "no", "off", ""}
@@ -145,6 +157,12 @@ def _default_codex_app_policy() -> dict[str, Any]:
         "summary_model_hint": {
             "enabled": False,
             "target_model": "gpt-5-codex",
+            "canary": {
+                "fraction": 1.0,
+                "holdout_fraction": 0.0,
+                "salt": "codex-app-summary-model-hint",
+                "unit": "source_hash",
+            },
         },
         "exact_cache": {
             "enabled": False,
@@ -169,6 +187,20 @@ def _apply_codex_app_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -
         target_model = hint.get("target_model", hint.get("model_hint"))
         if target_model is not None:
             policy["summary_model_hint"]["target_model"] = str(target_model).strip()
+        canary = hint.get("canary") or {}
+        if isinstance(canary, dict):
+            policy_canary = policy["summary_model_hint"]["canary"]
+            policy_canary["fraction"] = _bounded_fraction(canary.get("fraction"), policy_canary["fraction"])
+            policy_canary["holdout_fraction"] = _bounded_fraction(
+                canary.get("holdout_fraction"),
+                policy_canary["holdout_fraction"],
+            )
+            if canary.get("salt") is not None:
+                policy_canary["salt"] = str(canary["salt"]).strip() or policy_canary["salt"]
+            if canary.get("unit") is not None:
+                unit = str(canary["unit"]).strip().lower().replace("-", "_")
+                if unit in {"source_hash", "thread_id", "model_and_size"}:
+                    policy_canary["unit"] = unit
 
     exact_cache = data.get("exact_cache", data.get("cache") if isinstance(data.get("cache"), dict) else {})
     if isinstance(exact_cache, dict):
@@ -216,6 +248,24 @@ def _load_codex_app_policy() -> tuple[dict[str, Any], str, str]:
             str(policy["summary_model_hint"]["target_model"]),
         ),
     ).strip()
+    policy["summary_model_hint"]["canary"]["fraction"] = _bounded_fraction(
+        os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_FRACTION"),
+        policy["summary_model_hint"]["canary"]["fraction"],
+    )
+    policy["summary_model_hint"]["canary"]["holdout_fraction"] = _bounded_fraction(
+        os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_HOLDOUT_FRACTION"),
+        policy["summary_model_hint"]["canary"]["holdout_fraction"],
+    )
+    policy["summary_model_hint"]["canary"]["salt"] = os.getenv(
+        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_SALT",
+        str(policy["summary_model_hint"]["canary"]["salt"]),
+    ).strip() or "codex-app-summary-model-hint"
+    unit = os.getenv(
+        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_UNIT",
+        str(policy["summary_model_hint"]["canary"]["unit"]),
+    ).strip().lower().replace("-", "_")
+    if unit in {"source_hash", "thread_id", "model_and_size"}:
+        policy["summary_model_hint"]["canary"]["unit"] = unit
     policy["exact_cache"]["enabled"] = _env_bool("AGENTFLOW_CODEX_APP_CACHE", policy["exact_cache"]["enabled"])
     policy["exact_cache"]["namespace"] = os.getenv(
         "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE",
@@ -328,6 +378,42 @@ def codex_app_summary_model_hint_target() -> str:
     return str(CODEX_APP_POLICY["summary_model_hint"]["target_model"]).strip()
 
 
+def codex_app_summary_model_hint_canary() -> dict[str, Any]:
+    canary = CODEX_APP_POLICY["summary_model_hint"].get("canary")
+    if not isinstance(canary, dict):
+        canary = {}
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        fraction = _bounded_fraction(
+            os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_FRACTION"),
+            _bounded_fraction(canary.get("fraction"), 1.0),
+        )
+        holdout_fraction = _bounded_fraction(
+            os.getenv("AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_HOLDOUT_FRACTION"),
+            _bounded_fraction(canary.get("holdout_fraction"), 0.0),
+        )
+        salt = os.getenv(
+            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_SALT",
+            str(canary.get("salt") or "codex-app-summary-model-hint"),
+        ).strip() or "codex-app-summary-model-hint"
+        unit = os.getenv(
+            "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_CANARY_UNIT",
+            str(canary.get("unit") or "source_hash"),
+        ).strip().lower().replace("-", "_")
+    else:
+        fraction = _bounded_fraction(canary.get("fraction"), 1.0)
+        holdout_fraction = _bounded_fraction(canary.get("holdout_fraction"), 0.0)
+        salt = str(canary.get("salt") or "codex-app-summary-model-hint").strip()
+        unit = str(canary.get("unit") or "source_hash").strip().lower().replace("-", "_")
+    if unit not in {"source_hash", "thread_id", "model_and_size"}:
+        unit = "source_hash"
+    return {
+        "fraction": fraction,
+        "holdout_fraction": holdout_fraction,
+        "salt": salt,
+        "unit": unit,
+    }
+
+
 def codex_app_cache_namespace() -> str:
     if CODEX_APP_POLICY_SOURCE == "local-default":
         return os.getenv(
@@ -363,6 +449,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
     cache_enabled = codex_app_cache_enabled()
     summary_model_hint_enabled = codex_app_summary_model_hint_enabled()
     summary_model_hint_target = codex_app_summary_model_hint_target()
+    summary_model_hint_canary = codex_app_summary_model_hint_canary()
     upstream = codex_app_upstream()
     namespace = codex_app_cache_namespace()
     file_state = policy_file_status(
@@ -394,6 +481,7 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
             "summary_model_hint": {
                 "enabled": summary_model_hint_enabled,
                 "target_model": summary_model_hint_target,
+                "canary": summary_model_hint_canary,
                 "scope": "safe summary-phase turn/start frames with text-only input and known model field",
                 "disabled_reason": None if summary_model_hint_enabled else "codex app summary model hint is disabled by local policy",
                 "policy_source": policy_source,
@@ -442,6 +530,7 @@ def codex_app_bundle_policy_state() -> dict[str, Any]:
     cache_enabled = codex_app_cache_enabled()
     hint_enabled = codex_app_summary_model_hint_enabled()
     hint_target = codex_app_summary_model_hint_target()
+    hint_canary = codex_app_summary_model_hint_canary()
     namespace = codex_app_cache_namespace()
     rules: list[dict[str, Any]] = []
     if hint_enabled:
@@ -493,6 +582,7 @@ def codex_app_bundle_policy_state() -> dict[str, Any]:
         "summary_model_hint": {
             "enabled": hint_enabled,
             "target_model": hint_target,
+            "canary": hint_canary,
         },
         "exact_cache": {
             "enabled": cache_enabled,

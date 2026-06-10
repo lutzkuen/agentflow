@@ -7030,7 +7030,7 @@ def _codex_summary_hint_status(routing: dict[str, Any], cache: dict[str, Any]) -
         return None
     if isinstance(hint, dict):
         status = str(hint.get("status") or "").replace("_", "-").strip().lower()
-        if status in {"applied", "eligible-skipped", "unsafe-skipped"}:
+        if status in {"applied", "holdout", "eligible-skipped", "unsafe-skipped"}:
             return status
     if routing.get("applied") or routing.get("status") == "applied":
         return "applied"
@@ -7092,6 +7092,7 @@ def _new_codex_summary_hint_bucket(status: str, phase: str) -> dict[str, Any]:
         "latency_values": [],
         "estimated_savings_usd": 0.0,
         "estimated_input_cost_delta_usd": 0.0,
+        "projected_savings_usd": 0.0,
         "cache_hits": 0,
         "cache_eligible": 0,
         "cache_overlap_turns": 0,
@@ -7146,7 +7147,10 @@ def _add_codex_summary_hint_bucket(
     )
     bucket["estimated_savings_usd"] += savings
     delta = hint.get("estimated_cost_delta") if isinstance(hint.get("estimated_cost_delta"), dict) else {}
-    bucket["estimated_input_cost_delta_usd"] += max(_as_float(delta.get("delta_usd")), 0.0)
+    input_delta = max(_as_float(delta.get("delta_usd")), 0.0)
+    bucket["estimated_input_cost_delta_usd"] += input_delta
+    if status in {"applied", "holdout"}:
+        bucket["projected_savings_usd"] += input_delta
     if cache.get("status") == "hit":
         bucket["cache_hits"] += 1
     if cache.get("eligible"):
@@ -7179,15 +7183,83 @@ def _finalize_codex_summary_hint_buckets(
         bucket["avg_latency_ms"] = _avg_or_none(latency_values)
         bucket["estimated_savings_usd"] = round(_as_float(bucket.get("estimated_savings_usd")), 8)
         bucket["estimated_input_cost_delta_usd"] = round(_as_float(bucket.get("estimated_input_cost_delta_usd")), 8)
+        bucket["projected_savings_usd"] = round(_as_float(bucket.get("projected_savings_usd")), 8)
         bucket["requested_models"] = _count_breakdown(dict(bucket.pop("requested_model_counts", {})))
         bucket["target_models"] = _count_breakdown(dict(bucket.pop("target_model_counts", {})))
         bucket["skip_reasons"] = _count_breakdown(dict(bucket.pop("skip_reason_counts", {})))
         bucket["cache_statuses"] = _count_breakdown(dict(bucket.pop("cache_status_counts", {})))
         bucket["crunch_statuses"] = _count_breakdown(dict(bucket.pop("crunch_status_counts", {})))
         result.append(bucket)
-    order = {"applied": 0, "eligible-skipped": 1, "unsafe-skipped": 2}
+    order = {"applied": 0, "holdout": 1, "eligible-skipped": 2, "unsafe-skipped": 3}
     result.sort(key=lambda item: (str(item.get("workflow_phase") or ""), order.get(str(item.get("status")), 99)))
     return result
+
+
+def _codex_summary_hint_status_totals(buckets: list[dict[str, Any]], status: str) -> dict[str, Any]:
+    rows = [row for row in buckets if row.get("status") == status]
+    turns = sum(_as_int(row.get("turns")) for row in rows)
+    errors = sum(_as_int(row.get("errors")) for row in rows)
+    completed = sum(_as_int(row.get("completed")) for row in rows)
+    pending = sum(_as_int(row.get("pending")) for row in rows)
+    lat_weight = 0
+    lat_total = 0.0
+    for row in rows:
+        avg = row.get("avg_latency_ms")
+        completed_or_error = _as_int(row.get("completed")) + _as_int(row.get("errors"))
+        if avg is not None and completed_or_error > 0:
+            lat_weight += completed_or_error
+            lat_total += _as_float(avg) * completed_or_error
+    return {
+        "turns": turns,
+        "completed": completed,
+        "pending": pending,
+        "errors": errors,
+        "error_rate": round(errors / turns, 4) if turns else 0,
+        "avg_latency_ms": round(lat_total / lat_weight, 2) if lat_weight else None,
+        "estimated_savings_usd": round(
+            sum(_as_float(row.get("estimated_savings_usd")) for row in rows),
+            8,
+        ),
+        "projected_savings_usd": round(
+            sum(_as_float(row.get("projected_savings_usd")) for row in rows),
+            8,
+        ),
+        "estimated_input_cost_delta_usd": round(
+            sum(_as_float(row.get("estimated_input_cost_delta_usd")) for row in rows),
+            8,
+        ),
+    }
+
+
+def _codex_summary_hint_canary_summary(buckets: list[dict[str, Any]]) -> dict[str, Any]:
+    applied = _codex_summary_hint_status_totals(buckets, "applied")
+    holdout = _codex_summary_hint_status_totals(buckets, "holdout")
+    eligible = _codex_summary_hint_status_totals(buckets, "eligible-skipped")
+    unsafe = _codex_summary_hint_status_totals(buckets, "unsafe-skipped")
+    latency_delta = None
+    if applied["avg_latency_ms"] is not None and holdout["avg_latency_ms"] is not None:
+        latency_delta = round(_as_float(applied["avg_latency_ms"]) - _as_float(holdout["avg_latency_ms"]), 2)
+    return {
+        "candidate_count": applied["turns"] + holdout["turns"] + eligible["turns"],
+        "applied_count": applied["turns"],
+        "holdout_count": holdout["turns"],
+        "eligible_skipped_count": eligible["turns"],
+        "unsafe_skip_count": unsafe["turns"],
+        "error_count": applied["errors"] + holdout["errors"] + eligible["errors"] + unsafe["errors"],
+        "applied_error_rate": applied["error_rate"],
+        "holdout_error_rate": holdout["error_rate"],
+        "applied_minus_holdout_error_rate": round(applied["error_rate"] - holdout["error_rate"], 4),
+        "applied_avg_latency_ms": applied["avg_latency_ms"],
+        "holdout_avg_latency_ms": holdout["avg_latency_ms"],
+        "applied_minus_holdout_latency_avg_ms": latency_delta,
+        "applied_estimated_savings_usd": applied["estimated_savings_usd"],
+        "holdout_projected_savings_usd": holdout["projected_savings_usd"],
+        "candidate_projected_savings_usd": round(
+            applied["projected_savings_usd"] + holdout["projected_savings_usd"] + eligible["projected_savings_usd"],
+            8,
+        ),
+        "cost_delta_basis": "metadata-only estimated input/output token costs; holdout savings are projected",
+    }
 
 
 def _codex_crunch_pattern_breakdown(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -8635,6 +8707,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     summary_model_hint_errors = sum(_as_int(row.get("errors")) for row in summary_model_hint_buckets)
     summary_model_hint_pending = sum(_as_int(row.get("pending")) for row in summary_model_hint_buckets)
     summary_model_hint_savings = sum(_as_float(row.get("estimated_savings_usd")) for row in summary_model_hint_buckets)
+    summary_model_hint_canary = _codex_summary_hint_canary_summary(summary_model_hint_buckets)
     return {
         "schema": "agentflow.codex_app_effectiveness.v1",
         "generated_at": utc_now(),
@@ -8681,6 +8754,9 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             ),
             "summary_model_hint_eligible_skipped": sum(
                 _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "eligible-skipped"
+            ),
+            "summary_model_hint_holdout": sum(
+                _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "holdout"
             ),
             "summary_model_hint_unsafe_skipped": sum(
                 _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "unsafe-skipped"
@@ -8769,9 +8845,14 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "eligible_skipped": sum(
                     _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "eligible-skipped"
                 ),
+                "holdout": sum(
+                    _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "holdout"
+                ),
                 "unsafe_skipped": sum(
                     _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "unsafe-skipped"
                 ),
+                "candidate_count": summary_model_hint_canary["candidate_count"],
+                "unsafe_skip_count": summary_model_hint_canary["unsafe_skip_count"],
                 "pending": summary_model_hint_pending,
                 "errors": summary_model_hint_errors,
                 "error_rate": round(summary_model_hint_errors / summary_model_hint_turns, 4)
@@ -8779,6 +8860,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 else 0,
                 "estimated_savings_usd": round(summary_model_hint_savings, 8),
             },
+            "canary": summary_model_hint_canary,
             "buckets": summary_model_hint_buckets,
             "privacy": {
                 "metadata_only": True,
@@ -8786,6 +8868,8 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 "raw_params_included": False,
                 "raw_responses_included": False,
                 "raw_transcripts_included": False,
+                "raw_request_ids_included": False,
+                "raw_commands_included": False,
                 "basis": "routing, crunch, cache, size, latency, and JSON-RPC outcome metadata",
             },
         },
@@ -12463,7 +12547,7 @@ async function refreshCodexQuota(){
     </tr>`;
     const hintRows=((d.summary_model_hint||{}).buckets)||d.summary_model_hint_buckets||[];
     document.getElementById('codex-summary-hint-tbody').innerHTML=hintRows.map(row=>{
-      const cls=row.status==='applied'?'hit':row.status==='eligible-skipped'?'miss':'err';
+      const cls=row.status==='applied'?'hit':(row.status==='eligible-skipped'||row.status==='holdout')?'miss':'err';
       const topReason=(row.skip_reasons&&row.skip_reasons[0])?row.skip_reasons[0].value:'—';
       const requested=(row.requested_models&&row.requested_models[0])?row.requested_models[0].value:'—';
       const target=(row.target_models&&row.target_models[0])?row.target_models[0].value:'—';

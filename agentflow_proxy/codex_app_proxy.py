@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from agentflow_proxy.codex_app_policy import (
     codex_app_cache_namespace,
     codex_app_optimize_enabled,
     codex_app_summary_model_hint_enabled,
+    codex_app_summary_model_hint_canary,
     codex_app_summary_model_hint_target,
 )
 from agentflow_proxy.crunch import TOKEN_CHARS, crunch_body, crunch_codex_turn_params
@@ -61,6 +63,7 @@ CODEX_APP_OPTIMIZE = codex_app_optimize_enabled()
 CODEX_APP_CACHE = codex_app_cache_enabled()
 CODEX_APP_SUMMARY_MODEL_HINT = codex_app_summary_model_hint_enabled()
 CODEX_APP_SUMMARY_MODEL_HINT_TARGET = codex_app_summary_model_hint_target()
+CODEX_APP_SUMMARY_MODEL_HINT_CANARY = codex_app_summary_model_hint_canary()
 CODEX_APP_SESSION_COST_ALERT_USD = float(os.getenv(
     "AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD",
     os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"),
@@ -720,6 +723,57 @@ def _summary_model_hint_cost_delta(
     }
 
 
+def _summary_model_hint_canary_sample(
+    params: dict[str, Any],
+    *,
+    requested_model: str,
+    target_model: str,
+) -> dict[str, Any]:
+    canary = dict(CODEX_APP_SUMMARY_MODEL_HINT_CANARY or {})
+    fraction = min(max(float(canary.get("fraction", 1.0) or 0.0), 0.0), 1.0)
+    holdout_fraction = min(max(float(canary.get("holdout_fraction", 0.0) or 0.0), 0.0), 1.0)
+    salt = str(canary.get("salt") or "codex-app-summary-model-hint")
+    unit = str(canary.get("unit") or "source_hash").strip().lower().replace("-", "_")
+    if unit == "thread_id":
+        material = str(_thread_id(params) or "")
+        if not material:
+            unit = "source_hash"
+    if unit == "model_and_size":
+        material = f"{requested_model}:{target_model}:{_input_text_chars(params.get('input'))}"
+    elif unit == "thread_id":
+        material = str(_thread_id(params) or "")
+    else:
+        unit = "source_hash"
+        material = stable_json(params)
+    digest = hashlib.sha256(f"{salt}\0{unit}\0{material}".encode("utf-8")).hexdigest()
+    sample = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    applied_cutoff = min(1.0, holdout_fraction + fraction)
+    if sample < holdout_fraction:
+        cohort = "canary_holdout"
+        status = "holdout"
+        reason = "summary-model-hint-canary-holdout"
+    elif sample < applied_cutoff:
+        cohort = "canary_applied"
+        status = "applied"
+        reason = "safe-summary-model-hint-canary"
+    else:
+        cohort = "not_selected"
+        status = "eligible-skipped"
+        reason = "summary-model-hint-canary-not-selected"
+    return {
+        "enabled": True,
+        "cohort": cohort,
+        "status": status,
+        "reason": reason,
+        "fraction": fraction,
+        "holdout_fraction": holdout_fraction,
+        "sample_unit": unit,
+        "sample_bucket": round(sample, 6),
+        "hash_basis": "local-only-salted-policy-sample",
+        "raw_basis_included": False,
+    }
+
+
 def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     model_field, requested_model = _model_field(params)
     if not requested_model:
@@ -749,6 +803,11 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         base_meta.update({
             "canary": "codex-app-summary-model-hint",
             "canary_enabled": True,
+            "canary_policy": {
+                "fraction": CODEX_APP_SUMMARY_MODEL_HINT_CANARY.get("fraction"),
+                "holdout_fraction": CODEX_APP_SUMMARY_MODEL_HINT_CANARY.get("holdout_fraction"),
+                "sample_unit": CODEX_APP_SUMMARY_MODEL_HINT_CANARY.get("unit"),
+            },
             "summary_model_hint": {
                 "status": "unsafe-skipped",
                 "target_model": target_model,
@@ -804,6 +863,50 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
             base_meta["summary_model_hint"].update({
                 "status": "eligible-skipped",
                 "skip_reason": "summary-model-hint-target-matches-requested",
+            })
+            return params, base_meta
+        sample = _summary_model_hint_canary_sample(
+            params,
+            requested_model=requested_model,
+            target_model=target_model,
+        )
+        base_meta["canary_cohort"] = sample["cohort"]
+        base_meta["canary_sample"] = sample
+        base_meta["summary_model_hint"]["canary_cohort"] = sample["cohort"]
+        base_meta["summary_model_hint"]["canary_sample"] = sample
+        if sample["status"] == "holdout":
+            base_meta.update({
+                "status": "skipped",
+                "reason": sample["reason"],
+                "routed_model": requested_model,
+                "applied": False,
+                "policy_id": "local-codex-app-summary-model-hint-canary",
+                "hint_type": "model",
+                "safety_gates": {
+                    "known_model_field": True,
+                    "safe_param_shape": True,
+                    "text_only_input": True,
+                    "action_like_params": False,
+                    "workflow_phase": "summary",
+                },
+            })
+            base_meta["summary_model_hint"].update({
+                "status": "holdout",
+                "eligible": True,
+                "skip_reason": sample["reason"],
+            })
+            return params, base_meta
+        if sample["status"] == "eligible-skipped":
+            base_meta.update({
+                "status": "skipped",
+                "reason": sample["reason"],
+                "routed_model": requested_model,
+                "applied": False,
+            })
+            base_meta["summary_model_hint"].update({
+                "status": "eligible-skipped",
+                "eligible": True,
+                "skip_reason": sample["reason"],
             })
             return params, base_meta
         routed_params = copy.deepcopy(params)

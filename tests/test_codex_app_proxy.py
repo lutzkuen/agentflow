@@ -801,6 +801,71 @@ exact_cache:
         self.assertEqual(metadata["cache"]["policy_source"], "local-manual")
         self.assertEqual(metadata["cache"]["replayability_level"], "local-exact-response")
 
+    def test_file_backed_summary_hint_canary_produces_applied_and_holdout_cohorts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+            db_path = os.path.join(tmp, "codex.sqlite3")
+            with open(rules_path, "w", encoding="utf-8") as f:
+                f.write(
+                    """
+enabled: true
+summary_model_hint:
+  enabled: true
+  target_model: gpt-5-mini
+  canary:
+    fraction: 0.5
+    holdout_fraction: 0.5
+    salt: deterministic-test
+    unit: source_hash
+"""
+                )
+            seen = {}
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "AGENTFLOW_CODEX_APP_RULES": rules_path,
+                        "AGENTFLOW_DB": db_path,
+                        "HOME": tmp,
+                        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT": "0",
+                    },
+                    clear=False,
+                ):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+                    for idx in range(100):
+                        message = {
+                            "jsonrpc": "2.0",
+                            "id": f"turn-file-backed-canary-{idx}",
+                            "method": "turn/start",
+                            "params": {
+                                "threadId": f"thread-file-backed-canary-{idx}",
+                                "model": "gpt-5.3-codex",
+                                "input": [{"type": "text", "text": f"Summarize the completed work for run {idx}."}],
+                                "temperature": 0,
+                            },
+                        }
+                        forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                        status = metadata["routing"]["summary_model_hint"]["status"]
+                        seen.setdefault(status, (json.loads(forwarded), metadata))
+                        if {"applied", "holdout"}.issubset(seen):
+                            break
+            finally:
+                importlib.reload(codex_app_policy_module)
+                importlib.reload(codex_app_proxy)
+
+        self.assertIn("applied", seen)
+        self.assertIn("holdout", seen)
+        applied_forwarded, applied_metadata = seen["applied"]
+        holdout_forwarded, holdout_metadata = seen["holdout"]
+        self.assertEqual(applied_forwarded["params"]["model"], "gpt-5-mini")
+        self.assertEqual(holdout_forwarded["params"]["model"], "gpt-5.3-codex")
+        self.assertEqual(applied_metadata["routing"]["canary_cohort"], "canary_applied")
+        self.assertEqual(holdout_metadata["routing"]["canary_cohort"], "canary_holdout")
+        self.assertEqual(holdout_metadata["routing"]["reason"], "summary-model-hint-canary-holdout")
+        self.assertFalse(holdout_metadata["routing"]["canary_sample"]["raw_basis_included"])
+        self.assertEqual(applied_metadata["routing"]["policy_source"], "local-manual")
+
     def test_summary_model_hint_canary_skips_uncertain_turns(self):
         cases = [
             (
