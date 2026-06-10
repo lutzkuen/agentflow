@@ -52,8 +52,18 @@ from agentflow_proxy.recommendations import (
     pattern_feature_diagnostics,
     queue_codex_app_canary_lifecycle_feedback,
     queue_codex_outcome_feedback,
+    queue_policy_event_feedback,
 )
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
+from agentflow_proxy.routing_experiments import (
+    ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+    ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
+    compare_response_outputs,
+    response_output_text,
+    routing_experiment_decision,
+    routing_experiment_feedback_features,
+    routing_experiment_outcome_event,
+)
 from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
@@ -2842,6 +2852,242 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
     return forwarded, metadata
 
 
+def _attach_codex_routing_experiment_pending(
+    raw: str | bytes,
+    *,
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+    start_event_id: str | None,
+    pending_routing_experiments: dict[str, dict[str, Any]],
+) -> None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict):
+        return
+    method = msg.get("method")
+    if method != "turn/start":
+        return
+    request_id = _request_id(msg)
+    if request_id is None:
+        return
+    params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        return
+    result = _decide_codex_routing_experiment(params, optimization_metadata)
+    if result is None:
+        return
+    experiment_meta, routing_meta = result
+    pending_routing_experiments[request_id] = {
+        "experiment_meta": experiment_meta,
+        "routing_meta": routing_meta,
+        "input_text_chars": _input_text_chars(params.get("input")),
+        "start_event_id": start_event_id or "",
+    }
+
+
+def _decide_codex_routing_experiment(
+    params: dict[str, Any],
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return (experiment_meta, routing_meta) if sampled, else None."""
+    _, requested_model = _model_field(params)
+    if not requested_model:
+        return None
+    routing = (optimization_metadata or {}).get("routing") or {}
+    routed_model = str(routing.get("routed_model") or requested_model)
+    workflow_phase = str(routing.get("workflow_phase") or "unknown")
+    text_chars = _input_text_chars(params.get("input"))
+    experiment_routing_meta: dict[str, Any] = {
+        "requested_model": requested_model,
+        "routed_model": routed_model,
+        "category": "codex-turn",
+        "workflow_phase": workflow_phase,
+        "text_chars": text_chars,
+    }
+    try:
+        experiment_meta = routing_experiment_decision(
+            params,
+            experiment_routing_meta,
+            stream=False,
+            provider="openai",
+            source_surface="codex_turn",
+            store_obj=store,
+        )
+    except Exception as exc:
+        print(f"AgentFlow Codex routing experiment decision skipped: {exc}", file=sys.stderr)
+        return None
+    if not experiment_meta.get("sampled"):
+        return None
+    return experiment_meta, experiment_routing_meta
+
+
+async def _maybe_run_codex_routing_experiment(
+    raw: str | bytes,
+    *,
+    request_started: dict[str, float],
+    pending_routing_experiments: dict[str, dict[str, Any]],
+) -> None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict):
+        return
+    request_id = _request_id(msg)
+    if request_id is None:
+        return
+    pending = pending_routing_experiments.pop(request_id, None)
+    if not pending:
+        return
+
+    experiment_meta = pending["experiment_meta"]
+    routing_meta = pending["routing_meta"]
+    input_text_chars = int(pending.get("input_text_chars") or 0)
+    start_event_id = pending.get("start_event_id") or ""
+
+    started = request_started.get(request_id)
+    primary_latency_ms = int((time.time() - started) * 1000) if started is not None else None
+
+    error_obj = msg.get("error")
+    result = msg.get("result")
+    if isinstance(error_obj, dict):
+        primary_status_code = 500
+    elif result is not None:
+        primary_status_code = 200
+    else:
+        primary_status_code = None
+
+    primary_response_body: dict[str, Any] = result if isinstance(result, dict) else {}
+    primary_output_text = response_output_text(primary_response_body)
+    primary_output_chars = len(primary_output_text)
+
+    # Shadow WebSocket turn would mutate upstream session state; record limitation only
+    shadow_limitation = "websocket-stateful-turn-shadow-unsafe"
+    comparison = compare_response_outputs(primary_response_body if primary_status_code == 200 else {}, None)
+
+    experiment_id = str(uuid.uuid4())
+    shadow_model = str(experiment_meta.get("shadow_model") or "")
+    primary_model = str(experiment_meta.get("primary_model") or routing_meta.get("requested_model") or "")
+
+    input_tokens_est = max(0, input_text_chars // TOKEN_CHARS)
+    output_tokens_est = max(0, primary_output_chars // TOKEN_CHARS)
+    requested_model_for_cost = str(routing_meta.get("requested_model") or "")
+    primary_cost_est_usd: float | None = None
+    if requested_model_for_cost and (input_tokens_est or output_tokens_est):
+        raw_cost = estimate_cost(
+            requested_model_for_cost,
+            input_tokens_est,
+            output_tokens_est,
+            provider="openai",
+            processing_mode=codex_app_processing_mode(),
+        )
+        if raw_cost is not None:
+            primary_cost_est_usd = float(raw_cost)
+
+    feedback_features = routing_experiment_feedback_features(
+        experiment_id=experiment_id,
+        experiment_meta=experiment_meta,
+        routing_meta=routing_meta,
+        comparison=comparison,
+        primary_model=primary_model,
+        shadow_model=shadow_model,
+        primary_status_code=primary_status_code,
+        shadow_status_code=None,
+        primary_latency_ms=primary_latency_ms,
+        shadow_latency_ms=None,
+        primary_cost_est_usd=primary_cost_est_usd,
+        shadow_cost_est_usd=None,
+        error=shadow_limitation,
+    )
+    experiment_meta.update({
+        "experiment_id": experiment_id,
+        "status": feedback_features["status"],
+        "shadow_limitation": shadow_limitation,
+        "primary_model": primary_model,
+        "shadow_model": shadow_model,
+        "primary_status_code": primary_status_code,
+        "shadow_status_code": None,
+        "primary_output_chars": comparison["primary_output_chars"],
+        "shadow_output_chars": comparison["shadow_output_chars"],
+        "primary_output_sha256": comparison["primary_output_sha256"],
+        "shadow_output_sha256": comparison["shadow_output_sha256"],
+        "output_similarity": comparison["output_similarity"],
+        "passed_threshold": comparison["passed_threshold"],
+        "reason_codes": feedback_features.get("reason_codes", []),
+        "cost_delta_usd": feedback_features.get("cost_delta_usd"),
+        "latency_delta_ms": feedback_features.get("latency_delta_ms"),
+        "optimization_feedback": feedback_features,
+        "managed_feedback": {
+            "enabled": False,
+            "status": "not-exported",
+            "reason": "managed-feedback-not-attempted",
+        },
+    })
+
+    try:
+        event = routing_experiment_outcome_event(feedback_features)
+        feedback_meta = await queue_policy_event_feedback(
+            store,
+            event,
+            source_surface=ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+            queue_when_disabled=True,
+            flush_immediately=False,
+        )
+    except Exception as exc:
+        feedback_meta = {
+            "enabled": True,
+            "status": "error",
+            "reason": "queue-failed",
+            "endpoint": "/v1/policy-events",
+            "error": repr(exc),
+        }
+    experiment_meta["managed_feedback"] = {
+        "enabled": bool(feedback_meta.get("enabled")),
+        "status": feedback_meta.get("status"),
+        "reason": feedback_meta.get("reason"),
+        "endpoint": feedback_meta.get("endpoint"),
+        "queue_id": feedback_meta.get("queue_id"),
+        "attempts": feedback_meta.get("attempts"),
+        "status_code": feedback_meta.get("status_code"),
+        "latency_ms": feedback_meta.get("latency_ms"),
+        "source_surface": ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+        "payload_included": False,
+    }
+
+    try:
+        store.log_routing_experiment(
+            id=experiment_id,
+            call_id=start_event_id or None,
+            created_at=utc_now(),
+            provider="openai",
+            source_surface="codex_turn",
+            requested_model=experiment_meta.get("requested_model"),
+            routed_model=experiment_meta.get("routed_model"),
+            primary_model=primary_model,
+            shadow_model=shadow_model,
+            category=routing_meta.get("category"),
+            routing_reason=routing_meta.get("reason"),
+            input_tokens_est=input_tokens_est,
+            primary_status_code=primary_status_code,
+            shadow_status_code=None,
+            primary_latency_ms=primary_latency_ms,
+            shadow_latency_ms=None,
+            primary_output_chars=comparison["primary_output_chars"],
+            shadow_output_chars=comparison["shadow_output_chars"],
+            primary_output_sha256=comparison["primary_output_sha256"],
+            shadow_output_sha256=comparison["shadow_output_sha256"],
+            output_similarity=comparison["output_similarity"],
+            passed_threshold=0,
+            primary_cost_est_usd=primary_cost_est_usd,
+            shadow_cost_est_usd=None,
+            budget_limit_usd=experiment_meta.get("daily_budget_usd"),
+            budget_spent_before_usd=experiment_meta.get("budget_spent_usd"),
+            budget_remaining_before_usd=experiment_meta.get("budget_remaining_usd"),
+            budget_spent_after_usd=float(experiment_meta.get("budget_spent_usd") or 0.0),
+            error=shadow_limitation,
+            routing_json=stable_json(routing_meta),
+            experiment_json=stable_json(experiment_meta),
+            primary_response_json=stable_json(primary_response_body) if ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES else None,
+        )
+    except Exception as exc:
+        print(f"AgentFlow Codex routing experiment log skipped: {exc}", file=sys.stderr)
+
+
 def _log_codex_app_event(**kwargs: Any) -> None:
     try:
         store.log_codex_app_event(**kwargs)
@@ -3189,6 +3435,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     pending_cache: dict[str, dict[str, Any]] = {}
     pending_managed: dict[str, dict[str, Any]] = {}
     pending_lifecycle: dict[str, dict[str, Any]] = {}
+    pending_routing_experiments: dict[str, dict[str, Any]] = {}
     active_turn_windows: dict[str, dict[str, Any]] = {}
     model_states: dict[str, dict[str, Any]] = {}
 
@@ -3220,6 +3467,12 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         if lifecycle_pending and isinstance(lifecycle_pending.get("request_id"), str):
                             lifecycle_pending["start_event_id"] = start_event_id
                             pending_lifecycle[str(lifecycle_pending["request_id"])] = lifecycle_pending
+                        _attach_codex_routing_experiment_pending(
+                            forwarded,
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending_routing_experiments,
+                        )
                         replay_frame = cache_meta.get(_INTERNAL_REPLAY_FRAME_KEY)
                         if isinstance(replay_frame, str):
                             await _record_codex_managed_outcome(
@@ -3278,6 +3531,12 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         if lifecycle_pending and isinstance(lifecycle_pending.get("request_id"), str):
                             lifecycle_pending["start_event_id"] = start_event_id
                             pending_lifecycle[str(lifecycle_pending["request_id"])] = lifecycle_pending
+                        _attach_codex_routing_experiment_pending(
+                            forwarded,
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending_routing_experiments,
+                        )
                         await upstream.send(forwarded)
 
             async def upstream_to_client() -> None:
@@ -3293,6 +3552,11 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         msg,
                         request_started=request_started,
                         pending_lifecycle=pending_lifecycle,
+                    )
+                    await _maybe_run_codex_routing_experiment(
+                        msg,
+                        request_started=request_started,
+                        pending_routing_experiments=pending_routing_experiments,
                     )
                     _record_message(
                         msg,

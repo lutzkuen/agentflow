@@ -46,11 +46,12 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
 
     def test_default_policy_skips_without_sampling(self):
         self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["profile_id"], "first-safe-openai-codex-ab-v1")
-        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["mode"], "applied_routed_down")
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["mode"], "shadow_candidate_pass_through")
         self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["providers"], ["openai"])
         self.assertIn("openai_responses", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
         self.assertIn("codex_turn", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
 
+        # Anthropic provider is not in the openai-only policy — sampled must be False.
         meta = experiments.routing_experiment_decision(
             {"model": "claude-haiku-4-5-20251001"},
             {
@@ -63,10 +64,39 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
             random_value=lambda: 0.0,
         )
 
-        self.assertFalse(meta["enabled"])
+        self.assertTrue(meta["enabled"])
         self.assertFalse(meta["sampled"])
-        self.assertEqual(meta["reason"], "disabled")
+        self.assertEqual(meta["reason"], "provider-not-enabled")
         self.assertEqual(meta["policy_source"], "local-default")
+
+    def test_default_policy_samples_codex_turn_shadow_pass_through(self):
+        self.assertIn("codex-turn", experiments.ROUTING_EXPERIMENT_POLICY["categories"])
+
+        meta = experiments.routing_experiment_decision(
+            {"model": "gpt-5-codex", "input": "summarize the run"},
+            {
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "text_chars": 17,
+            },
+            stream=False,
+            provider="openai",
+            source_surface="codex_turn",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(meta["counterfactual"])
+        self.assertTrue(meta["shadow_only"])
+        self.assertEqual(meta["primary_model"], "gpt-5-codex")
+        self.assertEqual(meta["user_visible_model"], "gpt-5-codex")
+        self.assertEqual(meta["shadow_model"], "gpt-5-mini")
+        self.assertEqual(meta["routed_model"], "gpt-5-mini")
+        self.assertEqual(meta["source_surface"], "codex_turn")
+        self.assertEqual(meta["reason"], "sampled-shadow-candidate-pass-through")
 
     def test_config_policy_samples_routed_down_non_streaming_call(self):
         with TemporaryDirectory() as tmp:
