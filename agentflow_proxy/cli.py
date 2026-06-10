@@ -2692,6 +2692,10 @@ def policy_rollback_cli(
 ) -> int:
     parser = argparse.ArgumentParser(description="Rollback local AgentFlow policy YAML files from apply backups")
     parser.add_argument(
+        "--apply-id",
+        help="Rollback the exact policy workbench apply transaction with this apply ID.",
+    )
+    parser.add_argument(
         "--config-dir",
         default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
         help="Directory for local rule files, default: ~/.agentflow",
@@ -2708,6 +2712,27 @@ def policy_rollback_cli(
         help="Report the backups that would be restored without writing files.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow CLI-only partial recovery when an apply event is missing or backup metadata is incomplete.",
+    )
+    parser.add_argument(
+        "--reload-url",
+        default=os.getenv("AGENTFLOW_ADMIN_URL", _default_policy_reload_url()),
+        help=f"Admin reload URL for --apply-id rollback, default: {_default_policy_reload_url()}",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_ADMIN_TIMEOUT", "10")),
+        help="HTTP timeout in seconds for the loopback reload call, default: 10.",
+    )
+    parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="Allow posting reload to a non-loopback URL. Use only for explicit trusted tunnels.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print rollback JSON instead of emitting one compact line.",
@@ -2715,6 +2740,61 @@ def policy_rollback_cli(
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
+
+    if args.apply_id:
+        from agentflow_proxy.policy_events import log_policy_event
+        from agentflow_proxy.policy_workbench import POLICY_DRAFT_ROLLBACK_SCHEMA, rollback_policy_apply
+
+        if not args.dry_run and not args.allow_non_loopback and not _is_loopback_url(args.reload_url):
+            result = {
+                "schema": POLICY_DRAFT_ROLLBACK_SCHEMA,
+                "ok": False,
+                "status": "blocked",
+                "apply_id": args.apply_id,
+                "backup_id": args.apply_id,
+                "dry_run": bool(args.dry_run),
+                "force": bool(args.force),
+                "config_dir": args.config_dir,
+                "manifest_source": None,
+                "apply_event_found": None,
+                "requested_sections": args.section or ["routing", "crunch", "cache", "routing_experiments", "codex_app"],
+                "restored_sections": [],
+                "skipped_sections": [],
+                "files": [],
+                "current_backups": [],
+                "reloaded_modules": False,
+                "reload": None,
+                "verification": None,
+                "privacy": {"provider_calls_made": False, "managed_server_calls_made": False, "loopback_admin_calls_made": False},
+                "error": {
+                    "type": "unsafe_url",
+                    "message": "policy apply rollback only posts reloads to loopback URLs unless --allow-non-loopback is set",
+                    "url": args.reload_url,
+                },
+            }
+            log_policy_event(
+                "rollback",
+                ok=False,
+                details={"source": "cli", "apply_id": args.apply_id, "error_type": "unsafe_url", "exit_code": 2},
+            )
+            _write_policy_rollback_result(stdout, result, pretty=args.pretty)
+            return 2
+
+        async def reload_state() -> dict[str, Any]:
+            return await _reload_policy_state_via_url(args.reload_url, timeout=args.timeout)
+
+        result = asyncio.run(rollback_policy_apply(
+            args.apply_id,
+            config_dir=args.config_dir,
+            sections=args.section,
+            dry_run=args.dry_run,
+            force=args.force,
+            reload_policy_state=reload_state,
+            event_source="cli",
+            loopback_admin_calls_made=not args.dry_run,
+        ))
+        _write_policy_rollback_result(stdout, result, pretty=args.pretty)
+        return 0 if result.get("ok") else 1
 
     from agentflow_proxy.policy_bundle import rollback_policy_files
     from agentflow_proxy.policy_events import log_policy_event

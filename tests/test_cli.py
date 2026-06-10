@@ -6423,6 +6423,50 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(cache_path.read_text(encoding="utf-8"), "exact_cache:\n  enabled: true\n")
             self.assertEqual(len(list(Path(tmp).glob("cache_rules.yaml.bak-*"))), 1)
 
+    def test_policy_rollback_cli_apply_id_dry_run_reports_exact_backup(self):
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache_rules.yaml"
+            cache_path.write_text("exact_cache:\n  enabled: true\n", encoding="utf-8")
+            apply_id = "20260610T220000Z-cache-apply"
+            backup = Path(tmp) / f"cache_rules.yaml.bak-{apply_id}"
+            backup.write_text("exact_cache:\n  enabled: false\n", encoding="utf-8")
+            event_log = Path(tmp) / "policy_events.jsonl"
+            event_log.write_text(
+                json.dumps({
+                    "schema": "agentflow.policy_event.v1",
+                    "id": "event-apply",
+                    "created_at": "2026-06-10T22:00:00+00:00",
+                    "action": "draft-apply",
+                    "ok": True,
+                    "details": {
+                        "apply_id": apply_id,
+                        "backup_id": apply_id,
+                        "status": "applied",
+                        "changed_sections": ["cache"],
+                        "changed_files": [str(cache_path)],
+                        "backup_paths": [str(backup)],
+                    },
+                })
+                + "\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(event_log)}, clear=False):
+                code = cli.policy_rollback_cli(
+                    ["--config-dir", tmp, "--apply-id", apply_id, "--section", "cache", "--dry-run"],
+                    stdout=stdout,
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["schema"], "agentflow.policy_draft_rollback.v1")
+            self.assertEqual(payload["status"], "dry-run")
+            self.assertEqual(payload["apply_id"], apply_id)
+            self.assertEqual(payload["restored_sections"], ["cache"])
+            self.assertEqual(payload["files"][0]["restored_from"], str(backup))
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), "exact_cache:\n  enabled: true\n")
+
     def test_policy_rollback_cli_restores_selected_section_and_backs_up_current_file(self):
         with TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "cache_rules.yaml"

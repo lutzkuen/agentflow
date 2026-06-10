@@ -13,6 +13,7 @@ from agentflow_proxy.policy_files import _draft_workspace_root, utc_now
 
 POLICY_DRAFT_VALIDATE_SCHEMA = "agentflow.policy_draft_validate.v1"
 POLICY_DRAFT_APPLY_SCHEMA = "agentflow.policy_draft_apply.v1"
+POLICY_DRAFT_ROLLBACK_SCHEMA = "agentflow.policy_draft_rollback.v1"
 POLICY_DRAFT_VALIDATE_PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -206,6 +207,11 @@ def _backup_path(path: Path, apply_id: str) -> Path:
     return path.with_name(f"{path.name}.bak-{apply_id}")
 
 
+def _rollback_backup_path(path: Path, apply_id: str) -> Path:
+    rollback_id = _apply_id(f"rollback-{apply_id}")
+    return path.with_name(f"{path.name}.bak-{rollback_id}")
+
+
 def _file_result(plan: dict[str, Any], *, restored: bool = False) -> dict[str, Any]:
     result = {
         "section": plan["section"],
@@ -242,6 +248,99 @@ def _restore_transaction_plans(plans: list[dict[str, Any]]) -> dict[str, Any]:
         "ok": not errors,
         "files": files,
         "errors": errors,
+    }
+
+
+def _matching_backup_section(path: Path, apply_id: str) -> str | None:
+    suffix = f".bak-{apply_id}"
+    if not path.name.endswith(suffix):
+        return None
+    base_name = path.name[: -len(suffix)]
+    from agentflow_proxy.policy_files import POLICY_DRAFT_SECTION_FILES
+
+    for section, filename in POLICY_DRAFT_SECTION_FILES.items():
+        if base_name == filename:
+            return section
+    return None
+
+
+def _apply_event_for_id(apply_id: str) -> dict[str, Any] | None:
+    from agentflow_proxy.policy_events import policy_events_log_path
+
+    path = policy_events_log_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("action") != "draft-apply":
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        if details.get("apply_id") == apply_id:
+            return event
+    return None
+
+
+def _event_sections(event: dict[str, Any] | None) -> list[str]:
+    if not isinstance(event, dict):
+        return []
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    sections = details.get("changed_sections") if isinstance(details.get("changed_sections"), list) else []
+    return [section for section in APPLY_POLICY_SECTIONS if section in set(sections)]
+
+
+def _event_backup_paths(event: dict[str, Any] | None) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    if not isinstance(event, dict):
+        return paths
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    backup_paths = details.get("backup_paths") if isinstance(details.get("backup_paths"), list) else []
+    for raw in backup_paths:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = Path(raw).expanduser()
+        section = _matching_backup_section(path, str(details.get("apply_id") or ""))
+        if section is not None:
+            paths[section] = path
+    return paths
+
+
+def _workbench_rollback_error_result(
+    *,
+    apply_id: str,
+    config_dir: str | Path,
+    dry_run: bool,
+    sections: list[str] | tuple[str, ...] | None,
+    force: bool,
+    error: dict[str, Any],
+    event: dict[str, Any] | None = None,
+    files: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": POLICY_DRAFT_ROLLBACK_SCHEMA,
+        "ok": False,
+        "status": "blocked",
+        "apply_id": apply_id,
+        "backup_id": apply_id,
+        "dry_run": bool(dry_run),
+        "force": bool(force),
+        "config_dir": str(Path(config_dir).expanduser()),
+        "manifest_source": "policy-event" if event is not None else "backup-suffix",
+        "apply_event_found": event is not None,
+        "requested_sections": list(sections or APPLY_POLICY_SECTIONS),
+        "restored_sections": [],
+        "skipped_sections": [],
+        "files": files or [],
+        "current_backups": [],
+        "reloaded_modules": False,
+        "reload": None,
+        "verification": None,
+        "privacy": POLICY_DRAFT_APPLY_PRIVACY,
+        "error": error,
     }
 
 
@@ -791,7 +890,7 @@ async def apply_validated_policy_draft(
     rollback_command = None
     if changed_sections:
         rollback_command = " ".join(
-            ["agentflow-policy-rollback", "--config-dir", str(config_path)]
+            ["agentflow-policy-rollback", "--config-dir", str(config_path), "--apply-id", transaction_id]
             + [part for section in changed_sections for part in ("--section", section)]
         )
     result = {
@@ -826,6 +925,436 @@ async def apply_validated_policy_draft(
     return result
 
 
+async def rollback_policy_apply(
+    apply_id: str,
+    *,
+    config_dir: str | Path | None = None,
+    sections: list[str] | tuple[str, ...] | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    reload_policy_state: ReloadPolicyState | None = None,
+    event_source: str = "workbench",
+    loopback_admin_calls_made: bool = False,
+) -> dict[str, Any]:
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.policy_files import POLICY_DRAFT_SECTION_FILES
+
+    clean_apply_id = str(apply_id or "").strip()
+    config_path = Path(config_dir or Path.home() / ".agentflow").expanduser()
+    privacy = POLICY_DRAFT_APPLY_PRIVACY | {"loopback_admin_calls_made": bool(loopback_admin_calls_made)}
+    requested, invalid_sections = _requested_sections(sections)
+    if not clean_apply_id:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            error={"type": "missing_apply_id", "message": "rollback requires an apply ID"},
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+    if invalid_sections:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            error={
+                "type": "invalid_sections",
+                "message": "unknown or review-only policy section requested",
+                "sections": invalid_sections,
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    event = _apply_event_for_id(clean_apply_id)
+    event_details = event.get("details") if isinstance(event, dict) and isinstance(event.get("details"), dict) else {}
+    event_sections = _event_sections(event)
+    event_backups = _event_backup_paths(event)
+    discovered_backups: dict[str, Path] = {}
+    for section, filename in POLICY_DRAFT_SECTION_FILES.items():
+        backup = _backup_path(config_path / filename, clean_apply_id)
+        if backup.exists():
+            discovered_backups[section] = backup
+
+    if event is not None and not event.get("ok") and not force:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            event=event,
+            error={
+                "type": "apply_not_successful",
+                "message": "the matching apply event did not complete successfully",
+                "apply_status": event_details.get("status"),
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    if event is not None:
+        expected_sections = [section for section in (requested if sections else event_sections) if section in APPLY_POLICY_SECTIONS]
+    elif sections:
+        expected_sections = requested
+    elif force:
+        expected_sections = [section for section in APPLY_POLICY_SECTIONS if section in discovered_backups]
+    else:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            files=[
+                {
+                    "section": section,
+                    "path": str(config_path / POLICY_DRAFT_SECTION_FILES[section]),
+                    "restored_from": str(path),
+                    "changed": False,
+                }
+                for section, path in discovered_backups.items()
+            ],
+            error={
+                "type": "apply_event_not_found",
+                "message": "no policy apply event was found for this apply ID; pass --section for an exact recovery set or --force for CLI-only recovery",
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    if not expected_sections:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            event=event,
+            error={
+                "type": "empty_backup_set",
+                "message": "no policy sections with backups were associated with this apply ID",
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    if event is not None and not force:
+        unexpected = sorted(set(discovered_backups) - set(event_sections))
+        if unexpected:
+            result = _workbench_rollback_error_result(
+                apply_id=clean_apply_id,
+                config_dir=config_path,
+                dry_run=dry_run,
+                sections=sections,
+                force=force,
+                event=event,
+                error={
+                    "type": "ambiguous_backup_set",
+                    "message": "backup files exist for sections not recorded on the apply event",
+                    "sections": unexpected,
+                },
+            )
+            result["privacy"] = privacy
+            log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+            return result
+
+    plans: list[dict[str, Any]] = []
+    missing_sections: list[str] = []
+    unreadable_backups: list[dict[str, str]] = []
+    for section in APPLY_POLICY_SECTIONS:
+        if section not in expected_sections:
+            continue
+        path = config_path / POLICY_DRAFT_SECTION_FILES[section]
+        backup = event_backups.get(section) or discovered_backups.get(section) or _backup_path(path, clean_apply_id)
+        if not backup.exists():
+            missing_sections.append(section)
+            plans.append({
+                "section": section,
+                "path": path,
+                "backup": backup,
+                "missing": True,
+            })
+            continue
+        current_text, current_exists = _read_policy_text(path)
+        try:
+            backup_text = backup.read_text(encoding="utf-8")
+        except OSError as exc:
+            unreadable_backups.append({"section": section, "path": str(backup), "message": str(exc)})
+            continue
+        plans.append({
+            "section": section,
+            "path": path,
+            "backup": backup,
+            "old_text": current_text,
+            "existed_before": current_exists,
+            "backup_text": backup_text,
+            "changed": current_text != backup_text,
+            "sha256_before": _sha256_text(current_text),
+            "sha256_after": _sha256_text(backup_text),
+            "bytes_after": len(backup_text.encode("utf-8")),
+        })
+
+    partial_sections = sorted(set(missing_sections))
+    if partial_sections and not force:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            event=event,
+            files=[
+                {
+                    "section": plan["section"],
+                    "path": str(plan["path"]),
+                    "restored_from": str(plan["backup"]) if plan.get("backup") else None,
+                    "changed": False,
+                    "backup_path": None,
+                    "missing": bool(plan.get("missing")),
+                }
+                for plan in plans
+            ],
+            error={
+                "type": "partial_backup_set",
+                "message": "one or more requested apply backups are missing",
+                "sections": partial_sections,
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+    if unreadable_backups:
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            event=event,
+            error={
+                "type": "unreadable_backups",
+                "message": "one or more apply backups could not be read",
+                "backups": unreadable_backups,
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    write_plans = [plan for plan in plans if not plan.get("missing")]
+    current_backups: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    if dry_run:
+        for plan in write_plans:
+            files.append({
+                "section": plan["section"],
+                "path": str(plan["path"]),
+                "restored_from": str(plan["backup"]),
+                "changed": bool(plan["changed"]),
+                "backup_path": None,
+                "sha256_before": plan.get("sha256_before"),
+                "sha256_after": plan.get("sha256_after"),
+                "bytes_after": plan.get("bytes_after"),
+            })
+        result = {
+            "schema": POLICY_DRAFT_ROLLBACK_SCHEMA,
+            "ok": True,
+            "status": "dry-run",
+            "apply_id": clean_apply_id,
+            "backup_id": clean_apply_id,
+            "dry_run": True,
+            "force": bool(force),
+            "config_dir": str(config_path),
+            "manifest_source": "policy-event" if event is not None else "backup-suffix",
+            "apply_event_found": event is not None,
+            "requested_sections": expected_sections,
+            "restored_sections": [plan["section"] for plan in write_plans],
+            "skipped_sections": [
+                {"section": section, "reason": "not-requested"}
+                for section in APPLY_POLICY_SECTIONS
+                if section not in set(expected_sections)
+            ],
+            "files": files,
+            "current_backups": [],
+            "reloaded_modules": False,
+            "reload": None,
+            "verification": None,
+            "privacy": privacy,
+            "error": None,
+        }
+        log_policy_event("rollback", ok=True, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    written_plans: list[dict[str, Any]] = []
+    try:
+        for plan in write_plans:
+            if plan.get("changed") and plan.get("existed_before"):
+                current_backup = _rollback_backup_path(plan["path"], clean_apply_id)
+                current_backup.write_text(plan.get("old_text") or "", encoding="utf-8")
+                plan["current_backup_path"] = current_backup
+                current_backups.append({
+                    "section": plan["section"],
+                    "path": str(current_backup),
+                    "sha256": plan.get("sha256_before"),
+                })
+            if plan.get("changed"):
+                _atomic_write_policy_text(plan["path"], plan.get("backup_text") or "")
+                written_plans.append(plan)
+    except OSError as exc:
+        restore = _restore_transaction_plans(written_plans)
+        files = [
+            {
+                "section": plan["section"],
+                "path": str(plan["path"]),
+                "restored_from": str(plan["backup"]),
+                "changed": bool(plan.get("changed")),
+                "backup_path": str(plan.get("current_backup_path")) if plan.get("current_backup_path") is not None else None,
+                "sha256_before": plan.get("sha256_before"),
+                "sha256_after": plan.get("sha256_after"),
+                "bytes_after": plan.get("bytes_after"),
+            }
+            for plan in write_plans
+        ]
+        result = _workbench_rollback_error_result(
+            apply_id=clean_apply_id,
+            config_dir=config_path,
+            dry_run=dry_run,
+            sections=sections,
+            force=force,
+            event=event,
+            files=files,
+            error={"type": "write_failed", "message": str(exc), "restore": restore},
+        )
+        result["current_backups"] = current_backups
+        result["privacy"] = privacy
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    reload_payload: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    reloader = reload_policy_state or _default_reload_policy_state
+    try:
+        reload_payload = await reloader()
+        if not isinstance(reload_payload, dict) or not reload_payload.get("ok"):
+            error = {
+                "type": "reload_failed",
+                "message": "policy reload did not return ok=true",
+                "reload": reload_payload,
+            }
+        else:
+            policies_after = reload_payload.get("policies") if isinstance(reload_payload.get("policies"), dict) else {}
+            verification_plans = [
+                {
+                    "requested": True,
+                    "section": plan["section"],
+                    "path": plan["path"],
+                    "sha256_after": plan.get("sha256_after"),
+                }
+                for plan in write_plans
+            ]
+            verification = _verify_reloaded_policy_state(policies_after, verification_plans)
+            if not verification.get("ok"):
+                error = {
+                    "type": "verification_failed",
+                    "message": "reloaded policy snapshots did not match rolled-back files",
+                    "failures": verification.get("failures", []),
+                }
+    except Exception as exc:  # pragma: no cover - exercised through tests by type, not branch internals
+        error = {"type": "reload_failed", "message": str(exc)}
+
+    files = [
+        {
+            "section": plan["section"],
+            "path": str(plan["path"]),
+            "restored_from": str(plan["backup"]),
+            "changed": bool(plan.get("changed")),
+            "backup_path": str(plan.get("current_backup_path")) if plan.get("current_backup_path") is not None else None,
+            "sha256_before": plan.get("sha256_before"),
+            "sha256_after": plan.get("sha256_after"),
+            "bytes_after": plan.get("bytes_after"),
+        }
+        for plan in write_plans
+    ]
+    if error is not None:
+        restore = _restore_transaction_plans(written_plans)
+        restore_reload: dict[str, Any] | None = None
+        try:
+            restore_reload = await reloader()
+        except Exception as exc:  # pragma: no cover
+            restore_reload = {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+        restore["reload"] = restore_reload
+        result = {
+            "schema": POLICY_DRAFT_ROLLBACK_SCHEMA,
+            "ok": False,
+            "status": "failed",
+            "apply_id": clean_apply_id,
+            "backup_id": clean_apply_id,
+            "dry_run": False,
+            "force": bool(force),
+            "config_dir": str(config_path),
+            "manifest_source": "policy-event" if event is not None else "backup-suffix",
+            "apply_event_found": event is not None,
+            "requested_sections": expected_sections,
+            "restored_sections": [],
+            "skipped_sections": [
+                {"section": section, "reason": "not-requested"}
+                for section in APPLY_POLICY_SECTIONS
+                if section not in set(expected_sections)
+            ],
+            "files": files,
+            "current_backups": current_backups,
+            "reloaded_modules": bool(reload_payload and reload_payload.get("ok")),
+            "reload": reload_payload,
+            "verification": verification,
+            "restored": True,
+            "restore": restore,
+            "privacy": privacy,
+            "error": error,
+        }
+        log_policy_event("rollback", ok=False, details={"source": event_source, **_policy_rollback_event_details(result)})
+        return result
+
+    result = {
+        "schema": POLICY_DRAFT_ROLLBACK_SCHEMA,
+        "ok": True,
+        "status": "rolled-back",
+        "apply_id": clean_apply_id,
+        "backup_id": clean_apply_id,
+        "dry_run": False,
+        "force": bool(force),
+        "config_dir": str(config_path),
+        "manifest_source": "policy-event" if event is not None else "backup-suffix",
+        "apply_event_found": event is not None,
+        "requested_sections": expected_sections,
+        "restored_sections": [plan["section"] for plan in write_plans],
+        "skipped_sections": [
+            {"section": section, "reason": "not-requested"}
+            for section in APPLY_POLICY_SECTIONS
+            if section not in set(expected_sections)
+        ],
+        "files": files,
+        "current_backups": current_backups,
+        "reloaded_modules": True,
+        "reload": reload_payload,
+        "verification": verification or {"ok": True, "checks": [], "failures": []},
+        "privacy": privacy,
+        "error": None,
+    }
+    log_policy_event("rollback", ok=True, details={"source": event_source, **_policy_rollback_event_details(result)})
+    return result
+
+
 def _policy_apply_event_details(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "draft_id": result.get("draft_id"),
@@ -853,6 +1382,42 @@ def _policy_apply_event_details(result: dict[str, Any]) -> dict[str, Any]:
         "restored": result.get("restored"),
         "restore_ok": ((result.get("restore") or {}).get("ok") if isinstance(result.get("restore"), dict) else None),
         "rollback_command": result.get("rollback_command"),
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+        "exit_code": 0 if result.get("ok") else 1,
+    }
+
+
+def _policy_rollback_event_details(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "apply_id": result.get("apply_id"),
+        "backup_id": result.get("backup_id"),
+        "config_dir": result.get("config_dir"),
+        "status": result.get("status"),
+        "dry_run": result.get("dry_run"),
+        "force": result.get("force"),
+        "manifest_source": result.get("manifest_source"),
+        "apply_event_found": result.get("apply_event_found"),
+        "requested_sections": result.get("requested_sections", []),
+        "restored_sections": result.get("restored_sections", []),
+        "changed_files": [
+            file.get("path")
+            for file in result.get("files", [])
+            if isinstance(file, dict) and file.get("changed")
+        ],
+        "restored_from": [
+            file.get("restored_from")
+            for file in result.get("files", [])
+            if isinstance(file, dict) and file.get("restored_from")
+        ],
+        "current_backup_paths": [
+            backup.get("path")
+            for backup in result.get("current_backups", [])
+            if isinstance(backup, dict) and backup.get("path")
+        ],
+        "reloaded_modules": ((result.get("reload") or {}).get("reloaded_modules", []) if isinstance(result.get("reload"), dict) else []),
+        "verification_ok": ((result.get("verification") or {}).get("ok") if isinstance(result.get("verification"), dict) else None),
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,

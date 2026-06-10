@@ -14,7 +14,7 @@ from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy import codex_app_policy as codex_app_policy_module
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, stage_policy_draft, utc_now
-from agentflow_proxy.policy_workbench import apply_validated_policy_draft
+from agentflow_proxy.policy_workbench import apply_validated_policy_draft, rollback_policy_apply
 from agentflow_proxy.policy_bundle import (
     MANAGED_POLICY_HMAC_SECRET_ENV,
     MANAGED_POLICY_VERIFICATION_SECRET_ENV,
@@ -866,6 +866,167 @@ crunch:
             self.assertFalse(result["verification"]["ok"])
             self.assertTrue(result["restored"])
             self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
+
+    def test_policy_draft_rollback_by_apply_id_dry_run_reports_exact_files(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            event_log = Path(tmp) / "policy_events.jsonl"
+
+            env = {
+                "AGENTFLOW_CACHE_RULES": str(cache_path),
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-rollback-dry-run",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+                    apply_result = asyncio.run(apply_validated_policy_draft(
+                        "cache-rollback-dry-run",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                    ))
+                    self.assertTrue(apply_result["ok"])
+
+                    rollback = asyncio.run(rollback_policy_apply(
+                        apply_result["apply_id"],
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        dry_run=True,
+                        reload_policy_state=reload_policy_modules,
+                        event_source="test",
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertTrue(rollback["ok"])
+            self.assertEqual(rollback["schema"], "agentflow.policy_draft_rollback.v1")
+            self.assertEqual(rollback["status"], "dry-run")
+            self.assertEqual(rollback["apply_id"], apply_result["apply_id"])
+            self.assertEqual(rollback["restored_sections"], ["cache"])
+            self.assertEqual(rollback["files"][0]["restored_from"], apply_result["backups"][0]["path"])
+            self.assertTrue(rollback["files"][0]["changed"])
+            self.assertFalse(rollback["reloaded_modules"])
+            self.assertEqual(yaml.safe_load(cache_path.read_text(encoding="utf-8"))["semantic_cache"]["threshold"], 0.91)
+
+    def test_policy_draft_rollback_by_apply_id_restores_reloads_and_verifies(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            event_log = Path(tmp) / "policy_events.jsonl"
+
+            env = {
+                "AGENTFLOW_CACHE_RULES": str(cache_path),
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-rollback",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+                    apply_result = asyncio.run(apply_validated_policy_draft(
+                        "cache-rollback",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                    ))
+                    self.assertTrue(apply_result["ok"])
+                    self.assertIn("--apply-id", apply_result["rollback_command"])
+
+                    rollback = asyncio.run(rollback_policy_apply(
+                        apply_result["apply_id"],
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                        event_source="test",
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertTrue(rollback["ok"])
+            self.assertEqual(rollback["status"], "rolled-back")
+            self.assertEqual(rollback["restored_sections"], ["cache"])
+            self.assertTrue(rollback["reloaded_modules"])
+            self.assertTrue(rollback["verification"]["ok"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
+            self.assertEqual(len(rollback["current_backups"]), 1)
+            self.assertTrue(Path(rollback["current_backups"][0]["path"]).exists())
+            events = [json.loads(line) for line in event_log.read_text(encoding="utf-8").splitlines()]
+            event = [item for item in events if item.get("action") == "rollback"][-1]
+            self.assertTrue(event["ok"])
+            self.assertEqual(event["details"]["apply_id"], apply_result["apply_id"])
+            self.assertEqual(event["details"]["restored_sections"], ["cache"])
+
+    def test_policy_draft_rollback_by_apply_id_missing_backup_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            event_log = Path(tmp) / "policy_events.jsonl"
+
+            env = {
+                "AGENTFLOW_CACHE_RULES": str(cache_path),
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-rollback-missing",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+                    apply_result = asyncio.run(apply_validated_policy_draft(
+                        "cache-rollback-missing",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                    ))
+                    self.assertTrue(apply_result["ok"])
+                    Path(apply_result["backups"][0]["path"]).unlink()
+
+                    rollback = asyncio.run(rollback_policy_apply(
+                        apply_result["apply_id"],
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                        event_source="test",
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertFalse(rollback["ok"])
+            self.assertEqual(rollback["error"]["type"], "partial_backup_set")
+            self.assertEqual(rollback["error"]["sections"], ["cache"])
+            self.assertEqual(yaml.safe_load(cache_path.read_text(encoding="utf-8"))["semantic_cache"]["threshold"], 0.91)
 
     def test_policy_bundle_exports_manual_policy_source_and_file_status(self):
         with TemporaryDirectory() as tmp:
