@@ -2488,6 +2488,120 @@ def optimization_shadow_eval_cli(
     return 0
 
 
+def optimization_eval_queue_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Run a bounded batch from the local optimization eval queue")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path for queue selection and result records, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--family",
+        help="Optional optimization family filter, for example phase_routing or cache_replayability.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Maximum queue candidates to evaluate, default: 25, max: 1000",
+    )
+    parser.add_argument(
+        "--plan-limit",
+        type=int,
+        default=500,
+        help="Recent provider and Codex rows to inspect while building the queue, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=1,
+        help="Minimum samples for managed pattern readiness normalization, default: 1",
+    )
+    parser.add_argument(
+        "--max-candidate-age-hours",
+        type=int,
+        help="Record candidates older than this many hours as blocked with candidate-stale.",
+    )
+    parser.add_argument(
+        "--results-jsonl",
+        help="Optional path to write sanitized per-candidate result records as JSONL.",
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Opt in to provider-call execution. Requires --budget-usd > 0; rows without replayable local inputs remain blocked.",
+    )
+    parser.add_argument(
+        "--budget-usd",
+        type=float,
+        default=0.0,
+        help="Maximum provider-call spend allowed when --execute is set. Default 0, which disables execution.",
+    )
+    parser.add_argument(
+        "--min-output-similarity",
+        type=float,
+        default=0.9,
+        help="Minimum offline fixture output similarity/quality score required for a pass verdict, default: 0.9",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    if args.execute and args.budget_usd <= 0:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_eval_queue_error.v1",
+                "error": {
+                    "type": "missing_budget_cap",
+                    "message": "--execute requires --budget-usd greater than 0",
+                },
+                "provider_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 2
+
+    from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = asyncio.run(
+            run_optimization_eval_queue(
+                store,
+                family=args.family,
+                limit=int(args.limit or 25),
+                max_candidate_age_hours=args.max_candidate_age_hours,
+                execute=bool(args.execute),
+                budget_usd=float(args.budget_usd or 0.0),
+                min_output_similarity=float(args.min_output_similarity or 0.9),
+                plan_limit=int(args.plan_limit or 500),
+                min_samples=int(args.min_samples or 1),
+                results_jsonl_path=args.results_jsonl,
+            )
+        )
+    finally:
+        store.conn.close()
+
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def optimization_promotion_report_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -3329,6 +3443,10 @@ def optimization_eval_plan_main() -> None:
 
 def optimization_shadow_eval_main() -> None:
     raise SystemExit(optimization_shadow_eval_cli())
+
+
+def optimization_eval_queue_main() -> None:
+    raise SystemExit(optimization_eval_queue_cli())
 
 
 def optimization_promotion_report_main() -> None:

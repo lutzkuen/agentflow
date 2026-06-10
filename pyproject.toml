@@ -52,6 +52,7 @@ agentflow-managed-feedback-flush = "agentflow_proxy.cli:managed_feedback_flush_m
 agentflow-managed-pattern-rollups = "agentflow_proxy.cli:managed_pattern_rollups_main"
 agentflow-optimization-eval-plan = "agentflow_proxy.cli:optimization_eval_plan_main"
 agentflow-optimization-shadow-eval = "agentflow_proxy.cli:optimization_shadow_eval_main"
+agentflow-optimization-eval-next = "agentflow_proxy.cli:optimization_eval_queue_main"
 agentflow-optimization-promotion-report = "agentflow_proxy.cli:optimization_promotion_report_main"
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 

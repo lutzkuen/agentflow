@@ -890,6 +890,61 @@ class PolicyReloadCliTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def test_optimization_eval_queue_cli_builds_and_records_bounded_batch(self):
+        from agentflow_proxy.store import Store
+
+        async def fake_plan(_store, *, limit=500, min_samples=1):
+            return {
+                "schema": "agentflow.optimization_eval_plan.v1",
+                "generated_at": "2026-06-10T02:00:00+00:00",
+                "plans": [
+                    {
+                        "candidate_id": "queue-cli-pass",
+                        "optimization_family": "phase_routing",
+                        "action_family": "routing",
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude_code",
+                        "granularity": "provider_request",
+                        "replayability_level": "local-exact-response",
+                        "candidate_created_at": "2026-06-10T01:00:00+00:00",
+                        "projected_savings_usd": 0.02,
+                        "shadow_eval_fixture": {
+                            "baseline_status_code": 200,
+                            "candidate_status_code": 200,
+                            "output_similarity": 0.98,
+                            "prompt": "raw queue cli prompt must stay local",
+                        },
+                    }
+                ],
+            }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            Store(db_path).conn.close()
+            stdout = io.StringIO()
+
+            with patch("agentflow_proxy.optimization_eval_queue.build_optimization_eval_plan", fake_plan):
+                code = cli.optimization_eval_queue_cli(
+                    ["--db", db_path, "--family", "phase_routing", "--limit", "1"],
+                    stdout=stdout,
+                )
+
+            conn = sqlite3.connect(db_path)
+            try:
+                stored_count = conn.execute("select count(*) from optimization_eval_results").fetchone()[0]
+            finally:
+                conn.close()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_eval_queue_run.v1")
+        self.assertEqual(payload["summary"]["selected_candidate_count"], 1)
+        self.assertEqual(payload["results"][0]["candidate_id"], "queue-cli-pass")
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["wrote_local_policy_files"])
+        self.assertEqual(stored_count, 1)
+        self.assertNotIn("raw queue cli prompt", stdout.getvalue())
+
     def _promotion_plan_row(
         self,
         candidate_id: str,
@@ -1134,6 +1189,23 @@ class PolicyReloadCliTests(unittest.TestCase):
         code = cli.optimization_shadow_eval_cli(
             ["--execute", "-"],
             stdin=io.StringIO(json.dumps({"schema": "agentflow.optimization_eval_plan.v1", "plans": []})),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error"]["type"], "missing_budget_cap")
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["wrote_local_policy_files"])
+
+    def test_optimization_eval_queue_cli_requires_budget_for_execute(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = cli.optimization_eval_queue_cli(
+            ["--execute", "--limit", "1"],
             stdout=stdout,
             stderr=stderr,
         )

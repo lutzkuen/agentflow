@@ -210,6 +210,7 @@ Common policy commands:
 | `agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run cache replay pattern rules against recent local metadata without mutating cache entries |
 | `agentflow-optimization-eval-plan --db ~/.agentflow/agentflow.sqlite3 --pretty` | Export metadata-only optimization candidates for local evaluation |
 | `agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Record metadata-only local shadow-eval pass/fail/blocked/unknown results without provider calls by default |
+| `agentflow-optimization-eval-next --db ~/.agentflow/agentflow.sqlite3 --limit 10 --pretty` | Select a bounded highest-value eval queue batch and record local eval evidence without provider calls by default |
 | `agentflow-optimization-promotion-report eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Score local eval, canary, and holdout evidence into widen/hold/rollback/needs_eval promotion verdicts |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
 | `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |

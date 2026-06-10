@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import patch
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
+from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
 from agentflow_proxy.store import Store, stable_json
@@ -180,6 +182,114 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(json.loads(stored["cost_json"])["observed_savings_usd"], 0.02)
         self._assert_privacy_clean(result)
         self._assert_privacy_clean(json.loads(stored["result_json"]))
+
+    def test_eval_queue_runs_bounded_mixed_batch_without_provider_calls(self):
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "generated_at": "2026-06-10T02:00:00+00:00",
+            "plans": [
+                {
+                    "candidate_id": "queue-pass",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "candidate_created_at": "2026-06-10T01:00:00+00:00",
+                    "projected_savings_usd": 0.09,
+                    "shadow_eval_fixture": {
+                        "baseline_status_code": 200,
+                        "candidate_status_code": 200,
+                        "output_similarity": 0.97,
+                        "baseline_cost_usd": 0.10,
+                        "candidate_cost_usd": 0.01,
+                        "prompt": "raw queue pass prompt secret",
+                    },
+                },
+                {
+                    "candidate_id": "queue-blocked",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "features_only",
+                    "candidate_created_at": "2026-06-10T01:30:00+00:00",
+                    "projected_savings_usd": 0.05,
+                    "blocker_reason_codes": ["tool-call-disabled"],
+                },
+                {
+                    "candidate_id": "queue-stale",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "candidate_created_at": "2026-06-08T00:00:00+00:00",
+                    "projected_savings_usd": 0.04,
+                    "shadow_eval_fixture": {
+                        "baseline_status_code": 200,
+                        "candidate_status_code": 200,
+                        "output_similarity": 0.99,
+                    },
+                },
+                {
+                    "candidate_id": "queue-other-family",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "candidate_created_at": "2026-06-10T01:45:00+00:00",
+                    "projected_savings_usd": 1.0,
+                    "shadow_eval_fixture": {"baseline_status_code": 200, "candidate_status_code": 200},
+                },
+            ],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                result = asyncio.run(
+                    run_optimization_eval_queue(
+                        store,
+                        plan=plan,
+                        family="phase_routing",
+                        limit=3,
+                        max_candidate_age_hours=24,
+                        now=datetime(2026, 6, 10, 2, 0, tzinfo=timezone.utc),
+                    )
+                )
+                stored = store.conn.execute(
+                    "select candidate_id, status_class, reason_codes_json, result_json "
+                    "from optimization_eval_results order by candidate_id"
+                ).fetchall()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(result["schema"], "agentflow.optimization_eval_queue_run.v1")
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertTrue(result["wrote_result_records"])
+        self.assertEqual(result["summary"]["input_candidate_count"], 4)
+        self.assertEqual(result["summary"]["family_filtered_count"], 1)
+        self.assertEqual(result["summary"]["selected_candidate_count"], 3)
+        by_candidate = {row["candidate_id"]: row for row in result["results"]}
+        self.assertEqual(by_candidate["queue-pass"]["status_class"], "pass")
+        self.assertEqual(by_candidate["queue-blocked"]["status_class"], "blocked")
+        self.assertEqual(by_candidate["queue-stale"]["status_class"], "blocked")
+        self.assertIn("tool-call-disabled", by_candidate["queue-blocked"]["reason_codes"])
+        self.assertIn("candidate-stale", by_candidate["queue-stale"]["reason_codes"])
+        self.assertEqual({row["candidate_id"] for row in stored}, {"queue-pass", "queue-blocked", "queue-stale"})
+        stored_stale = next(row for row in stored if row["candidate_id"] == "queue-stale")
+        self.assertEqual(stored_stale["status_class"], "blocked")
+        self.assertIn("candidate-stale", json.loads(stored_stale["reason_codes_json"]))
+        self._assert_privacy_clean(result)
+        self._assert_privacy_clean(json.loads(stored_stale["result_json"]))
 
     def test_promotion_report_omits_raw_like_plan_and_eval_result_fields(self):
         plan = {
