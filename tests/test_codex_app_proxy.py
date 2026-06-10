@@ -310,6 +310,8 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
             try:
                 with (
                     patch.object(codex_app_proxy, "CODEX_APP_SESSION_COST_ALERT_USD", 0.02),
+                    patch.object(codex_app_proxy, "codex_app_model", return_value="gpt-5.3-codex"),
+                    patch.object(codex_app_proxy, "codex_app_processing_mode", return_value="standard"),
                     patch.object(codex_app_proxy.logging, "warning") as warning,
                 ):
                     self._record_codex_turn(
