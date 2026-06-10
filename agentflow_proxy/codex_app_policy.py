@@ -19,6 +19,7 @@ CODEX_APP_SOURCE_SURFACE_ALIASES = frozenset({
 CODEX_APP_POLICY_CONDITION_KEYS = (
     "app_family",
     "workflow_phase",
+    "granularity",
     "model_field_state",
     "input_size_bucket",
     "cache_eligible",
@@ -267,6 +268,9 @@ def _apply_codex_app_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -
             canary = rule.get("canary")
             if isinstance(canary, dict):
                 normalized["canary"] = dict(canary)
+            safety_stop = rule.get("safety_stop")
+            if isinstance(safety_stop, dict):
+                normalized["safety_stop"] = dict(safety_stop)
             managed = rule.get("managed_recommendation")
             if isinstance(managed, dict):
                 normalized["managed_recommendation"] = {

@@ -1130,6 +1130,7 @@ def _validate_routing_experiment_policy(policy: dict[str, Any], errors: list[dic
 
 _CODEX_APP_CONDITION_KEYS = {
     "app_family",
+    "granularity",
     "workflow_phase",
     "model_field_state",
     "input_size_bucket",
@@ -1137,20 +1138,67 @@ _CODEX_APP_CONDITION_KEYS = {
     "cache_status",
     "replayability_level",
     "has_action_like_params",
+    "stale_risk",
+    "stale_risk_signal",
+    "supported_action_family",
 }
 _CODEX_APP_ACTION_KEYS = {
     "recommended_model",
     "model_hint",
+    "summary_model_hint",
     "crunch_profile",
+    "exact_cache",
     "cache_eligible",
     "cache_eligibility_reason",
     "pass_through_reason",
+    "canary",
+    "safety_stop",
     "reason",
 }
+_CODEX_APP_ACTION_FAMILIES = {"routing", "crunch", "cache"}
+_CODEX_APP_ACTION_FAMILY_KEYS = {
+    "recommended_model": "routing",
+    "model_hint": "routing",
+    "summary_model_hint": "routing",
+    "crunch_profile": "crunch",
+    "exact_cache": "cache",
+    "cache_eligible": "cache",
+    "cache_eligibility_reason": "cache",
+}
+
+
+def _codex_app_action_families(rule: dict[str, Any], action: dict[str, Any]) -> set[str]:
+    families: set[str] = set()
+    for key in action:
+        family = _CODEX_APP_ACTION_FAMILY_KEYS.get(str(key))
+        if family:
+            families.add(family)
+    for source in (rule, rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}):
+        for key in ("action_family", "local_action"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                families.add(value.strip())
+        for key in ("action_families", "local_action_families"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, list):
+                families.update(str(item).strip() for item in value if str(item).strip())
+    managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+    policy_sections = managed.get("codex_policy_sections")
+    if isinstance(policy_sections, list):
+        for section in policy_sections:
+            normalized = str(section).strip()
+            if normalized in {"model_hint", "summary_model_hint"}:
+                families.add("routing")
+            elif normalized in {"exact_cache", "cache"}:
+                families.add("cache")
+            elif normalized in {"crunch", "crunch_profile"}:
+                families.add("crunch")
+    return {family for family in families if family}
 
 
 def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, str]]) -> None:
     base = "$.policies.codex_app"
+    _reject_raw_payload_fields(policy, errors, base)
     if policy.get("policy_source") == "managed-enforced":
         _add_error(errors, f"{base}.policy_source", "managed-enforced is not accepted for review-only Codex app policies")
     if "enabled" in policy:
@@ -1188,6 +1236,17 @@ def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, st
         if not isinstance(rule, dict):
             _add_error(errors, rule_path, "expected rule object")
             continue
+        if rule.get("policy_source") == "managed-enforced":
+            _add_error(errors, f"{rule_path}.policy_source", "managed-enforced is not accepted for Codex app rules")
+        managed = rule.get("managed_recommendation")
+        if managed is not None and not isinstance(managed, dict):
+            _add_error(errors, f"{rule_path}.managed_recommendation", "expected object")
+        elif isinstance(managed, dict) and managed.get("policy_source") == "managed-enforced":
+            _add_error(
+                errors,
+                f"{rule_path}.managed_recommendation.policy_source",
+                "managed-enforced is not accepted for Codex app rules",
+            )
 
         conditions = rule.get("conditions", {})
         if not isinstance(conditions, dict):
@@ -1195,10 +1254,10 @@ def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, st
         else:
             for key in sorted(set(conditions) - _CODEX_APP_CONDITION_KEYS):
                 _add_error(errors, f"{rule_path}.conditions.{key}", "unknown Codex app condition")
-            for key in ("app_family", "workflow_phase", "model_field_state", "input_size_bucket", "cache_status", "replayability_level"):
+            for key in ("app_family", "granularity", "workflow_phase", "model_field_state", "input_size_bucket", "cache_status", "replayability_level", "stale_risk_signal", "supported_action_family"):
                 if key in conditions:
                     _validate_non_empty_string(errors, f"{rule_path}.conditions.{key}", conditions[key])
-            for key in ("cache_eligible", "has_action_like_params"):
+            for key in ("cache_eligible", "has_action_like_params", "stale_risk"):
                 if key in conditions:
                     _validate_boolish(errors, f"{rule_path}.conditions.{key}", conditions[key])
 
@@ -1210,11 +1269,56 @@ def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, st
             _add_error(errors, f"{rule_path}.action", "expected at least one reviewable action")
         for key in sorted(set(action) - _CODEX_APP_ACTION_KEYS):
             _add_error(errors, f"{rule_path}.action.{key}", "unknown Codex app action")
-        for key in ("recommended_model", "model_hint", "crunch_profile", "cache_eligibility_reason", "pass_through_reason", "reason"):
+        for key in ("recommended_model", "crunch_profile", "cache_eligibility_reason", "pass_through_reason", "reason"):
             if key in action:
                 _validate_non_empty_string(errors, f"{rule_path}.action.{key}", action[key])
+        if "model_hint" in action:
+            model_hint = action["model_hint"]
+            if isinstance(model_hint, dict):
+                if "enabled" in model_hint:
+                    _validate_boolish(errors, f"{rule_path}.action.model_hint.enabled", model_hint["enabled"])
+                if "recommended_model" in model_hint:
+                    _validate_non_empty_string(errors, f"{rule_path}.action.model_hint.recommended_model", model_hint["recommended_model"])
+            else:
+                _validate_non_empty_string(errors, f"{rule_path}.action.model_hint", model_hint)
+        summary_hint = _validate_object_field(action, f"{rule_path}.action", "summary_model_hint", errors)
+        if "enabled" in summary_hint:
+            _validate_boolish(errors, f"{rule_path}.action.summary_model_hint.enabled", summary_hint["enabled"])
+        if "recommended_model" in summary_hint and summary_hint["recommended_model"] not in (None, ""):
+            _validate_non_empty_string(errors, f"{rule_path}.action.summary_model_hint.recommended_model", summary_hint["recommended_model"])
+        exact_cache = _validate_object_field(action, f"{rule_path}.action", "exact_cache", errors)
+        if "enabled" in exact_cache:
+            _validate_boolish(errors, f"{rule_path}.action.exact_cache.enabled", exact_cache["enabled"])
+        if "profile" in exact_cache:
+            _validate_non_empty_string(errors, f"{rule_path}.action.exact_cache.profile", exact_cache["profile"])
+        canary = _validate_object_field(action, f"{rule_path}.action", "canary", errors)
+        if "enabled" in canary:
+            _validate_boolish(errors, f"{rule_path}.action.canary.enabled", canary["enabled"])
+        for key in ("fraction", "canary_fraction", "holdout_fraction"):
+            if key in canary:
+                _validate_floatish(errors, f"{rule_path}.action.canary.{key}", canary[key], min_value=0.0, max_value=1.0)
+        for key in ("salt", "unit"):
+            if key in canary and canary[key] not in (None, ""):
+                _validate_non_empty_string(errors, f"{rule_path}.action.canary.{key}", canary[key])
+        safety_stop = _validate_object_field(action, f"{rule_path}.action", "safety_stop", errors)
+        for key in ("max_error_rate", "max_retry_rate"):
+            if key in safety_stop and safety_stop[key] is not None:
+                _validate_floatish(errors, f"{rule_path}.action.safety_stop.{key}", safety_stop[key], min_value=0.0)
+        if "rollback_on_quality_regression" in safety_stop:
+            _validate_boolish(
+                errors,
+                f"{rule_path}.action.safety_stop.rollback_on_quality_regression",
+                safety_stop["rollback_on_quality_regression"],
+            )
         if "cache_eligible" in action:
             _validate_boolish(errors, f"{rule_path}.action.cache_eligible", action["cache_eligible"])
+        unsupported_families = sorted(_codex_app_action_families(rule, action) - _CODEX_APP_ACTION_FAMILIES)
+        for family in unsupported_families:
+            _add_error(
+                errors,
+                rule_path,
+                f"unsupported Codex app action family: {family}",
+            )
 
 
 def _validate_policy_section_shape(section: str, value: dict[str, Any], errors: list[dict[str, str]]) -> None:
@@ -3420,6 +3524,173 @@ def _old_context_summary_apply_metadata(bundle: Any) -> dict[str, Any]:
     }
 
 
+def _codex_app_rule_id(candidate_id: str, rule: dict[str, Any], index: int) -> str:
+    for key in ("id", "rule_id", "policy_id", "recommendation_id"):
+        value = rule.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in candidate_id.strip())[:96]
+    return f"managed-codex-app-{safe or index + 1}"
+
+
+def _boolish_enabled(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return default
+
+
+def _codex_app_model_hint(action: dict[str, Any]) -> str | None:
+    for key in ("recommended_model", "model_hint"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            enabled = _boolish_enabled(value.get("enabled"), True)
+            model = value.get("recommended_model") or value.get("target_model") or value.get("model")
+            if enabled and isinstance(model, str) and model.strip():
+                return model.strip()
+    summary = action.get("summary_model_hint")
+    if isinstance(summary, dict) and _boolish_enabled(summary.get("enabled"), False):
+        model = summary.get("recommended_model") or summary.get("target_model") or summary.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    return None
+
+
+def _codex_app_cache_enabled(action: dict[str, Any]) -> bool | None:
+    if "cache_eligible" in action and _is_boolish(action["cache_eligible"]):
+        return bool(_enabled(action["cache_eligible"]))
+    exact = action.get("exact_cache")
+    if isinstance(exact, dict) and "enabled" in exact and _is_boolish(exact["enabled"]):
+        return bool(_enabled(exact["enabled"]))
+    return None
+
+
+def _codex_app_managed_rule_to_local(rule: dict[str, Any], *, policy: dict[str, Any], index: int) -> dict[str, Any] | None:
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    candidate_id = _codex_app_rule_candidate_id(rule, index)
+    if not candidate_id:
+        return None
+    managed = rule.get("managed_recommendation") if isinstance(rule.get("managed_recommendation"), dict) else {}
+    source = (
+        rule.get("policy_source")
+        or managed.get("policy_source")
+        or policy.get("policy_source")
+        or "local-manual"
+    )
+    source = "managed-recommended" if str(source).startswith("managed-") else str(source)
+
+    local_action: dict[str, Any] = {}
+    model_hint = _codex_app_model_hint(action)
+    if model_hint:
+        local_action["model_hint"] = model_hint
+    cache_enabled = _codex_app_cache_enabled(action)
+    if cache_enabled is not None:
+        local_action["cache_eligible"] = cache_enabled
+    for key in ("crunch_profile", "cache_eligibility_reason", "pass_through_reason", "reason"):
+        value = action.get(key)
+        if value not in (None, "", [], {}):
+            local_action[key] = _safe_pattern_value(value)
+    if "reason" not in local_action and isinstance((rule.get("managed_recommendation") or {}).get("reason"), str):
+        local_action["reason"] = str((rule.get("managed_recommendation") or {}).get("reason"))
+    if not local_action:
+        return None
+
+    local_rule: dict[str, Any] = {
+        "id": _codex_app_rule_id(candidate_id, rule, index),
+        "candidate_id": candidate_id,
+        "policy_source": source,
+        "conditions": _safe_pattern_value(conditions),
+        "action": local_action,
+    }
+
+    managed_meta = {
+        key: _safe_pattern_value(value)
+        for key, value in {
+            "policy_source": "managed-recommended" if str(source).startswith("managed-") else source,
+            "candidate_id": managed.get("candidate_id") or candidate_id,
+            "policy_id": managed.get("policy_id") or rule.get("policy_id"),
+            "recommendation_id": managed.get("recommendation_id") or rule.get("recommendation_id"),
+            "candidate_family": managed.get("candidate_family"),
+            "source_surface": managed.get("source_surface") or policy.get("surface") or CODEX_APP_SOURCE_SURFACE,
+            "codex_policy_sections": managed.get("codex_policy_sections"),
+            "reason": managed.get("reason"),
+        }.items()
+        if value not in (None, "", [], {})
+    }
+    if managed_meta:
+        local_rule["managed_recommendation"] = managed_meta
+
+    for source in (action, managed, rule):
+        canary = source.get("canary") if isinstance(source, dict) else None
+        if isinstance(canary, dict):
+            local_rule["canary"] = _safe_pattern_value(canary)
+            break
+    for source in (action, managed, rule):
+        safety_stop = source.get("safety_stop") if isinstance(source, dict) else None
+        if isinstance(safety_stop, dict):
+            local_rule["safety_stop"] = _safe_pattern_value(safety_stop)
+            break
+    return local_rule
+
+
+def _codex_app_local_rules(policy: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw_rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    local_rules: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for index, rule in enumerate(raw_rules):
+        if not isinstance(rule, dict):
+            skipped.append({"index": index, "reason": "non-object-rule"})
+            continue
+        local_rule = _codex_app_managed_rule_to_local(rule, policy=policy, index=index)
+        if local_rule is None:
+            skipped.append({
+                "index": index,
+                "candidate_id": _codex_app_rule_candidate_id(rule, index),
+                "reason": "no-reviewable-local-action",
+            })
+            continue
+        local_rules.append(local_rule)
+    return local_rules, {
+        "status": "candidate-selected" if local_rules else ("no-applicable-candidate" if raw_rules else "none"),
+        "candidate_count": len(raw_rules),
+        "candidate_ids": [_codex_app_rule_candidate_id(rule, index) for index, rule in enumerate(raw_rules) if isinstance(rule, dict)],
+        "selected_candidate_ids": [rule.get("candidate_id") for rule in local_rules],
+        "selected_rule_ids": [rule.get("id") for rule in local_rules],
+        "policy_source": (
+            "managed-recommended"
+            if any(str(rule.get("policy_source") or "").startswith("managed-") for rule in local_rules)
+            else (local_rules[0].get("policy_source") if local_rules else policy.get("policy_source"))
+        ),
+        "skipped_candidates": skipped[:10],
+    }
+
+
+def _codex_app_apply_metadata(bundle: Any) -> dict[str, Any]:
+    codex_app = _section_policy(bundle, "codex_app")
+    if not codex_app:
+        return {"lifecycle_kind": "codex_app", "status": "none", "candidate_count": 0, "candidate_ids": []}
+    _rules, selected = _codex_app_local_rules(codex_app)
+    return {
+        "lifecycle_kind": "codex_app",
+        "status": selected.get("status", "none"),
+        "candidate_count": selected.get("candidate_count", 0),
+        "candidate_ids": selected.get("candidate_ids", []),
+        "selected_candidate_ids": selected.get("selected_candidate_ids", []),
+        "selected_rule_ids": selected.get("selected_rule_ids", []),
+        "policy_source": selected.get("policy_source"),
+        "skipped_candidates": selected.get("skipped_candidates", []),
+        "writes_local_policy_files": bool(selected.get("selected_rule_ids")),
+    }
+
+
 def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
     if section == "routing":
         payload: dict[str, Any] = {"rules": policy.get("rules") if isinstance(policy.get("rules"), list) else []}
@@ -3459,18 +3730,27 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
         return experiment_policy if isinstance(experiment_policy, dict) else {}
     if section == "codex_app":
         payload: dict[str, Any] = {}
+        local_rules, _meta = _codex_app_local_rules(policy)
         if "enabled" in policy:
-            payload["enabled"] = policy.get("enabled")
+            payload["enabled"] = bool(policy.get("enabled") or local_rules)
+        elif local_rules:
+            payload["enabled"] = True
+        payload["policy_source"] = (
+            "managed-recommended"
+            if any(str(rule.get("policy_source") or "").startswith("managed-") for rule in local_rules)
+            else (local_rules[0].get("policy_source") if local_rules else policy.get("policy_source", "local-manual"))
+        )
+        payload["surface"] = canonical_source_surface(policy.get("surface", CODEX_APP_SOURCE_SURFACE))
         if isinstance(policy.get("summary_model_hint"), dict):
             payload["summary_model_hint"] = {
                 key: policy["summary_model_hint"][key]
-                for key in ("enabled", "target_model")
+                for key in ("enabled", "target_model", "canary")
                 if key in policy["summary_model_hint"]
             }
         if isinstance(policy.get("exact_cache"), dict):
             payload["exact_cache"] = {
                 key: policy["exact_cache"][key]
-                for key in ("enabled", "namespace")
+                for key in ("enabled", "namespace", "ttl_seconds", "canary")
                 if key in policy["exact_cache"]
             }
         if isinstance(policy.get("crunch"), dict):
@@ -3479,6 +3759,8 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
                 for key in ("profiles",)
                 if key in policy["crunch"]
             }
+        if local_rules:
+            payload["rules"] = local_rules
         return payload
     return {}
 
@@ -3542,6 +3824,7 @@ def apply_policy_bundle(
         "safety_warning_count": len(warnings),
         "safety_warnings": warnings,
         "old_context_summarization": _old_context_summary_apply_metadata(bundle),
+        "codex_app": _codex_app_apply_metadata(bundle),
         "error": None,
     }
 
@@ -3556,12 +3839,18 @@ def apply_policy_bundle(
         if result["old_context_summarization"].get("candidate_count"):
             result["old_context_summarization"]["status"] = "rejected"
             result["old_context_summarization"]["reason"] = "validation_failed"
+        if result["codex_app"].get("candidate_count"):
+            result["codex_app"]["status"] = "rejected"
+            result["codex_app"]["reason"] = "validation_failed"
         result["error"] = {"type": "validation_failed", "message": "policy bundle is invalid"}
         return result
     if warnings and not allow_risky:
         if result["old_context_summarization"].get("candidate_count"):
             result["old_context_summarization"]["status"] = "rejected"
             result["old_context_summarization"]["reason"] = "risky_policy"
+        if result["codex_app"].get("candidate_count"):
+            result["codex_app"]["status"] = "rejected"
+            result["codex_app"]["reason"] = "risky_policy"
         result["error"] = {
             "type": "risky_policy",
             "message": "policy bundle has safety warnings; rerun with --allow-risky to apply explicitly",
@@ -3575,15 +3864,6 @@ def apply_policy_bundle(
             continue
 
         policy = policies.get(section) if isinstance(policies.get(section), dict) else {}
-        if section == "codex_app" and (
-            str(policy.get("policy_source") or "").startswith("managed-") or bool(policy.get("review_only"))
-        ):
-            result["skipped_sections"].append({
-                "section": "codex_app",
-                "reason": "review-only-not-applied",
-                "message": "Managed Codex app recommendations are visible in review output but are not written to local YAML policy files.",
-            })
-            continue
         yaml_payload = _policy_apply_yaml(section, policy)
         text = yaml.safe_dump(yaml_payload, sort_keys=False)
         path = config_path / _POLICY_SECTION_FILES[section]
@@ -3618,6 +3898,13 @@ def apply_policy_bundle(
                 result["old_context_summarization"]["path"] = str(path)
             else:
                 result["old_context_summarization"]["status"] = "not-applied"
+        if section == "codex_app" and result["codex_app"].get("candidate_count"):
+            if result["codex_app"].get("status") == "candidate-selected":
+                result["codex_app"]["status"] = "dry-run" if dry_run else "applied"
+                result["codex_app"]["changed"] = bool(changed)
+                result["codex_app"]["path"] = str(path)
+            else:
+                result["codex_app"]["status"] = "not-applied"
 
     result["ok"] = True
     return result
@@ -3642,6 +3929,11 @@ def rollback_policy_files(
         "files": [],
         "old_context_summarization": {
             "lifecycle_kind": "old_context_summarization",
+            "status": "none",
+            "candidate_ids": [],
+        },
+        "codex_app": {
+            "lifecycle_kind": "codex_app",
             "status": "none",
             "candidate_ids": [],
         },
@@ -3704,6 +3996,9 @@ def rollback_policy_files(
         if "crunch" in missing_sections:
             result["old_context_summarization"]["status"] = "rollback-rejected"
             result["old_context_summarization"]["reason"] = "missing_backup"
+        if "codex_app" in missing_sections:
+            result["codex_app"]["status"] = "rollback-rejected"
+            result["codex_app"]["reason"] = "missing_backup"
         result["error"] = {
             "type": "missing_backups",
             "message": "one or more requested policy sections have no backup file",
@@ -3714,6 +4009,9 @@ def rollback_policy_files(
         if any(item.get("section") == "crunch" for item in unreadable_backups):
             result["old_context_summarization"]["status"] = "rollback-rejected"
             result["old_context_summarization"]["reason"] = "unreadable_backup"
+        if any(item.get("section") == "codex_app" for item in unreadable_backups):
+            result["codex_app"]["status"] = "rollback-rejected"
+            result["codex_app"]["reason"] = "unreadable_backup"
         result["error"] = {
             "type": "unreadable_backups",
             "message": "one or more requested policy backups could not be read",
@@ -3745,6 +4043,10 @@ def rollback_policy_files(
             result["old_context_summarization"]["status"] = "rollback-dry-run" if dry_run else "rolled-back"
             result["old_context_summarization"]["path"] = str(path)
             result["old_context_summarization"]["restored_from"] = str(plan["backup"])
+        if plan["section"] == "codex_app":
+            result["codex_app"]["status"] = "rollback-dry-run" if dry_run else "rolled-back"
+            result["codex_app"]["path"] = str(path)
+            result["codex_app"]["restored_from"] = str(plan["backup"])
 
     result["ok"] = True
     return result

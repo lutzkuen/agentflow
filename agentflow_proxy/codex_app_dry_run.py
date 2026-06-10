@@ -14,6 +14,7 @@ from agentflow_proxy.store import Store
 CODEX_APP_DRY_RUN_SCHEMA = "agentflow.codex_app_policy_dry_run.v1"
 SUPPORTED_CONDITIONS = {
     "app_family",
+    "granularity",
     "workflow_phase",
     "model_field_state",
     "input_size_bucket",
@@ -21,6 +22,7 @@ SUPPORTED_CONDITIONS = {
     "cache_status",
     "replayability_level",
     "has_action_like_params",
+    "supported_action_family",
 }
 
 
@@ -115,6 +117,7 @@ def _recent_row_features(row: Any, index: int) -> dict[str, Any]:
         "created_at": row["created_at"],
         "app_family": "codex",
         "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "granularity": "agent_turn",
         "workflow_phase": _workflow_phase(window, routing, crunch, cache),
         "model_field_state": str(window.get("model_field_state") or "unknown"),
         "input_size_bucket": _input_size_bucket(input_chars),
@@ -124,6 +127,7 @@ def _recent_row_features(row: Any, index: int) -> dict[str, Any]:
         "cache_status": cache_status,
         "replayability_level": str(cache.get("replayability_level") or "turn-metadata-only"),
         "has_action_like_params": bool(has_action_like_params),
+        "supported_action_family": ["routing", "crunch", "cache"],
         "requested_model": str(requested_model),
         "cache_hit": cache_status == "hit",
         "error_count": _as_int(window.get("error_count")),
@@ -142,6 +146,7 @@ def _synthetic_features() -> list[dict[str, Any]]:
             "row_index": 0,
             "app_family": "codex",
             "source_surface": CODEX_APP_SOURCE_SURFACE,
+            "granularity": "agent_turn",
             "workflow_phase": "summary",
             "model_field_state": "derived_present",
             "input_size_bucket": "small",
@@ -151,6 +156,7 @@ def _synthetic_features() -> list[dict[str, Any]]:
             "cache_status": "skipped",
             "replayability_level": "turn-metadata-only",
             "has_action_like_params": False,
+            "supported_action_family": ["routing", "crunch", "cache"],
             "requested_model": codex_app_model(),
             "cache_hit": False,
             "error_count": 0,
@@ -190,6 +196,7 @@ def load_codex_app_fixture_features(path: str | Path) -> list[dict[str, Any]]:
             "row_index": index,
             "app_family": str(item.get("app_family") or "codex"),
             "source_surface": canonical_source_surface(item.get("source_surface") or CODEX_APP_SOURCE_SURFACE),
+            "granularity": str(item.get("granularity") or "agent_turn"),
             "workflow_phase": str(item.get("workflow_phase") or _workflow_phase(window, routing, crunch, cache)),
             "model_field_state": str(item.get("model_field_state") or window.get("model_field_state") or "unknown"),
             "input_size_bucket": str(item.get("input_size_bucket") or _input_size_bucket(input_chars)),
@@ -199,6 +206,7 @@ def load_codex_app_fixture_features(path: str | Path) -> list[dict[str, Any]]:
             "cache_status": cache_status,
             "replayability_level": str(item.get("replayability_level") or cache.get("replayability_level") or "turn-metadata-only"),
             "has_action_like_params": bool(_as_bool(item.get("has_action_like_params")) or False),
+            "supported_action_family": item.get("supported_action_family") or ["routing", "crunch", "cache"],
             "requested_model": str(item.get("requested_model") or routing.get("requested_model") or codex_app_model()),
             "cache_hit": cache_status == "hit",
             "error_count": _as_int(item.get("error_count") or window.get("error_count")),

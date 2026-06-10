@@ -897,7 +897,7 @@ def policy_apply_cli(
     parser.add_argument(
         "--section",
         action="append",
-        choices=["routing", "crunch", "cache", "routing_experiments"],
+        choices=["routing", "crunch", "cache", "routing_experiments", "codex_app"],
         help="Apply only one policy section. Repeat to apply multiple sections.",
     )
     parser.add_argument(
@@ -955,6 +955,7 @@ def policy_apply_cli(
             "provenance_status": (result.get("provenance") or {}).get("status"),
             "provenance_managed_bundle": (result.get("provenance") or {}).get("managed_bundle"),
             "old_context_summarization": result.get("old_context_summarization"),
+            "codex_app": result.get("codex_app"),
             "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
             "exit_code": 0 if result["ok"] else 1,
         },
@@ -2251,7 +2252,7 @@ def policy_rollback_cli(
     parser.add_argument(
         "--section",
         action="append",
-        choices=["routing", "crunch", "cache", "routing_experiments"],
+        choices=["routing", "crunch", "cache", "routing_experiments", "codex_app"],
         help="Rollback only one policy section. Repeat to rollback multiple sections.",
     )
     parser.add_argument(
@@ -2286,6 +2287,7 @@ def policy_rollback_cli(
                 if isinstance(file, dict) and file.get("changed")
             ],
             "old_context_summarization": result.get("old_context_summarization"),
+            "codex_app": result.get("codex_app"),
             "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
             "exit_code": 0 if result["ok"] else 1,
         },

@@ -1324,6 +1324,7 @@ def _codex_rule_features(
     features = {
         "app_family": "codex",
         "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "granularity": "agent_turn",
         "workflow_phase": workflow_phase,
         "model_field_state": "present" if model_field and requested_model else "absent",
         "input_size_bucket": _codex_input_size_bucket(_input_text_chars(params.get("input"))),

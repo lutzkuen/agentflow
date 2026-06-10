@@ -5738,6 +5738,172 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(rollback_payload["files"][0]["restored_from"], str(backups[0]))
             self.assertNotEqual(crunch_path.read_text(encoding="utf-8"), previous)
 
+    def _managed_codex_apply_bundle(self):
+        bundle = self._managed_policy_bundle()
+        rule = bundle["policies"]["codex_app"]["rules"][0]
+        rule["conditions"] = {
+            "app_family": "codex",
+            "workflow_phase": "summary",
+            "granularity": "agent_turn",
+            "model_field_state": "present",
+            "input_size_bucket": "small",
+            "cache_eligible": True,
+            "replayability_level": "local-exact-response",
+            "has_action_like_params": False,
+            "stale_risk": False,
+            "supported_action_family": "routing",
+        }
+        rule["action"] = {
+            "summary_model_hint": {
+                "enabled": True,
+                "recommended_model": "gpt-5-mini",
+                "workflow_phase": "summary",
+            },
+            "exact_cache": {
+                "enabled": True,
+                "profile": "exact",
+                "replayability_level": "agent_turn",
+            },
+            "cache_eligible": True,
+            "crunch_profile": "codex-repeated-scaffolding",
+            "cache_eligibility_reason": "managed exact-cache canary evidence passed",
+            "canary": {
+                "enabled": True,
+                "fraction": 1.0,
+                "holdout_fraction": 0.0,
+                "salt": "managed-codex-app-test",
+                "unit": "source_hash",
+            },
+            "safety_stop": {
+                "max_error_rate": 0.05,
+                "max_retry_rate": 0.05,
+                "rollback_on_quality_regression": True,
+            },
+            "reason": "managed Codex summary rule",
+        }
+        rule["managed_recommendation"]["candidate_family"] = "codex-agent-turn-policy"
+        rule["managed_recommendation"]["source_surface"] = "codex_turn"
+        rule["managed_recommendation"]["codex_policy_sections"] = ["summary_model_hint", "exact_cache"]
+        bundle["recommendation"]["candidate_ids"] = ["candidate-codex-summary"]
+        bundle["recommendation"]["candidate_count"] = 1
+        return bundle
+
+    def test_policy_apply_cli_writes_reviewed_managed_codex_app_rules_and_rollback_finds_backup(self):
+        proposed = self._managed_codex_apply_bundle()
+
+        with TemporaryDirectory() as tmp:
+            codex_path = Path(tmp) / "codex_app_rules.yaml"
+            previous = "enabled: true\nrules: []\n"
+            codex_path.write_text(previous, encoding="utf-8")
+
+            dry_stdout = io.StringIO()
+            dry_code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "codex_app", "--dry-run", "--pretty", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=dry_stdout,
+            )
+            dry_payload = json.loads(dry_stdout.getvalue())
+
+            self.assertEqual(dry_code, 0)
+            self.assertEqual(dry_payload["applied_sections"], ["codex_app"])
+            self.assertEqual(dry_payload["codex_app"]["status"], "dry-run")
+            self.assertEqual(dry_payload["codex_app"]["selected_candidate_ids"], ["candidate-codex-summary"])
+            self.assertEqual(codex_path.read_text(encoding="utf-8"), previous)
+            diff = dry_payload["files"][0]["diff"]
+            self.assertIn("+  candidate_id: candidate-codex-summary", diff)
+            self.assertIn("+  policy_source: managed-recommended", diff)
+            self.assertIn("+    model_hint: gpt-5-mini", diff)
+
+            apply_stdout = io.StringIO()
+            apply_code = cli.policy_apply_cli(
+                ["--config-dir", tmp, "--section", "codex_app", "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=apply_stdout,
+            )
+            apply_payload = json.loads(apply_stdout.getvalue())
+
+            self.assertEqual(apply_code, 0)
+            self.assertEqual(apply_payload["codex_app"]["status"], "applied")
+            applied = yaml.safe_load(codex_path.read_text(encoding="utf-8"))
+            self.assertTrue(applied["enabled"])
+            self.assertEqual(applied["policy_source"], "managed-recommended")
+            self.assertEqual(len(applied["rules"]), 1)
+            rule = applied["rules"][0]
+            self.assertEqual(rule["candidate_id"], "candidate-codex-summary")
+            self.assertEqual(rule["policy_source"], "managed-recommended")
+            self.assertEqual(rule["action"]["model_hint"], "gpt-5-mini")
+            self.assertTrue(rule["action"]["cache_eligible"])
+            self.assertEqual(rule["action"]["crunch_profile"], "codex-repeated-scaffolding")
+            self.assertEqual(rule["canary"]["salt"], "managed-codex-app-test")
+            self.assertTrue(rule["safety_stop"]["rollback_on_quality_regression"])
+            backups = list(Path(tmp).glob("codex_app_rules.yaml.bak-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), previous)
+
+            rollback_stdout = io.StringIO()
+            rollback_code = cli.policy_rollback_cli(
+                ["--config-dir", tmp, "--section", "codex_app", "--dry-run"],
+                stdout=rollback_stdout,
+            )
+            rollback_payload = json.loads(rollback_stdout.getvalue())
+
+            self.assertEqual(rollback_code, 0)
+            self.assertEqual(rollback_payload["codex_app"]["status"], "rollback-dry-run")
+            self.assertEqual(rollback_payload["restored_sections"], ["codex_app"])
+            self.assertEqual(rollback_payload["files"][0]["restored_from"], str(backups[0]))
+
+    def test_policy_apply_cli_rejects_unsafe_managed_codex_app_bundles(self):
+        cases = []
+        unsupported_action = self._managed_codex_apply_bundle()
+        unsupported_action["policies"]["codex_app"]["rules"][0]["action"]["provider_body_rewrite"] = True
+        cases.append((unsupported_action, "$.policies.codex_app.rules[0].action.provider_body_rewrite"))
+
+        raw_payload = self._managed_codex_apply_bundle()
+        raw_payload["policies"]["codex_app"]["rules"][0]["managed_recommendation"]["raw_request"] = {
+            "prompt": "raw managed Codex prompt must not be accepted"
+        }
+        cases.append((raw_payload, "$.policies.codex_app.rules[0].managed_recommendation.raw_request"))
+
+        managed_enforced = self._managed_codex_apply_bundle()
+        managed_enforced["policies"]["codex_app"]["rules"][0]["managed_recommendation"]["policy_source"] = "managed-enforced"
+        cases.append((managed_enforced, "$.policies.codex_app.rules[0].managed_recommendation.policy_source"))
+
+        unsupported_family = self._managed_codex_apply_bundle()
+        unsupported_family["policies"]["codex_app"]["rules"][0]["local_action"] = "provider_body_rewrite"
+        cases.append((unsupported_family, "$.policies.codex_app.rules[0]"))
+
+        for bundle, expected_path in cases:
+            with TemporaryDirectory() as tmp:
+                stdout = io.StringIO()
+                code = cli.policy_apply_cli(
+                    ["--config-dir", tmp, "--section", "codex_app", "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stdout,
+                )
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(code, 1)
+                self.assertEqual(payload["error"]["type"], "validation_failed")
+                self.assertIn(expected_path, {error["path"] for error in payload["validation"]["errors"]})
+                self.assertFalse((Path(tmp) / "codex_app_rules.yaml").exists())
+                self.assertNotIn("raw managed Codex prompt", stdout.getvalue())
+
+    def test_policy_apply_cli_rejects_unsigned_managed_codex_bundle_when_signature_required(self):
+        proposed = self._managed_codex_apply_bundle()
+
+        with TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "codex-secret"}, clear=False):
+                stdout = io.StringIO()
+                code = cli.policy_apply_cli(
+                    ["--config-dir", tmp, "--section", "codex_app", "-"],
+                    stdin=io.StringIO(json.dumps(proposed)),
+                    stdout=stdout,
+                )
+                payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error"]["type"], "validation_failed")
+        self.assertIn("$.provenance", {error["path"] for error in payload["validation"]["errors"]})
+
     def test_policy_apply_cli_normalizes_managed_enforced_old_context_summary_to_recommended_canary(self):
         proposed = self._managed_policy_bundle()
         proposed["policies"]["crunch"]["policy_source"] = "managed-recommended"

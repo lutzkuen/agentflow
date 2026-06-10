@@ -522,7 +522,7 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertNotIn("raw provider response must not render", rendered)
         self.assertNotIn("api_key", rendered)
 
-    def test_policy_apply_reports_codex_app_review_only_and_writes_no_codex_yaml(self):
+    def test_policy_apply_dry_run_reports_reviewed_codex_app_yaml_without_writing(self):
         bundle = asyncio.run(build_policy_bundle())
         bundle["policies"]["codex_app"] = {
             **bundle["policies"]["codex_app"],
@@ -547,13 +547,16 @@ class PolicyFileStatusTest(unittest.TestCase):
             result = apply_policy_bundle(bundle, config_dir=tmp, dry_run=True)
 
             self.assertTrue(result["ok"])
-            skipped = {item["section"]: item for item in result["skipped_sections"]}
-            self.assertEqual(skipped["codex_app"]["reason"], "review-only-not-applied")
+            self.assertEqual(result["codex_app"]["status"], "dry-run")
+            self.assertEqual(result["codex_app"]["selected_candidate_ids"], ["codex-summary-pass-through"])
             self.assertFalse((Path(tmp) / "codex_app_rules.yaml").exists())
             self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
             self.assertFalse((Path(tmp) / "crunch_rules.yaml").exists())
             self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
-            self.assertFalse(any("codex-summary-pass-through" in json.dumps(file) for file in result["files"]))
+            codex_file = next(file for file in result["files"] if file["section"] == "codex_app")
+            self.assertTrue(codex_file["changed"])
+            self.assertIn("codex-summary-pass-through", codex_file["diff"])
+            self.assertIn("policy_source: managed-recommended", codex_file["diff"])
 
     def test_codex_app_manual_policy_file_exports_and_applies_safe_actions(self):
         try:
