@@ -13,6 +13,46 @@ from agentflow_proxy.crunch import build_embedding, sha256_text
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import cosine_similarity, stable_json
 
+_PUBLIC_LABEL_RAW_MARKERS = (
+    "raw",
+    "provider_body",
+    "provider body",
+    "request_id",
+    "request id",
+    "session_id",
+    "session id",
+    "tenant_id",
+    "tenant id",
+    "account_id",
+    "account id",
+    "thread_id",
+    "thread id",
+    "cache_key",
+    "cache key",
+    "file_path",
+    "file path",
+    "tool_payload",
+    "tool payload",
+    "authorization",
+    "api_key",
+    "api key",
+    "secret",
+    "transcript",
+    "/tmp/",
+    "/home/",
+    "sk-",
+)
+
+
+def _public_label(value: Any, *, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lowered = text.lower()
+    if len(text) > 160 or any(marker in lowered for marker in _PUBLIC_LABEL_RAW_MARKERS):
+        return "redacted-metadata-label"
+    return text
+
 
 def _as_bool(value: Any, default: bool) -> bool:
     if value is None:
@@ -699,7 +739,7 @@ def _mean(values: list[float]) -> float | None:
 def _sample_mode_from_experiment(experiment: dict[str, Any]) -> str:
     mode = str(experiment.get("mode") or "").strip()
     if mode:
-        return mode
+        return _public_label(mode)
     if experiment.get("shadow_only") or experiment.get("counterfactual"):
         return "shadow_candidate_pass_through"
     return "applied_routed_down"
@@ -709,10 +749,10 @@ def _workflow_phase_from_payloads(experiment: dict[str, Any], routing: dict[str,
     for source in (experiment, routing):
         value = source.get("workflow_phase") if isinstance(source, dict) else None
         if value not in (None, ""):
-            return str(value)
+            return _public_label(value)
     feedback = experiment.get("managed_feedback") if isinstance(experiment, dict) else None
     if isinstance(feedback, dict) and feedback.get("workflow_phase") not in (None, ""):
-        return str(feedback["workflow_phase"])
+        return _public_label(feedback["workflow_phase"])
     return "unknown"
 
 
@@ -855,11 +895,11 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         mode = _sample_mode_from_experiment(experiment)
         workflow_phase = _workflow_phase_from_payloads(experiment, routing)
         key = (
-            str(row["provider"]),
-            str(row["source_surface"]),
-            str(row["requested_model"] or ""),
-            str(row["routed_model"] or ""),
-            str(row["category"] or "unknown"),
+            _public_label(row["provider"]),
+            _public_label(row["source_surface"]),
+            _public_label(row["requested_model"], fallback=""),
+            _public_label(row["routed_model"], fallback=""),
+            _public_label(row["category"]),
             workflow_phase,
             mode,
         )
@@ -890,7 +930,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         )
         item["samples"] += 1
         item["mode_composition"][mode] = item["mode_composition"].get(mode, 0) + 1
-        reason = str(row["routing_reason"] or "unknown")
+        reason = _public_label(row["routing_reason"])
         item["routing_reasons"][reason] = item["routing_reasons"].get(reason, 0) + 1
         primary_status = row["primary_status_code"]
         shadow_status = row["shadow_status_code"]
@@ -997,8 +1037,8 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             mode = "invalid-json"
         else:
             feedback = experiment.get("managed_feedback") if isinstance(experiment, dict) else None
-            status = str((feedback or {}).get("status") or "not-exported") if isinstance(feedback, dict) else "not-exported"
-            mode = str(experiment.get("mode") or "applied_routed_down") if isinstance(experiment, dict) else "unknown"
+            status = _public_label((feedback or {}).get("status"), fallback="not-exported") if isinstance(feedback, dict) else "not-exported"
+            mode = _sample_mode_from_experiment(experiment) if isinstance(experiment, dict) else "unknown"
         feedback_status_counts[status] = feedback_status_counts.get(status, 0) + 1
         sample_mode_counts[mode] = sample_mode_counts.get(mode, 0) + 1
 
@@ -1028,9 +1068,9 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
             if not isinstance(experiment, dict):
                 continue
-            reason = str(experiment.get("reason") or "unknown")
-            status = str(experiment.get("status") or "unknown")
-        key = (str(row["provider"]), str(row["source_surface"]), status, reason)
+            reason = _public_label(experiment.get("reason"))
+            status = _public_label(experiment.get("status"))
+        key = (_public_label(row["provider"]), _public_label(row["source_surface"]), status, reason)
         decision_reason_counts[key] = decision_reason_counts.get(key, 0) + 1
     decision_reasons = [
         {

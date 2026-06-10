@@ -49,6 +49,42 @@ class StatsFullTest(unittest.TestCase):
                 keys.update(self._keys_in(item))
         return keys
 
+    def _assert_shadow_promotion_forbidden_absent(self, rendered: str) -> None:
+        for forbidden in (
+            "raw shadow readiness prompt",
+            "raw shadow readiness response",
+            "raw shadow failure prompt",
+            "raw shadow failure response",
+            "raw-primary-error-body",
+            "raw-shadow-error-body",
+            "req-shadow-secret",
+            "session-shadow-secret",
+            "tenant-shadow-secret",
+            "account-shadow-secret",
+            "/tmp/shadow-secret.py",
+            "cache-shadow-secret",
+            "tool-shadow-secret",
+            "authorization-shadow-secret",
+            "sk-shadow-secret",
+            "shadow-call-secret",
+            "routing reason raw secret",
+            "workflow raw secret",
+            '"raw_prompt"',
+            '"raw_response"',
+            '"provider_body"',
+            '"request_id"',
+            '"session_id"',
+            '"tenant_id"',
+            '"account_id"',
+            '"file_path"',
+            '"cache_key"',
+            '"tool_payload"',
+            '"authorization"',
+            '"api_key"',
+            '"secret"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_crunch_savings_uses_cache_blended_input_rate(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
@@ -5434,24 +5470,40 @@ class StatsFullTest(unittest.TestCase):
         mode: str = "shadow_candidate_pass_through",
         passed: bool = True,
         shadow_status_code: int | None = 200,
+        primary_status_code: int | None = 200,
         fallback: bool = False,
         error: str | None = None,
+        routing_reason: str = "sampled-shadow-candidate-pass-through",
+        category: str | None = None,
+        workflow_phase: str = "summary",
+        experiment_extra: dict | None = None,
+        routing_extra: dict | None = None,
     ) -> None:
         similarity = 0.94 if passed else 0.7
         experiment_json = {
             "mode": mode,
             "counterfactual": mode == "shadow_candidate_pass_through",
             "shadow_only": mode == "shadow_candidate_pass_through",
-            "workflow_phase": "summary",
+            "workflow_phase": workflow_phase,
             "raw_prompt": "raw shadow readiness prompt",
             "response_body": "raw shadow readiness response",
+            "raw_response": "raw shadow failure response",
+            "provider_body": {"messages": [{"content": "raw shadow failure prompt"}]},
             "request_id": "req-shadow-secret",
             "session_id": "session-shadow-secret",
+            "tenant_id": "tenant-shadow-secret",
+            "account_id": "account-shadow-secret",
             "file_path": "/tmp/shadow-secret.py",
             "cache_key": "cache-shadow-secret",
             "tool_payload": {"secret": "tool-shadow-secret"},
+            "authorization": "Bearer authorization-shadow-secret",
+            "api_key": "sk-shadow-secret",
         }
-        routing_json = {"workflow_phase": "summary"}
+        if experiment_extra:
+            experiment_json.update(experiment_extra)
+        routing_json = {"workflow_phase": workflow_phase}
+        if routing_extra:
+            routing_json.update(routing_extra)
         if fallback:
             routing_json["fallback_reason"] = "rate_limited"
         server.store.log_routing_experiment(
@@ -5464,10 +5516,10 @@ class StatsFullTest(unittest.TestCase):
             routed_model="gpt-5-mini",
             primary_model="gpt-5-codex",
             shadow_model="gpt-5-mini",
-            category=f"codex-{candidate}",
-            routing_reason="sampled-shadow-candidate-pass-through",
+            category=category or f"codex-{candidate}",
+            routing_reason=routing_reason,
             input_tokens_est=100,
-            primary_status_code=200,
+            primary_status_code=primary_status_code,
             shadow_status_code=shadow_status_code,
             primary_latency_ms=120,
             shadow_latency_ms=80,
@@ -5558,23 +5610,80 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("shadow-routing-promotion-candidates-tbody", html.text)
         rendered = json.dumps(endpoint.json(), sort_keys=True) + html.text
         self.assertIn("metadata only", html.text)
-        for forbidden in (
-            "raw shadow readiness prompt",
-            "raw shadow readiness response",
-            "req-shadow-secret",
-            "session-shadow-secret",
-            "/tmp/shadow-secret.py",
-            "cache-shadow-secret",
-            "tool-shadow-secret",
-            "shadow-call-secret",
-            '"raw_prompt"',
-            '"request_id"',
-            '"session_id"',
-            '"file_path"',
-            '"cache_key"',
-            '"tool_payload"',
-        ):
-            self.assertNotIn(forbidden, rendered)
+        self._assert_shadow_promotion_forbidden_absent(rendered)
+
+    def test_shadow_routing_promotion_failure_fixtures_are_bounded_and_metadata_only(self):
+        stale = "2025-01-01T00:00:00+00:00"
+        with self._patch_shadow_routing_promotion_thresholds():
+            for idx in range(3):
+                self._log_shadow_routing_promotion_sample(candidate="low-similarity", idx=idx, passed=False)
+                self._log_shadow_routing_promotion_sample(
+                    candidate="shadow-error",
+                    idx=idx,
+                    shadow_status_code=500,
+                    error="raw-shadow-error-body should not leak",
+                )
+                self._log_shadow_routing_promotion_sample(
+                    candidate="primary-error",
+                    idx=idx,
+                    primary_status_code=500,
+                )
+                self._log_shadow_routing_promotion_sample(candidate="fallback", idx=idx, fallback=True)
+                self._log_shadow_routing_promotion_sample(candidate="stale", idx=idx, created_at=stale)
+                self._log_shadow_routing_promotion_sample(
+                    candidate="raw-labels",
+                    idx=idx,
+                    routing_reason="routing reason raw secret /tmp/shadow-secret.py",
+                    category="category raw secret",
+                    workflow_phase="workflow raw secret",
+                    experiment_extra={
+                        "mode": "mode raw secret",
+                        "managed_feedback": {"status": "queued raw secret", "workflow_phase": "managed workflow raw secret"},
+                    },
+                    routing_extra={
+                        "routing_experiment": {"status": "status raw secret", "reason": "reason raw secret"},
+                        "safety_stop": {
+                            "tripped": True,
+                            "reason": "safety stop raw secret",
+                            "reason_codes": ["safety-stop-observed raw secret"],
+                        },
+                    },
+                )
+
+            result = asyncio.run(stats_views.stats_shadow_routing_promotion_readiness(server.store, limit=20))
+            app = create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.example.invalid",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            endpoint = client.get("/agentflow/stats/shadow-routing-promotion-readiness?limit=20")
+            html = client.get("/agentflow/dashboard")
+
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(html.status_code, 200)
+        candidates = {row["category"]: row for row in result["candidates"]}
+        self.assertEqual(candidates["codex-low-similarity"]["promotion_verdict"], "reject")
+        self.assertIn("below-similarity-pass-rate", candidates["codex-low-similarity"]["reason_codes"])
+        self.assertEqual(candidates["codex-shadow-error"]["promotion_verdict"], "reject")
+        self.assertIn("shadow-error-rate-high", candidates["codex-shadow-error"]["reason_codes"])
+        self.assertNotEqual(candidates["codex-primary-error"]["promotion_verdict"], "promote")
+        self.assertIn("primary-error-rate-high", candidates["codex-primary-error"]["reason_codes"])
+        self.assertEqual(candidates["codex-fallback"]["promotion_verdict"], "hold")
+        self.assertIn("fallback-or-retry-observed", candidates["codex-fallback"]["reason_codes"])
+        self.assertEqual(candidates["codex-stale"]["promotion_verdict"], "hold")
+        self.assertIn("stale-evidence", candidates["codex-stale"]["reason_codes"])
+        redacted = candidates["redacted-metadata-label"]
+        self.assertEqual(redacted["workflow_phase"], "redacted-metadata-label")
+        self.assertEqual(redacted["sample_mode"], "redacted-metadata-label")
+        self.assertEqual(redacted["routing_reasons"][0]["reason"], "redacted-metadata-label")
+        rendered = json.dumps(result, sort_keys=True) + json.dumps(endpoint.json(), sort_keys=True) + html.text
+        self._assert_shadow_promotion_forbidden_absent(rendered)
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
 
     def test_sessions_include_thinking_token_breakdown(self):
         server.store.log_call(

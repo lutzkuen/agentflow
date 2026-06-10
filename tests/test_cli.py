@@ -6011,6 +6011,19 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_routing_promotion_draft_stage_cli_rejects_raw_and_stale_candidates(self):
         raw_report = self._routing_promotion_report()
         raw_report["candidates"][0]["raw_prompt"] = "raw prompt secret"
+        raw_report["candidates"][0]["evidence"] = {
+            "messages": [{"content": "raw nested message secret"}],
+            "provider_body": {"prompt": "raw nested provider body secret"},
+            "tool_payload": {"arguments": "raw nested tool payload secret"},
+            "file_path": "/tmp/private-shadow-routing.py",
+            "cache_key": "cache-key-secret",
+            "request_id": "req_123",
+            "session_id": "session-abc",
+            "tenant_id": "tenant-secret",
+            "account_id": "account-secret",
+            "authorization": "Bearer auth-secret",
+            "api_key": "sk-shadow-secret",
+        }
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
             code = cli.routing_promotion_draft_stage_cli(
@@ -6024,6 +6037,17 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(payload["error"]["type"], "raw_payload_rejected")
             self.assertFalse((Path(tmp) / "drafts").exists())
             self.assertNotIn("raw prompt secret", stdout.getvalue())
+            self.assertNotIn("raw nested message secret", stdout.getvalue())
+            self.assertNotIn("raw nested provider body secret", stdout.getvalue())
+            self.assertNotIn("raw nested tool payload secret", stdout.getvalue())
+            self.assertNotIn("/tmp/private-shadow-routing.py", stdout.getvalue())
+            self.assertNotIn("cache-key-secret", stdout.getvalue())
+            self.assertNotIn("req_123", stdout.getvalue())
+            self.assertNotIn("session-abc", stdout.getvalue())
+            self.assertNotIn("tenant-secret", stdout.getvalue())
+            self.assertNotIn("account-secret", stdout.getvalue())
+            self.assertNotIn("auth-secret", stdout.getvalue())
+            self.assertNotIn("sk-shadow-secret", stdout.getvalue())
 
         stale_report = self._routing_promotion_report()
         stale_report["candidates"][0]["last_sample_age_hours"] = 999
@@ -6039,6 +6063,47 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["summary"]["staged_count"], 0)
             self.assertEqual(payload["omitted"][0]["reason"], "stale-evidence")
+            self.assertFalse((Path(tmp) / "drafts").exists())
+
+    def test_routing_promotion_draft_stage_cli_fails_closed_for_malformed_shadow_promotion_inputs(self):
+        server_content_report = self._routing_promotion_report()
+        server_content_report["candidates"][0]["replacement_prompt"] = "raw replacement prompt must not leak"
+        server_content_report["candidates"][0]["provider_body_rewrite"] = {"enabled": True}
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.routing_promotion_draft_stage_cli(
+                ["-", "--workspace", str(Path(tmp) / "drafts")],
+                stdin=io.StringIO(json.dumps(server_content_report)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["summary"]["staged_count"], 0)
+            self.assertEqual(payload["omitted"][0]["reason"], "requires-server-content-processing")
+            self.assertFalse(payload["provider_calls_made"])
+            self.assertFalse(payload["managed_server_calls_made"])
+            self.assertFalse((Path(tmp) / "drafts").exists())
+            self.assertNotIn("raw replacement prompt", stdout.getvalue())
+
+        malformed_report = self._routing_promotion_report(extra_candidate="not-a-candidate")
+        malformed_report["candidates"][0]["workflow_phase"] = ""
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.routing_promotion_draft_stage_cli(
+                ["-", "--workspace", str(Path(tmp) / "drafts")],
+                stdin=io.StringIO(json.dumps(malformed_report)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["summary"]["staged_count"], 0)
+            reasons = {item["reason"] for item in payload["omitted"]}
+            self.assertIn("missing-evidence", reasons)
+            self.assertIn("invalid-candidate", reasons)
+            self.assertFalse(payload["provider_calls_made"])
+            self.assertFalse(payload["managed_server_calls_made"])
             self.assertFalse((Path(tmp) / "drafts").exists())
 
     def test_policy_draft_validate_cli_combines_validation_dry_run_and_section_impacts(self):

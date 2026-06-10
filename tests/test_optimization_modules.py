@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import yaml
 
+from agentflow_proxy import recommendations
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
@@ -1333,6 +1334,83 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(result["routing_experiments"]["outcome_status_breakdown"], [{"value": "compared", "count": 1}])
         self.assertEqual(result["routing_experiments"]["reason_code_breakdown"], [{"value": "passed", "count": 1}])
         self.assertFalse(result["routing_experiments"]["payload_json_included"])
+
+    def test_shadow_routing_policy_event_egress_blocks_raw_payload_before_queue(self):
+        raw_event = {
+            "schema": "agentflow.routing_experiment_outcome_event.v1",
+            "event_type": "routing_experiment_outcome",
+            "source_surface": "codex_turn",
+            "candidate": {
+                "candidate_bucket": "summary:gpt-5-codex->gpt-5-mini",
+                "requested_model_family": "gpt-5",
+                "routed_model_family": "gpt-5-mini",
+                "prompt": "raw prompt must not leave",
+                "messages": [{"content": "raw message must not leave"}],
+                "provider_body": {"input": "raw provider body must not leave"},
+                "tool_payload": {"arguments": "raw tool payload must not leave"},
+                "file_path": "/tmp/shadow-routing-secret.py",
+                "cache_key": "cache-key-secret",
+                "request_id": "request-id-secret",
+                "session_id": "session-id-secret",
+                "tenant_id": "tenant-id-secret",
+                "account_id": "account-id-secret",
+                "authorization": "Bearer auth-secret",
+                "api_key": "sk-shadow-secret",
+            },
+            "outcome": {"status": "compared", "primary_status_class": "2xx", "shadow_status_class": "2xx"},
+            "reason_codes": ["passed"],
+            "privacy": {"metadata_only": True, "raw_prompts_included": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "AGENTFLOW_RECOMMENDATION_ENABLED": "0",
+                        "AGENTFLOW_RECOMMENDATION_SERVER_URL": "",
+                    },
+                    clear=False,
+                ):
+                    meta = asyncio.run(
+                        recommendations.queue_policy_event_feedback(
+                            store,
+                            raw_event,
+                            source_surface="routing_experiment_outcome",
+                            queue_when_disabled=True,
+                            flush_immediately=False,
+                        )
+                    )
+                rows = store.managed_outcome_feedback_rows(source_surface="routing_experiment_outcome", limit=10)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "unsafe-egress-payload")
+        self.assertEqual(meta["fallback"], "local-policy")
+        self.assertTrue(meta["egress_guard"]["blocked"])
+        self.assertFalse(meta["egress_guard"]["raw_values_logged"])
+        self.assertEqual(rows, [])
+        rendered = json.dumps(meta, sort_keys=True)
+        for secret in (
+            "raw prompt must not leave",
+            "raw message must not leave",
+            "raw provider body must not leave",
+            "raw tool payload must not leave",
+            "/tmp/shadow-routing-secret.py",
+            "cache-key-secret",
+            "request-id-secret",
+            "session-id-secret",
+            "tenant-id-secret",
+            "account-id-secret",
+            "auth-secret",
+            "sk-shadow-secret",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("prompt", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("messages", meta["egress_guard"]["blocked_keys"])
+        self.assertIn("provider_body", meta["egress_guard"]["blocked_keys"])
 
     def test_feedback_status_includes_codex_canary_lifecycle_queue_summary(self):
         base_event = {
