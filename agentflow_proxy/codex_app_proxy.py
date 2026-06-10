@@ -1130,6 +1130,95 @@ def _update_method_count(target: dict[str, int], method: str | None) -> None:
     target[key] = int(target.get(key) or 0) + 1
 
 
+def _codex_phase_signal(method: Any) -> str | None:
+    method_l = str(method or "").replace("_", "").replace("-", "").lower()
+    if not method_l:
+        return None
+    if method_l in {"initialize", "threadstart", "threadconfigure"}:
+        return "idle_control"
+    if "commandexecution" in method_l or "toolcall" in method_l or "toolresult" in method_l:
+        return "tool_execution"
+    if "diff" in method_l or "patch" in method_l:
+        return "verification"
+    if "plan" in method_l:
+        return "planning"
+    if "agentmessage" in method_l or "message/delta" in str(method or "").lower():
+        return "summary"
+    return None
+
+
+def _codex_phase_from_method_counts(method_counts: Any) -> dict[str, Any] | None:
+    if not isinstance(method_counts, dict):
+        return None
+    signal_counts: dict[str, int] = {}
+    signal_methods: dict[str, list[str]] = {}
+    for method, count_raw in method_counts.items():
+        signal = _codex_phase_signal(method)
+        if not signal:
+            continue
+        count = _as_int(count_raw)
+        if count <= 0:
+            count = 1
+        signal_counts[signal] = int(signal_counts.get(signal) or 0) + count
+        methods = signal_methods.setdefault(signal, [])
+        method_s = str(method or "")
+        if method_s and method_s not in methods:
+            methods.append(method_s)
+    for phase in ("tool_execution", "verification", "planning", "summary", "idle_control"):
+        if signal_counts.get(phase):
+            return {
+                "workflow_phase": phase,
+                "workflow_phase_reason": f"event-window-signal:{phase}",
+                "workflow_phase_source": "event_window",
+                "workflow_phase_confidence": "high",
+                "workflow_phase_signals": signal_methods.get(phase, [])[:5],
+            }
+    return None
+
+
+def _codex_phase_from_decision_metadata(
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    for decision in (optimization_metadata or {}).values():
+        if not isinstance(decision, dict):
+            continue
+        phase = str(decision.get("workflow_phase") or "").strip()
+        if phase and phase != "unknown":
+            return {
+                "workflow_phase": phase,
+                "workflow_phase_reason": str(decision.get("workflow_phase_reason") or "decision-metadata"),
+                "workflow_phase_source": "decision_metadata",
+                "workflow_phase_confidence": str(decision.get("workflow_phase_confidence") or "medium"),
+                "workflow_phase_signals": list(decision.get("workflow_phase_signals") or []),
+            }
+    reasons = {
+        str(decision.get("reason") or "")
+        for decision in (optimization_metadata or {}).values()
+        if isinstance(decision, dict)
+    }
+    if "action-like-params" in reasons:
+        return {
+            "workflow_phase": "tool_execution",
+            "workflow_phase_reason": "decision-reason:action-like-params",
+            "workflow_phase_source": "decision_metadata",
+            "workflow_phase_confidence": "medium",
+            "workflow_phase_signals": ["action-like-params"],
+        }
+    return None
+
+
+def _update_event_window_workflow_phase(
+    window: dict[str, Any],
+    optimization_metadata: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    phase = _codex_phase_from_method_counts(window.get("method_counts"))
+    if phase is None:
+        phase = _codex_phase_from_decision_metadata(optimization_metadata)
+    if phase is None:
+        return
+    window.update(phase)
+
+
 def _new_event_window(
     *,
     start_event_id: str,
@@ -1172,6 +1261,7 @@ def _new_event_window(
     }
     _apply_derived_model_state(window, derived_model_state)
     _update_method_count(window["method_counts"], method)
+    _update_event_window_workflow_phase(window, optimization_metadata)
     return window
 
 
@@ -1252,6 +1342,7 @@ def _record_event_window(
     direction_counts[direction] = int(direction_counts.get(direction) or 0) + 1
     method_counts = window.setdefault("method_counts", {})
     _update_method_count(method_counts, method)
+    _update_event_window_workflow_phase(window, optimization_metadata)
     if direction == "server_to_client":
         window["server_message_chars"] = int(window.get("server_message_chars") or 0) + int(message_chars or 0)
     if result_chars is not None:

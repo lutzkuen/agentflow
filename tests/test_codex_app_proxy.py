@@ -496,6 +496,11 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         self.assertEqual(window["method_counts"]["turn/completed"], 1)
         self.assertEqual(window["direction_counts"]["server_to_client"], 2)
         self.assertEqual(window["model_field_state"], "present")
+        self.assertEqual(window["workflow_phase"], "tool_execution")
+        self.assertEqual(window["workflow_phase_reason"], "event-window-signal:tool_execution")
+        self.assertEqual(window["workflow_phase_source"], "event_window")
+        self.assertEqual(window["workflow_phase_confidence"], "high")
+        self.assertEqual(window["workflow_phase_signals"], ["item/commandExecution/outputDelta"])
         self.assertGreater(window["server_message_chars"], 0)
         self.assertNotIn(secret, json.dumps(window))
 

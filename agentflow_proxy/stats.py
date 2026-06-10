@@ -7389,6 +7389,11 @@ def _codex_public_event_window(raw: Any) -> dict[str, Any]:
         "model_field_state": window.get("model_field_state") or "unknown",
         "model_field": window.get("model_field"),
         "model_state": dict(window.get("model_state") or {}) if isinstance(window.get("model_state"), dict) else {},
+        "workflow_phase": window.get("workflow_phase") or "unknown",
+        "workflow_phase_reason": window.get("workflow_phase_reason") or "unknown",
+        "workflow_phase_source": window.get("workflow_phase_source") or "unknown",
+        "workflow_phase_confidence": window.get("workflow_phase_confidence") or "unknown",
+        "workflow_phase_signals": list(window.get("workflow_phase_signals") or []),
         "request_id_present": bool(window.get("request_id")),
         "thread_id_present": bool(window.get("thread_id")),
         "session_id_present": bool(window.get("session_id")),
@@ -7524,9 +7529,10 @@ def _codex_workflow_phase(
     cache: dict[str, Any],
 ) -> dict[str, Any]:
     for decision in (routing, crunch, cache):
-        if isinstance(decision, dict) and decision.get("workflow_phase"):
+        phase_value = str(decision.get("workflow_phase") or "").strip() if isinstance(decision, dict) else ""
+        if phase_value and phase_value != "unknown":
             return {
-                "phase": str(decision.get("workflow_phase") or "unknown"),
+                "phase": phase_value,
                 "reason": str(decision.get("workflow_phase_reason") or "decision-metadata"),
                 "source": "decision_metadata",
                 "signals": list(decision.get("workflow_phase_signals") or []),
@@ -7534,6 +7540,14 @@ def _codex_workflow_phase(
 
     event_window = _json_obj(row.get("event_window_json"))
     if event_window:
+        window_phase = str(event_window.get("workflow_phase") or "").strip()
+        if window_phase and window_phase != "unknown":
+            return {
+                "phase": window_phase,
+                "reason": str(event_window.get("workflow_phase_reason") or "event-window-metadata"),
+                "source": str(event_window.get("workflow_phase_source") or "event_window"),
+                "signals": list(event_window.get("workflow_phase_signals") or []),
+            }
         signal_counts, signal_methods = _codex_signal_counts_from_method_counts(event_window.get("method_counts"))
         phase = _codex_phase_from_signal_counts(
             signal_counts,
