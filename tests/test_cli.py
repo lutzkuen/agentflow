@@ -264,6 +264,73 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["crunch_pattern_breakdown"][0]["type"], "repeated_input_section")
         self.assertFalse(payload["privacy"]["raw_params_included"])
 
+    def test_cache_replayability_report_cli_reads_local_metadata_only(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for index, cost in enumerate((0.01, 0.02)):
+                    store.log_call(
+                        id=f"cli-cache-{index}",
+                        created_at=f"2026-06-10T01:0{index}:00+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=1,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=100,
+                        input_tokens_est=100,
+                        output_tokens_est=10,
+                        actual_input_tokens=100,
+                        actual_output_tokens=10,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost,
+                        crunch_json=stable_json({
+                            "pattern_modules": {
+                                "server_features": {
+                                    "features": [
+                                        {
+                                            "family": "cacheability",
+                                            "features": {
+                                                "cacheability_bucket": "high",
+                                                "static_information_hint": True,
+                                                "exact_cache_candidate_hint": True,
+                                            },
+                                        }
+                                    ],
+                                },
+                            },
+                        }),
+                        routing_json=stable_json({"category": "chat", "has_tools": False, "text_chars": 1200}),
+                        cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                        request_json=stable_json({"messages": [{"content": "private cli cache prompt"}]}),
+                        session_id="cli-cache-session-secret",
+                        category="chat",
+                        retry_count=0,
+                        provider="anthropic",
+                    )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.cache_replayability_report_cli(["--db", db_path, "--limit", "5"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.cache_replayability.v1")
+        self.assertEqual(payload["summary"]["repeated_shape_groups"], 1)
+        self.assertAlmostEqual(payload["summary"]["projected_repeated_call_cost_usd"], 0.015)
+        self.assertEqual(payload["groups"][0]["replay_candidate_class"], "streaming-non-tool-exact-candidate")
+        self.assertEqual(payload["groups"][0]["cacheability_bucket"], "high")
+        encoded = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("private cli cache prompt", encoded)
+        self.assertNotIn("cli-cache-session-secret", encoded)
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(payload["privacy"]["cache_keys_included"])
+
     def test_managed_pattern_rollups_cli_exports_metadata_only_cohorts(self):
         from agentflow_proxy.store import Store, stable_json
 

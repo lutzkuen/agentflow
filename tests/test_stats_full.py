@@ -3442,6 +3442,7 @@ class StatsFullTest(unittest.TestCase):
             category,
             cost,
             request_json=None,
+            crunch_json=None,
         ):
             server.store.log_call(
                 id=str(uuid.uuid4()),
@@ -3459,7 +3460,7 @@ class StatsFullTest(unittest.TestCase):
                 actual_output_tokens=1,
                 cost_est_usd=cost,
                 cost_baseline_usd=cost,
-                crunch_json=stable_json({"changed": False}),
+                crunch_json=stable_json(crunch_json or {"changed": False}),
                 routing_json=stable_json(routing_json),
                 cache_json=stable_json(cache_json),
                 error=None,
@@ -3472,6 +3473,36 @@ class StatsFullTest(unittest.TestCase):
                 retry_count=0,
                 provider="anthropic",
             )
+
+        def cacheability_crunch(
+            *,
+            bucket,
+            static=False,
+            current_state=False,
+            user_specific=False,
+            exact_candidate=False,
+        ):
+            return {
+                "changed": False,
+                "pattern_modules": {
+                    "server_features": {
+                        "features": [
+                            {
+                                "family": "cacheability",
+                                "features": {
+                                    "cacheability_bucket": bucket,
+                                    "deterministic_answer_likelihood_bucket": "high" if bucket == "high" else "low",
+                                    "static_information_hint": static,
+                                    "time_sensitive_hint": current_state,
+                                    "user_specific_hint": user_specific,
+                                    "exact_cache_candidate_hint": exact_candidate,
+                                    "cache_preserved_by_default_reason": "none" if exact_candidate else "current-state",
+                                },
+                            }
+                        ],
+                    },
+                },
+            }
 
         streaming_cache = {
             "status": "skipped",
@@ -3489,6 +3520,7 @@ class StatsFullTest(unittest.TestCase):
             stream=1,
             category="chat",
             cost=0.01,
+            crunch_json=cacheability_crunch(bucket="high", static=True, exact_candidate=True),
             request_json=stable_json({"messages": [{"content": "raw-secret-should-not-leak"}]}),
         )
         log_provider_call(
@@ -3498,6 +3530,7 @@ class StatsFullTest(unittest.TestCase):
             stream=1,
             category="chat",
             cost=0.02,
+            crunch_json=cacheability_crunch(bucket="high", static=True, exact_candidate=True),
         )
 
         tool_cache = {
@@ -3526,36 +3559,81 @@ class StatsFullTest(unittest.TestCase):
             cost=0.04,
         )
 
+        static_cache = {"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}
+        static_routing = {"text_chars": 600, "category": "chat", "has_tools": False}
         log_provider_call(
-            cache_json={"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
-            routing_json={"text_chars": 400, "category": "chat", "has_tools": False},
-            session_id="session-one-off",
+            cache_json=static_cache,
+            routing_json=static_routing,
+            session_id="session-static",
             stream=0,
             category="chat",
+            cost=0.02,
+            crunch_json=cacheability_crunch(bucket="high", static=True, exact_candidate=True),
+        )
+        log_provider_call(
+            cache_json=static_cache,
+            routing_json=static_routing,
+            session_id="session-static",
+            stream=0,
+            category="chat",
+            cost=0.03,
+            crunch_json=cacheability_crunch(bucket="high", static=True, exact_candidate=True),
+        )
+
+        log_provider_call(
+            cache_json={"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            routing_json={"text_chars": 800, "category": "chat", "has_tools": False},
+            session_id="session-current",
+            stream=0,
+            category="chat",
+            cost=0.006,
+            crunch_json=cacheability_crunch(
+                bucket="low",
+                current_state=True,
+                user_specific=True,
+                exact_candidate=False,
+            ),
+        )
+
+        log_provider_call(
+            cache_json={"status": "miss", "reason": "exact-miss", "policy_source": "local-default"},
+            routing_json={"text_chars": 400, "category": "short-completion", "has_tools": False},
+            session_id="session-one-off",
+            stream=0,
+            category="short-completion",
             cost=0.005,
         )
 
         result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
-        groups = {(row["cache_reason"], row["category"]): row for row in result["groups"]}
+        groups = {(row["cache_reason"], row["category"], row["cacheability_bucket"]): row for row in result["groups"]}
 
         self.assertEqual(result["schema"], "agentflow.cache_replayability.v1")
         self.assertFalse(result["privacy"]["raw_prompts_included"])
-        self.assertEqual(result["summary"]["repeated_shape_groups"], 2)
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertEqual(result["summary"]["repeated_shape_groups"], 3)
         self.assertTrue(result["summary"]["repeated_shape_exists_but_cache_is_unsafe"])
-        self.assertEqual(groups[("streaming", "chat")]["count"], 2)
-        self.assertIn("streaming", groups[("streaming", "chat")]["replayability_blockers"])
-        self.assertEqual(groups[("tools-disabled", "tool-result")]["count"], 2)
-        self.assertEqual(groups[("tools-disabled", "tool-result")]["sessions"], 2)
-        self.assertIn("tool-call-disabled", groups[("tools-disabled", "tool-result")]["replayability_blockers"])
-        self.assertIn("file-dependency-unknown", groups[("tools-disabled", "tool-result")]["replayability_blockers"])
-        self.assertIn("session-context-changed", groups[("tools-disabled", "tool-result")]["replayability_blockers"])
-        self.assertIn("true-one-off-miss", groups[("exact-miss", "chat")]["replayability_blockers"])
+        self.assertAlmostEqual(result["summary"]["projected_repeated_call_cost_usd"], 0.075)
+        self.assertEqual(groups[("streaming", "chat", "high")]["count"], 2)
+        self.assertEqual(groups[("streaming", "chat", "high")]["replay_candidate_class"], "streaming-non-tool-exact-candidate")
+        self.assertIn("streaming", groups[("streaming", "chat", "high")]["replayability_blockers"])
+        self.assertEqual(groups[("tools-disabled", "tool-result", "unknown")]["count"], 2)
+        self.assertEqual(groups[("tools-disabled", "tool-result", "unknown")]["sessions"], 2)
+        self.assertEqual(groups[("tools-disabled", "tool-result", "unknown")]["replay_candidate_class"], "blocked-tool-result-invalidation")
+        self.assertIn("tool-call-disabled", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
+        self.assertIn("file-dependency-unknown", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
+        self.assertIn("session-context-changed", groups[("tools-disabled", "tool-result", "unknown")]["replayability_blockers"])
+        self.assertEqual(groups[("exact-miss", "chat", "high")]["replay_candidate_class"], "replay-safe-exact-candidate")
+        self.assertEqual(groups[("exact-miss", "chat", "low")]["replay_candidate_class"], "blocked-low-cacheability")
+        self.assertIn("current-state", groups[("exact-miss", "chat", "low")]["replayability_blockers"])
+        self.assertIn("user-specific", groups[("exact-miss", "chat", "low")]["replayability_blockers"])
+        self.assertIn("true-one-off-miss", groups[("exact-miss", "short-completion", "unknown")]["replayability_blockers"])
         self.assertNotIn("raw-secret-should-not-leak", json.dumps(result))
 
         by_blocker = {row["blocker"]: row["calls"] for row in result["blocker_breakdown"]}
         self.assertEqual(by_blocker["streaming"], 2)
         self.assertEqual(by_blocker["tool-call-disabled"], 2)
         self.assertEqual(by_blocker["true-one-off-miss"], 1)
+        self.assertEqual(by_blocker["current-state"], 1)
 
     def test_cache_replayability_endpoint_and_dashboard_are_read_only_metadata(self):
         server.store.log_call(

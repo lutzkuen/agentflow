@@ -3325,6 +3325,7 @@ def _cache_replayability_blockers(unit: dict[str, Any]) -> list[str]:
     cache = unit["cache"]
     reason = str(unit["cache_reason"] or "")
     category = str(unit.get("category") or "")
+    cacheability = unit.get("cacheability") if isinstance(unit.get("cacheability"), dict) else {}
     blockers: set[str] = set()
     if unit.get("stream") or "streaming" in reason:
         blockers.add("streaming")
@@ -3340,13 +3341,87 @@ def _cache_replayability_blockers(unit: dict[str, Any]) -> list[str]:
     ):
         blockers.add("semantic-cache-disabled")
     tool_like = bool(unit.get("has_tools")) or category.startswith("tool")
-    if tool_like and not bool(cache.get("file_watch_enabled")):
+    if tool_like and not bool(unit.get("file_dependency_evidence_available")):
         blockers.add("file-dependency-unknown")
+    if bool(cacheability.get("time_sensitive_hint")):
+        blockers.add("current-state")
+    if bool(cacheability.get("user_specific_hint")):
+        blockers.add("user-specific")
+    if str(unit.get("cacheability_bucket") or "") == "low":
+        blockers.add("low-cacheability")
     if is_codex_turn_source_surface(str(unit.get("source_surface") or "")):
         blockers.add("turn-level-only")
     if unit["cache_status"] == "missing":
         blockers.add("missing-cache-metadata")
     return sorted(blockers)
+
+
+def _cacheability_meta_from_row(
+    *,
+    routing: dict[str, Any],
+    crunch: dict[str, Any],
+    cache: dict[str, Any],
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for source in (
+        routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {},
+        cache.get("managed_pattern_features") if isinstance(cache.get("managed_pattern_features"), dict) else {},
+        cache.get("cacheability") if isinstance(cache.get("cacheability"), dict) else {},
+    ):
+        if isinstance(source, dict):
+            candidates.append(source)
+
+    pattern_modules = crunch.get("pattern_modules") if isinstance(crunch.get("pattern_modules"), dict) else {}
+    server_features = pattern_modules.get("server_features") if isinstance(pattern_modules.get("server_features"), dict) else {}
+    for entry in server_features.get("features") or []:
+        if not isinstance(entry, dict) or entry.get("family") != "cacheability":
+            continue
+        features = entry.get("features") if isinstance(entry.get("features"), dict) else {}
+        if features:
+            candidates.append(features)
+
+    result = {
+        "bucket": "unknown",
+        "deterministic_answer_likelihood_bucket": "unknown",
+        "static_information_hint": False,
+        "time_sensitive_hint": False,
+        "user_specific_hint": False,
+        "exact_cache_candidate_hint": False,
+        "preserved_by_default_reason": None,
+        "metadata_available": False,
+    }
+    for candidate in candidates:
+        bucket = candidate.get("cacheability_bucket")
+        if isinstance(bucket, str) and bucket:
+            result["bucket"] = bucket
+            result["metadata_available"] = True
+        deterministic = candidate.get("deterministic_answer_likelihood_bucket")
+        if isinstance(deterministic, str) and deterministic:
+            result["deterministic_answer_likelihood_bucket"] = deterministic
+            result["metadata_available"] = True
+        for key in (
+            "static_information_hint",
+            "time_sensitive_hint",
+            "user_specific_hint",
+            "exact_cache_candidate_hint",
+        ):
+            if candidate.get(key) is not None:
+                result[key] = bool(candidate.get(key))
+                result["metadata_available"] = True
+        reason = candidate.get("cache_preserved_by_default_reason")
+        if isinstance(reason, str) and reason:
+            result["preserved_by_default_reason"] = reason
+            result["metadata_available"] = True
+    return result
+
+
+def _file_dependency_count(cache: dict[str, Any]) -> int:
+    if cache.get("file_dependency_count") is not None:
+        return _as_int(cache.get("file_dependency_count"))
+    file_dependencies = cache.get("file_dependencies")
+    if isinstance(file_dependencies, list):
+        return len(file_dependencies)
+    return 0
 
 
 def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granularity: str) -> dict[str, Any] | None:
@@ -3356,6 +3431,7 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         return None
     cache = _json_obj(row.get("cache_json"))
     routing = _json_obj(row.get("routing_json"))
+    crunch = _json_obj(row.get("crunch_json"))
     text_chars = _as_int(row.get("text_chars") if row.get("text_chars") is not None else routing.get("text_chars"))
     input_tokens = _as_int(row.get("input_tokens") if row.get("input_tokens") is not None else row.get("input_tokens_est"))
     if not text_chars and input_tokens:
@@ -3364,6 +3440,15 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
     requested_model = str(row.get("requested_model") or "")
     routed_model = str(row.get("routed_model") or requested_model)
     replayability_level = str(cache.get("replayability_level") or ("features_only" if granularity == "agent_turn" else "metadata_shape"))
+    pattern_diagnostics = routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {}
+    cacheability = _cacheability_meta_from_row(routing=routing, crunch=crunch, cache=cache)
+    file_dependency_count = _file_dependency_count(cache)
+    file_dependency_evidence_available = bool(
+        file_dependency_count > 0
+        or cache.get("file_dependency_evidence_available")
+        or cache.get("safe_invalidation_evidence")
+        or cache.get("safe_invalidation")
+    )
     unit = {
         "source_surface": canonical_source_surface(source_surface),
         "granularity": granularity,
@@ -3375,11 +3460,22 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "hit_type": str(decision.get("hit_type") or ""),
         "policy_source": str(decision.get("policy_source") or "unknown"),
         "category": category,
+        "workflow_phase": str(
+            cache.get("workflow_phase")
+            or routing.get("workflow_phase")
+            or pattern_diagnostics.get("workflow_phase")
+            or category
+            or "unknown"
+        ),
         "requested_tier": model_tier(requested_model) if requested_model else "unknown",
         "target_tier": model_tier(routed_model) if routed_model else "unknown",
         "has_tools": bool(routing.get("has_tools") or category.startswith("tool")),
         "eligible": bool(cache.get("eligible")),
         "replayability_level": replayability_level,
+        "cacheability": cacheability,
+        "cacheability_bucket": cacheability["bucket"],
+        "file_dependency_evidence_available": file_dependency_evidence_available,
+        "file_dependency_count": file_dependency_count,
         "text_size_bucket": _size_bucket(text_chars),
         "input_items_bucket": _size_bucket(row.get("input_items")),
         "cost_est_usd": _as_float(row.get("cost_est_usd")),
@@ -3399,6 +3495,7 @@ def _cache_replayability_fingerprint_basis(unit: dict[str, Any]) -> dict[str, An
         "cache_status": unit["cache_status"],
         "cache_reason": unit["cache_reason"],
         "category": unit["category"],
+        "workflow_phase": unit["workflow_phase"],
         "stream": unit["stream"],
         "has_tools": unit["has_tools"],
         "requested_tier": unit["requested_tier"],
@@ -3406,6 +3503,10 @@ def _cache_replayability_fingerprint_basis(unit: dict[str, Any]) -> dict[str, An
         "text_size_bucket": unit["text_size_bucket"],
         "input_items_bucket": unit["input_items_bucket"],
         "replayability_level": unit["replayability_level"],
+        "cacheability_bucket": unit["cacheability_bucket"],
+        "current_state": bool((unit.get("cacheability") or {}).get("time_sensitive_hint")),
+        "user_specific": bool((unit.get("cacheability") or {}).get("user_specific_hint")),
+        "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
         "eligible": unit["eligible"],
     }
 
@@ -3431,6 +3532,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
                 "cache_status": unit["cache_status"],
                 "cache_reason": unit["cache_reason"],
                 "category": unit["category"],
+                "workflow_phase": unit["workflow_phase"],
                 "text_size_bucket": unit["text_size_bucket"],
                 "input_items_bucket": unit["input_items_bucket"],
                 "requested_tier": unit["requested_tier"],
@@ -3439,12 +3541,17 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
                 "has_tools": unit["has_tools"],
                 "eligible": unit["eligible"],
                 "replayability_level": unit["replayability_level"],
+                "cacheability_bucket": unit["cacheability_bucket"],
+                "cacheability": unit["cacheability"],
+                "file_dependency_evidence_available": unit["file_dependency_evidence_available"],
+                "file_dependency_count": 0,
                 "policy_source": unit["policy_source"],
                 "count": 0,
                 "sessions": set(),
                 "example_sessions": [],
                 "estimated_cost_usd": 0.0,
                 "baseline_cost_usd": 0.0,
+                "projected_repeated_call_cost_usd": 0.0,
                 "input_tokens": 0,
                 "text_chars": 0,
                 "first_seen_at": unit.get("created_at"),
@@ -3463,6 +3570,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
         bucket["baseline_cost_usd"] += _as_float(unit.get("baseline_cost_usd"))
         bucket["input_tokens"] += _as_int(unit.get("input_tokens"))
         bucket["text_chars"] += _as_int(unit.get("text_chars"))
+        bucket["file_dependency_count"] += _as_int(unit.get("file_dependency_count"))
         for blocker in unit.get("blockers") or []:
             bucket["_blockers"].add(str(blocker))
         if str(unit.get("created_at") or "") < str(bucket.get("first_seen_at") or unit.get("created_at") or ""):
@@ -3475,6 +3583,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
     repeated_groups = 0
     repeated_rows = 0
     repeated_cost = 0.0
+    projected_repeated_cost = 0.0
     unsafe_repeated_rows = 0
     unsafe_repeated_cost = 0.0
     for bucket in grouped.values():
@@ -3489,28 +3598,50 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             one_off_rows += 1
         blocker_list = sorted(blockers)
         repeated = bucket["count"] > 1
+        avg_cost = float(bucket["estimated_cost_usd"]) / bucket["count"] if bucket["count"] else 0.0
+        projected = max(0.0, float(bucket["estimated_cost_usd"]) - avg_cost) if repeated else 0.0
+        replay_candidate_class = "blocked-structural"
+        if "true-one-off-miss" in blocker_list:
+            replay_candidate_class = "one-off-miss"
+        elif {"current-state", "user-specific", "low-cacheability"} & set(blocker_list):
+            replay_candidate_class = "blocked-low-cacheability"
+        elif (
+            bool(bucket.get("stream"))
+            and not bool(bucket.get("has_tools"))
+            and bucket.get("cacheability_bucket") in {"high", "medium", "unknown"}
+        ):
+            replay_candidate_class = "streaming-non-tool-exact-candidate"
+        elif bool(bucket.get("has_tools")) and "file-dependency-unknown" in blocker_list:
+            replay_candidate_class = "blocked-tool-result-invalidation"
+        elif not blocker_list and bucket.get("cacheability_bucket") in {"high", "medium", "unknown"}:
+            replay_candidate_class = "replay-safe-exact-candidate"
         if repeated:
             repeated_groups += 1
             repeated_rows += bucket["count"]
             repeated_cost += float(bucket["estimated_cost_usd"])
+            projected_repeated_cost += projected
             if blocker_list:
                 unsafe_repeated_rows += bucket["count"]
                 unsafe_repeated_cost += float(bucket["estimated_cost_usd"])
         for blocker in blocker_list or ["none"]:
             row = blocker_counts.setdefault(
                 blocker,
-                {"blocker": blocker, "groups": 0, "calls": 0, "estimated_cost_usd": 0.0},
+                {"blocker": blocker, "groups": 0, "calls": 0, "estimated_cost_usd": 0.0, "projected_repeated_call_cost_usd": 0.0},
             )
             row["groups"] += 1
             row["calls"] += bucket["count"]
             row["estimated_cost_usd"] += float(bucket["estimated_cost_usd"])
+            row["projected_repeated_call_cost_usd"] += projected
         finalized = {
             **bucket,
+            "replay_fingerprint": f"sha256:{bucket['shape_fingerprint']}",
             "sessions": session_count,
             "repeated": repeated,
+            "replay_candidate_class": replay_candidate_class,
             "replayability_blockers": blocker_list,
             "estimated_cost_usd": round(float(bucket["estimated_cost_usd"]), 6),
             "baseline_cost_usd": round(float(bucket["baseline_cost_usd"]), 6),
+            "projected_repeated_call_cost_usd": round(projected, 6),
         }
         groups.append(finalized)
 
@@ -3519,17 +3650,25 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
         {
             **row,
             "estimated_cost_usd": round(float(row["estimated_cost_usd"]), 6),
+            "projected_repeated_call_cost_usd": round(float(row["projected_repeated_call_cost_usd"]), 6),
         }
         for row in blocker_counts.values()
     ]
-    blocker_rows.sort(key=lambda row: (row["calls"], row["estimated_cost_usd"]), reverse=True)
+    blocker_rows.sort(key=lambda row: (row["calls"], row["projected_repeated_call_cost_usd"], row["estimated_cost_usd"]), reverse=True)
     return {
         "schema": "agentflow.cache_replayability.v1",
         "generated_at": utc_now(),
         "privacy": {
+            "metadata_only": True,
             "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
             "raw_responses_included": False,
             "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
             "basis": "metadata-derived shape fingerprints only; request/response bodies are not inspected",
         },
         "summary": {
@@ -3539,6 +3678,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             "repeated_candidate_rows": repeated_rows,
             "one_off_candidate_rows": one_off_rows,
             "repeated_estimated_cost_usd": round(repeated_cost, 6),
+            "projected_repeated_call_cost_usd": round(projected_repeated_cost, 6),
             "unsafe_repeated_rows": unsafe_repeated_rows,
             "unsafe_repeated_estimated_cost_usd": round(unsafe_repeated_cost, 6),
             "no_repeated_shape_exists": repeated_groups == 0,
@@ -3556,7 +3696,7 @@ async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str
         for row in conn.execute("""
             select created_at, path, coalesce(provider, 'anthropic') as provider,
                    requested_model, routed_model, stream, cache_hit, status_code,
-                   cache_json, routing_json, category, session_id,
+                   cache_json, routing_json, crunch_json, category, session_id,
                    input_tokens_est, actual_input_tokens as input_tokens,
                    cost_est_usd, cost_baseline_usd,
                    null as input_items,
@@ -3578,6 +3718,7 @@ async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str
             select s.created_at,
                    s.session_id,
                    s.routing_json,
+                   s.crunch_json,
                    s.cache_json,
                    s.input_items,
                    s.input_text_chars as text_chars,

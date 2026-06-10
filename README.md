@@ -113,6 +113,14 @@ The same read-only report is available from a running dashboard or proxy at:
 
 The report uses stored metadata, sizes, and decision JSON only. It does not include raw prompts, params, responses, transcripts, or tool payloads.
 
+To measure replay-safe cache opportunity and blockers across recent Anthropic, OpenAI, and Codex metadata, run:
+
+```bash
+agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The report groups local metadata by replay fingerprint and includes stream/tool flags, workflow phase, cacheability bucket, safe invalidation evidence, current cache decision, blocker counts, and projected repeated-call cost. It does not print raw prompts, responses, tool payloads, request IDs, cache keys, file paths, transcripts, or raw session IDs.
+
 To measure Anthropic phase-routing opportunity and blockers before changing routing behavior, run:
 
 ```bash
@@ -176,6 +184,7 @@ Common policy commands:
 | `agentflow-policy-diff before.json after.json --pretty` | Compare two policy bundles |
 | `agentflow-policy-review proposed.json --pretty` | Review changes and warnings before apply |
 | `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
+| `agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Measure replay-safe cache opportunity and blockers from local metadata |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
 | `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
 | `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |
