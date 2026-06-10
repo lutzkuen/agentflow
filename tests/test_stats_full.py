@@ -6458,6 +6458,17 @@ class StatsFullTest(unittest.TestCase):
         secret_session_ready = "secret-session-ready"
         secret_session_blocked = "secret-session-blocked"
         secret_prompt = "SECRET_PHASE_MEMORY_PROMPT /tmp/private-project/main.py"
+        raw_phase_fields = {
+            "prompt": secret_prompt,
+            "messages": [{"role": "user", "content": "SECRET_PHASE_MEMORY_MESSAGE"}],
+            "content": "SECRET_PHASE_MEMORY_CONTENT",
+            "tool_payload": {"arguments": "SECRET_PHASE_MEMORY_TOOL_PAYLOAD"},
+            "request_id": "req_phase_memory_dashboard_secret",
+            "cache_key": "cache-key-phase-memory-dashboard-secret",
+            "file_path": "/tmp/private-project/main.py",
+            "session_id": "secret-session-dashboard-raw-field",
+            "raw_request": {"messages": [{"content": secret_prompt}]},
+        }
         for idx in range(3):
             server.store.log_call(
                 id=f"phase-ready-{idx}",
@@ -6475,11 +6486,11 @@ class StatsFullTest(unittest.TestCase):
                 actual_output_tokens=10,
                 cost_est_usd=0.001,
                 cost_baseline_usd=0.001,
-                crunch_json=stable_json({"changed": True, "tokens_saved_est": 1500}),
-                routing_json=stable_json({"workflow_phase": "summary", "text_chars": 1000}),
-                cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                crunch_json=stable_json({"changed": True, "tokens_saved_est": 1500, **raw_phase_fields}),
+                routing_json=stable_json({"workflow_phase": "summary", "text_chars": 1000, **raw_phase_fields}),
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss", **raw_phase_fields}),
                 error=None,
-                request_json=stable_json({"messages": [{"content": secret_prompt}]}),
+                request_json=stable_json({"messages": [{"content": secret_prompt}], **raw_phase_fields}),
                 response_json=stable_json({"content": [{"text": "SECRET_PHASE_MEMORY_RESPONSE"}]}),
                 session_id=secret_session_ready,
                 category="short-completion",
@@ -6490,13 +6501,17 @@ class StatsFullTest(unittest.TestCase):
                 provider="anthropic",
             )
         for idx, text_chars in enumerate((40_000, 40_500, 40_200)):
-            routing = {"category": "tool-result", "text_chars": text_chars}
+            routing = {"category": "tool-result", "text_chars": text_chars, **raw_phase_fields}
             status_code = 200
             retry_count = 0
             if idx == 2:
                 routing.update({
                     "fallback_reason": "rate_limited",
-                    "session_phase_memory": {"status": "blocked", "reason": "recent_errors"},
+                    "session_phase_memory": {
+                        "status": "blocked",
+                        "reason": "cache-key-phase-memory-dashboard-secret",
+                        **raw_phase_fields,
+                    },
                 })
                 status_code = 429
                 retry_count = 1
@@ -6516,11 +6531,17 @@ class StatsFullTest(unittest.TestCase):
                 actual_output_tokens=10,
                 cost_est_usd=0.01,
                 cost_baseline_usd=0.02,
-                crunch_json=stable_json({"changed": True, "tokens_saved_est": 5000}),
+                crunch_json=stable_json({"changed": True, "tokens_saved_est": 5000, **raw_phase_fields}),
                 routing_json=stable_json(routing),
-                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                cache_json=stable_json(
+                    {
+                        "status": "skipped",
+                        "reason": "cache-key-phase-memory-dashboard-secret",
+                        **raw_phase_fields,
+                    }
+                ),
                 error="SECRET_PHASE_MEMORY_ERROR" if status_code >= 400 else None,
-                request_json=stable_json({"messages": [{"content": secret_prompt}]}),
+                request_json=stable_json({"messages": [{"content": secret_prompt}], **raw_phase_fields}),
                 response_json=None,
                 session_id=secret_session_blocked,
                 category="tool-result",
@@ -6550,6 +6571,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(payload["summary"]["blocked_session_count"], 1)
         self.assertEqual(payload["summary"]["decision_usage"]["decision_count"], 1)
         self.assertEqual(payload["summary"]["decision_usage"]["status_counts"], [{"value": "blocked", "count": 1}])
+        self.assertEqual(payload["summary"]["decision_usage"]["reason_counts"], [{"value": "unknown", "count": 1}])
         ready = next(row for row in payload["sessions"] if row["readiness"] == "ready")
         blocked = next(row for row in payload["sessions"] if row["readiness"] == "blocked")
         self.assertEqual(ready["dominant_phase"], "summary")
@@ -6574,6 +6596,12 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(secret_prompt, rendered)
         self.assertNotIn("SECRET_PHASE_MEMORY_RESPONSE", rendered)
         self.assertNotIn("SECRET_PHASE_MEMORY_ERROR", rendered)
+        self.assertNotIn("SECRET_PHASE_MEMORY_MESSAGE", rendered)
+        self.assertNotIn("SECRET_PHASE_MEMORY_CONTENT", rendered)
+        self.assertNotIn("SECRET_PHASE_MEMORY_TOOL_PAYLOAD", rendered)
+        self.assertNotIn("req_phase_memory_dashboard_secret", rendered)
+        self.assertNotIn("cache-key-phase-memory-dashboard-secret", rendered)
+        self.assertNotIn("secret-session-dashboard-raw-field", rendered)
         self.assertNotIn("/tmp/private-project", rendered)
         self.assertNotIn("<form", dashboard.text.lower())
         self.assertNotIn("contenteditable", dashboard.text.lower())

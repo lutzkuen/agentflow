@@ -10582,6 +10582,37 @@ def _phase_memory_session_key(session_id: Any) -> str:
     return f"sha256:{digest}"
 
 
+_PHASE_MEMORY_DECISION_STATUSES = {"blocked", "ignored", "used", "evaluating", "unknown"}
+_PHASE_MEMORY_DECISION_REASONS = {
+    "blocked_phase_present",
+    "condition-disabled",
+    "db-missing",
+    "dominant_phase_mismatch",
+    "dominant_phase_window_too_short",
+    "matched",
+    "memory-missing",
+    "missing-session-id",
+    "model_family_floor_not_met",
+    "non-sqlite-db",
+    "phase_not_stable",
+    "recent_errors",
+    "recent_retries",
+    "recent_routing_fallback",
+    "stable_window_too_small",
+    "thinking_present",
+    "unknown",
+}
+
+
+def _phase_memory_decision_label(value: Any, allowed: set[str], *, default: str = "unknown") -> str:
+    label = str(value or "").strip().lower()
+    if not label:
+        return default
+    if label.startswith("db-error:"):
+        return "db-error"
+    return label if label in allowed else default
+
+
 def _session_phase_memory_decision_usage(store_obj: Any, *, limit: int = 5000) -> dict[str, Any]:
     rows = store_obj.conn.execute(
         """
@@ -10601,8 +10632,8 @@ def _session_phase_memory_decision_usage(store_obj: Any, *, limit: int = 5000) -
         memory = routing.get("session_phase_memory")
         if not isinstance(memory, dict):
             continue
-        status = str(memory.get("status") or "unknown")
-        reason = str(memory.get("reason") or "unknown")
+        status = _phase_memory_decision_label(memory.get("status"), _PHASE_MEMORY_DECISION_STATUSES)
+        reason = _phase_memory_decision_label(memory.get("reason"), _PHASE_MEMORY_DECISION_REASONS)
         status_counts[status] = status_counts.get(status, 0) + 1
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
         session_key = _phase_memory_session_key(row["session_id"])

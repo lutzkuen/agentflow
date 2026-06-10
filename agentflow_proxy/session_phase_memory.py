@@ -14,6 +14,44 @@ DEFAULT_MIN_PLATEAU_CHARS = 8_000
 DEFAULT_MAX_PLATEAU_DELTA_RATIO = 0.03
 DEFAULT_PLATEAU_PAIRS_FOR_CLASSIFICATION = 2
 MODEL_FAMILY_RANK = {"unknown": 0, "other": 0, "haiku": 1, "gpt": 1, "sonnet": 2, "opus": 3}
+SAFE_PHASES = {"planning", "tool-execution", "verification", "summary", "thinking", "unknown"}
+SAFE_CATEGORIES = {
+    "chat",
+    "code-gen",
+    "long-context",
+    "short-completion",
+    "summary",
+    "thinking",
+    "tool-heavy",
+    "tool-light",
+    "tool-result",
+    "unknown",
+}
+SAFE_SOURCE_SURFACES = {
+    "anthropic_messages",
+    "codex_app",
+    "codex_turn",
+    "openai_chat",
+    "openai_responses",
+    "unknown",
+}
+SAFE_CACHE_STATUSES = {"bypass", "disabled", "error", "hit", "miss", "skipped", "unknown"}
+SAFE_CACHE_REASONS = {
+    "cache-disabled",
+    "disabled",
+    "exact-hit",
+    "exact-match",
+    "exact-miss",
+    "legacy-cache-hit",
+    "legacy-exact-miss",
+    "legacy-streaming",
+    "legacy-unknown",
+    "missing-cache-json",
+    "semantic-match",
+    "streaming",
+    "tool-call-cache-disabled",
+    "unknown",
+}
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -66,6 +104,13 @@ def _model_family(model: Any) -> str:
     if not value:
         return "unknown"
     return "other"
+
+
+def _safe_label(value: Any, allowed: set[str], *, default: str = "unknown") -> str:
+    label = str(value or "").strip().lower().replace("_", "-")
+    if not label:
+        return default
+    return label if label in allowed else default
 
 
 def _text_bucket(chars: int) -> str:
@@ -161,10 +206,10 @@ def _derive_phase(row: dict[str, Any], routing: dict[str, Any]) -> tuple[str, st
         "chat": "unknown",
     }
     if explicit:
-        return explicit_map.get(explicit, explicit), "routing_json.workflow_phase"
+        return _safe_label(explicit_map.get(explicit, explicit), SAFE_PHASES), "routing_json.workflow_phase"
 
     reason = str(routing.get("reason") or "").lower()
-    category = str(row.get("category") or routing.get("category") or "").lower()
+    category = _safe_label(row.get("category") or routing.get("category"), SAFE_CATEGORIES)
     if "thinking" in reason:
         return "thinking", "routing_reason"
     if category == "tool-result":
@@ -199,7 +244,7 @@ def _row_features(row: dict[str, Any]) -> dict[str, Any]:
     output_tokens = _as_int(row.get("actual_output_tokens")) or _as_int(row.get("output_tokens_est"))
     text_chars = _as_int(routing.get("text_chars")) or input_tokens * TOKEN_CHARS
     phase, phase_source = _derive_phase(row, routing)
-    category = str(row.get("category") or routing.get("category") or "unknown")
+    category = _safe_label(row.get("category") or routing.get("category"), SAFE_CATEGORIES)
     status_code = _as_int(row.get("status_code"))
     tokens_saved = _as_int(crunch.get("tokens_saved_est"))
     if not tokens_saved:
@@ -208,7 +253,9 @@ def _row_features(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "session_id": row.get("session_id"),
         "provider": str(row.get("provider") or "anthropic"),
-        "source_surface": str(row.get("source_surface") or _source_surface(row)),
+        "source_surface": _safe_label(row.get("source_surface"), SAFE_SOURCE_SURFACES)
+        if row.get("source_surface")
+        else _source_surface(row),
         "app_family": _app_family(row),
         "phase": phase,
         "phase_source": phase_source,
@@ -223,8 +270,8 @@ def _row_features(row: dict[str, Any]) -> dict[str, Any]:
         "status_bucket": _status_bucket(status_code),
         "retry_count": _as_int(row.get("retry_count")),
         "fallback": bool(routing.get("fallback_reason")),
-        "cache_status": str(cache.get("status") or "unknown"),
-        "cache_reason": str(cache.get("reason") or "unknown"),
+        "cache_status": _safe_label(cache.get("status"), SAFE_CACHE_STATUSES),
+        "cache_reason": _safe_label(cache.get("reason"), SAFE_CACHE_REASONS, default="other"),
         "crunch_changed": bool(crunch.get("changed") or crunch.get("applied")),
         "tokens_saved_est": tokens_saved,
         "cost_est_usd": _as_float(row.get("cost_est_usd")),

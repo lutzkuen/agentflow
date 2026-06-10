@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import agentflow_proxy.router as router_module
+from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.store import Store, stable_json, utc_now
 from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
 
@@ -22,6 +23,7 @@ def _log_memory_call(
     fallback: bool = False,
     requested_model: str = SONNET_DEFAULT,
     routed_model: str = SONNET_DEFAULT,
+    adversarial_raw_fields: bool = False,
 ) -> None:
     routing = {
         "workflow_phase": phase,
@@ -31,6 +33,25 @@ def _log_memory_call(
     }
     if fallback:
         routing["fallback_reason"] = "rate_limited"
+    raw_fields = {}
+    if adversarial_raw_fields:
+        raw_fields = {
+            "prompt": "SECRET_ROUTER_MEMORY_PROMPT",
+            "messages": [{"role": "user", "content": "SECRET_ROUTER_MEMORY_MESSAGE"}],
+            "content": "SECRET_ROUTER_MEMORY_CONTENT",
+            "tool_payload": {"arguments": "SECRET_ROUTER_MEMORY_TOOL_PAYLOAD"},
+            "request_id": "req_router_memory_secret",
+            "cache_key": "cache-key-router-memory-secret",
+            "file_path": "/tmp/router-memory-secret.py",
+            "session_id": "secret-session-router-raw-field",
+            "raw_request": {"messages": [{"content": "SECRET_ROUTER_MEMORY_PROMPT"}]},
+        }
+        routing.update({
+            "workflow_phase": "SECRET_ROUTER_MEMORY_PROMPT",
+            "category": "SECRET_ROUTER_MEMORY_MESSAGE",
+            **raw_fields,
+        })
+    stored_category = "SECRET_ROUTER_MEMORY_MESSAGE" if adversarial_raw_fields else category
     store.log_call(
         id=f"memory-call-{suffix}",
         created_at=f"2026-06-10T10:00:{suffix:02d}+00:00",
@@ -48,10 +69,13 @@ def _log_memory_call(
         cost_est_usd=0.01,
         cost_baseline_usd=0.02,
         routing_json=stable_json(routing),
-        crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
-        cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+        crunch_json=stable_json({"changed": False, "tokens_saved_est": 0, **raw_fields}),
+        cache_json=stable_json({"status": "SECRET_ROUTER_MEMORY_CONTENT", "reason": "cache-key-router-memory-secret", **raw_fields} if adversarial_raw_fields else {"status": "skipped", "reason": "streaming"}),
+        request_json=stable_json({"messages": [{"content": "SECRET_ROUTER_MEMORY_PROMPT"}], **raw_fields}) if adversarial_raw_fields else None,
+        response_json=stable_json({"content": [{"text": "SECRET_ROUTER_MEMORY_RESPONSE"}]}) if adversarial_raw_fields else None,
+        error="SECRET_ROUTER_MEMORY_ERROR" if adversarial_raw_fields else None,
         session_id=session_id,
-        category=category,
+        category=stored_category,
         retry_count=retry_count,
         provider="anthropic",
     )
@@ -863,6 +887,74 @@ rules:
                     self.assertEqual(memory["memory"]["window"]["call_count"], 3)
                     self.assertFalse(memory["memory"]["raw_session_id_included"])
                     self.assertNotIn("secret-session-router", stable_json(memory))
+                    self.assertEqual(managed_egress_violations(memory), [])
+            finally:
+                importlib.reload(router_module)
+
+    def test_session_memory_rule_buckets_adversarial_metadata_before_route_meta(self):
+        forbidden = (
+            "SECRET_ROUTER_MEMORY_PROMPT",
+            "SECRET_ROUTER_MEMORY_MESSAGE",
+            "SECRET_ROUTER_MEMORY_CONTENT",
+            "SECRET_ROUTER_MEMORY_TOOL_PAYLOAD",
+            "SECRET_ROUTER_MEMORY_RESPONSE",
+            "SECRET_ROUTER_MEMORY_ERROR",
+            "req_router_memory_secret",
+            "cache-key-router-memory-secret",
+            "/tmp/router-memory-secret.py",
+            "secret-session-router",
+        )
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for index in range(1, 4):
+                    _log_memory_call(store, index, adversarial_raw_fields=True)
+            finally:
+                store.conn.close()
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+      session_memory:
+        enabled: true
+        window_size: 3
+        min_call_count: 3
+        dominant_phase: unknown
+        min_dominant_phase_count: 3
+        allow_blockers: [small_sample]
+    action:
+      route_to: haiku
+      reason: stable unknown memory route
+""",
+                    {"AGENTFLOW_DB": db_path},
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body, session_id="secret-session-router")
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    memory = meta["session_phase_memory"]
+                    self.assertEqual(memory["status"], "used")
+                    self.assertEqual(memory["memory"]["dominant_phase"], "unknown")
+                    self.assertIn({"value": "unknown", "count": 3}, memory["memory"]["category_counts"])
+                    self.assertEqual(managed_egress_violations(memory), [])
+                    rendered = stable_json(meta)
+                    for value in forbidden:
+                        self.assertNotIn(value, rendered)
             finally:
                 importlib.reload(router_module)
 
