@@ -45,7 +45,9 @@ _RAW_LIKE_KEY_PARTS = (
     "command",
     "content",
     "credential",
+    "endpoint",
     "file_path",
+    "generated_summary",
     "message",
     "param",
     "prompt",
@@ -53,9 +55,11 @@ _RAW_LIKE_KEY_PARTS = (
     "raw_payload",
     "raw_request",
     "raw_response",
+    "raw_context",
     "request_id",
     "secret",
     "session_id",
+    "summary_text",
     "tool_payload",
     "transcript",
 )
@@ -702,6 +706,124 @@ def _cache_pattern_rule(action: dict[str, Any], *, existing: dict[str, Any] | No
     return rule, None
 
 
+def _is_old_context_summary_action(action: dict[str, Any]) -> bool:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    values = [
+        action.get("action_family"),
+        action.get("optimization_family"),
+        local_update.get("kind"),
+        local_update.get("module_family"),
+        local_update.get("candidate_profile"),
+    ]
+    if isinstance(local_update.get("old_context_summarization"), dict):
+        return True
+    normalized = [str(value or "").strip().lower().replace("_", "-") for value in values]
+    return any("old-context" in value or "old-context-summary" in value or "old-context-summarization" in value for value in normalized)
+
+
+def _find_summary_rule(summary: Any, action: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(summary, dict):
+        return None
+    target_rule_id = str(action.get("target_rule_id") or "").strip()
+    target_candidate_id = str(action.get("target_candidate_id") or "").strip()
+    rule_id = str(summary.get("rule_id") or "").strip()
+    candidate_id = str(summary.get("candidate_id") or "").strip()
+    if target_rule_id and rule_id and target_rule_id != rule_id:
+        return None
+    if target_candidate_id and candidate_id and target_candidate_id != candidate_id:
+        return None
+    return summary
+
+
+def _old_context_summary_policy(action: dict[str, Any], *, existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    summary_update = (
+        local_update.get("old_context_summarization")
+        if isinstance(local_update.get("old_context_summarization"), dict)
+        else {}
+    )
+    disabled = str(action.get("action_type") or "") == "rollback"
+    existing = existing if isinstance(existing, dict) else {}
+    summary = dict(existing)
+    summary["enabled"] = False if disabled else _as_bool(summary_update.get("enabled"), _as_bool(existing.get("enabled"), True))
+    summary["rule_id"] = str(action.get("target_rule_id") or summary_update.get("rule_id") or existing.get("rule_id") or "promotion-old-context-summary")
+    summary["candidate_id"] = str(action.get("target_candidate_id") or summary_update.get("candidate_id") or existing.get("candidate_id") or "")
+    summary["policy_source"] = "managed-recommended"
+    summary["promotion_action_id"] = action.get("action_id")
+    for key in ("model", "model_hint", "profile", "placement", "excluded_categories"):
+        value = summary_update.get(key)
+        if value is None and key == "model":
+            value = local_update.get("candidate_target_model")
+        if value is not None:
+            target_key = "model" if key == "model_hint" else key
+            summary[target_key] = value
+    for key in (
+        "min_request_chars",
+        "min_summarized_chars",
+        "max_turns",
+        "keep_recent_turns",
+        "max_summary_chars",
+        "max_source_chars",
+    ):
+        value = summary_update.get(key)
+        if value is not None:
+            summary[key] = _as_int(value)
+    if summary_update.get("max_summary_cost_usd") is not None:
+        try:
+            summary["max_summary_cost_usd"] = max(0.0, float(summary_update["max_summary_cost_usd"]))
+        except (TypeError, ValueError):
+            pass
+    for key in ("block_tool_protocol", "block_thinking"):
+        if summary_update.get(key) is not None:
+            summary[key] = _as_bool(summary_update.get(key), True)
+
+    existing_canary = existing.get("canary") if isinstance(existing.get("canary"), dict) else {}
+    update_canary = local_update.get("canary") if isinstance(local_update.get("canary"), dict) else {}
+    canary_fraction = _as_float(update_canary.get("fraction", update_canary.get("canary_fraction", action.get("canary_fraction"))))
+    holdout_fraction = _as_float(update_canary.get("holdout_fraction", action.get("holdout_fraction")))
+    summary["canary"] = {
+        **existing_canary,
+        "enabled": False if disabled else _as_bool(update_canary.get("enabled"), True),
+        "fraction": 0.0 if disabled else canary_fraction,
+        "holdout_fraction": 0.0 if disabled else holdout_fraction,
+        "salt": str(update_canary.get("salt") or update_canary.get("canary_salt") or action.get("action_id") or summary["rule_id"]),
+        "unit": str(update_canary.get("unit") or update_canary.get("canary_unit") or existing_canary.get("unit") or "source_hash"),
+    }
+
+    existing_safety = existing.get("safety_stop") if isinstance(existing.get("safety_stop"), dict) else {}
+    update_safety = local_update.get("safety_stop") if isinstance(local_update.get("safety_stop"), dict) else {}
+    safety = dict(existing_safety)
+    safety["enabled"] = _as_bool(update_safety.get("enabled"), _as_bool(existing_safety.get("enabled"), True))
+    for key in ("min_outcome_samples", "window"):
+        value = update_safety.get(key)
+        if value is not None:
+            safety[key] = _as_int(value)
+    for key in (
+        "max_error_rate",
+        "max_retry_rate",
+        "max_negative_net_savings_rate",
+        "max_summary_failure_rate",
+        "max_error_rate_delta",
+    ):
+        value = update_safety.get(key)
+        if value is not None:
+            try:
+                safety[key] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                pass
+    summary["safety_stop"] = safety
+    summary["rollout_action"] = {
+        "schema": ACTION_SCHEMA,
+        "action_type": action.get("action_type"),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "target_rule_id": action.get("target_rule_id"),
+        "canary_fraction": summary["canary"]["fraction"],
+        "holdout_fraction": summary["canary"]["holdout_fraction"],
+        "managed_enforced": False,
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 def _find_pattern_rule(rules: list[Any], action: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None]:
     target_rule_id = str(action.get("target_rule_id") or "").strip()
     target_candidate_id = str(action.get("target_candidate_id") or "").strip()
@@ -798,6 +920,58 @@ def apply_optimization_promotion_canaries(
                     "action_id": action.get("action_id"),
                     "canary_fraction": plan["data"]["phase_canary"]["canary_fraction"],
                     "holdout_fraction": plan["data"]["phase_canary"]["holdout_fraction"],
+                })
+                continue
+
+            if section == "crunch" and _is_old_context_summary_action(action):
+                summary = plan["data"].get("old_context_summarization")
+                existing_summary = _find_summary_rule(summary, action)
+                if isinstance(summary, dict) and existing_summary is None:
+                    errors.append({"path": f"$.actions[{index}]", "message": "promotion canary targets an unknown old-context summarization rule"})
+                    actions.append({
+                        "path": f"$.actions[{index}]",
+                        "status": "rejected",
+                        "reason": "unknown-rule",
+                        "policy_section": section,
+                        "target_candidate_id": action.get("target_candidate_id"),
+                        "target_rule_id": action.get("target_rule_id"),
+                    })
+                    continue
+                if existing_summary is not None and str(existing_summary.get("policy_source") or "") != "managed-recommended":
+                    errors.append({"path": f"$.actions[{index}]", "message": "promotion canary targets a non-managed-recommended old-context summarization rule"})
+                    actions.append({
+                        "path": f"$.actions[{index}]",
+                        "status": "rejected",
+                        "reason": "unsafe-policy-source",
+                        "policy_section": section,
+                        "target_candidate_id": action.get("target_candidate_id"),
+                        "target_rule_id": action.get("target_rule_id"),
+                    })
+                    continue
+                if str(action.get("action_type") or "") == "rollback" and existing_summary is None:
+                    errors.append({"path": f"$.actions[{index}]", "message": "rollback targets an unknown old-context summarization rule"})
+                    actions.append({
+                        "path": f"$.actions[{index}]",
+                        "status": "rejected",
+                        "reason": "unknown-rule",
+                        "policy_section": section,
+                        "target_candidate_id": action.get("target_candidate_id"),
+                        "target_rule_id": action.get("target_rule_id"),
+                    })
+                    continue
+                summary_rule = _old_context_summary_policy(action, existing=existing_summary)
+                plan["data"]["old_context_summarization"] = summary_rule
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "planned",
+                    "policy_section": section,
+                    "action_type": action.get("action_type"),
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                    "action_id": action.get("action_id"),
+                    "rule_id": summary_rule.get("rule_id"),
+                    "canary_fraction": (summary_rule.get("canary") or {}).get("fraction"),
+                    "holdout_fraction": (summary_rule.get("canary") or {}).get("holdout_fraction"),
                 })
                 continue
 

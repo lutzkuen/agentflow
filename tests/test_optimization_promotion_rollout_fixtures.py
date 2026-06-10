@@ -1,7 +1,9 @@
 import asyncio
 import copy
 from datetime import datetime, timezone
+import importlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +11,7 @@ from unittest.mock import patch
 
 import yaml
 
+import agentflow_proxy.crunch as crunch_module
 from agentflow_proxy import cache as cache_module
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization_promotion_actions import ACTION_SCHEMA, SCHEMA as PROMOTION_ACTIONS_SCHEMA, build_optimization_promotion_actions
@@ -60,6 +63,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "fixture-cache-key-secret",
             "fixture-request-id-secret",
             "fixture-session-id-secret",
+            "raw fixture summary secret",
             "/tmp/fixture-secret.py",
             "sk-fixture-secret",
         ):
@@ -220,6 +224,104 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
                 "raw_session_ids_included": False,
                 "filesystem_paths_included": False,
                 "cache_keys_included": False,
+            },
+        }
+        return {
+            "schema": PROMOTION_ACTIONS_SCHEMA,
+            "generated_at": "2026-06-10T06:00:00+00:00",
+            "ok": True,
+            "read_only": True,
+            "wrote_local_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "summary": {"candidate_count": 1, "action_count": 1, "omitted_count": 0},
+            "actions": [action],
+            "omitted": [],
+            "privacy": {"metadata_only": True, "content_free": True},
+        }
+
+    def _old_context_summary_promotion_bundle(
+        self,
+        *,
+        action_type="widen",
+        raw_like=False,
+        managed_enforced=False,
+        canary_fraction=0.2,
+        holdout_fraction=0.1,
+    ):
+        local_update = {
+            "kind": "old-context-summarization-canary",
+            "policy_source": "managed-enforced" if managed_enforced else "managed-recommended",
+            "managed_enforced": managed_enforced,
+            "required_local_review": True,
+            "candidate_profile": "old-context-summary",
+            "old_context_summarization": {
+                "enabled": True,
+                "model": "claude-haiku-4-5-20251001",
+                "profile": "old-context-summary",
+                "placement": "system",
+                "min_request_chars": 10,
+                "min_summarized_chars": 10,
+                "max_turns": 3,
+                "keep_recent_turns": 1,
+                "max_summary_chars": 1000,
+                "max_source_chars": 20000,
+                "max_summary_cost_usd": 0.02,
+                "excluded_categories": [],
+                "block_tool_protocol": True,
+                "block_thinking": True,
+            },
+            "canary": {
+                "enabled": action_type != "rollback",
+                "fraction": 0.0 if action_type == "rollback" else canary_fraction,
+                "holdout_fraction": 0.0 if action_type == "rollback" else holdout_fraction,
+                "salt": "fixture-old-context-summary",
+                "unit": "source_hash",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 6,
+                "window": 100,
+                "max_error_rate": 0.07,
+                "max_retry_rate": 0.22,
+                "max_negative_net_savings_rate": 0.4,
+                "max_summary_failure_rate": 0.08,
+                "max_error_rate_delta": 0.04,
+            },
+        }
+        if raw_like:
+            local_update["old_context_summarization"]["generated_summary"] = "raw fixture summary secret"
+        fraction = 0.0 if action_type == "rollback" else canary_fraction
+        action = {
+            "schema": ACTION_SCHEMA,
+            "action_id": f"promotion-rollout-action:fixture-old-context-{action_type}-{fraction}",
+            "status": "planned",
+            "action_type": action_type,
+            "verdict": "rollback" if action_type == "rollback" else action_type,
+            "target_candidate_id": "fixture-old-context-candidate",
+            "target_rule_id": "promotion-old-context-fixture",
+            "action_family": "old_context_summarization",
+            "optimization_family": "old_context_summarization",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "policy_section": "crunch",
+            "target_local_policy_section": "crunch.rules",
+            "local_policy_update": local_update,
+            "current_canary_fraction": 0.1,
+            "canary_fraction": fraction,
+            "holdout_fraction": 0.0 if action_type == "rollback" else holdout_fraction,
+            "evidence_summary": {"eval_pass_count": 3, "eval_fail_count": 0, "reason_codes": ["promotion-thresholds-met"]},
+            "rollback_metadata": {"preserve_previous_rule_required": True},
+            "local_review": {"required": True, "apply_preview_command": "agentflow-optimization-promotion-canaries-apply --dry-run"},
+            "privacy": {
+                "metadata_only": True,
+                "content_free": True,
+                "raw_prompts_included": False,
+                "raw_provider_bodies_included": False,
+                "raw_responses_included": False,
+                "request_ids_included": False,
+                "raw_session_ids_included": False,
+                "filesystem_paths_included": False,
             },
         }
         return {
@@ -629,6 +731,255 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
         self.assertEqual(rolled_back["rollout"]["holdout_fraction"], 0.0)
         self.assertTrue(untouched["enabled"])
         self.assertEqual(untouched["policy_source"], "local-manual")
+
+    def test_old_context_summary_promotion_canary_dry_run_and_write_update_only_summary_policy(self):
+        candidate = {
+            "candidate_id": "fixture-old-context-from-report",
+            "candidate_family": "old-context-summarization-policy-rule",
+            "action_family": "old_context_summarization",
+            "optimization_family": "old_context_summarization",
+            "verdict": "widen",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "summary_model": "claude-haiku-4-5-20251001",
+            "conditions": {
+                "min_request_chars": 10,
+                "min_summarized_chars": 10,
+                "max_source_chars": 20000,
+            },
+            "action": {
+                "max_turns": 3,
+                "keep_recent_turns": 1,
+                "max_summary_chars": 1000,
+                "max_summary_cost_usd": 0.02,
+            },
+            "canary": {"salt": "fixture-old-context-summary", "unit": "source_hash", "holdout_fraction": 0.1},
+            "safety_gates": {"min_outcome_samples": 6, "max_error_rate": 0.07},
+            "cohort_counts": {"canary_applied": 2, "canary_holdout": 8},
+            "eval_evidence": {"result_count": 4, "pass_count": 4, "fail_count": 0},
+            "privacy": {"metadata_only": True, "raw_prompts_included": False, "raw_provider_bodies_included": False},
+        }
+        built = build_optimization_promotion_actions(
+            {"schema": "agentflow.optimization_promotion_report.v1", "candidates": [candidate]},
+            initial_canary_fraction=0.1,
+            widen_step=0.25,
+            holdout_fraction=0.1,
+        )
+        self.assertEqual(built["summary"]["action_count"], 1)
+        self.assertEqual(built["actions"][0]["local_policy_update"]["kind"], "old-context-summarization-canary")
+        self.assertIn("old_context_summarization", built["actions"][0]["local_policy_update"])
+        self._assert_metadata_only(built)
+
+        bundle = self._old_context_summary_promotion_bundle()
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            before_crunch = crunch_path.read_text(encoding="utf-8")
+            before_routing = routing_path.read_text(encoding="utf-8")
+            before_cache = cache_path.read_text(encoding="utf-8")
+
+            dry_run = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=True)
+            self.assertTrue(dry_run["ok"])
+            self.assertTrue(dry_run["dry_run"])
+            self.assertFalse(dry_run["wrote_policy_files"])
+            self.assertEqual(dry_run["summary"]["planned_action_count"], 1)
+            self.assertEqual(dry_run["files"][0]["section"], "crunch")
+            self.assertTrue(dry_run["files"][0]["changed"])
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before_crunch)
+
+            applied = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=False)
+            written = yaml.safe_load(crunch_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(applied["ok"])
+            self.assertFalse(applied["dry_run"])
+            self.assertTrue(applied["wrote_policy_files"])
+            self.assertEqual(applied["files"][0]["section"], "crunch")
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before_cache)
+
+        summary = written["old_context_summarization"]
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(summary["rule_id"], "promotion-old-context-fixture")
+        self.assertEqual(summary["candidate_id"], "fixture-old-context-candidate")
+        self.assertEqual(summary["policy_source"], "managed-recommended")
+        self.assertEqual(summary["promotion_action_id"], "promotion-rollout-action:fixture-old-context-widen-0.2")
+        self.assertEqual(summary["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(summary["profile"], "old-context-summary")
+        self.assertEqual(summary["min_request_chars"], 10)
+        self.assertEqual(summary["max_turns"], 3)
+        self.assertEqual(summary["keep_recent_turns"], 1)
+        self.assertEqual(summary["canary"]["fraction"], 0.2)
+        self.assertEqual(summary["canary"]["holdout_fraction"], 0.1)
+        self.assertEqual(summary["canary"]["unit"], "source_hash")
+        self.assertEqual(summary["safety_stop"]["min_outcome_samples"], 6)
+        self.assertEqual(summary["safety_stop"]["max_error_rate"], 0.07)
+        self.assertNotIn("endpoint_url", summary)
+        self.assertNotIn("generated_summary", summary)
+
+    def test_old_context_summary_promotion_canary_rollback_and_local_manual_preservation(self):
+        managed_summary = {
+            "enabled": True,
+            "rule_id": "promotion-old-context-fixture",
+            "candidate_id": "fixture-old-context-candidate",
+            "policy_source": "managed-recommended",
+            "model": "claude-haiku-4-5-20251001",
+            "min_request_chars": 10,
+            "min_summarized_chars": 10,
+            "max_turns": 3,
+            "keep_recent_turns": 1,
+            "canary": {"enabled": True, "fraction": 0.2, "holdout_fraction": 0.1, "salt": "fixture", "unit": "source_hash"},
+            "safety_stop": {"enabled": True, "min_outcome_samples": 6, "window": 100},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            crunch_path.write_text(
+                yaml.safe_dump({"enabled": True, "threshold_chars": 24000, "old_context_summarization": managed_summary}, sort_keys=False),
+                encoding="utf-8",
+            )
+            before_routing = routing_path.read_text(encoding="utf-8")
+            before_cache = cache_path.read_text(encoding="utf-8")
+
+            result = apply_optimization_promotion_canaries(
+                self._old_context_summary_promotion_bundle(action_type="rollback"),
+                config_dir=tmp,
+                dry_run=False,
+            )
+            written = yaml.safe_load(crunch_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["wrote_policy_files"])
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before_cache)
+
+        rolled_back = written["old_context_summarization"]
+        self.assertFalse(rolled_back["enabled"])
+        self.assertEqual(rolled_back["policy_source"], "managed-recommended")
+        self.assertFalse(rolled_back["canary"]["enabled"])
+        self.assertEqual(rolled_back["canary"]["fraction"], 0.0)
+        self.assertEqual(rolled_back["canary"]["holdout_fraction"], 0.0)
+
+        local_manual = dict(managed_summary)
+        local_manual["policy_source"] = "local-manual"
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            crunch_path.write_text(
+                yaml.safe_dump({"enabled": True, "threshold_chars": 24000, "old_context_summarization": local_manual}, sort_keys=False),
+                encoding="utf-8",
+            )
+            before = {
+                "crunch": crunch_path.read_text(encoding="utf-8"),
+                "routing": routing_path.read_text(encoding="utf-8"),
+                "cache": cache_path.read_text(encoding="utf-8"),
+            }
+
+            rejected = apply_optimization_promotion_canaries(
+                self._old_context_summary_promotion_bundle(),
+                config_dir=tmp,
+                dry_run=False,
+            )
+
+            self.assertFalse(rejected["ok"])
+            self.assertFalse(rejected["wrote_policy_files"])
+            self.assertEqual(rejected["actions"][0]["reason"], "unsafe-policy-source")
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before["crunch"])
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before["routing"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before["cache"])
+
+    def test_old_context_summary_promotion_canary_rejects_raw_payload_and_emits_metadata_only_cohorts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            before = {
+                "crunch": crunch_path.read_text(encoding="utf-8"),
+                "routing": routing_path.read_text(encoding="utf-8"),
+                "cache": cache_path.read_text(encoding="utf-8"),
+            }
+
+            rejected = apply_optimization_promotion_canaries(
+                self._old_context_summary_promotion_bundle(raw_like=True),
+                config_dir=tmp,
+                dry_run=False,
+            )
+
+            self.assertFalse(rejected["ok"])
+            self.assertFalse(rejected["wrote_policy_files"])
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before["crunch"])
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before["routing"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before["cache"])
+            self.assertIn("raw or local-identifier promotion rollout payloads are not accepted", {error["message"] for error in rejected["errors"]})
+
+        old_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                root = Path(tmp)
+                config = root / "config"
+                config.mkdir()
+                apply_optimization_promotion_canaries(
+                    self._old_context_summary_promotion_bundle(canary_fraction=1.0, holdout_fraction=0.0),
+                    config_dir=config,
+                    dry_run=False,
+                )
+                os.chdir(root)
+                manual = importlib.reload(crunch_module)
+                secret = "raw fixture old context secret"
+                body = {
+                    "model": "claude-sonnet-4-6",
+                    "messages": [
+                        {"role": "user", "content": (secret + " durable fact ") * 20},
+                        {"role": "assistant", "content": "old answer " * 20},
+                        {"role": "user", "content": "recent request"},
+                    ],
+                }
+                cache = {}
+
+                async def fetch(_request):
+                    return {
+                        "summary": "compact fixture summary secret",
+                        "summary_input_tokens": 20,
+                        "summary_output_tokens": 5,
+                        "summary_cost_est_usd": 0.0002,
+                        "summary_status_code": 200,
+                    }
+
+                summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                    body,
+                    exact_cache_enabled=False,
+                    get_cached_summary=cache.get,
+                    set_cached_summary=lambda key, value: cache.__setitem__(key, value),
+                    fetch_summary=fetch,
+                ))
+                self.assertEqual(meta["status"], "applied")
+                self.assertEqual(meta["canary"]["cohort"], "canary_applied")
+                self.assertIn("compact fixture summary secret", summarized["system"][0]["text"])
+                self.assertNotIn(secret, json.dumps(meta))
+                self.assertNotIn("compact fixture summary secret", json.dumps(meta))
+                self.assertFalse(meta["canary"]["raw_context_included"])
+                self.assertFalse(meta["canary"]["raw_summary_included"])
+
+                apply_optimization_promotion_canaries(
+                    self._old_context_summary_promotion_bundle(action_type="hold", canary_fraction=0.0, holdout_fraction=1.0),
+                    config_dir=config,
+                    dry_run=False,
+                )
+                manual = importlib.reload(crunch_module)
+
+                async def fail_fetch(_request):
+                    raise AssertionError("holdout should not fetch a generated summary")
+
+                held_out, holdout_meta = asyncio.run(manual.maybe_summarize_old_context(
+                    body,
+                    exact_cache_enabled=False,
+                    get_cached_summary=lambda _key: None,
+                    set_cached_summary=lambda _key, _value: None,
+                    fetch_summary=fail_fetch,
+                ))
+                self.assertIs(held_out, body)
+                self.assertEqual(holdout_meta["status"], "skipped")
+                self.assertEqual(holdout_meta["reason"], "canary_holdout")
+                self.assertEqual(holdout_meta["canary"]["cohort"], "canary_holdout")
+                self.assertNotIn(secret, json.dumps(holdout_meta))
+            finally:
+                os.chdir(old_cwd)
+                importlib.reload(crunch_module)
 
     def test_shared_canary_safety_stop_and_lifecycle_feedback_are_metadata_only(self):
         fixture = self._fixture()

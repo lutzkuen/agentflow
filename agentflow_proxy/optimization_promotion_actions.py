@@ -177,6 +177,16 @@ def _local_policy(candidate: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
+def _is_old_context_summary_candidate(candidate: dict[str, Any]) -> bool:
+    family = _action_family(candidate)
+    optimization_family = str(candidate.get("optimization_family") or "").strip().lower().replace("_", "-")
+    candidate_family = str(candidate.get("candidate_family") or "").strip().lower().replace("_", "-")
+    return any(
+        "old-context" in value or "old-context-summary" in value or "old-context-summarization" in value
+        for value in (family, optimization_family, candidate_family)
+    ) or any("summarization" in value or "summary" in value for value in (family, optimization_family, candidate_family))
+
+
 def _cohort_counts(candidate: dict[str, Any]) -> dict[str, int]:
     counts = candidate.get("cohort_counts") if isinstance(candidate.get("cohort_counts"), dict) else {}
     return {
@@ -297,6 +307,67 @@ def _action(
         "candidate_target_model": candidate.get("candidate_target_model"),
         "candidate_profile": candidate.get("candidate_profile"),
     }
+    if policy["policy_section"] == "crunch" and _is_old_context_summary_candidate(candidate):
+        local_policy_update["kind"] = "old-context-summarization-canary"
+        thresholds = candidate.get("thresholds") if isinstance(candidate.get("thresholds"), dict) else {}
+        conditions = candidate.get("conditions") if isinstance(candidate.get("conditions"), dict) else {}
+        action_fields = candidate.get("action") if isinstance(candidate.get("action"), dict) else {}
+        canary = candidate.get("canary") if isinstance(candidate.get("canary"), dict) else {}
+        safety = (
+            candidate.get("safety_stop")
+            if isinstance(candidate.get("safety_stop"), dict)
+            else candidate.get("safety_gates")
+            if isinstance(candidate.get("safety_gates"), dict)
+            else {}
+        )
+        summary_update: dict[str, Any] = {
+            "enabled": True,
+            "rule_id": target_rule_id,
+            "candidate_id": candidate_id,
+            "model": (
+                candidate.get("summary_model")
+                or candidate.get("model_hint")
+                or candidate.get("candidate_target_model")
+                or action_fields.get("model")
+            ),
+            "profile": candidate.get("candidate_profile") or candidate.get("profile"),
+            "placement": candidate.get("placement") or action_fields.get("placement") or "system",
+        }
+        for key in (
+            "min_request_chars",
+            "min_summarized_chars",
+            "max_turns",
+            "keep_recent_turns",
+            "max_summary_chars",
+            "max_source_chars",
+            "max_summary_cost_usd",
+            "excluded_categories",
+            "block_tool_protocol",
+            "block_thinking",
+        ):
+            value = candidate.get(key, conditions.get(key, thresholds.get(key, action_fields.get(key))))
+            if value is not None:
+                summary_update[key] = value
+        local_policy_update["old_context_summarization"] = summary_update
+        local_policy_update["canary"] = {
+            "enabled": action_type != "rollback",
+            "fraction": canary_fraction,
+            "holdout_fraction": 0.0 if action_type == "rollback" else _bounded_fraction(
+                canary.get("holdout_fraction", holdout_fraction)
+            ),
+            "salt": str(canary.get("salt") or canary.get("canary_salt") or target_rule_id),
+            "unit": str(canary.get("unit") or canary.get("canary_unit") or "source_hash"),
+        }
+        local_policy_update["safety_stop"] = {
+            "enabled": True,
+            "min_outcome_samples": _as_int(safety.get("min_outcome_samples", safety.get("min_samples", 5)), 5),
+            "window": _as_int(safety.get("window", 500), 500),
+            "max_error_rate": _as_float(safety.get("max_error_rate"), 0.1),
+            "max_retry_rate": _as_float(safety.get("max_retry_rate"), 0.25),
+            "max_negative_net_savings_rate": _as_float(safety.get("max_negative_net_savings_rate"), 0.5),
+            "max_summary_failure_rate": _as_float(safety.get("max_summary_failure_rate"), 0.1),
+            "max_error_rate_delta": _as_float(safety.get("max_error_rate_delta"), 0.05),
+        }
     if policy["policy_section"] == "cache":
         pattern_hashes = _collect_pattern_hashes(candidate)
         conditions: dict[str, Any] = {}

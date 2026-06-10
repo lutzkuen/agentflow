@@ -80,6 +80,7 @@ def _default_crunch_policy() -> dict[str, Any]:
             "canary": {
                 "enabled": False,
                 "fraction": 1.0,
+                "holdout_fraction": None,
                 "salt": "",
                 "unit": "source_hash",
             },
@@ -346,6 +347,7 @@ def _apply_summary_policy_yaml(policy: dict[str, Any], summary: dict[str, Any]) 
             ("fraction", "fraction"),
             ("rollout_fraction", "fraction"),
             ("canary_fraction", "fraction"),
+            ("holdout_fraction", "holdout_fraction"),
         ):
             if canary.get(source_key) is not None:
                 target_canary[target_key] = max(0.0, min(1.0, float(canary[source_key])))
@@ -1698,9 +1700,14 @@ def _summary_base_meta(status: str, reason: str, *, policy: dict[str, Any] | Non
 def _summary_canary_public_meta(policy: dict[str, Any] | None = None) -> dict[str, Any]:
     policy = policy or OLD_CONTEXT_SUMMARY_POLICY
     canary = policy.get("canary") or {}
+    fraction = float(canary.get("fraction", 1.0))
+    holdout_fraction = canary.get("holdout_fraction")
+    if holdout_fraction is None:
+        holdout_fraction = max(0.0, 1.0 - fraction)
     return {
         "enabled": bool(canary.get("enabled")),
-        "fraction": float(canary.get("fraction", 1.0)),
+        "fraction": fraction,
+        "holdout_fraction": float(holdout_fraction),
         "salt": str(canary.get("salt") or ""),
         "unit": str(canary.get("unit") or "source_hash"),
     }
@@ -2004,17 +2011,21 @@ def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any], *, poli
     material = {"salt": str(public["salt"] or ""), "basis": basis}
     digest = hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
     bucket = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    holdout_fraction = max(0.0, min(1.0, float(public.get("holdout_fraction", max(0.0, 1.0 - fraction)))))
     selected = bucket < fraction
+    holdout = not selected and bucket < min(1.0, fraction + holdout_fraction)
     base.update({
         "selected": selected,
-        "status": "applied" if selected else "holdout",
-        "cohort": "canary_applied" if selected else "canary_holdout",
-        "reason": None if selected else "canary_holdout",
+        "status": "applied" if selected else ("holdout" if holdout else "skipped"),
+        "cohort": "canary_applied" if selected else ("canary_holdout" if holdout else "outside_canary_and_holdout"),
+        "reason": None if selected else ("canary_holdout" if holdout else "outside-canary-and-holdout"),
         "fraction": fraction,
+        "holdout_fraction": holdout_fraction,
         "salt": str(public["salt"] or ""),
         "unit": unit,
         "bucket": round(bucket, 8),
         "threshold": fraction,
+        "holdout_threshold": min(1.0, fraction + holdout_fraction),
         "cohort_key_hash": "sha256:" + hashlib.sha256(_canonical_json(basis).encode("utf-8")).hexdigest(),
     })
     return base
@@ -2244,9 +2255,9 @@ async def maybe_summarize_old_context(
     if canary.get("enabled") and not canary.get("selected"):
         meta.update({
             "status": "skipped",
-            "reason": "canary_holdout",
+            "reason": str(canary.get("reason") or "canary_holdout"),
             "changed": False,
-            "enhanced_crunch_state": "holdout",
+            "enhanced_crunch_state": "holdout" if canary.get("cohort") == "canary_holdout" else "outside-canary",
             "applied": False,
         })
         return body, meta
