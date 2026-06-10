@@ -2604,6 +2604,497 @@ def _pattern_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool 
     return result
 
 
+_CACHE_REPLAY_INVALIDATION_REASONS = {
+    "file-dependency-missing",
+    "dependency-missing",
+    "dependency-changed",
+    "dependency-deleted",
+    "dependency-created",
+    "dependency-cap-exceeded",
+    "file-watch-disabled",
+    "file-dependency-evidence-absent",
+    "safe-invalidation-required",
+    "tool-cache-rule-requires-safe-invalidation",
+    "tool-cache-rule-missing-safe-invalidation",
+    "unsafe-tool-cache-pattern",
+    "file-watch-required",
+}
+_CACHE_REPLAY_STALE_RISK_REASONS = {
+    "current-state",
+    "user-specific",
+    "low-cacheability",
+    "stale-risk-blockers",
+}
+_CACHE_REPLAY_SAFETY_STOP_REASON = "local-canary-safety-stop"
+
+
+def _public_cache_canary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    public = {
+        key: value.get(key)
+        for key in (
+            "enabled",
+            "selected",
+            "cohort",
+            "fraction",
+            "threshold",
+            "unit",
+            "reason",
+        )
+        if value.get(key) is not None
+    }
+    public["pattern_hashes_included"] = False
+    return public
+
+
+def _public_cache_rollout(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: value.get(key)
+        for key in (
+            "enabled",
+            "canary_enabled",
+            "canary_fraction",
+            "holdout_fraction",
+            "rollout_fraction",
+            "canary_unit",
+            "unit",
+        )
+        if value.get(key) is not None
+    }
+
+
+def _cache_pattern_rules_from_meta(cache: dict[str, Any]) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    if isinstance(cache.get("pattern_rule"), dict):
+        rules.append(cache["pattern_rule"])
+    pattern_rules = cache.get("pattern_rules") if isinstance(cache.get("pattern_rules"), dict) else {}
+    for rule in pattern_rules.get("rules") or []:
+        if isinstance(rule, dict):
+            rules.append(rule)
+    for skip in pattern_rules.get("skip_reasons") or []:
+        if not isinstance(skip, dict):
+            continue
+        if skip.get("rule_id") or skip.get("candidate_id") or skip.get("canary") or skip.get("safety_stop"):
+            rules.append(skip)
+
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for rule in rules:
+        key = (
+            str(rule.get("rule_id") or ""),
+            str(rule.get("candidate_id") or ""),
+            str(rule.get("reason") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(rule)
+    return unique
+
+
+def _cache_rule_identity(
+    *,
+    cache: dict[str, Any],
+    rule: dict[str, Any] | None,
+    source_surface: str,
+    category: str,
+    stream: bool,
+    has_tools: bool,
+) -> dict[str, Any]:
+    rule = rule if isinstance(rule, dict) else {}
+    rule_id = str(rule.get("rule_id") or cache.get("rule_id") or "unruled-cache-decision")
+    candidate_id = rule.get("candidate_id") if rule.get("candidate_id") is not None else cache.get("candidate_id")
+    policy_source = str(rule.get("policy_source") or cache.get("policy_source") or "unknown")
+    return {
+        "rule_id": rule_id,
+        "candidate_id": candidate_id,
+        "policy_source": policy_source,
+        "source_surface": canonical_source_surface(source_surface),
+        "category": category or "unknown",
+        "stream": bool(stream),
+        "has_tools": bool(has_tools),
+    }
+
+
+def _cache_confidence_outcome(cache: dict[str, Any], decision: dict[str, Any], rule: dict[str, Any] | None) -> str:
+    status = str(decision.get("status") or cache.get("status") or "missing")
+    reason = str((rule or {}).get("reason") or decision.get("reason") or cache.get("reason") or "unknown")
+    canary = (rule or {}).get("canary") if isinstance(rule, dict) else None
+    if not isinstance(canary, dict):
+        canary = cache.get("canary") if isinstance(cache.get("canary"), dict) else None
+    cohort = str(cache.get("canary_cohort") or (canary or {}).get("cohort") or "")
+    if reason == _CACHE_REPLAY_SAFETY_STOP_REASON or isinstance((rule or {}).get("safety_stop"), dict) or isinstance(cache.get("safety_stop"), dict):
+        return "safety_stop"
+    if reason == "canary_holdout" or cohort == "canary_holdout" or (isinstance(canary, dict) and canary.get("selected") is False):
+        return "holdout"
+    if status == "hit":
+        return "hit"
+    if status == "miss":
+        return "miss"
+    return "skip"
+
+
+def _cache_confidence_reason_counts(
+    *,
+    cache: dict[str, Any],
+    decision: dict[str, Any],
+    rule: dict[str, Any] | None,
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    invalidation: dict[str, int] = {}
+    stale: dict[str, int] = {}
+    safety: dict[str, int] = {}
+    reasons = {
+        str(decision.get("reason") or cache.get("reason") or ""),
+        str((rule or {}).get("reason") or ""),
+    }
+    for blocker in (rule or {}).get("blockers") or cache.get("blockers") or []:
+        if isinstance(blocker, (str, int, float, bool)):
+            reasons.add(str(blocker))
+    for blocker in (rule or {}).get("stale_risk_blockers") or cache.get("stale_risk_blockers") or []:
+        if isinstance(blocker, (str, int, float, bool)):
+            reasons.add(str(blocker))
+    audit = cache.get("file_dependency_audit") if isinstance(cache.get("file_dependency_audit"), dict) else {}
+    if audit.get("cap_exceeded"):
+        reasons.add("dependency-cap-exceeded")
+    if audit.get("invalidation_reason"):
+        reasons.add(str(audit.get("invalidation_reason")))
+    if _as_int(audit.get("changed_path_count")):
+        reasons.add("dependency-changed")
+    if _as_int(audit.get("deleted_path_count")):
+        reasons.add("dependency-deleted")
+    if _as_int(audit.get("missing_path_count")):
+        reasons.add("dependency-missing")
+    cacheability = cache.get("cacheability") if isinstance(cache.get("cacheability"), dict) else {}
+    if cacheability.get("time_sensitive_hint"):
+        reasons.add("current-state")
+    if cacheability.get("user_specific_hint"):
+        reasons.add("user-specific")
+    if str(cacheability.get("cacheability_bucket") or "").lower() == "low":
+        reasons.add("low-cacheability")
+    if isinstance((rule or {}).get("safety_stop"), dict) or isinstance(cache.get("safety_stop"), dict):
+        reasons.add(_CACHE_REPLAY_SAFETY_STOP_REASON)
+
+    for reason in reasons:
+        if not reason:
+            continue
+        if reason in _CACHE_REPLAY_INVALIDATION_REASONS:
+            invalidation[reason] = invalidation.get(reason, 0) + 1
+        if reason in _CACHE_REPLAY_STALE_RISK_REASONS:
+            stale[reason] = stale.get(reason, 0) + 1
+        if reason == _CACHE_REPLAY_SAFETY_STOP_REASON:
+            safety[reason] = safety.get(reason, 0) + 1
+    return invalidation, stale, safety
+
+
+def _cache_replay_confidence_rows_from_store(store_obj: Any, *, limit: int) -> list[dict[str, Any]]:
+    conn = store_obj.conn
+    capped = max(1, min(int(limit or 1000), 10000))
+    provider_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select created_at, path, coalesce(provider, 'anthropic') as provider,
+                   requested_model, routed_model, stream, cache_hit, status_code,
+                   latency_ms, retry_count, cost_est_usd, cost_baseline_usd,
+                   cache_json, routing_json, category,
+                   null as response_error_code,
+                   null as response_result_chars,
+                   null as input_text_chars
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+    ]
+    for row in provider_rows:
+        row["source_surface"] = _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
+        row["granularity"] = "provider_request"
+
+    codex_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select s.created_at,
+                   s.routing_json,
+                   s.cache_json,
+                   s.input_text_chars,
+                   (
+                       select r.result_chars from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_result_chars,
+                   (
+                       select r.error_code from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as response_error_code,
+                   (
+                       select r.latency_ms from codex_app_events r
+                       where r.direction = 'server_to_client'
+                         and r.request_id = s.request_id
+                         and coalesce(r.session_id, '') = coalesce(s.session_id, '')
+                       order by r.created_at desc
+                       limit 1
+                   ) as latency_ms
+            from codex_app_events s
+            where s.direction = 'client_to_server'
+              and s.method = 'turn/start'
+            order by s.created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+    ]
+    for row in codex_rows:
+        cache = _json_obj(row.get("cache_json"))
+        estimates = _codex_estimates_with_cache(row.get("input_text_chars"), row.get("response_result_chars"), cache)
+        row.update(
+            {
+                "path": "codex-app://turn/start",
+                "provider": "codex-app",
+                "source_surface": CODEX_APP_SOURCE_SURFACE,
+                "granularity": "agent_turn",
+                "requested_model": CODEX_APP_MODEL,
+                "routed_model": CODEX_APP_MODEL,
+                "stream": 0,
+                "cache_hit": 1 if cache.get("status") == "hit" else 0,
+                "status_code": 500 if row.get("response_error_code") is not None else 200,
+                "retry_count": 0,
+                "cost_est_usd": estimates.get("cost_est_usd"),
+                "cost_baseline_usd": estimates.get("baseline_cost_est_usd"),
+                "category": _json_obj(row.get("routing_json")).get("category") or "codex_turn",
+            }
+        )
+
+    return sorted(provider_rows + codex_rows, key=lambda row: str(row.get("created_at") or ""), reverse=True)[:capped]
+
+
+async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    rows = _cache_replay_confidence_rows_from_store(store_obj, limit=limit)
+    grouped: dict[tuple[str, str, str, str, str, bool, bool], dict[str, Any]] = {}
+    status_counts: dict[str, int] = {}
+    invalidation_counts: dict[str, int] = {}
+    stale_counts: dict[str, int] = {}
+    safety_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+
+    for row in rows:
+        cache = _json_obj(row.get("cache_json"))
+        if not cache:
+            continue
+        routing = _json_obj(row.get("routing_json"))
+        decision = _cache_decision_for_breakdown(row)
+        source_surface = str(decision.get("source_surface") or row.get("source_surface") or "unknown")
+        category = str(row.get("category") or routing.get("category") or cache.get("category") or "unknown")
+        stream = bool(_as_int(row.get("stream")) or cache.get("stream"))
+        has_tools = bool(routing.get("has_tools") or category.startswith("tool") or cache.get("has_tools"))
+        rules = _cache_pattern_rules_from_meta(cache) or [None]
+        for rule in rules:
+            identity = _cache_rule_identity(
+                cache=cache,
+                rule=rule,
+                source_surface=source_surface,
+                category=category,
+                stream=stream,
+                has_tools=has_tools,
+            )
+            key = (
+                identity["rule_id"],
+                str(identity.get("candidate_id") or ""),
+                identity["policy_source"],
+                identity["source_surface"],
+                identity["category"],
+                identity["stream"],
+                identity["has_tools"],
+            )
+            bucket = grouped.setdefault(
+                key,
+                {
+                    **identity,
+                    "granularities": set(),
+                    "sample_count": 0,
+                    "hit_count": 0,
+                    "miss_count": 0,
+                    "holdout_count": 0,
+                    "skip_count": 0,
+                    "safety_stop_count": 0,
+                    "invalidation_count": 0,
+                    "stale_risk_blocked_count": 0,
+                    "error_count": 0,
+                    "retry_count": 0,
+                    "replayed_count": 0,
+                    "replayed_error_count": 0,
+                    "replayed_retry_count": 0,
+                    "holdout_error_count": 0,
+                    "holdout_retry_count": 0,
+                    "estimated_saved_cost_usd": 0.0,
+                    "estimated_cost_usd": 0.0,
+                    "baseline_cost_usd": 0.0,
+                    "first_seen_at": row.get("created_at"),
+                    "last_seen_at": row.get("created_at"),
+                    "canary": None,
+                    "rollout": None,
+                    "safety_stop_active": False,
+                    "safety_stop": None,
+                    "_invalidation_reasons": {},
+                    "_stale_reasons": {},
+                    "_safety_reasons": {},
+                },
+            )
+            outcome = _cache_confidence_outcome(cache, decision, rule)
+            bucket["sample_count"] += 1
+            bucket["granularities"].add(str(row.get("granularity") or "provider_request"))
+            bucket[f"{outcome}_count"] = _as_int(bucket.get(f"{outcome}_count")) + 1
+            if outcome == "hit":
+                bucket["replayed_count"] += 1
+            status_counts[outcome] = status_counts.get(outcome, 0) + 1
+            source_counts[identity["policy_source"]] = source_counts.get(identity["policy_source"], 0) + 1
+
+            status_code = _as_int(row.get("status_code")) if row.get("status_code") is not None else None
+            retry_count = _as_int(row.get("retry_count"))
+            errored = bool(status_code is not None and status_code >= 400)
+            if errored:
+                bucket["error_count"] += 1
+            if retry_count:
+                bucket["retry_count"] += retry_count
+            if outcome == "hit":
+                bucket["replayed_error_count"] += 1 if errored else 0
+                bucket["replayed_retry_count"] += retry_count
+            elif outcome == "holdout":
+                bucket["holdout_error_count"] += 1 if errored else 0
+                bucket["holdout_retry_count"] += retry_count
+
+            saved = _as_float(cache.get("estimated_saved_cost_usd"))
+            if not saved and outcome == "hit":
+                saved = max(_as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")), 0.0)
+            bucket["estimated_saved_cost_usd"] += saved
+            bucket["estimated_cost_usd"] += _as_float(row.get("cost_est_usd"))
+            bucket["baseline_cost_usd"] += _as_float(row.get("cost_baseline_usd"))
+            if str(row.get("created_at") or "") < str(bucket.get("first_seen_at") or row.get("created_at") or ""):
+                bucket["first_seen_at"] = row.get("created_at")
+            if str(row.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+                bucket["last_seen_at"] = row.get("created_at")
+
+            canary = _public_cache_canary((rule or {}).get("canary") if isinstance(rule, dict) else cache.get("canary"))
+            if canary and bucket["canary"] is None:
+                bucket["canary"] = canary
+            rollout = _public_cache_rollout((rule or {}).get("rollout") if isinstance(rule, dict) else cache.get("rollout"))
+            if rollout and bucket["rollout"] is None:
+                bucket["rollout"] = rollout
+            safety_stop = (rule or {}).get("safety_stop") if isinstance(rule, dict) else cache.get("safety_stop")
+            if isinstance(safety_stop, dict):
+                bucket["safety_stop"] = {
+                    key: safety_stop.get(key)
+                    for key in ("reason", "decision", "rule_id", "candidate_id", "sample_count", "error_rate", "retry_rate")
+                    if safety_stop.get(key) is not None
+                }
+                bucket["safety_stop_active"] = True
+
+            invalidation, stale, safety = _cache_confidence_reason_counts(cache=cache, decision=decision, rule=rule)
+            for reason, count in invalidation.items():
+                bucket["_invalidation_reasons"][reason] = bucket["_invalidation_reasons"].get(reason, 0) + count
+                invalidation_counts[reason] = invalidation_counts.get(reason, 0) + count
+            for reason, count in stale.items():
+                bucket["_stale_reasons"][reason] = bucket["_stale_reasons"].get(reason, 0) + count
+                stale_counts[reason] = stale_counts.get(reason, 0) + count
+            for reason, count in safety.items():
+                bucket["_safety_reasons"][reason] = bucket["_safety_reasons"].get(reason, 0) + count
+                safety_counts[reason] = safety_counts.get(reason, 0) + count
+
+    confidence_rows: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        samples = _as_int(bucket.get("sample_count"))
+        replayed = _as_int(bucket.get("replayed_count"))
+        holdout = _as_int(bucket.get("holdout_count"))
+        bucket["granularities"] = sorted(bucket["granularities"])
+        bucket["invalidation_count"] = sum(bucket["_invalidation_reasons"].values())
+        bucket["stale_risk_blocked_count"] = sum(bucket["_stale_reasons"].values())
+        bucket["safety_stop_count"] = sum(bucket["_safety_reasons"].values()) or bucket["safety_stop_count"]
+        bucket["hit_rate"] = round(_as_int(bucket.get("hit_count")) / samples, 4) if samples else 0.0
+        bucket["holdout_rate"] = round(holdout / samples, 4) if samples else 0.0
+        bucket["error_rate"] = round(_as_int(bucket.get("error_count")) / samples, 4) if samples else 0.0
+        bucket["retry_rate"] = round(_as_int(bucket.get("retry_count")) / samples, 4) if samples else 0.0
+        bucket["replayed_error_rate"] = round(_as_int(bucket.get("replayed_error_count")) / replayed, 4) if replayed else 0.0
+        bucket["holdout_error_rate"] = round(_as_int(bucket.get("holdout_error_count")) / holdout, 4) if holdout else 0.0
+        bucket["replayed_retry_rate"] = round(_as_int(bucket.get("replayed_retry_count")) / replayed, 4) if replayed else 0.0
+        bucket["holdout_retry_rate"] = round(_as_int(bucket.get("holdout_retry_count")) / holdout, 4) if holdout else 0.0
+        bucket["estimated_saved_cost_usd"] = round(_as_float(bucket.get("estimated_saved_cost_usd")), 8)
+        bucket["estimated_cost_usd"] = round(_as_float(bucket.get("estimated_cost_usd")), 8)
+        bucket["baseline_cost_usd"] = round(_as_float(bucket.get("baseline_cost_usd")), 8)
+        bucket["invalidation_reasons"] = _breakdown_from_counts(bucket.pop("_invalidation_reasons"))
+        bucket["stale_risk_reasons"] = _breakdown_from_counts(bucket.pop("_stale_reasons"))
+        bucket["safety_stop_reasons"] = _breakdown_from_counts(bucket.pop("_safety_reasons"))
+        if bucket.get("canary") is None and bucket.get("rollout"):
+            rollout = bucket["rollout"]
+            fraction = rollout.get("canary_fraction") if rollout.get("canary_fraction") is not None else rollout.get("rollout_fraction")
+            bucket["canary"] = {
+                "enabled": bool(rollout.get("canary_enabled", True)),
+                "fraction": fraction,
+                "pattern_hashes_included": False,
+            }
+        confidence_rows.append(bucket)
+
+    confidence_rows.sort(
+        key=lambda row: (
+            bool(row.get("safety_stop_active")),
+            _as_int(row.get("sample_count")),
+            _as_float(row.get("estimated_saved_cost_usd")),
+            _as_int(row.get("hit_count")),
+        ),
+        reverse=True,
+    )
+    return {
+        "schema": "agentflow.cache_replay_confidence.v1",
+        "generated_at": utc_now(),
+        "summary": {
+            "rows_considered": len(rows),
+            "rule_buckets": len(confidence_rows),
+            "active_rule_count": sum(1 for row in confidence_rows if row.get("rule_id") != "unruled-cache-decision"),
+            "hit_rows": status_counts.get("hit", 0),
+            "miss_rows": status_counts.get("miss", 0),
+            "holdout_rows": status_counts.get("holdout", 0),
+            "skip_rows": status_counts.get("skip", 0),
+            "safety_stop_rows": status_counts.get("safety_stop", 0),
+            "invalidation_rows": sum(invalidation_counts.values()),
+            "stale_risk_blocked_rows": sum(stale_counts.values()),
+            "estimated_saved_cost_usd": round(sum(_as_float(row.get("estimated_saved_cost_usd")) for row in confidence_rows), 8),
+            "safety_stop_active": any(bool(row.get("safety_stop_active")) for row in confidence_rows),
+        },
+        "policy_source_breakdown": _breakdown_from_counts(source_counts),
+        "outcome_breakdown": _breakdown_from_counts(status_counts),
+        "invalidation_breakdown": _breakdown_from_counts(invalidation_counts),
+        "stale_risk_breakdown": _breakdown_from_counts(stale_counts),
+        "safety_stop_breakdown": _breakdown_from_counts(safety_counts),
+        "rules": confidence_rows[: max(1, min(int(limit or 50), 1000))],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
+            "pattern_hashes_included": False,
+            "provider_calls_made": 0,
+            "dashboard_read_only": True,
+            "basis": "stored cache decision metadata, canary cohorts, safety-stop summaries, status codes, retries, and cost estimates only",
+        },
+    }
+
+
 LOCAL_PATTERN_COVERAGE_FAMILIES = (
     "terminal_logs",
     "tool_results",
@@ -8711,6 +9202,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
+    cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
     pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows)
     today_pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows, today_only=True)
 
@@ -8916,6 +9408,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
         "cache_replayability": cache_replayability,
+        "cache_replay_confidence": cache_replay_confidence,
         "old_context_summary_opportunity": old_context_summary_opportunity,
         "pattern_decision_breakdown": pattern_decision_breakdown,
         "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
@@ -9881,6 +10374,15 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-cache">
 <div class="section">
+  <h2>Cache replay confidence</h2>
+  <table data-table-id="cache-replay-confidence" data-filter-label="Filter cache replay confidence">
+    <thead><tr>
+      <th data-sort-type="text">Rule</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Cohort</th><th data-sort-type="number">Hits</th><th data-sort-type="number">Misses</th><th data-sort-type="number">Holdouts</th><th data-sort-type="number">Skips</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Invalidations</th><th data-sort-type="money">Savings</th><th data-sort-type="percent">Replay errors</th><th data-sort-type="percent">Holdout errors</th><th data-sort-type="text">Health</th>
+    </tr></thead>
+    <tbody id="cache-replay-confidence-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Skipped cache replayability</h2>
   <table data-table-id="cache-replayability" data-filter-label="Filter cache replayability groups">
     <thead><tr>
@@ -10758,6 +11260,42 @@ async function refreshCategories(){
 async function refreshCache(){
   try{
     const d=await loadFullStats();
+    const confidence=d.cache_replay_confidence||{};
+    const confidenceRows=confidence.rules||[];
+    document.getElementById('cache-replay-confidence-tbody').innerHTML=confidenceRows.map(row=>{
+      const canary=row.canary||{};
+      const cohortParts=[];
+      if(canary.enabled!=null)cohortParts.push(canary.enabled?'canary on':'canary off');
+      if(canary.fraction!=null)cohortParts.push('canary '+fmtPctValue(Number(canary.fraction)||0));
+      if(row.holdout_rate!=null)cohortParts.push('holdout '+fmtPctValue(Number(row.holdout_rate)||0));
+      const cohort=cohortParts.map(p=>`<span class="badge provider">${esc(p)}</span>`).join(' ')||'<span class="badge miss">no canary</span>';
+      const invalidation=(row.invalidation_reasons||[]).slice(0,3).map(r=>`<span class="badge routed">${esc(r.value)} ${(r.count||0).toLocaleString()}</span>`).join(' ');
+      const stale=(row.stale_risk_reasons||[]).slice(0,3).map(r=>`<span class="badge miss">${esc(r.value)} ${(r.count||0).toLocaleString()}</span>`).join(' ');
+      const safety=row.safety_stop_active||row.safety_stop_count?'<span class="badge err">safety stop</span>':'<span class="badge hit">clear</span>';
+      const health=[safety,invalidation,stale].filter(Boolean).join(' ');
+      const surface=[
+        shortSurface(row.source_surface||'unknown'),
+        row.stream?'stream':'non-stream',
+        row.has_tools?'tools':'no tools',
+        row.category||'unknown'
+      ].join(' · ');
+      const rule=row.candidate_id?`${row.rule_id||'unknown'} / ${row.candidate_id}`:(row.rule_id||'unknown');
+      return `<tr>
+        <td class="model">${esc(rule)}</td>
+        <td><span class="badge provider">${esc(surface)}</span></td>
+        <td class="flags">${cohort}</td>
+        <td class="tokens">${(row.hit_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.miss_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.skip_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.invalidation_count||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.estimated_saved_cost_usd||0,6)}</td>
+        <td class="tokens">${fmtPctValue(row.replayed_error_rate||0)}</td>
+        <td class="tokens">${fmtPctValue(row.holdout_error_rate||0)}</td>
+        <td class="flags">${health}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="13" style="color:#8b949e">No cache replay confidence metadata recorded yet</td></tr>';
     const replay=d.cache_replayability||{};
     const replayRows=replay.groups||[];
     document.getElementById('cache-replayability-tbody').innerHTML=replayRows.map(row=>{

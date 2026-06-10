@@ -3686,6 +3686,213 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("Skipped cache replayability", html)
             self.assertIn("cache-replayability-tbody", html)
 
+    def test_cache_replay_confidence_endpoint_and_dashboard_are_read_only_metadata(self):
+        base_rule = {
+            "rule_id": "static-chat-cache",
+            "candidate_id": "candidate-static",
+            "policy_source": "managed-recommended",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "rollout": {
+                "canary_enabled": True,
+                "canary_fraction": 0.5,
+                "canary_unit": "request_fingerprint",
+            },
+            "canary": {
+                "enabled": True,
+                "selected": True,
+                "cohort": "canary_applied",
+                "fraction": 0.5,
+                "pattern_hashes": ["sha256:" + "a" * 64],
+            },
+        }
+
+        def log_cache_row(
+            *,
+            cache_json,
+            status_code=200,
+            retry_count=0,
+            stream=0,
+            category="chat",
+            has_tools=False,
+            cost=0.01,
+            baseline=0.02,
+        ):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=stream,
+                cache_hit=1 if cache_json.get("status") == "hit" else 0,
+                status_code=status_code,
+                latency_ms=3,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"text_chars": 900, "category": category, "has_tools": has_tools}),
+                cache_json=stable_json(cache_json),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "private replay prompt"}]}),
+                response_json=None,
+                session_id="raw-session-id-should-not-leak",
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                provider="anthropic",
+            )
+
+        log_cache_row(
+            cache_json={
+                "status": "hit",
+                "reason": "exact-match",
+                "hit_type": "exact",
+                "policy_source": "managed-recommended",
+                "estimated_saved_cost_usd": 0.012,
+                "pattern_rule": base_rule,
+            },
+            cost=0.001,
+            baseline=0.013,
+        )
+        log_cache_row(
+            cache_json={
+                "status": "miss",
+                "reason": "exact-miss",
+                "policy_source": "managed-recommended",
+                "pattern_rule": base_rule,
+            },
+        )
+        holdout_rule = {
+            **base_rule,
+            "canary": {
+                "enabled": True,
+                "selected": False,
+                "cohort": "canary_holdout",
+                "fraction": 0.5,
+                "pattern_hashes": ["sha256:" + "b" * 64],
+            },
+            "reason": "canary_holdout",
+        }
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "canary_holdout",
+                "policy_source": "managed-recommended",
+                "pattern_rules": {"skip_reasons": [holdout_rule]},
+            },
+            status_code=429,
+            retry_count=2,
+        )
+        safety_rule = {
+            **base_rule,
+            "reason": "local-canary-safety-stop",
+            "safety_stop": {
+                "reason": "local-canary-safety-stop",
+                "decision": "stop",
+                "sample_count": 9,
+                "error_rate": 0.4,
+            },
+        }
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "local-canary-safety-stop",
+                "policy_source": "managed-recommended",
+                "pattern_rules": {"skip_reasons": [safety_rule]},
+            },
+        )
+        tool_rule = {
+            "rule_id": "tool-result-cache",
+            "candidate_id": "candidate-tool",
+            "policy_source": "managed-recommended",
+            "allow_tool_calls": True,
+            "safe_invalidation": True,
+        }
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "dependency-changed",
+                "policy_source": "managed-recommended",
+                "pattern_rule": tool_rule,
+                "file_dependency_audit": {
+                    "invalidation_reason": "dependency-changed",
+                    "changed_path_count": 1,
+                    "paths": ["/tmp/private.py"],
+                    "paths_included": True,
+                },
+            },
+            category="tool-result",
+            has_tools=True,
+        )
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "stale-risk-blockers",
+                "policy_source": "managed-recommended",
+                "pattern_rule": base_rule,
+                "cacheability": {
+                    "cacheability_bucket": "low",
+                    "time_sensitive_hint": True,
+                    "user_specific_hint": True,
+                },
+            },
+        )
+
+        result = asyncio.run(stats_views.stats_cache_replay_confidence(server.store, limit=10))
+        self.assertEqual(result["schema"], "agentflow.cache_replay_confidence.v1")
+        self.assertEqual(result["summary"]["hit_rows"], 1)
+        self.assertEqual(result["summary"]["miss_rows"], 1)
+        self.assertEqual(result["summary"]["holdout_rows"], 1)
+        self.assertEqual(result["summary"]["safety_stop_rows"], 1)
+        self.assertGreaterEqual(result["summary"]["invalidation_rows"], 1)
+        self.assertGreaterEqual(result["summary"]["stale_risk_blocked_rows"], 1)
+        self.assertAlmostEqual(result["summary"]["estimated_saved_cost_usd"], 0.012)
+        static = next(row for row in result["rules"] if row["rule_id"] == "static-chat-cache")
+        self.assertEqual(static["hit_count"], 1)
+        self.assertEqual(static["miss_count"], 1)
+        self.assertEqual(static["holdout_count"], 1)
+        self.assertEqual(static["safety_stop_count"], 1)
+        self.assertEqual(static["holdout_error_count"], 1)
+        self.assertEqual(static["holdout_retry_count"], 2)
+        self.assertTrue(static["safety_stop_active"])
+        self.assertEqual(static["canary"]["fraction"], 0.5)
+        tool = next(row for row in result["rules"] if row["rule_id"] == "tool-result-cache")
+        self.assertEqual(tool["category"], "tool-result")
+        self.assertTrue(tool["has_tools"])
+        self.assertIn("dependency-changed", {row["value"] for row in tool["invalidation_reasons"]})
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("private replay prompt", rendered)
+        self.assertNotIn("raw-session-id-should-not-leak", rendered)
+        self.assertNotIn("/tmp/private.py", rendered)
+        self.assertNotIn("sha256:" + "a" * 64, rendered)
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/cache-replay-confidence?limit=10")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["summary"]["hit_rows"], 1)
+            html = client.get("/agentflow/dashboard").text
+            self.assertIn("Cache replay confidence", html)
+            self.assertIn("cache-replay-confidence-tbody", html)
+            self.assertNotIn("private replay prompt", html)
+
     def test_cache_replayability_report_surfaces_file_dependency_audit_reasons_without_paths(self):
         def log_tool_candidate(name, audit):
             server.store.log_call(

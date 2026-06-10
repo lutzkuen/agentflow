@@ -117,6 +117,10 @@ def create_dashboard_router(
     async def stats_cache_replayability(limit: int = 25) -> dict[str, Any]:
         return await stats_views.stats_cache_replayability(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/cache-replay-confidence")
+    async def stats_cache_replay_confidence(limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_cache_replay_confidence(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/old-context-summary")
     async def stats_old_context_summary() -> dict[str, Any]:
         return await stats_views.stats_old_context_summary(_store(store_obj))
