@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import importlib
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ from unittest.mock import patch
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import openai_features
 from agentflow_proxy.optimization import openai_pipeline
+from agentflow_proxy import router as router_module
 from agentflow_proxy.store import stable_json
 
 
@@ -58,6 +60,64 @@ class CapturingOpenAIClient:
             "json": json,
             "kwargs": kwargs,
         })
+        return FakeJsonResponse(self.__class__.response_body, self.__class__.status_code)
+
+
+class FakeStreamResponse:
+    def __init__(self, chunks, status_code=200, headers=None):
+        self._chunks = chunks
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "text/event-stream"}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class CapturingStreamingOpenAIClient(CapturingOpenAIClient):
+    stream_calls = []
+    stream_chunks = [
+        b'data: {"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":3}}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    stream_status_code = 200
+
+    def stream(self, method, url, *, headers=None, json=None, **kwargs):
+        self.__class__.stream_calls.append({
+            "method": method,
+            "url": url,
+            "headers": dict(headers or {}),
+            "json": copy.deepcopy(json),
+            "kwargs": kwargs,
+        })
+        return FakeStreamResponse(
+            self.__class__.stream_chunks,
+            status_code=self.__class__.stream_status_code,
+        )
+
+
+class RateLimitThenSuccessOpenAIClient(CapturingOpenAIClient):
+    calls = []
+
+    async def post(self, url, *, headers=None, json=None, **kwargs):
+        self.__class__.calls.append({
+            "url": url,
+            "headers": dict(headers or {}),
+            "json": copy.deepcopy(json),
+            "kwargs": kwargs,
+        })
+        if len(self.__class__.calls) == 1:
+            return FakeJsonResponse(
+                {"error": {"message": "rate limited"}},
+                status_code=429,
+                headers={"content-type": "application/json", "retry-after": "0"},
+            )
         return FakeJsonResponse(self.__class__.response_body, self.__class__.status_code)
 
 
@@ -453,6 +513,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.old_openai_auth_mode = server.OPENAI_AUTH_MODE
         self.old_log_bodies = server.LOG_BODIES
         self.saved_recommendation_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
+        self.saved_routing_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
         os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
@@ -478,6 +539,11 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
         else:
             os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = self.saved_recommendation_enabled
+        if self.saved_routing_rules is None:
+            os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+        else:
+            os.environ["AGENTFLOW_ROUTING_RULES"] = self.saved_routing_rules
+        importlib.reload(router_module)
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
@@ -488,6 +554,49 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             openai_upstream=self.old_openai_upstream,
             openai_auth_mode=self.old_openai_auth_mode,
         )
+
+    def _enable_openai_canary(
+        self,
+        *,
+        canary_fraction=1.0,
+        holdout_fraction=0.0,
+        target_model="gpt-5-mini",
+        allow_stream=False,
+        safety_stop_enabled=False,
+        eligible_categories=None,
+    ):
+        policy_file = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+        categories = eligible_categories or ["chat", "short-completion"]
+        policy_file.write("\n".join([
+            "openai_canary:",
+            "  enabled: true",
+            "  policy_id: test-openai-local-canary",
+            "  promotion_action_id: test-openai-action",
+            "  target_candidate_id: test-openai-candidate",
+            "  model_pattern: gpt-5",
+            f"  target_model: {target_model}",
+            "  eligible_categories:",
+            *[f"    - {category}" for category in categories],
+            "  excluded_categories: []",
+            "  allow_tools: false",
+            f"  allow_stream: {'true' if allow_stream else 'false'}",
+            "  min_text_chars: 0",
+            "  max_text_chars: 8000",
+            "  min_input_tokens_est: 0",
+            "  max_input_tokens_est: 2000",
+            f"  canary_fraction: {canary_fraction}",
+            f"  holdout_fraction: {holdout_fraction}",
+            "  salt: test-openai-local-canary-salt",
+            "  safety_stop:",
+            f"    enabled: {'true' if safety_stop_enabled else 'false'}",
+            "rules: []",
+            "",
+        ]))
+        policy_file.close()
+        os.environ["AGENTFLOW_ROUTING_RULES"] = policy_file.name
+        importlib.reload(router_module)
+        self.addCleanup(lambda: os.path.exists(policy_file.name) and os.unlink(policy_file.name))
+        return policy_file.name
 
     def test_openai_route_persists_source_surface_and_sanitized_feature_summaries(self):
         request_body = {
@@ -991,6 +1100,124 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(managed["status"], "skipped")
         self.assertEqual(managed["apply_reason"], "disabled")
         self.assertFalse(managed["applied"])
+
+    def test_openai_local_canary_applies_in_responses_optimized_path(self):
+        self._enable_openai_canary(canary_fraction=1.0)
+        request_body = {"model": "gpt-5-codex", "input": "short prompt SECRET_OPENAI_CANARY"}
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        [row] = server.store.conn.execute(
+            "select requested_model, routed_model, routing_json, request_json from calls"
+        ).fetchall()
+        routing = json.loads(row["routing_json"])
+        canary = routing["openai_canary"]
+
+        self.assertEqual(row["requested_model"], "gpt-5-codex")
+        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertIsNone(row["request_json"])
+        self.assertEqual(canary["status"], "applied")
+        self.assertEqual(canary["cohort"], "canary_applied")
+        self.assertEqual(canary["rule_id"], "test-openai-local-canary")
+        self.assertEqual(canary["candidate_id"], "test-openai-candidate")
+        self.assertEqual(canary["original_model"], "gpt-5-codex")
+        self.assertEqual(canary["target_model"], "gpt-5-mini")
+        self.assertEqual(canary["actual_forwarded_model"], "gpt-5-mini")
+        self.assertTrue(canary["cohort_key_hash"].startswith("sha256:"))
+        self.assertIsNotNone(canary["projected_input_savings_usd"])
+        self.assertNotIn("SECRET_OPENAI_CANARY", row["routing_json"])
+
+    def test_openai_local_canary_holdout_keeps_chat_requested_model(self):
+        self._enable_openai_canary(canary_fraction=0.0, holdout_fraction=1.0)
+        request_body = {
+            "model": "gpt-5-codex",
+            "messages": [{"role": "user", "content": "short chat prompt"}],
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post("/v1/chat/completions", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        canary = json.loads(row["routing_json"])["openai_canary"]
+
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(canary["status"], "holdout")
+        self.assertEqual(canary["cohort"], "canary_holdout")
+        self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
+
+    def test_openai_local_canary_records_incompatible_target_noop(self):
+        self._enable_openai_canary(canary_fraction=1.0, target_model="claude-haiku-4-5-20251001")
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post(
+                "/v1/responses",
+                json={"model": "gpt-5-codex", "input": "short prompt"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        canary = json.loads(row["routing_json"])["openai_canary"]
+
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(canary["status"], "ineligible")
+        self.assertEqual(canary["reason"], "provider-mismatch")
+
+    def test_openai_local_canary_records_streaming_metadata_when_allowed(self):
+        self._enable_openai_canary(canary_fraction=1.0, allow_stream=True)
+        CapturingStreamingOpenAIClient.stream_calls = []
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingStreamingOpenAIClient):
+            response = TestClient(server.app).post(
+                "/v1/responses",
+                json={"model": "gpt-5-codex", "input": "short prompt", "stream": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingStreamingOpenAIClient.stream_calls[0]["json"]["model"], "gpt-5-mini")
+        [row] = server.store.conn.execute("select stream, routed_model, routing_json from calls").fetchall()
+        canary = json.loads(row["routing_json"])["openai_canary"]
+
+        self.assertEqual(row["stream"], 1)
+        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(canary["status"], "applied")
+        self.assertTrue(canary["stream"])
+
+    def test_openai_local_canary_rate_limit_fallback_records_requested_model(self):
+        self._enable_openai_canary(canary_fraction=1.0)
+        RateLimitThenSuccessOpenAIClient.calls = []
+        RateLimitThenSuccessOpenAIClient.status_code = 200
+        RateLimitThenSuccessOpenAIClient.response_body = CapturingOpenAIClient.response_body
+
+        async def no_sleep(delay):
+            return None
+
+        with patch.object(openai_proxy.asyncio, "sleep", new=no_sleep):
+            with patch.object(openai_proxy.httpx, "AsyncClient", RateLimitThenSuccessOpenAIClient):
+                response = TestClient(server.app).post(
+                    "/v1/responses",
+                    json={"model": "gpt-5-codex", "input": "short prompt"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(RateLimitThenSuccessOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(RateLimitThenSuccessOpenAIClient.calls[1]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select retry_count, routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        canary = routing["openai_canary"]
+
+        self.assertEqual(row["retry_count"], 1)
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(routing["fallback_reason"], "rate_limited")
+        self.assertEqual(routing["fallback_model"], "gpt-5-codex")
+        self.assertEqual(canary["status"], "applied")
+        self.assertEqual(canary["fallback_reason"], "rate_limited")
+        self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
 
 
 if __name__ == "__main__":

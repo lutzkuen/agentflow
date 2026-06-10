@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.store import stable_json
 
 HAIKU_DEFAULT = os.getenv("AGENTFLOW_HAIKU_MODEL", "claude-haiku-4-5-20251001")
@@ -760,16 +761,27 @@ def _openai_canary_base_meta(
     reason: str,
     status: str,
 ) -> dict[str, Any]:
+    current_input_cost = estimate_cost(requested, input_tokens_est, 0, provider="openai")
+    target_input_cost = estimate_cost(target_model, input_tokens_est, 0, provider="openai")
+    projected_savings = None
+    if current_input_cost is not None and target_input_cost is not None:
+        projected_savings = current_input_cost - target_input_cost
+    policy_id = str(ROUTING_OPENAI_CANARY.get("policy_id") or "local-openai-routing-canary-v1")
+    candidate_id = ROUTING_OPENAI_CANARY.get("target_candidate_id") or ROUTING_OPENAI_CANARY.get("promotion_action_id")
     return {
         "enabled": bool(ROUTING_OPENAI_CANARY.get("enabled")),
-        "policy_id": str(ROUTING_OPENAI_CANARY.get("policy_id") or "local-openai-routing-canary-v1"),
+        "policy_id": policy_id,
+        "rule_id": policy_id,
         "promotion_action_id": ROUTING_OPENAI_CANARY.get("promotion_action_id"),
         "target_candidate_id": ROUTING_OPENAI_CANARY.get("target_candidate_id"),
+        "candidate_id": candidate_id,
         "status": status,
         "cohort": "none",
         "reason": reason,
+        "original_model": requested,
         "requested_model": requested,
         "target_model": target_model,
+        "actual_forwarded_model": requested,
         "source_surface": "openai_provider_request",
         "app_family": "generic_openai",
         "category": category,
@@ -777,6 +789,9 @@ def _openai_canary_base_meta(
         "text_bucket": _text_bucket(text_chars),
         "input_tokens_est": input_tokens_est,
         "token_bucket": _text_bucket(input_tokens_est * 4),
+        "current_input_cost_est_usd": current_input_cost,
+        "target_input_cost_est_usd": target_input_cost,
+        "projected_input_savings_usd": projected_savings,
         "has_tools": tools,
         "stream": stream,
         "canary_fraction": float(ROUTING_OPENAI_CANARY.get("canary_fraction") or 0.0),
@@ -993,16 +1008,32 @@ def openai_canary_decision(
     canary_fraction = float(ROUTING_OPENAI_CANARY.get("canary_fraction") or 0.0)
     meta.update({
         "cohort_hash": cohort_hash,
+        "cohort_key_hash": cohort_hash,
         "cohort_score": round(score, 12),
         "cohort_features": cohort_payload,
     })
     if score < holdout_fraction:
-        meta.update({"status": "holdout", "cohort": "canary_holdout", "reason": "selected-holdout"})
+        meta.update({
+            "status": "holdout",
+            "cohort": "canary_holdout",
+            "reason": "selected-holdout",
+            "actual_forwarded_model": requested,
+        })
         return requested, meta
     if score < holdout_fraction + canary_fraction:
-        meta.update({"status": "applied", "cohort": "canary_applied", "reason": "selected-canary"})
+        meta.update({
+            "status": "applied",
+            "cohort": "canary_applied",
+            "reason": "selected-canary",
+            "actual_forwarded_model": target_model,
+        })
         return target_model, meta
-    meta.update({"status": "not_selected", "cohort": "skipped", "reason": "outside-canary-fraction"})
+    meta.update({
+        "status": "not_selected",
+        "cohort": "skipped",
+        "reason": "outside-canary-fraction",
+        "actual_forwarded_model": requested,
+    })
     return requested, meta
 
 

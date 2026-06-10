@@ -367,6 +367,12 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                                                 _rate_limited_model = crunched.get("model")
                                                 crunched["model"] = resolved_requested_model
                                                 routing_meta["fallback_reason"] = "rate_limited"
+                                                routing_meta["fallback_model"] = resolved_requested_model
+                                                openai_canary = routing_meta.get("openai_canary")
+                                                if isinstance(openai_canary, dict):
+                                                    openai_canary["fallback_reason"] = "rate_limited"
+                                                    openai_canary["fallback_model"] = resolved_requested_model
+                                                    openai_canary["actual_forwarded_model"] = resolved_requested_model
                                                 print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                                             await asyncio.sleep(delay)
                                             continue
@@ -690,6 +696,12 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                             _rate_limited_model = crunched.get("model")
                             crunched["model"] = resolved_requested_model
                             routing_meta["fallback_reason"] = "rate_limited"
+                            routing_meta["fallback_model"] = resolved_requested_model
+                            openai_canary = routing_meta.get("openai_canary")
+                            if isinstance(openai_canary, dict):
+                                openai_canary["fallback_reason"] = "rate_limited"
+                                openai_canary["fallback_model"] = resolved_requested_model
+                                openai_canary["actual_forwarded_model"] = resolved_requested_model
                             print(f"openai_rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                         await asyncio.sleep(delay)
                         continue
