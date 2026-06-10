@@ -19,6 +19,7 @@ if HAS_RUNTIME_DEPS:
 
     from agentflow_proxy import server, stats as stats_views
     from agentflow_proxy.dashboard_app import create_dashboard_app
+    from agentflow_proxy import routing_experiments
     from agentflow_proxy.store import Store, stable_json, utc_now
 
 
@@ -5423,6 +5424,157 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(row["confidence_score"], 0.08, places=6)
         self.assertEqual(row["min_samples_for_confidence"], 20)
         json.dumps(result["routing_experiment_summary"])
+
+    def _log_shadow_routing_promotion_sample(
+        self,
+        *,
+        candidate: str,
+        idx: int,
+        created_at: str | None = None,
+        mode: str = "shadow_candidate_pass_through",
+        passed: bool = True,
+        shadow_status_code: int | None = 200,
+        fallback: bool = False,
+        error: str | None = None,
+    ) -> None:
+        similarity = 0.94 if passed else 0.7
+        experiment_json = {
+            "mode": mode,
+            "counterfactual": mode == "shadow_candidate_pass_through",
+            "shadow_only": mode == "shadow_candidate_pass_through",
+            "workflow_phase": "summary",
+            "raw_prompt": "raw shadow readiness prompt",
+            "response_body": "raw shadow readiness response",
+            "request_id": "req-shadow-secret",
+            "session_id": "session-shadow-secret",
+            "file_path": "/tmp/shadow-secret.py",
+            "cache_key": "cache-shadow-secret",
+            "tool_payload": {"secret": "tool-shadow-secret"},
+        }
+        routing_json = {"workflow_phase": "summary"}
+        if fallback:
+            routing_json["fallback_reason"] = "rate_limited"
+        server.store.log_routing_experiment(
+            id=f"shadow-readiness-{candidate}-{idx}",
+            call_id=f"shadow-call-secret-{candidate}-{idx}",
+            created_at=created_at or utc_now(),
+            provider="openai",
+            source_surface="codex_turn",
+            requested_model="gpt-5-codex",
+            routed_model="gpt-5-mini",
+            primary_model="gpt-5-codex",
+            shadow_model="gpt-5-mini",
+            category=f"codex-{candidate}",
+            routing_reason="sampled-shadow-candidate-pass-through",
+            input_tokens_est=100,
+            primary_status_code=200,
+            shadow_status_code=shadow_status_code,
+            primary_latency_ms=120,
+            shadow_latency_ms=80,
+            primary_output_chars=20,
+            shadow_output_chars=18,
+            primary_output_sha256=f"primary-{candidate}-{idx}",
+            shadow_output_sha256=f"shadow-{candidate}-{idx}",
+            output_similarity=similarity if shadow_status_code and shadow_status_code < 400 else None,
+            passed_threshold=1 if passed else 0,
+            primary_cost_est_usd=0.003,
+            shadow_cost_est_usd=0.001,
+            routing_json=stable_json(routing_json),
+            experiment_json=stable_json(experiment_json),
+            error=error,
+        )
+
+    def _patch_shadow_routing_promotion_thresholds(self):
+        return patch.multiple(
+            routing_experiments,
+            ROUTING_EXPERIMENT_ENABLED=True,
+            ROUTING_EXPERIMENT_MIN_SAMPLES=3,
+            ROUTING_EXPERIMENT_SAMPLE_RATE=0.25,
+            ROUTING_EXPERIMENT_DAILY_BUDGET_USD=10.0,
+            ROUTING_EXPERIMENT_POLICY={
+                "profile_id": "test-shadow-readiness",
+                "mode": "shadow_candidate_pass_through",
+                "sample_rate": 0.25,
+                "daily_budget_usd": 10.0,
+                "min_samples_for_confidence": 3,
+                "providers": ["openai"],
+                "source_surfaces": ["codex_turn"],
+                "model_pairs": [{"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"}],
+                "categories": [],
+                "workflow_phases": [],
+            },
+        )
+
+    def test_shadow_routing_promotion_readiness_endpoint_and_dashboard_are_metadata_only(self):
+        stale = "2025-01-01T00:00:00+00:00"
+        with self._patch_shadow_routing_promotion_thresholds():
+            for idx in range(3):
+                self._log_shadow_routing_promotion_sample(candidate="promote", idx=idx)
+                self._log_shadow_routing_promotion_sample(candidate="hold", idx=idx, created_at=stale)
+                self._log_shadow_routing_promotion_sample(candidate="reject", idx=idx, passed=False)
+                self._log_shadow_routing_promotion_sample(candidate="applied", idx=idx, mode="applied_routed_down")
+            self._log_shadow_routing_promotion_sample(candidate="needs", idx=0)
+
+            result = asyncio.run(stats_views.stats_shadow_routing_promotion_readiness(server.store, limit=20))
+            app = create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.example.invalid",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            endpoint = client.get("/agentflow/stats/shadow-routing-promotion-readiness?limit=20")
+            html = client.get("/agentflow/dashboard")
+
+        self.assertEqual(result["schema"], "agentflow.shadow_routing_promotion_readiness.v1")
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["wrote_local_files"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        verdicts = {row["promotion_verdict"] for row in result["candidates"]}
+        self.assertIn("promote", verdicts)
+        self.assertIn("hold", verdicts)
+        self.assertIn("needs_more_samples", verdicts)
+        self.assertIn("reject", verdicts)
+        self.assertGreater(result["summary"]["applied_canary_count"], 0)
+        self.assertGreater(result["summary"]["shadow_only_count"], 0)
+        applied = next(row for row in result["candidates"] if row["sample_mode"] == "applied_routed_down")
+        holdout = next(row for row in result["candidates"] if row["sample_mode"] == "shadow_candidate_pass_through")
+        self.assertTrue(applied["canary"]["canary_evidence"])
+        self.assertGreater(applied["canary"]["applied_count"], 0)
+        self.assertTrue(holdout["canary"]["shadow_only"])
+        self.assertGreater(holdout["canary"]["holdout_count"], 0)
+        self.assertIn("readiness_state", applied)
+        self.assertIn("fallback_or_retry_count", applied)
+        self.assertIn("avg_latency_delta_ms", applied)
+        self.assertEqual(endpoint.status_code, 200)
+        endpoint_verdicts = {row["promotion_verdict"] for row in endpoint.json()["candidates"]}
+        self.assertEqual(endpoint_verdicts, verdicts)
+        self.assertEqual(html.status_code, 200)
+        self.assertIn("/agentflow/stats/shadow-routing-promotion-readiness", html.text)
+        self.assertIn("Shadow-routing promotion readiness", html.text)
+        self.assertIn("shadow-routing-promotion-candidates-tbody", html.text)
+        rendered = json.dumps(endpoint.json(), sort_keys=True) + html.text
+        self.assertIn("metadata only", html.text)
+        for forbidden in (
+            "raw shadow readiness prompt",
+            "raw shadow readiness response",
+            "req-shadow-secret",
+            "session-shadow-secret",
+            "/tmp/shadow-secret.py",
+            "cache-shadow-secret",
+            "tool-shadow-secret",
+            "shadow-call-secret",
+            '"raw_prompt"',
+            '"request_id"',
+            '"session_id"',
+            '"file_path"',
+            '"cache_key"',
+            '"tool_payload"',
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_sessions_include_thinking_token_breakdown(self):
         server.store.log_call(

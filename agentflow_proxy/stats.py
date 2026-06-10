@@ -6528,6 +6528,220 @@ async def stats_openai_canary_readiness(store_obj: Any, limit: int = 1000) -> di
     }
 
 
+def _shadow_routing_candidate_id(row: dict[str, Any]) -> str:
+    parts = [
+        row.get("provider"),
+        row.get("source_surface"),
+        row.get("requested_model"),
+        row.get("routed_model"),
+        row.get("category"),
+        row.get("workflow_phase"),
+    ]
+    payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"shadow-route-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _shadow_routing_readiness_state(verdict: str, mode: str) -> str:
+    if verdict == "promote":
+        return "ready-to-stage" if mode == "shadow_candidate_pass_through" else "ready-to-widen"
+    if verdict == "needs_more_samples":
+        return "needs-more-samples"
+    if verdict == "hold":
+        return "held"
+    if verdict == "reject":
+        return "rejected"
+    return "unknown"
+
+
+def _shadow_routing_candidate_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for candidate in report.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        promotion = candidate.get("promotion") if isinstance(candidate.get("promotion"), dict) else {}
+        coverage = promotion.get("coverage") if isinstance(promotion.get("coverage"), dict) else {}
+        thresholds = promotion.get("thresholds") if isinstance(promotion.get("thresholds"), dict) else {}
+        budget = promotion.get("budget") if isinstance(promotion.get("budget"), dict) else {}
+        mode = str(candidate.get("mode") or "unknown")
+        verdict = str(candidate.get("promotion_verdict") or promotion.get("verdict") or "unknown")
+        samples = _as_int(candidate.get("samples"))
+        compared = _as_int(candidate.get("compared_samples"))
+        shadow_only = bool(promotion.get("shadow_only") or mode == "shadow_candidate_pass_through")
+        canary_evidence = bool(promotion.get("canary_evidence") or mode == "applied_routed_down")
+        applied_count = samples if canary_evidence else 0
+        holdout_count = samples if shadow_only else 0
+        fallback_retry_count = _as_int(candidate.get("fallback_or_retry_count"))
+        sample_rate = _as_float(policy.get("sample_rate"))
+        row = {
+            "candidate_id": _shadow_routing_candidate_id(candidate),
+            "provider": str(candidate.get("provider") or "unknown"),
+            "source_surface": str(candidate.get("source_surface") or "unknown"),
+            "requested_model": candidate.get("requested_model"),
+            "routed_model": candidate.get("routed_model"),
+            "model_pair": f"{candidate.get('requested_model') or 'unknown'} -> {candidate.get('routed_model') or 'unknown'}",
+            "category": str(candidate.get("category") or "unknown"),
+            "workflow_phase": str(candidate.get("workflow_phase") or "unknown"),
+            "sample_mode": mode,
+            "sample_rate": sample_rate,
+            "sample_count": samples,
+            "compared_count": compared,
+            "compared_coverage": _as_float(candidate.get("compared_coverage")),
+            "pass_rate": candidate.get("pass_rate"),
+            "avg_similarity": candidate.get("avg_similarity"),
+            "primary_error_rate": _as_float(candidate.get("primary_error_rate")),
+            "shadow_error_rate": _as_float(candidate.get("shadow_error_rate")),
+            "fallback_or_retry_count": fallback_retry_count,
+            "fallback_or_retry_rate": round(fallback_retry_count / samples, 6) if samples else 0.0,
+            "cost_delta_usd": _as_float(candidate.get("cost_delta_usd")),
+            "avg_latency_delta_ms": candidate.get("avg_latency_delta_ms"),
+            "last_sample_at": candidate.get("last_sample_at"),
+            "last_sample_age_hours": candidate.get("last_sample_age_hours"),
+            "promotion_verdict": verdict,
+            "readiness_state": _shadow_routing_readiness_state(verdict, mode),
+            "promotion_ready": bool(promotion.get("promotion_ready")),
+            "promotion_scope": str(promotion.get("promotion_scope") or "unknown"),
+            "evidence_kind": str(promotion.get("evidence_kind") or ("shadow_pass_through" if shadow_only else "applied_canary")),
+            "reason_codes": [
+                str(reason)
+                for reason in (candidate.get("promotion_reason_codes") or promotion.get("reason_codes") or [])
+                if reason is not None
+            ][:10],
+            "thresholds": {
+                "min_samples": _as_int(thresholds.get("min_samples")),
+                "min_compared_coverage": _as_float(thresholds.get("min_compared_coverage")),
+                "min_similarity_pass_rate": _as_float(thresholds.get("min_similarity_pass_rate")),
+                "max_shadow_error_rate": _as_float(thresholds.get("max_shadow_error_rate")),
+                "max_primary_error_rate": _as_float(thresholds.get("max_primary_error_rate")),
+                "freshness_max_age_hours": _as_int(thresholds.get("freshness_max_age_hours")),
+            },
+            "freshness": {
+                "age_hours": candidate.get("last_sample_age_hours"),
+                "fresh": "stale-evidence" not in (candidate.get("promotion_reason_codes") or []),
+            },
+            "canary": {
+                "applied_count": applied_count,
+                "holdout_count": holdout_count,
+                "applied_fraction": sample_rate if canary_evidence else 0.0,
+                "holdout_fraction": sample_rate if shadow_only else 0.0,
+                "shadow_only": shadow_only,
+                "canary_evidence": canary_evidence,
+                "safety_stop_state": "clear",
+                "safety_stop_count": 0,
+            },
+            "budget": {
+                "daily_budget_usd": _as_float(budget.get("daily_budget_usd")),
+                "today_shadow_spend_usd": _as_float(budget.get("today_shadow_spend_usd")),
+                "daily_budget_exhausted": bool(budget.get("daily_budget_exhausted")),
+            },
+            "routing_reasons": candidate.get("routing_reasons") or [],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "content_free": True,
+                "raw_prompts_included": False,
+                "raw_provider_bodies_included": False,
+                "raw_responses_included": False,
+                "tool_payloads_included": False,
+                "request_ids_included": False,
+                "raw_session_ids_included": False,
+                "filesystem_paths_included": False,
+                "cache_keys_included": False,
+                "api_keys_included": False,
+            },
+        }
+        rows.append(row)
+    rows.sort(
+        key=lambda item: (
+            str(item.get("readiness_state") or ""),
+            -_as_int(item.get("sample_count")),
+            str(item.get("candidate_id") or ""),
+        )
+    )
+    return rows
+
+
+async def stats_shadow_routing_promotion_readiness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 500), 1000))
+    report = build_routing_experiment_report(store_obj, limit=capped_limit)
+    policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    candidates = _shadow_routing_candidate_rows(report)
+    verdict_counts: dict[str, int] = {}
+    readiness_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    for row in candidates:
+        _increment_count(verdict_counts, row.get("promotion_verdict"))
+        _increment_count(readiness_counts, row.get("readiness_state"))
+        for reason in row.get("reason_codes") or []:
+            _increment_count(reason_counts, reason)
+    return {
+        "schema": "agentflow.shadow_routing_promotion_readiness.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "policy": {
+            "profile_id": policy.get("profile_id"),
+            "enabled": bool(policy.get("enabled")),
+            "mode": policy.get("mode"),
+            "policy_source": policy.get("policy_source"),
+            "sample_rate": _as_float(policy.get("sample_rate")),
+            "daily_budget_usd": _as_float(policy.get("daily_budget_usd")),
+            "today_shadow_spend_usd": _as_float(policy.get("today_shadow_spend_usd")),
+            "daily_budget_exhausted": bool(policy.get("daily_budget_exhausted")),
+            "provider_count": len(policy.get("providers") or []),
+            "source_surface_count": len(policy.get("source_surfaces") or []),
+            "model_pair_count": len(policy.get("model_pairs") or []),
+        },
+        "summary": {
+            "candidate_count": len(candidates),
+            "sample_count": _as_int(summary.get("sample_count")),
+            "compared_count": _as_int(summary.get("comparison_count")),
+            "shadow_only_count": sum(_as_int((row.get("canary") or {}).get("holdout_count")) for row in candidates),
+            "applied_canary_count": sum(_as_int((row.get("canary") or {}).get("applied_count")) for row in candidates),
+            "promotion_ready_count": sum(1 for row in candidates if row.get("promotion_verdict") == "promote"),
+            "hold_count": sum(1 for row in candidates if row.get("promotion_verdict") == "hold"),
+            "needs_more_samples_count": sum(1 for row in candidates if row.get("promotion_verdict") == "needs_more_samples"),
+            "reject_count": sum(1 for row in candidates if row.get("promotion_verdict") == "reject"),
+            "avg_similarity": summary.get("avg_similarity"),
+            "pass_rate": summary.get("pass_rate"),
+            "cost_delta_usd": _as_float(summary.get("cost_delta_usd")),
+            "avg_latency_delta_ms": summary.get("avg_latency_delta_ms"),
+            "sample_mode_counts": summary.get("sample_mode_counts") or {},
+            "managed_feedback_status_counts": summary.get("feedback_status_counts") or {},
+        },
+        "promotion_verdict_counts": _count_breakdown(verdict_counts),
+        "readiness_counts": _count_breakdown(readiness_counts),
+        "reason_counts": _count_breakdown(reason_counts),
+        "candidates": candidates,
+        "source_reports": {
+            "routing_experiment_report_schema": report.get("schema"),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "api_keys_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "sanitized local routing experiment promotion aggregates only",
+        },
+    }
+
+
 async def stats_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_routing_report import build_openai_routing_report
 
@@ -13277,6 +13491,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Shadow-routing promotion readiness</h2>
+  <table data-table-id="shadow-routing-promotion-summary" data-filter-label="Filter shadow-routing promotion summary">
+    <thead><tr>
+      <th data-sort-type="number">Candidates</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="number">Promote</th><th data-sort-type="number">Hold</th><th data-sort-type="number">Needs samples</th><th data-sort-type="number">Reject</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="money">Cost delta</th><th data-sort-type="text">Managed feedback</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="shadow-routing-promotion-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Shadow-routing promotion candidates</h2>
+  <table class="activity-table" data-table-id="shadow-routing-promotion-candidates" data-filter-label="Filter shadow-routing promotion candidates">
+    <thead><tr>
+      <th data-sort-type="text">Readiness</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Phase / category</th><th data-sort-type="text">Sample mode</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="percent">Shadow errors</th><th data-sort-type="number">Fallback/retry</th><th data-sort-type="money">Cost delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Canary health</th><th data-sort-type="time">Freshness</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="shadow-routing-promotion-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Routing A/B experiments</h2>
   <table class="activity-table" data-table-id="routing-experiments" data-filter-label="Filter routing A/B experiments">
     <thead><tr>
@@ -14777,6 +15009,78 @@ function promotionReasonBadges(row){
   if(!combined.length)return'<span class="badge hit">none</span>';
   return combined.slice(0,5).map(item=>`<span class="badge miss">${esc(item.value||item)}${item.count!=null?' '+Number(item.count||0).toLocaleString():''}</span>`).join(' ');
 }
+function shadowPromotionBadge(status){
+  if(status==='ready-to-stage'||status==='ready-to-widen'||status==='promote')return'hit';
+  if(status==='rejected'||status==='reject')return'err';
+  if(status==='held'||status==='hold')return'routed';
+  if(status==='needs-more-samples'||status==='needs_more_samples')return'miss';
+  return'provider';
+}
+function shadowPromotionReasonBadges(reasons){
+  reasons=reasons||[];
+  if(!reasons.length)return'<span class="badge hit">promotion-thresholds-met</span>';
+  return reasons.slice(0,5).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
+}
+async function refreshShadowRoutingPromotionReadiness(){
+  try{
+    const r=await fetch('/agentflow/stats/shadow-routing-promotion-readiness?limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    const feedback=s.managed_feedback_status_counts||{};
+    const feedbackBadges=Object.keys(feedback).length
+      ? Object.entries(feedback).slice(0,4).map(([key,value])=>`<span class="badge provider">${esc(key)} ${Number(value||0).toLocaleString()}</span>`).join(' ')
+      : '<span class="badge miss">not-exported</span>';
+    document.getElementById('shadow-routing-promotion-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.sample_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.compared_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.promotion_ready_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.hold_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.needs_more_samples_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.reject_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_canary_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.shadow_only_count||0).toLocaleString()}</td>
+      <td class="tokens">${s.pass_rate==null?'—':fmtPctValue(s.pass_rate)}</td>
+      <td class="${(s.cost_delta_usd||0)<0?'cost':'savings'}">${fmt(s.cost_delta_usd||0,6)}</td>
+      <td class="flags">${feedbackBadges}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">request IDs omitted</span> <span class="badge hit">payload omitted</span></td>
+    </tr>`;
+    const rows=d.candidates||[];
+    document.getElementById('shadow-routing-promotion-candidates-tbody').innerHTML=rows.map(row=>{
+      const canary=row.canary||{};
+      const phase=[row.workflow_phase,row.category].filter(Boolean).join(' / ');
+      const health=[
+        `<span class="badge ${canary.canary_evidence?'hit':'miss'}">applied ${(canary.applied_count||0).toLocaleString()}</span>`,
+        `<span class="badge ${canary.shadow_only?'routed':'miss'}">holdout ${(canary.holdout_count||0).toLocaleString()}</span>`,
+        `<span class="badge ${canary.safety_stop_count?'err':'hit'}">safety ${esc(canary.safety_stop_state||'clear')}</span>`,
+        `<span class="badge provider">canary ${fmtPctValue(canary.applied_fraction||0)}</span>`,
+        `<span class="badge provider">holdout ${fmtPctValue(canary.holdout_fraction||0)}</span>`
+      ].join(' ');
+      return `<tr>
+        <td><span class="badge ${shadowPromotionBadge(row.readiness_state)}">${esc(row.readiness_state||'unknown')}</span></td>
+        <td><span class="badge ${shadowPromotionBadge(row.promotion_verdict)}">${esc(row.promotion_verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.candidate_id||'unknown')}</td>
+        <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="model">${esc(shortModel(row.requested_model))} → ${esc(shortModel(row.routed_model))}</td>
+        <td class="model">${esc(phase||'unknown')}</td>
+        <td><span class="badge provider">${esc(row.sample_mode||'unknown')}</span> <span class="badge miss">${esc(row.evidence_kind||'unknown')}</span></td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.compared_count||0).toLocaleString()} <span class="badge provider">${fmtPctValue(row.compared_coverage||0)}</span></td>
+        <td class="tokens">${row.pass_rate==null?'—':fmtPctValue(row.pass_rate)}</td>
+        <td class="${(row.shadow_error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.shadow_error_rate||0)}</td>
+        <td class="tokens">${(row.fallback_or_retry_count||0).toLocaleString()} <span class="badge ${row.fallback_or_retry_count?'routed':'hit'}">${fmtPctValue(row.fallback_or_retry_rate||0)}</span></td>
+        <td class="${(row.cost_delta_usd||0)<0?'cost':'savings'}">${fmt(row.cost_delta_usd||0,6)}</td>
+        <td class="latency">${fmtMs(row.avg_latency_delta_ms)}</td>
+        <td class="flags">${health}</td>
+        <td class="ts">${row.last_sample_at?ago(row.last_sample_at):'—'} ${row.freshness&&row.freshness.fresh?'<span class="badge hit">fresh</span>':'<span class="badge routed">stale</span>'}</td>
+        <td class="flags">${shadowPromotionReasonBadges(row.reason_codes)}</td>
+        <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">content omitted</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="18" style="color:#8b949e">No shadow-routing promotion candidates recorded in local metadata</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshOptimizationPromotionFunnel(){
   try{
     const r=await fetch('/agentflow/stats/optimization-promotion-funnel?limit=500');
@@ -15405,6 +15709,7 @@ refreshSafety();
 refreshPolicies();
 refreshOpenAICanaryReadiness();
 refreshOpenAIScoreboard();
+refreshShadowRoutingPromotionReadiness();
 refreshOptimizationPromotionFunnel();
 refreshOptimizationEvalQueue();
 refreshManaged();
@@ -15426,6 +15731,7 @@ setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
 setInterval(refreshOpenAICanaryReadiness,30000);
 setInterval(refreshOpenAIScoreboard,30000);
+setInterval(refreshShadowRoutingPromotionReadiness,30000);
 setInterval(refreshOptimizationPromotionFunnel,30000);
 setInterval(refreshOptimizationEvalQueue,30000);
 setInterval(refreshManaged,30000);

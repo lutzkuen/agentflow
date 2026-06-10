@@ -169,6 +169,10 @@ def create_dashboard_router(
     async def stats_openai_canary_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_canary_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/shadow-routing-promotion-readiness")
+    async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_shadow_routing_promotion_readiness(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/optimization-eval-queue")
     async def stats_optimization_eval_queue(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_eval_queue(_store(store_obj), limit=limit)
