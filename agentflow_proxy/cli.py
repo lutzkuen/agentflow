@@ -3150,6 +3150,99 @@ def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: 
     return 0
 
 
+def routing_promotion_draft_stage_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Stage local policy drafts from promoted routing experiment candidates")
+    parser.add_argument(
+        "promotion_report",
+        nargs="?",
+        help="Routing experiment promotion report JSON path, or '-' for stdin. If omitted, a fresh report is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=20, help="Maximum candidate rows when building a fresh report, default: 20.")
+    parser.add_argument(
+        "--draft-id",
+        help="Optional local draft ID. When multiple promoted candidates are staged, a numeric suffix is added.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--initial-canary-fraction",
+        type=float,
+        default=0.10,
+        help="Deterministic applied canary fraction for staged routing canaries, default: 0.10.",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.10,
+        help="Deterministic holdout fraction for staged routing canaries, default: 0.10.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.promotion_report:
+        report = _read_json_input(str(args.promotion_report), stdin=stdin)
+    else:
+        from agentflow_proxy.routing_experiments import build_routing_experiment_report
+
+        store = _open_store_for_db(str(args.db))
+        try:
+            report = build_routing_experiment_report(store, limit=args.limit)
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.routing_promotion_drafts import stage_routing_promotion_drafts
+
+    result = asyncio.run(stage_routing_promotion_drafts(
+        report,
+        draft_id=args.draft_id,
+        workspace=args.workspace,
+        initial_canary_fraction=args.initial_canary_fraction,
+        holdout_fraction=args.holdout_fraction,
+    ))
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "routing-promotion-draft-stage",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.promotion_report,
+            "workspace": args.workspace,
+            "candidate_count": summary.get("candidate_count", 0),
+            "promoted_candidate_count": summary.get("promoted_candidate_count", 0),
+            "staged_count": summary.get("staged_count", 0),
+            "omitted_count": summary.get("omitted_count", 0),
+            "wrote_active_policy_files": False,
+            "reloaded_modules": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure replay-safe cache opportunity and blockers from local metadata")
     parser.add_argument(
@@ -5085,6 +5178,10 @@ def openai_canary_impact_main() -> None:
 
 def routing_experiment_report_main() -> None:
     raise SystemExit(routing_experiment_report_cli())
+
+
+def routing_promotion_draft_stage_main() -> None:
+    raise SystemExit(routing_promotion_draft_stage_cli())
 
 
 def phase_routing_report_main() -> None:

@@ -106,6 +106,8 @@ _RAW_POLICY_PAYLOAD_KEYS = {
     "contents",
     "file_content",
     "file_contents",
+    "file_path",
+    "file_paths",
     "message",
     "messages",
     "password",
@@ -137,6 +139,14 @@ _RAW_POLICY_PAYLOAD_KEYS = {
     "tool_results",
     "transcript",
     "transcripts",
+}
+_RAW_POLICY_PAYLOAD_ALLOWED_KEYS = {
+    "raw_prompts_included",
+    "raw_responses_included",
+    "raw_provider_bodies_included",
+    "raw_tool_payloads_included",
+    "raw_session_ids_included",
+    "raw_request_ids_included",
 }
 
 
@@ -171,6 +181,9 @@ def _raw_payload_errors(value: Any, *, path: str = "$") -> list[dict[str, str]]:
             for key, child in item.items():
                 child_path = f"{item_path}.{key}"
                 lowered = str(key).strip().lower()
+                if lowered in _RAW_POLICY_PAYLOAD_ALLOWED_KEYS:
+                    walk(child, child_path)
+                    continue
                 if lowered in _RAW_POLICY_PAYLOAD_KEYS or lowered.startswith("raw_"):
                     errors.append({
                         "path": child_path,

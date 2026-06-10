@@ -5840,6 +5840,185 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(payload["error"]["type"], "raw_payload_rejected")
             self.assertFalse((Path(tmp) / "drafts").exists())
 
+    def _routing_promotion_report(self, *, extra_candidate=None):
+        promoted = {
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "requested_model": "claude-sonnet-4-6",
+            "routed_model": "claude-haiku-4-5-20251001",
+            "category": "tool-result",
+            "workflow_phase": "tool-execution",
+            "mode": "shadow_candidate_pass_through",
+            "samples": 24,
+            "compared_samples": 24,
+            "compared_coverage": 1.0,
+            "avg_similarity": 0.94,
+            "pass_rate": 1.0,
+            "primary_error_rate": 0.0,
+            "shadow_error_rate": 0.0,
+            "fallback_or_retry_count": 0,
+            "cost_delta_usd": 0.42,
+            "avg_latency_delta_ms": -12.5,
+            "last_sample_at": "2026-06-10T22:00:00+00:00",
+            "last_sample_age_hours": 1.0,
+            "promotion": {
+                "schema": "agentflow.routing_experiment_promotion_verdict.v1",
+                "verdict": "promote",
+                "promotion_ready": True,
+                "reason_codes": ["promotion-thresholds-met"],
+                "evidence_kind": "shadow_pass_through",
+                "promotion_scope": "stage_local_canary_from_shadow",
+                "shadow_only": True,
+                "canary_evidence": False,
+                "thresholds": {
+                    "min_samples": 20,
+                    "min_compared_coverage": 0.8,
+                    "min_similarity_pass_rate": 0.9,
+                    "max_shadow_error_rate": 0.05,
+                    "max_primary_error_rate": 0.05,
+                    "freshness_max_age_hours": 168,
+                },
+                "coverage": {"samples": 24, "compared_samples": 24, "compared_coverage": 1.0},
+                "budget": {"daily_budget_usd": 10.0, "today_shadow_spend_usd": 0.1, "daily_budget_exhausted": False},
+            },
+            "promotion_verdict": "promote",
+            "promotion_reason_codes": ["promotion-thresholds-met"],
+        }
+        held = {
+            **promoted,
+            "category": "chat",
+            "workflow_phase": "summary",
+            "samples": 4,
+            "compared_samples": 4,
+            "promotion": {
+                **promoted["promotion"],
+                "verdict": "hold",
+                "promotion_ready": False,
+                "reason_codes": ["stale-evidence"],
+            },
+            "promotion_verdict": "hold",
+            "promotion_reason_codes": ["stale-evidence"],
+        }
+        candidates = [promoted, held]
+        if extra_candidate is not None:
+            candidates.append(extra_candidate)
+        return {
+            "schema": "agentflow.routing_experiment_report.v1",
+            "generated_at": "2026-06-10T22:30:00+00:00",
+            "policy": {
+                "policy_source": "local-default",
+                "min_text_chars": 0,
+                "max_text_chars": 8000,
+                "daily_budget_usd": 10.0,
+            },
+            "candidates": candidates,
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_responses_included_by_default": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "file_paths_included": False,
+            },
+        }
+
+    def test_routing_promotion_draft_stage_cli_stages_only_promoted_shadow_candidate(self):
+        with TemporaryDirectory() as tmp:
+            active_path = Path(tmp) / "routing_rules.yaml"
+            active_text = "rules: []\nphase_canary:\n  enabled: false\n"
+            active_path.write_text(active_text, encoding="utf-8")
+            report_path = Path(tmp) / "routing_report.json"
+            report_path.write_text(json.dumps(self._routing_promotion_report()), encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            stdout = io.StringIO()
+
+            from agentflow_proxy import router
+            from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+
+            with (
+                patch.object(router, "ROUTING_RULES_PATH", str(active_path)),
+                patch.object(router, "ROUTING_RULES_SOURCE", "local-manual"),
+                patch.object(router, "ROUTING_RULES_LOADED_AT", utc_now()),
+                patch.object(router, "ROUTING_RULES_LOADED_FILE", policy_file_snapshot(active_path)),
+            ):
+                code = cli.routing_promotion_draft_stage_cli(
+                    [
+                        str(report_path),
+                        "--workspace",
+                        str(workspace),
+                        "--draft-id",
+                        "shadow-routing-promotion",
+                        "--initial-canary-fraction",
+                        "0.12",
+                        "--holdout-fraction",
+                        "0.08",
+                    ],
+                    stdout=stdout,
+                )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["summary"]["candidate_count"], 2)
+            self.assertEqual(payload["summary"]["staged_count"], 1)
+            self.assertEqual(payload["summary"]["omitted_count"], 1)
+            self.assertEqual(payload["omitted"][0]["reason"], "not-promoted")
+            self.assertFalse(payload["wrote_active_policy_files"])
+            self.assertFalse(payload["provider_calls_made"])
+            self.assertEqual(active_path.read_text(encoding="utf-8"), active_text)
+
+            staged = payload["staged_drafts"][0]
+            self.assertEqual(staged["section"], "routing")
+            self.assertEqual(staged["target_local_policy"], "phase_canary")
+            self.assertEqual(staged["canary_fraction"], 0.12)
+            self.assertEqual(staged["holdout_fraction"], 0.08)
+            bundle = json.loads(Path(staged["bundle_path"]).read_text(encoding="utf-8"))
+            canary = bundle["policies"]["routing"]["phase_canary"]
+            self.assertTrue(canary["enabled"])
+            self.assertEqual(canary["target_model"], "claude-haiku-4-5-20251001")
+            self.assertEqual(canary["eligible_categories"], ["tool-result"])
+            self.assertEqual(canary["eligible_workflow_phases"], ["tool-execution"])
+            self.assertEqual(canary["promotion"]["evidence_summary"]["samples"], 24)
+            self.assertEqual(canary["promotion"]["rollback_metadata"]["rollback_action_type"], "disable_canary")
+            rendered = json.dumps(canary["promotion"], sort_keys=True)
+            self.assertIn("tool-result", rendered)
+            self.assertNotIn('"category": "chat"', rendered)
+            for secret in ("raw prompt secret", "req_123", "session-abc", "/tmp/private.py", "cache-key-secret"):
+                self.assertNotIn(secret, rendered)
+
+    def test_routing_promotion_draft_stage_cli_rejects_raw_and_stale_candidates(self):
+        raw_report = self._routing_promotion_report()
+        raw_report["candidates"][0]["raw_prompt"] = "raw prompt secret"
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.routing_promotion_draft_stage_cli(
+                ["-", "--workspace", str(Path(tmp) / "drafts")],
+                stdin=io.StringIO(json.dumps(raw_report)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "raw_payload_rejected")
+            self.assertFalse((Path(tmp) / "drafts").exists())
+            self.assertNotIn("raw prompt secret", stdout.getvalue())
+
+        stale_report = self._routing_promotion_report()
+        stale_report["candidates"][0]["last_sample_age_hours"] = 999
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.routing_promotion_draft_stage_cli(
+                ["-", "--workspace", str(Path(tmp) / "drafts")],
+                stdin=io.StringIO(json.dumps(stale_report)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["summary"]["staged_count"], 0)
+            self.assertEqual(payload["omitted"][0]["reason"], "stale-evidence")
+            self.assertFalse((Path(tmp) / "drafts").exists())
+
     def test_policy_draft_validate_cli_combines_validation_dry_run_and_section_impacts(self):
         from agentflow_proxy.store import Store, stable_json
 
