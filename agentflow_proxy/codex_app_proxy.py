@@ -2878,6 +2878,7 @@ def _attach_codex_routing_experiment_pending(
     pending_routing_experiments[request_id] = {
         "experiment_meta": experiment_meta,
         "routing_meta": routing_meta,
+        "start_routing_meta": dict((optimization_metadata or {}).get("routing") or {}),
         "input_text_chars": _input_text_chars(params.get("input")),
         "start_event_id": start_event_id or "",
     }
@@ -2919,6 +2920,32 @@ def _decide_codex_routing_experiment(
     return experiment_meta, experiment_routing_meta
 
 
+def _codex_result_output_text(value: Any) -> str:
+    parts: list[str] = []
+
+    def walk(item: Any) -> None:
+        if isinstance(item, str):
+            if item:
+                parts.append(item)
+        elif isinstance(item, list):
+            for nested in item:
+                walk(nested)
+        elif isinstance(item, dict):
+            for nested in item.values():
+                if isinstance(nested, (str, list, dict)):
+                    walk(nested)
+
+    walk(value)
+    return "\n".join(parts)
+
+
+def _codex_result_comparison_body(result: Any) -> dict[str, Any]:
+    text = _codex_result_output_text(result)
+    if text:
+        return {"output_text": text}
+    return result if isinstance(result, dict) else {}
+
+
 async def _maybe_run_codex_routing_experiment(
     raw: str | bytes,
     *,
@@ -2952,7 +2979,7 @@ async def _maybe_run_codex_routing_experiment(
     else:
         primary_status_code = None
 
-    primary_response_body: dict[str, Any] = result if isinstance(result, dict) else {}
+    primary_response_body = _codex_result_comparison_body(result) if primary_status_code == 200 else {}
     primary_output_text = response_output_text(primary_response_body)
     primary_output_chars = len(primary_output_text)
 
@@ -3048,6 +3075,15 @@ async def _maybe_run_codex_routing_experiment(
         "source_surface": ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
         "payload_included": False,
     }
+    if start_event_id:
+        routing_for_event = dict(pending.get("start_routing_meta") or {})
+        if not routing_for_event:
+            routing_for_event = dict(routing_meta)
+        routing_for_event["routing_experiment"] = experiment_meta
+        try:
+            store.update_codex_app_event_routing_json(start_event_id, stable_json(routing_for_event))
+        except Exception as exc:
+            print(f"AgentFlow Codex routing experiment metadata update skipped: {exc}", file=sys.stderr)
 
     try:
         store.log_routing_experiment(
@@ -3485,6 +3521,11 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                                 replay_frame,
                                 request_started=request_started,
                                 pending_lifecycle=pending_lifecycle,
+                            )
+                            await _maybe_run_codex_routing_experiment(
+                                replay_frame,
+                                request_started=request_started,
+                                pending_routing_experiments=pending_routing_experiments,
                             )
                             _record_message(
                                 replay_frame,

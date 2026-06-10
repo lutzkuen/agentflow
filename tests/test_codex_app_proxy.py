@@ -2219,6 +2219,218 @@ summary_model_hint:
         self.assertEqual(feedback_meta["results"]["cache"]["reason"], "disabled")
         self.assertFalse(feedback_meta["payload_included"])
 
+    def test_codex_routing_experiment_samples_turn_and_queues_metadata_only_outcome(self):
+        secret_prompt = "secret codex prompt must not be queued"
+        secret_result = "secret codex result must not be queued"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-routing-experiment",
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": secret_prompt}],
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment",
+            "result": {"message": secret_result},
+        }
+        optimization_metadata = {
+            "routing": {
+                "status": "skipped",
+                "reason": "keep requested Codex model",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "model_field": "model",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        def sampled_decision(body, routing_meta, *, stream, provider, source_surface, store_obj):
+            self.assertFalse(stream)
+            self.assertEqual(provider, "openai")
+            self.assertEqual(source_surface, "codex_turn")
+            self.assertIsNotNone(store_obj)
+            self.assertEqual(body["model"], "gpt-5-codex")
+            self.assertEqual(routing_meta["requested_model"], "gpt-5-codex")
+            self.assertEqual(routing_meta["routed_model"], "gpt-5-codex")
+            return {
+                "schema": "agentflow.routing_experiment_decision.v1",
+                "enabled": True,
+                "mode": "shadow_candidate_pass_through",
+                "status": "selected",
+                "sampled": True,
+                "reason": "sampled-shadow-candidate-pass-through",
+                "counterfactual": True,
+                "shadow_only": True,
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-mini",
+                "primary_model": "gpt-5-codex",
+                "shadow_model": "gpt-5-mini",
+                "user_visible_model": "gpt-5-codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "text_chars": len(secret_prompt),
+                "daily_budget_usd": 10.0,
+                "budget_spent_usd": 0.0,
+                "budget_remaining_usd": 10.0,
+                "similarity_threshold": 0.86,
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "raw_responses_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "file_paths_included": False,
+                },
+            }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    request_started = {}
+                    pending = {}
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "routing_experiment_decision", side_effect=sampled_decision),
+                    ):
+                        start_event_id = codex_app_proxy._record_message(
+                            json.dumps(message),
+                            direction="client_to_server",
+                            session_id="session-routing-experiment",
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                        )
+                        codex_app_proxy._attach_codex_routing_experiment_pending(
+                            json.dumps(message),
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending,
+                        )
+                        self.assertIn("turn-routing-experiment", pending)
+                        response_frame = json.dumps(response)
+                        await codex_app_proxy._maybe_run_codex_routing_experiment(
+                            response_frame,
+                            request_started=request_started,
+                            pending_routing_experiments=pending,
+                        )
+
+                    experiment = test_store.conn.execute(
+                        "select * from routing_experiments"
+                    ).fetchone()
+                    queue_row = test_store.conn.execute(
+                        "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue"
+                    ).fetchone()
+                    routing_row = test_store.conn.execute(
+                        "select routing_json from codex_app_events where id = ?",
+                        (start_event_id,),
+                    ).fetchone()
+                    from agentflow_proxy.routing_experiments import build_routing_experiment_report
+
+                    report = build_routing_experiment_report(test_store, limit=5)
+                    return dict(experiment), dict(queue_row), json.loads(routing_row["routing_json"]), report
+                finally:
+                    test_store.conn.close()
+
+        experiment, queue_row, routing, report = asyncio.run(run_fixture())
+
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["requested_model"], "gpt-5-codex")
+        self.assertEqual(experiment["routed_model"], "gpt-5-mini")
+        self.assertEqual(experiment["primary_model"], "gpt-5-codex")
+        self.assertEqual(experiment["shadow_model"], "gpt-5-mini")
+        self.assertEqual(experiment["primary_status_code"], 200)
+        self.assertIsNone(experiment["shadow_status_code"])
+        self.assertEqual(experiment["error"], "websocket-stateful-turn-shadow-unsafe")
+        self.assertGreater(experiment["primary_output_chars"], 0)
+        self.assertIsNone(experiment["primary_response_json"])
+        experiment_json = json.loads(experiment["experiment_json"])
+        self.assertEqual(experiment_json["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(experiment_json["counterfactual"])
+        self.assertTrue(experiment_json["shadow_only"])
+        self.assertEqual(experiment_json["shadow_limitation"], "websocket-stateful-turn-shadow-unsafe")
+        self.assertEqual(experiment_json["status"], "shadow-error")
+        self.assertIn("shadow-exception", experiment_json["reason_codes"])
+        self.assertEqual(experiment_json["managed_feedback"]["status"], "queued")
+        self.assertFalse(experiment_json["managed_feedback"]["payload_included"])
+
+        self.assertEqual(queue_row["source_surface"], "routing_experiment_outcome")
+        self.assertEqual(queue_row["endpoint"], "/v1/policy-events")
+        self.assertEqual(queue_row["status"], "queued")
+        payload = json.loads(queue_row["payload_json"])
+        self.assertEqual(payload["schema"], "agentflow.routing_experiment_outcome_event.v1")
+        self.assertEqual(payload["source_surface"], "codex_turn")
+        self.assertEqual(payload["app_family"], "codex")
+        self.assertTrue(payload["candidate"]["counterfactual"])
+        self.assertTrue(payload["candidate"]["shadow_only"])
+        self.assertEqual(payload["candidate"]["shadow_model_family"], "gpt-5")
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["raw_responses_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+        self.assertNotIn(secret_prompt, json.dumps(payload))
+        self.assertNotIn(secret_result, json.dumps(payload))
+        self.assertNotIn("turn-routing-experiment", json.dumps(payload))
+        self.assertNotIn("thread-routing-experiment", json.dumps(payload))
+        self.assertNotIn(secret_prompt, json.dumps(experiment_json))
+        self.assertNotIn(secret_result, json.dumps(experiment_json))
+
+        self.assertEqual(routing["routing_experiment"]["source_surface"], "codex_turn")
+        self.assertEqual(routing["routing_experiment"]["managed_feedback"]["status"], "queued")
+        [candidate] = report["candidates"]
+        self.assertEqual(candidate["source_surface"], "codex_turn")
+        self.assertEqual(candidate["requested_model"], "gpt-5-codex")
+        self.assertEqual(candidate["routed_model"], "gpt-5-mini")
+        self.assertEqual(report["summary"]["sample_mode_counts"], {"shadow_candidate_pass_through": 1})
+
+    def test_codex_routing_experiment_respects_budget_and_sample_skips(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-skip",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Summarize the completed work."}],
+            },
+        }
+        optimization_metadata = {
+            "routing": {
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+            },
+        }
+
+        for reason in ("daily-budget-zero", "not-sampled"):
+            pending = {}
+
+            def skipped_decision(body, routing_meta, *, stream, provider, source_surface, store_obj, reason=reason):
+                self.assertEqual(provider, "openai")
+                self.assertEqual(source_surface, "codex_turn")
+                return {
+                    "schema": "agentflow.routing_experiment_decision.v1",
+                    "sampled": False,
+                    "status": "skipped",
+                    "reason": reason,
+                }
+
+            with patch.object(codex_app_proxy, "routing_experiment_decision", side_effect=skipped_decision):
+                codex_app_proxy._attach_codex_routing_experiment_pending(
+                    json.dumps(message),
+                    optimization_metadata=optimization_metadata,
+                    start_event_id="start-skip",
+                    pending_routing_experiments=pending,
+                )
+
+            self.assertEqual(pending, {})
+
 
 if __name__ == "__main__":
     unittest.main()
