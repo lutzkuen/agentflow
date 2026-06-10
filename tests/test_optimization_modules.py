@@ -26,7 +26,7 @@ from agentflow_proxy.optimization_rollout_review import (
     review_optimization_rollout_actions,
 )
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
-from agentflow_proxy.store import Store, stable_json
+from agentflow_proxy.store import Store, stable_json, utc_now
 
 
 class FakeFeedbackStore:
@@ -55,6 +55,9 @@ class FakeFeedbackStore:
     def due_managed_outcome_feedback(self, *, limit, source_surface=None):
         self.due_limit = limit
         return self.managed_outcome_feedback_rows(source_surface=source_surface, limit=limit)
+
+    def managed_outcome_feedback_payload_rows(self, *, source_surface=None, limit=10000):
+        return []
 
 
 class FakeOutcomeStore:
@@ -1139,6 +1142,59 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(result["summary"]["due"], 1)
         self.assertFalse(result["due_samples"][0]["payload_included"])
         self.assertTrue(result["privacy"]["metadata_only"])
+
+    def test_feedback_status_includes_routing_experiment_queue_summary(self):
+        event = {
+            "schema": "agentflow.routing_experiment_outcome_event.v1",
+            "event_type": "routing_experiment_outcome",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "candidate": {
+                "candidate_bucket": "tool-result:sonnet->haiku",
+                "requested_model_family": "sonnet",
+                "routed_model_family": "haiku",
+                "shadow_model_family": "sonnet",
+            },
+            "outcome": {
+                "status": "compared",
+                "primary_status_class": "2xx",
+                "shadow_status_class": "2xx",
+                "output_similarity": 0.91,
+            },
+            "reason_codes": ["passed"],
+            "privacy": {"metadata_only": True, "raw_prompts_included": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                now = utc_now()
+                store.enqueue_managed_outcome_feedback(
+                    id="routing-exp-queue-1",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface="routing_experiment_outcome",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(event),
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at=now,
+                )
+                result = feedback.managed_feedback_status_result(
+                    store,
+                    source_surface="routing_experiment_outcome",
+                    sample_limit=5,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(result["routing_experiments"]["schema"], "agentflow.routing_experiment_feedback_queue_status.v1")
+        self.assertEqual(result["routing_experiments"]["queue_rows"], 1)
+        self.assertEqual(result["routing_experiments"]["status_breakdown"], [{"value": "queued", "count": 1}])
+        self.assertEqual(result["routing_experiments"]["outcome_status_breakdown"], [{"value": "compared", "count": 1}])
+        self.assertEqual(result["routing_experiments"]["reason_code_breakdown"], [{"value": "passed", "count": 1}])
+        self.assertFalse(result["routing_experiments"]["payload_json_included"])
 
     def test_openai_outcome_summary_is_feature_only(self):
         routing_meta = {"reason": "test"}

@@ -110,6 +110,47 @@ def _pattern_evidence_status(
     }
 
 
+def _routing_experiment_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    status_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    for row in rows:
+        payload = _safe_payload_json(row)
+        if payload.get("schema") != "agentflow.routing_experiment_outcome_event.v1":
+            continue
+        row_count += 1
+        status = str(row.get("status") or "unknown")
+        endpoint = str(row.get("endpoint") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
+        outcome = payload.get("outcome") if isinstance(payload.get("outcome"), dict) else {}
+        outcome_status = str(outcome.get("status") or "unknown")
+        outcome_counts[outcome_status] = outcome_counts.get(outcome_status, 0) + 1
+        for reason in payload.get("reason_codes") or []:
+            reason_text = str(reason or "unknown")
+            reason_counts[reason_text] = reason_counts.get(reason_text, 0) + 1
+    return {
+        "schema": "agentflow.routing_experiment_feedback_queue_status.v1",
+        "queue_rows": row_count,
+        "status_breakdown": breakdown_from_counts(status_counts),
+        "endpoint_breakdown": breakdown_from_counts(endpoint_counts),
+        "outcome_status_breakdown": breakdown_from_counts(outcome_counts),
+        "reason_code_breakdown": breakdown_from_counts(reason_counts),
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -198,6 +239,7 @@ def managed_feedback_status_result(
         "retry_limit_drops": dropped,
     }
     pattern_evidence = _pattern_evidence_status(store, source_surface=source_surface)
+    routing_experiments = _routing_experiment_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -206,6 +248,7 @@ def managed_feedback_status_result(
         "managed_feedback": managed_feedback_config(),
         "summary": summary,
         "pattern_evidence": pattern_evidence,
+        "routing_experiments": routing_experiments,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,

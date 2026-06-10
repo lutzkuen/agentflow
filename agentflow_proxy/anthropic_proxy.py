@@ -49,8 +49,10 @@ from agentflow_proxy.errors import (
     upstream_error_text,
 )
 from agentflow_proxy.routing_experiments import (
+    ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
     compare_response_outputs,
+    routing_experiment_outcome_event,
     routing_experiment_feedback_features,
     routing_experiment_decision,
 )
@@ -460,6 +462,35 @@ async def _run_anthropic_routing_experiment(
             },
         }
     )
+    try:
+        event = routing_experiment_outcome_event(feedback_features)
+        feedback_meta = await queue_policy_event_feedback(
+            context.store,
+            event,
+            source_surface=ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+            queue_when_disabled=True,
+            flush_immediately=False,
+        )
+    except Exception as exc:
+        feedback_meta = {
+            "enabled": True,
+            "status": "error",
+            "reason": "queue-failed",
+            "endpoint": "/v1/policy-events",
+            "error": repr(exc),
+        }
+    experiment_meta["managed_feedback"] = {
+        "enabled": bool(feedback_meta.get("enabled")),
+        "status": feedback_meta.get("status"),
+        "reason": feedback_meta.get("reason"),
+        "endpoint": feedback_meta.get("endpoint"),
+        "queue_id": feedback_meta.get("queue_id"),
+        "attempts": feedback_meta.get("attempts"),
+        "status_code": feedback_meta.get("status_code"),
+        "latency_ms": feedback_meta.get("latency_ms"),
+        "source_surface": ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+        "payload_included": False,
+    }
     store_bodies = context.log_bodies or ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES
     context.store.log_routing_experiment(
         id=experiment_id,

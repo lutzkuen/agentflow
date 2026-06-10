@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import random
 from pathlib import Path
@@ -147,6 +148,7 @@ ROUTING_EXPERIMENT_DAILY_BUDGET_USD = float(ROUTING_EXPERIMENT_POLICY["daily_bud
 ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD = float(ROUTING_EXPERIMENT_POLICY["similarity_threshold"])
 ROUTING_EXPERIMENT_MIN_SAMPLES = int(ROUTING_EXPERIMENT_POLICY["min_samples_for_confidence"])
 ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES = bool(ROUTING_EXPERIMENT_POLICY["store_response_bodies"])
+ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE = "routing_experiment_outcome"
 
 
 def _today_shadow_spend_usd(store_obj: Any | None, *, provider: str | None = None, source_surface: str | None = None) -> float:
@@ -332,6 +334,51 @@ def _text_chars_bucket(text_chars: Any) -> str:
     return "gte-30k"
 
 
+def _model_family(model: Any) -> str | None:
+    if not model:
+        return None
+    model_l = str(model).lower()
+    for family in ("haiku", "sonnet", "opus", "codex", "gpt-5", "gpt-4", "gpt-3"):
+        if family in model_l:
+            return family
+    return "other"
+
+
+def _app_family(provider: Any, source_surface: Any, requested_model: Any) -> str:
+    provider_l = str(provider or "").lower()
+    surface_l = str(source_surface or "").lower()
+    model_l = str(requested_model or "").lower()
+    if provider_l == "anthropic" or surface_l == "anthropic_messages":
+        return "claude_code"
+    if provider_l == "openai" and "codex" in model_l:
+        return "codex"
+    if provider_l == "openai":
+        return "generic_openai"
+    return "unknown"
+
+
+def _status_class(status_code: Any) -> str:
+    try:
+        code = int(status_code)
+    except (TypeError, ValueError):
+        return "missing"
+    if code < 200:
+        return "other"
+    if code < 300:
+        return "2xx"
+    if code < 400:
+        return "3xx"
+    if code < 500:
+        return "4xx"
+    return "5xx"
+
+
+def _hash_identifier(value: Any) -> str | None:
+    if not value:
+        return None
+    return "sha256:" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
 def routing_experiment_feedback_features(
     *,
     experiment_id: str,
@@ -386,6 +433,7 @@ def routing_experiment_feedback_features(
         "primary_model": primary_model,
         "shadow_model": shadow_model,
         "category": category,
+        "workflow_phase": routing_meta.get("workflow_phase") or experiment_meta.get("workflow_phase"),
         "candidate_bucket": f"{category}:{requested_model}->{routed_model}",
         "text_chars_bucket": _text_chars_bucket(experiment_meta.get("text_chars") or routing_meta.get("text_chars")),
         "routing_reason": routing_meta.get("reason"),
@@ -421,6 +469,85 @@ def routing_experiment_feedback_features(
         },
         "error_present": bool(error),
     }
+
+
+def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[str, Any]:
+    """Build a metadata-only policy event for managed A/B evidence ingestion."""
+    provider = feedback_features.get("provider") or "anthropic"
+    source_surface = feedback_features.get("source_surface") or "anthropic_messages"
+    requested_model = feedback_features.get("requested_model")
+    routed_model = feedback_features.get("routed_model")
+    shadow_model = feedback_features.get("shadow_model")
+    requested_family = _model_family(requested_model)
+    routed_family = _model_family(routed_model)
+    shadow_family = _model_family(shadow_model)
+    primary_status_class = _status_class(feedback_features.get("primary_status_code"))
+    shadow_status_class = _status_class(feedback_features.get("shadow_status_code"))
+    compared = feedback_features.get("status") == "compared"
+    reason_codes = [
+        str(item)
+        for item in feedback_features.get("reason_codes") or []
+        if item is not None
+    ]
+    event = {
+        "schema": "agentflow.routing_experiment_outcome_event.v1",
+        "event_type": "routing_experiment_outcome",
+        "generated_at": utc_now(),
+        "source_surface": source_surface,
+        "app_family": _app_family(provider, source_surface, requested_model),
+        "provider": provider,
+        "workflow_phase": feedback_features.get("workflow_phase") or "unknown",
+        "category": feedback_features.get("category") or "unknown",
+        "candidate": {
+            "schema": "agentflow.routing_experiment_candidate.v1",
+            "candidate_bucket": (
+                f"{feedback_features.get('category') or 'unknown'}:{requested_family or 'unknown'}->{routed_family or 'unknown'}"
+            ),
+            "text_chars_bucket": feedback_features.get("text_chars_bucket"),
+            "requested_model_family": requested_family,
+            "routed_model_family": routed_family,
+            "shadow_model_family": shadow_family,
+        },
+        "outcome": {
+            "schema": "agentflow.routing_experiment_outcome_summary.v1",
+            "sampled": bool(feedback_features.get("sampled")),
+            "status": feedback_features.get("status"),
+            "compared": compared,
+            "passed_threshold": bool(feedback_features.get("passed_threshold")),
+            "primary_status_class": primary_status_class,
+            "shadow_status_class": shadow_status_class,
+            "status_class_pair": f"{primary_status_class}:{shadow_status_class}",
+            "output_similarity": feedback_features.get("output_similarity"),
+            "similarity_threshold": feedback_features.get("similarity_threshold"),
+            "latency_delta_ms": feedback_features.get("latency_delta_ms"),
+            "cost_delta_usd": feedback_features.get("cost_delta_usd"),
+            "primary_output_sha256": feedback_features.get("primary_output_sha256"),
+            "shadow_output_sha256": feedback_features.get("shadow_output_sha256"),
+            "error_present": bool(feedback_features.get("error_present")),
+        },
+        "reason_codes": reason_codes,
+        "routing": {
+            "schema": "agentflow.routing_experiment_routing_basis.v1",
+            "routing_reason": feedback_features.get("routing_reason"),
+        },
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_safe": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "tenant_ids_included": False,
+            "secrets_included": False,
+        },
+    }
+    experiment_hash = _hash_identifier(feedback_features.get("experiment_id"))
+    if experiment_hash:
+        event["experiment_hash"] = experiment_hash
+    return event
 
 
 def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[str, Any]:

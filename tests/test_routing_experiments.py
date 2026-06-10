@@ -1,9 +1,14 @@
+import asyncio
 import importlib
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from agentflow_proxy.managed_egress import assert_managed_egress_safe
+from agentflow_proxy.recommendations import queue_policy_event_feedback
+from agentflow_proxy.store import Store
 import agentflow_proxy.routing_experiments as experiments
 
 
@@ -14,6 +19,8 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         "AGENTFLOW_ROUTING_EXPERIMENT_SAMPLE_RATE",
         "AGENTFLOW_ROUTING_EXPERIMENT_DAILY_BUDGET_USD",
         "AGENTFLOW_ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD",
+        "AGENTFLOW_RECOMMENDATION_ENABLED",
+        "AGENTFLOW_RECOMMENDATION_SERVER_URL",
         "HOME",
     )
 
@@ -268,6 +275,187 @@ categories:
         self.assertNotIn("text", result)
         self.assertEqual(result["reason_codes"], ["passed"])
         self.assertTrue(result["privacy"]["metadata_only"])
+
+    def test_outcome_event_uses_metadata_only_aggregate_fields(self):
+        feedback = experiments.routing_experiment_feedback_features(
+            experiment_id="local-exp-secret",
+            experiment_meta={
+                "sampled": True,
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "similarity_threshold": 0.86,
+                "text_chars": 7000,
+            },
+            routing_meta={
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "reason": "tool-result processing turn routed to Haiku",
+            },
+            comparison={
+                "primary_output_chars": 17,
+                "shadow_output_chars": 19,
+                "primary_output_sha256": "sha256:primary",
+                "shadow_output_sha256": "sha256:shadow",
+                "output_similarity": 0.91,
+                "passed_threshold": True,
+            },
+            primary_model="claude-haiku-4-5-20251001",
+            shadow_model="claude-sonnet-4-6",
+            primary_status_code=200,
+            shadow_status_code=200,
+            primary_latency_ms=50,
+            shadow_latency_ms=90,
+            primary_cost_est_usd=0.001,
+            shadow_cost_est_usd=0.004,
+        )
+
+        event = experiments.routing_experiment_outcome_event(feedback)
+
+        assert_managed_egress_safe(event)
+        self.assertEqual(event["schema"], "agentflow.routing_experiment_outcome_event.v1")
+        self.assertEqual(event["source_surface"], "anthropic_messages")
+        self.assertEqual(event["app_family"], "claude_code")
+        self.assertEqual(event["workflow_phase"], "tool-execution")
+        self.assertEqual(event["candidate"]["candidate_bucket"], "tool-result:sonnet->haiku")
+        self.assertEqual(event["candidate"]["requested_model_family"], "sonnet")
+        self.assertEqual(event["candidate"]["routed_model_family"], "haiku")
+        self.assertEqual(event["candidate"]["shadow_model_family"], "sonnet")
+        self.assertEqual(event["outcome"]["primary_status_class"], "2xx")
+        self.assertEqual(event["outcome"]["shadow_status_class"], "2xx")
+        self.assertEqual(event["outcome"]["output_similarity"], 0.91)
+        self.assertEqual(event["outcome"]["primary_output_sha256"], "sha256:primary")
+        self.assertTrue(event["privacy"]["metadata_only"])
+        rendered = json.dumps(event, sort_keys=True)
+        self.assertNotIn("claude-sonnet-4-6", rendered)
+        self.assertNotIn("claude-haiku-4-5-20251001", rendered)
+        self.assertNotIn("local-exp-secret", rendered)
+        for forbidden_key in (
+            '"messages"',
+            '"provider_body"',
+            '"raw_request"',
+            '"raw_response"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+            '"tenant_id"',
+        ):
+            self.assertNotIn(forbidden_key, rendered)
+
+    def test_disabled_managed_mode_queues_routing_experiment_policy_event(self):
+        feedback = experiments.routing_experiment_feedback_features(
+            experiment_id="exp-1",
+            experiment_meta={
+                "sampled": True,
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-haiku-4-5-20251001",
+                "similarity_threshold": 0.86,
+                "text_chars": 7000,
+            },
+            routing_meta={"category": "tool-result", "workflow_phase": "tool-execution"},
+            comparison={
+                "primary_output_chars": 17,
+                "shadow_output_chars": 19,
+                "primary_output_sha256": "sha256:primary",
+                "shadow_output_sha256": "sha256:shadow",
+                "output_similarity": 0.91,
+                "passed_threshold": True,
+            },
+            primary_model="claude-haiku-4-5-20251001",
+            shadow_model="claude-sonnet-4-6",
+            primary_status_code=200,
+            shadow_status_code=200,
+            primary_latency_ms=50,
+            shadow_latency_ms=90,
+            primary_cost_est_usd=0.001,
+            shadow_cost_est_usd=0.004,
+        )
+        event = experiments.routing_experiment_outcome_event(feedback)
+
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                meta = asyncio.run(
+                    queue_policy_event_feedback(
+                        store,
+                        event,
+                        source_surface=experiments.ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+                        queue_when_disabled=True,
+                    )
+                )
+                row = store.conn.execute(
+                    "select source_surface, endpoint, status, attempts, payload_json "
+                    "from managed_outcome_feedback_queue"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(meta["status"], "queued")
+        self.assertEqual(meta["reason"], "queued-managed-disabled")
+        self.assertEqual(row["source_surface"], experiments.ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE)
+        self.assertEqual(row["endpoint"], "/v1/policy-events")
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["attempts"], 0)
+        payload = json.loads(row["payload_json"])
+        self.assertEqual(payload["schema"], "agentflow.routing_experiment_outcome_event.v1")
+        assert_managed_egress_safe(payload)
+        self.assertNotIn("claude-sonnet-4-6", row["payload_json"])
+        self.assertNotIn("claude-haiku-4-5-20251001", row["payload_json"])
+
+    def test_enabled_managed_mode_can_queue_routing_experiment_for_explicit_flush(self):
+        event = experiments.routing_experiment_outcome_event({
+            "schema": "agentflow.routing_experiment_feedback.v1",
+            "experiment_id": "exp-1",
+            "sampled": True,
+            "status": "compared",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "requested_model": "claude-sonnet-4-6",
+            "routed_model": "claude-haiku-4-5-20251001",
+            "shadow_model": "claude-sonnet-4-6",
+            "category": "tool-result",
+            "workflow_phase": "tool-execution",
+            "text_chars_bucket": "2k-8k",
+            "primary_status_code": 200,
+            "shadow_status_code": 200,
+            "output_similarity": 0.91,
+            "similarity_threshold": 0.86,
+            "passed_threshold": True,
+            "reason_codes": ["passed"],
+        })
+
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+                os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+                meta = asyncio.run(
+                    queue_policy_event_feedback(
+                        store,
+                        event,
+                        source_surface=experiments.ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+                        queue_when_disabled=True,
+                        flush_immediately=False,
+                    )
+                )
+                row = store.conn.execute(
+                    "select source_surface, endpoint, status, attempts, payload_json "
+                    "from managed_outcome_feedback_queue"
+                ).fetchone()
+            finally:
+                store.conn.close()
+
+        self.assertTrue(meta["enabled"])
+        self.assertEqual(meta["status"], "queued")
+        self.assertEqual(meta["reason"], "queued")
+        self.assertEqual(row["source_surface"], experiments.ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE)
+        self.assertEqual(row["endpoint"], "/v1/policy-events")
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["attempts"], 0)
 
 
 if __name__ == "__main__":

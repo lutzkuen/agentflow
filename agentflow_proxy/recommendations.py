@@ -2698,6 +2698,7 @@ async def queue_policy_event_feedback(
     *,
     source_surface: str = ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE,
     queue_when_disabled: bool = False,
+    flush_immediately: bool = True,
 ) -> dict[str, Any]:
     if not recommendations_enabled():
         if queue_when_disabled and hasattr(store_obj, "enqueue_managed_outcome_feedback"):
@@ -2773,6 +2774,9 @@ async def queue_policy_event_feedback(
         "next_attempt_at": now,
     }
     store_obj.enqueue_managed_outcome_feedback(**row)
+    if not flush_immediately:
+        stored = store_obj.get_managed_outcome_feedback(queue_id) if hasattr(store_obj, "get_managed_outcome_feedback") else row
+        return _queued_meta(stored or row)
     claimed = (
         store_obj.claim_managed_outcome_feedback(queue_id, now=utc_now())
         if hasattr(store_obj, "claim_managed_outcome_feedback")
