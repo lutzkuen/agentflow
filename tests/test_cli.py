@@ -5800,6 +5800,179 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(payload["error"]["type"], "raw_payload_rejected")
             self.assertFalse((Path(tmp) / "drafts").exists())
 
+    def test_policy_draft_validate_cli_combines_validation_dry_run_and_section_impacts(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["routing"]["rules"] = [{
+            "conditions": {"model_pattern": "sonnet", "category": "chat", "has_tools": False},
+            "action": {"route_to": "haiku", "reason": "workbench test chat downgrade"},
+        }]
+        proposed["policies"]["crunch"]["threshold_chars"] = 12000
+        proposed["policies"]["cache"]["semantic_cache"]["threshold"] = 0.91
+        proposed["policies"]["codex_app"] = {
+            **proposed["policies"]["codex_app"],
+            "enabled": True,
+            "policy_source": "local-manual",
+            "review_only": False,
+            "rules": [
+                {
+                    "id": "local-codex-summary",
+                    "conditions": {
+                        "app_family": "codex",
+                        "granularity": "agent_turn",
+                        "workflow_phase": "summary",
+                        "model_field_state": "derived_present",
+                        "input_size_bucket": "small",
+                        "cache_eligible": False,
+                        "has_action_like_params": False,
+                        "supported_action_family": "routing",
+                    },
+                    "action": {
+                        "model_hint": "gpt-5-mini",
+                        "reason": "local workbench dry-run projection",
+                    },
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            config_dir = Path(tmp) / "config"
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="workbench-routing-match",
+                    created_at="2026-06-08T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.0045,
+                    routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                    cache_json=stable_json({"status": "miss"}),
+                    retry_count=0,
+                    provider="anthropic",
+                )
+                store.log_codex_app_event(
+                    id="workbench-codex-event",
+                    created_at="2026-06-08T10:01:00+00:00",
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="raw-request-id-must-not-leak",
+                    thread_id="raw-thread-id-must-not-leak",
+                    session_id="raw-session-id-must-not-leak",
+                    message_chars=900,
+                    params_chars=100,
+                    input_items=1,
+                    input_text_chars=700,
+                    result_chars=140,
+                    latency_ms=100,
+                    routing_json=stable_json({"requested_model": "gpt-5.4", "workflow_phase": "summary"}),
+                    crunch_json=stable_json({}),
+                    cache_json=stable_json({"status": "skipped", "eligible": False, "replayability_level": "turn-metadata-only"}),
+                    event_window_json=stable_json({
+                        "workflow_phase": "summary",
+                        "model_field_state": "derived_present",
+                        "input_text_chars": 700,
+                        "result_chars": 140,
+                    }),
+                    metadata_json=stable_json({"kind": "turn_window"}),
+                )
+            finally:
+                store.conn.close()
+
+            stage_stdout = io.StringIO()
+            stage_code = cli.policy_draft_stage_cli(
+                ["--draft-id", "workbench-all", "--workspace", str(workspace), "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=stage_stdout,
+            )
+            self.assertEqual(stage_code, 0)
+
+            validate_stdout = io.StringIO()
+            validate_code = cli.policy_draft_validate_cli(
+                [
+                    "workbench-all",
+                    "--workspace",
+                    str(workspace),
+                    "--config-dir",
+                    str(config_dir),
+                    "--db",
+                    db_path,
+                ],
+                stdout=validate_stdout,
+            )
+
+        self.assertEqual(validate_code, 0)
+        payload = json.loads(validate_stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.policy_draft_validate.v1")
+        self.assertEqual(payload["status"], "pass")
+        self.assertTrue(payload["can_apply"])
+        self.assertFalse(payload["apply_blocked"])
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+        self.assertFalse(payload["privacy"]["managed_server_calls_made"])
+        sections = {section["section"]: section for section in payload["sections"]}
+        for section in ("routing", "crunch", "cache", "codex_app"):
+            self.assertTrue(sections[section]["changed"])
+            self.assertEqual(sections[section]["verdict"], "pass")
+            self.assertTrue(sections[section]["reload_required_after_apply"])
+        self.assertGreaterEqual(sections["routing"]["projected_impact"]["projected_applied_count"], 1)
+        self.assertGreaterEqual(sections["codex_app"]["projected_impact"]["projected_applied_count"], 2)
+        self.assertIn("codex_app_dry_run", payload)
+        rendered = validate_stdout.getvalue()
+        self.assertNotIn("raw-request-id-must-not-leak", rendered)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered)
+
+    def test_policy_draft_validate_cli_blocks_risky_draft_before_apply(self):
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        proposed = json.loads(exported.getvalue())
+        proposed["policies"]["cache"]["exact_cache"]["cache_tool_calls"] = True
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            stage_code = cli.policy_draft_stage_cli(
+                ["--draft-id", "risky-cache", "--workspace", str(workspace), "-"],
+                stdin=io.StringIO(json.dumps(proposed)),
+                stdout=io.StringIO(),
+            )
+            self.assertEqual(stage_code, 0)
+
+            validate_stdout = io.StringIO()
+            validate_code = cli.policy_draft_validate_cli(
+                [
+                    str(workspace / "risky-cache"),
+                    "--workspace",
+                    str(workspace),
+                    "--config-dir",
+                    str(Path(tmp) / "config"),
+                    "--db",
+                    str(Path(tmp) / "missing.sqlite3"),
+                ],
+                stdout=validate_stdout,
+            )
+
+        self.assertEqual(validate_code, 1)
+        payload = json.loads(validate_stdout.getvalue())
+        self.assertEqual(payload["status"], "warn")
+        self.assertFalse(payload["can_apply"])
+        self.assertTrue(payload["apply_blocked"])
+        self.assertIn("tool-call-cache-enabled", payload["apply_prerequisites"]["blocker_reason_codes"])
+        cache_section = {section["section"]: section for section in payload["sections"]}["cache"]
+        self.assertEqual(cache_section["verdict"], "warn")
+        self.assertIn("tool-call-cache-enabled", cache_section["blocker_reason_codes"])
+
     def test_policy_apply_cli_dry_run_shows_old_context_summary_canary_yaml_diff(self):
         proposed = self._managed_old_context_summary_bundle()
 

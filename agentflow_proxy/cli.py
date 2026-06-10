@@ -1081,6 +1081,96 @@ def policy_draft_stage_cli(
     return 0 if result.get("ok") else 1
 
 
+def policy_draft_validate_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Validate and dry-run a staged local AgentFlow policy draft before apply"
+    )
+    parser.add_argument(
+        "draft",
+        help="Staged draft ID, draft directory, draft.json path, or policy_bundle.json path.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files used by the dry-run apply projection, default: ~/.agentflow.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local SQLite DB path for metadata-only impact simulation.",
+    )
+    parser.add_argument(
+        "--impact-limit",
+        type=int,
+        default=1000,
+        help="Recent provider metadata rows to inspect for impact simulation, default: 1000.",
+    )
+    parser.add_argument(
+        "--codex-recent-limit",
+        type=int,
+        default=200,
+        help="Recent Codex app metadata rows to inspect for Codex app dry-run projection, default: 200.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print validation JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.policy_workbench import validate_staged_policy_draft
+
+    result = asyncio.run(validate_staged_policy_draft(
+        args.draft,
+        workspace=args.workspace,
+        config_dir=args.config_dir,
+        db_path=args.db,
+        impact_limit=args.impact_limit,
+        codex_recent_limit=args.codex_recent_limit,
+    ))
+
+    log_policy_event(
+        "draft-validate",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "draft": args.draft,
+            "workspace": args.workspace,
+            "config_dir": args.config_dir,
+            "db": args.db,
+            "status": result.get("status"),
+            "can_apply": result.get("can_apply"),
+            "apply_blocked": result.get("apply_blocked"),
+            "changed_sections": (result.get("draft") or {}).get("changed_sections", []) if isinstance(result.get("draft"), dict) else [],
+            "section_verdicts": {
+                section.get("section"): section.get("verdict")
+                for section in result.get("sections", [])
+                if isinstance(section, dict)
+            },
+            "blocker_reason_codes": (result.get("apply_prerequisites") or {}).get("blocker_reason_codes", [])
+            if isinstance(result.get("apply_prerequisites"), dict)
+            else [],
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    _write_policy_draft_validate_result(stdout, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
 async def _queue_codex_app_dry_run_lifecycle_events(store: Any, result: dict[str, Any]) -> dict[str, Any]:
     from agentflow_proxy.recommendations import queue_policy_event_feedback
 
@@ -3834,6 +3924,13 @@ def _write_policy_draft_stage_result(stream: Any, payload: dict[str, Any], *, pr
         _write_json(stream, payload)
 
 
+def _write_policy_draft_validate_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
 def _write_rollout_actions_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -4654,6 +4751,10 @@ def policy_apply_main() -> None:
 
 def policy_draft_stage_main() -> None:
     raise SystemExit(policy_draft_stage_cli())
+
+
+def policy_draft_validate_main() -> None:
+    raise SystemExit(policy_draft_validate_cli())
 
 
 def codex_app_policy_dry_run_main() -> None:

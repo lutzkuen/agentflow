@@ -245,6 +245,10 @@ def load_recent_codex_app_features(store: Store, *, limit: int) -> list[dict[str
 
 
 def _condition_value_matches(expected: Any, actual: Any) -> bool:
+    if isinstance(actual, list):
+        return any(_condition_value_matches(expected, item) for item in actual)
+    if isinstance(expected, list):
+        return any(_condition_value_matches(item, actual) for item in expected)
     expected_bool = _as_bool(expected)
     if expected_bool is not None:
         actual_bool = _as_bool(actual)
@@ -260,10 +264,11 @@ def _match_conditions(rule: dict[str, Any], features: dict[str, Any]) -> tuple[b
     for key, expected in conditions.items():
         if key not in SUPPORTED_CONDITIONS:
             continue
-        if key not in features or features.get(key) in {None, ""}:
+        actual = features.get(key)
+        if key not in features or actual is None or actual == "":
             blockers.append(f"insufficient-metadata:{key}")
             continue
-        if not _condition_value_matches(expected, features.get(key)):
+        if not _condition_value_matches(expected, actual):
             blockers.append(f"condition-mismatch:{key}")
     return not blockers, blockers
 
