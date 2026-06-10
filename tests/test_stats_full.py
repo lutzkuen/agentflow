@@ -6277,7 +6277,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','oldcontext','sessions']", html)
+        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
 
     def test_dashboard_exposes_codex_quota_token_usage_panel(self):
         html = stats_views.dashboard_html()
@@ -6453,6 +6453,130 @@ class StatsFullTest(unittest.TestCase):
         self.assertFalse(plateau["flagged"])
         self.assertEqual(result["context_plateau_policy"]["min_text_chars"], 8_000)
         json.dumps(result)
+
+    def test_session_phase_memory_endpoint_and_dashboard_are_metadata_only(self):
+        secret_session_ready = "secret-session-ready"
+        secret_session_blocked = "secret-session-blocked"
+        secret_prompt = "SECRET_PHASE_MEMORY_PROMPT /tmp/private-project/main.py"
+        for idx in range(3):
+            server.store.log_call(
+                id=f"phase-ready-{idx}",
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=10,
+                input_tokens_est=250,
+                output_tokens_est=10,
+                actual_input_tokens=250,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.001,
+                crunch_json=stable_json({"changed": True, "tokens_saved_est": 1500}),
+                routing_json=stable_json({"workflow_phase": "summary", "text_chars": 1000}),
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                error=None,
+                request_json=stable_json({"messages": [{"content": secret_prompt}]}),
+                response_json=stable_json({"content": [{"text": "SECRET_PHASE_MEMORY_RESPONSE"}]}),
+                session_id=secret_session_ready,
+                category="short-completion",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+        for idx, text_chars in enumerate((40_000, 40_500, 40_200)):
+            routing = {"category": "tool-result", "text_chars": text_chars}
+            status_code = 200
+            retry_count = 0
+            if idx == 2:
+                routing.update({
+                    "fallback_reason": "rate_limited",
+                    "session_phase_memory": {"status": "blocked", "reason": "recent_errors"},
+                })
+                status_code = 429
+                retry_count = 1
+            server.store.log_call(
+                id=f"phase-blocked-{idx}",
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=20,
+                input_tokens_est=text_chars // 4,
+                output_tokens_est=10,
+                actual_input_tokens=text_chars // 4,
+                actual_output_tokens=10,
+                cost_est_usd=0.01,
+                cost_baseline_usd=0.02,
+                crunch_json=stable_json({"changed": True, "tokens_saved_est": 5000}),
+                routing_json=stable_json(routing),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error="SECRET_PHASE_MEMORY_ERROR" if status_code >= 400 else None,
+                request_json=stable_json({"messages": [{"content": secret_prompt}]}),
+                response_json=None,
+                session_id=secret_session_blocked,
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                thinking_output_tokens=0,
+                provider="anthropic",
+            )
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=server.store.path,
+            upstream="https://anthropic.test",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        client = TestClient(app)
+        response = client.get("/agentflow/stats/session-phase-memory")
+        dashboard = client.get("/agentflow/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["schema"], "agentflow.session_phase_memory_dashboard.v1")
+        self.assertEqual(payload["summary"]["memory_ready_session_count"], 1)
+        self.assertEqual(payload["summary"]["blocked_session_count"], 1)
+        self.assertEqual(payload["summary"]["decision_usage"]["decision_count"], 1)
+        self.assertEqual(payload["summary"]["decision_usage"]["status_counts"], [{"value": "blocked", "count": 1}])
+        ready = next(row for row in payload["sessions"] if row["readiness"] == "ready")
+        blocked = next(row for row in payload["sessions"] if row["readiness"] == "blocked")
+        self.assertEqual(ready["dominant_phase"], "summary")
+        self.assertEqual(ready["phase_stability"], 1.0)
+        self.assertEqual(ready["model_family_floor"], "sonnet")
+        self.assertIn("recent_errors", blocked["blocker_reasons"])
+        self.assertIn("recent_retries", blocked["blocker_reasons"])
+        self.assertIn("recent_routing_fallback", blocked["blocker_reasons"])
+        self.assertEqual(blocked["context_plateau"]["pairs"], 2)
+        self.assertFalse(payload["privacy"]["raw_session_ids_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+
+        rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("/agentflow/stats/session-phase-memory", dashboard.text)
+        self.assertIn("Session phase memory readiness", dashboard.text)
+        self.assertIn("session-phase-memory-summary-tbody", dashboard.text)
+        self.assertIn("session-phase-memory-sessions-tbody", dashboard.text)
+        self.assertNotIn(secret_session_ready, rendered)
+        self.assertNotIn(secret_session_blocked, rendered)
+        self.assertNotIn(secret_prompt, rendered)
+        self.assertNotIn("SECRET_PHASE_MEMORY_RESPONSE", rendered)
+        self.assertNotIn("SECRET_PHASE_MEMORY_ERROR", rendered)
+        self.assertNotIn("/tmp/private-project", rendered)
+        self.assertNotIn("<form", dashboard.text.lower())
+        self.assertNotIn("contenteditable", dashboard.text.lower())
 
     def test_limiter_stats_include_active_cooldown_and_recent_rate_limits(self):
         server._tier_backoff_until.clear()

@@ -13,6 +13,7 @@ DEFAULT_WINDOW_SIZE = 20
 DEFAULT_MIN_PLATEAU_CHARS = 8_000
 DEFAULT_MAX_PLATEAU_DELTA_RATIO = 0.03
 DEFAULT_PLATEAU_PAIRS_FOR_CLASSIFICATION = 2
+MODEL_FAMILY_RANK = {"unknown": 0, "other": 0, "haiku": 1, "gpt": 1, "sonnet": 2, "opus": 3}
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -115,6 +116,18 @@ def _savings_bucket(tokens: int) -> str:
     if tokens < 100_000:
         return "10k_100k_tokens"
     return "gte_100k_tokens"
+
+
+def _model_family_floor(*counters: Counter[str]) -> str:
+    floor = "unknown"
+    floor_rank = 0
+    for counter in counters:
+        for family in counter:
+            rank = MODEL_FAMILY_RANK.get(family, 0)
+            if rank > floor_rank:
+                floor = family
+                floor_rank = rank
+    return floor
 
 
 def _status_bucket(status_code: int) -> str:
@@ -308,6 +321,13 @@ def _session_memory(
     crunch_changed_count = sum(1 for feature in recent if feature["crunch_changed"])
     raw_session_hash = _session_hash(key) if key != "__missing_session__" else None
     session_key = raw_session_hash or "missing-session"
+    dominant_phase_count = phase_counts.get(dominant_phase, 0)
+    phase_stability = round(dominant_phase_count / len(recent), 4) if recent else 0.0
+    blocker_reasons = _memory_blockers(
+        recent,
+        plateau_pairs,
+        plateau_pairs_for_classification=plateau_pairs_for_classification,
+    )
 
     return {
         "session_key": session_key,
@@ -322,36 +342,39 @@ def _session_memory(
         "source_surface": _dominant(source_counts),
         "source_surface_counts": _breakdown(source_counts),
         "app_family": _dominant(app_counts),
+        "readiness": "ready" if recent and not blocker_reasons else "blocked",
         "dominant_phase": dominant_phase,
+        "dominant_phase_count": dominant_phase_count,
+        "phase_stability": phase_stability,
         "classifications": classifications,
         "phase_counts": _breakdown(phase_counts),
         "phase_source_counts": _breakdown(phase_sources),
         "category_counts": _breakdown(category_counts),
         "requested_model_family_counts": _breakdown(requested_counts),
         "routed_model_family_counts": _breakdown(routed_counts),
+        "model_family_floor": _model_family_floor(requested_counts, routed_counts),
         "text_bucket_counts": _breakdown(text_buckets),
         "token_bucket_counts": _breakdown(token_buckets),
         "status_bucket_counts": _breakdown(status_buckets),
         "cache_status_counts": _breakdown(cache_statuses),
         "cache_reason_counts": _breakdown(cache_reasons),
         "retry_count": retry_count,
+        "retry_rate": round(retry_count / len(recent), 4) if recent else 0.0,
         "fallback_count": fallback_count,
+        "fallback_rate": round(fallback_count / len(recent), 4) if recent else 0.0,
         "error_count": error_count,
         "error_rate": round(error_count / len(recent), 4) if recent else 0.0,
         "crunch_changed_count": crunch_changed_count,
         "crunch_savings_bucket": _savings_bucket(tokens_saved),
         "cost_bucket": _cost_bucket(total_cost),
+        "projected_savings_bucket": _savings_bucket(tokens_saved),
         "context_plateau": {
             "active": plateau_pairs >= plateau_pairs_for_classification,
             "pairs": plateau_pairs,
             "min_text_chars": min_plateau_chars,
             "max_delta_ratio": max_plateau_delta_ratio,
         },
-        "blocker_reasons": _memory_blockers(
-            recent,
-            plateau_pairs,
-            plateau_pairs_for_classification=plateau_pairs_for_classification,
-        ),
+        "blocker_reasons": blocker_reasons,
     }
 
 
@@ -439,6 +462,8 @@ def build_session_phase_memory(
             "hashed_session_count": sum(1 for item in memories if item["session_key_kind"] == "sha256_session_id"),
             "unknown_session_call_count": unknown_session_count,
             "plateau_session_count": sum(1 for item in memories if item["context_plateau"]["active"]),
+            "memory_ready_session_count": sum(1 for item in memories if item["readiness"] == "ready"),
+            "blocked_session_count": sum(1 for item in memories if item["readiness"] == "blocked"),
             "dominant_phase_counts": _breakdown(Counter(item["dominant_phase"] for item in memories)),
             "blocker_counts": _breakdown(
                 Counter(reason for item in memories for reason in item["blocker_reasons"])

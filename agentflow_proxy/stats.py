@@ -34,6 +34,7 @@ from agentflow_proxy.recommendations import (
     pattern_decision_summaries,
 )
 from agentflow_proxy.routing_experiments import build_routing_experiment_report
+from agentflow_proxy.session_phase_memory import build_session_phase_memory
 from agentflow_proxy.store import utc_now
 
 CODEX_APP_PRICING_BASIS = codex_app_pricing_basis()
@@ -10296,6 +10297,127 @@ async def stats_limiter(store_obj: Any, tier_status: Any, limiter_config: dict[s
     }
 
 
+def _phase_memory_session_key(session_id: Any) -> str:
+    value = str(session_id or "").strip()
+    if not value:
+        return "missing-session"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"sha256:{digest}"
+
+
+def _session_phase_memory_decision_usage(store_obj: Any, *, limit: int = 5000) -> dict[str, Any]:
+    rows = store_obj.conn.execute(
+        """
+        SELECT created_at, session_id, routing_json
+        FROM calls
+        WHERE routing_json LIKE '%session_phase_memory%'
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit or 5000), 10000)),),
+    ).fetchall()
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    per_session: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        routing = _json_obj(row["routing_json"])
+        memory = routing.get("session_phase_memory")
+        if not isinstance(memory, dict):
+            continue
+        status = str(memory.get("status") or "unknown")
+        reason = str(memory.get("reason") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        session_key = _phase_memory_session_key(row["session_id"])
+        bucket = per_session.setdefault(
+            session_key,
+            {
+                "decision_count": 0,
+                "status_counts": {},
+                "reason_counts": {},
+                "last_decision_at": None,
+                "last_status": None,
+                "last_reason": None,
+            },
+        )
+        bucket["decision_count"] += 1
+        bucket["status_counts"][status] = bucket["status_counts"].get(status, 0) + 1
+        bucket["reason_counts"][reason] = bucket["reason_counts"].get(reason, 0) + 1
+        if bucket["last_decision_at"] is None:
+            bucket["last_decision_at"] = row["created_at"]
+            bucket["last_status"] = status
+            bucket["last_reason"] = reason
+
+    for bucket in per_session.values():
+        bucket["status_counts"] = _breakdown_from_counts(bucket["status_counts"])
+        bucket["reason_counts"] = _breakdown_from_counts(bucket["reason_counts"])
+
+    return {
+        "decision_count": sum(status_counts.values()),
+        "status_counts": _breakdown_from_counts(status_counts),
+        "reason_counts": _breakdown_from_counts(reason_counts),
+        "per_session": per_session,
+    }
+
+
+async def stats_session_phase_memory(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    memory = build_session_phase_memory(store_obj, limit=limit)
+    decision_usage = _session_phase_memory_decision_usage(store_obj)
+    per_session_decisions = decision_usage.pop("per_session")
+    sessions = []
+    for session in memory.get("sessions", []):
+        row = dict(session)
+        usage = per_session_decisions.get(row.get("session_key")) or {
+            "decision_count": 0,
+            "status_counts": [],
+            "reason_counts": [],
+            "last_decision_at": None,
+            "last_status": None,
+            "last_reason": None,
+        }
+        row["decision_usage"] = usage
+        sessions.append(row)
+
+    summary = dict(memory.get("summary") or {})
+    session_count = int(summary.get("session_count") or 0)
+    ready_count = int(summary.get("memory_ready_session_count") or 0)
+    blocked_count = int(summary.get("blocked_session_count") or 0)
+    summary.update({
+        "memory_ready_session_count": ready_count,
+        "blocked_session_count": blocked_count,
+        "memory_ready_rate": round(ready_count / session_count, 4) if session_count else 0.0,
+        "readiness_counts": _breakdown_from_counts({
+            "ready": ready_count,
+            "blocked": blocked_count,
+        }),
+        "top_blocker_reasons": summary.get("blocker_counts") or [],
+        "decision_usage": decision_usage,
+    })
+
+    return {
+        "schema": "agentflow.session_phase_memory_dashboard.v1",
+        "memory_schema": memory.get("schema"),
+        "generated_at": memory.get("generated_at") or utc_now(),
+        "lookback": memory.get("lookback") or {},
+        "summary": summary,
+        "sessions": sessions,
+        "privacy": {
+            **(memory.get("privacy") or {}),
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "session_ids_hashed": True,
+            "cache_keys_included": False,
+            "provider_calls_made": False,
+        },
+    }
+
+
 async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
     conn = store_obj.conn
     capped_limit = max(1, min(int(limit or 100), 500))
@@ -12272,6 +12394,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('evalqueue')">Eval queue</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
   <button class="tab-btn" onclick="showTab('phaserouting')">Phase routing</button>
+  <button class="tab-btn" onclick="showTab('phasememory')">Phase memory</button>
   <button class="tab-btn" onclick="showTab('oldcontext')">Old-context summary</button>
   <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
 </div>
@@ -12844,6 +12967,36 @@ def dashboard_html() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-phasememory">
+<div class="section">
+  <h2>Session phase memory readiness</h2>
+  <table data-table-id="session-phase-memory-summary" data-filter-label="Filter session phase memory summary">
+    <thead><tr>
+      <th data-sort-type="number">Sessions</th><th data-sort-type="number">Ready</th><th data-sort-type="number">Blocked</th><th data-sort-type="percent">Ready rate</th><th data-sort-type="number">Plateau sessions</th><th data-sort-type="number">Unknown-session calls</th><th data-sort-type="number">Decision uses</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="session-phase-memory-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Session phase memory blockers</h2>
+  <table data-table-id="session-phase-memory-blockers" data-filter-label="Filter session phase memory blockers">
+    <thead><tr>
+      <th data-sort-type="text">Reason</th><th data-sort-type="number">Sessions</th>
+    </tr></thead>
+    <tbody id="session-phase-memory-blockers-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Recent session phase memory</h2>
+  <table class="activity-table" data-table-id="session-phase-memory-sessions" data-filter-label="Filter session phase memory sessions">
+    <thead><tr>
+      <th data-sort-type="time">Freshness</th><th data-sort-type="text">Session</th><th data-sort-type="text">Readiness</th><th data-sort-type="text">Dominant phase</th><th data-sort-type="percent">Stability</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Plateau pairs</th><th data-sort-type="text">Model floor</th><th data-sort-type="percent">Error</th><th data-sort-type="percent">Retry</th><th data-sort-type="percent">Fallback</th><th data-sort-type="text">Cost</th><th data-sort-type="text">Projected savings</th><th data-sort-type="number">Decision uses</th><th data-sort-type="text">Blockers</th>
+    </tr></thead>
+    <tbody id="session-phase-memory-sessions-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <div class="tab-panel" id="tab-oldcontext">
 <div class="section">
   <h2>Old-context summarization rollout health</h2>
@@ -13183,7 +13336,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','oldcontext','sessions'];
+  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -14626,6 +14779,74 @@ async function refreshPhaseRouting(){
   }catch(e){}
 }
 
+function phaseMemoryBadge(status){
+  if(status==='ready'||status==='used')return'hit';
+  if(status==='blocked')return'err';
+  if(status==='evaluating')return'routed';
+  return'miss';
+}
+function phaseMemoryBlockerBadges(reasons){
+  reasons=reasons||[];
+  if(!reasons.length)return'<span class="badge hit">none</span>';
+  return reasons.slice(0,5).map(reason=>`<span class="badge err">${esc(reason)}</span>`).join(' ');
+}
+async function refreshSessionPhaseMemory(){
+  try{
+    const r=await fetch('/agentflow/stats/session-phase-memory?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    const decisions=s.decision_usage||{};
+    const privacyBadges=[
+      privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>',
+      privacy.raw_session_ids_included?'<span class="badge err">raw session IDs</span>':'<span class="badge hit">session IDs hashed</span>',
+      privacy.raw_prompts_included||privacy.raw_messages_included?'<span class="badge err">raw content</span>':'<span class="badge hit">raw content omitted</span>',
+      privacy.tool_payloads_included?'<span class="badge err">tool payloads</span>':'<span class="badge hit">tool payloads omitted</span>',
+      privacy.request_ids_included?'<span class="badge err">request IDs</span>':'<span class="badge hit">request IDs omitted</span>',
+      privacy.provider_calls_made?'<span class="badge err">provider call</span>':'<span class="badge hit">offline</span>'
+    ].join(' ');
+    document.getElementById('session-phase-memory-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.session_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.memory_ready_session_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.blocked_session_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(s.memory_ready_rate||0)}</td>
+      <td class="tokens">${(s.plateau_session_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.unknown_session_call_count||0).toLocaleString()}</td>
+      <td class="flags"><span class="badge provider">${(decisions.decision_count||0).toLocaleString()} uses</span> ${compactBreakdown(decisions.status_counts,'none')}</td>
+      <td class="flags">${privacyBadges}</td>
+    </tr>`;
+    const blockers=s.top_blocker_reasons||s.blocker_counts||[];
+    document.getElementById('session-phase-memory-blockers-tbody').innerHTML=blockers.map(row=>`<tr>
+      <td><span class="badge err">${esc(row.value||'unknown')}</span></td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="2" style="color:#8b949e">No session phase memory blockers observed</td></tr>';
+    const rows=d.sessions||[];
+    document.getElementById('session-phase-memory-sessions-tbody').innerHTML=rows.map(row=>{
+      const window=row.window||{};
+      const plateau=row.context_plateau||{};
+      const usage=row.decision_usage||{};
+      return `<tr>
+        <td class="ts">${ago(window.last_seen_at)}</td>
+        <td class="ts" title="${esc(row.session_key_kind||'')}">${esc(shortHash(row.session_key))}<div class="sub">${esc(row.session_key_kind||'')}</div></td>
+        <td><span class="badge ${phaseMemoryBadge(row.readiness)}">${esc(row.readiness||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(row.dominant_phase||'unknown')}</span></td>
+        <td class="tokens">${fmtPctValue(row.phase_stability||0)}</td>
+        <td class="tokens">${(window.call_count||0).toLocaleString()}</td>
+        <td class="tokens">${(plateau.pairs||0).toLocaleString()} ${plateau.active?'<span class="badge routed">active</span>':'<span class="badge miss">clear</span>'}</td>
+        <td><span class="badge provider">${esc(row.model_family_floor||'unknown')}</span></td>
+        <td class="${(row.error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.error_rate||0)}</td>
+        <td class="${(row.retry_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.retry_rate||0)}</td>
+        <td class="${(row.fallback_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.fallback_rate||0)}</td>
+        <td><span class="badge miss">${esc(row.cost_bucket||'unknown')}</span></td>
+        <td><span class="badge miss">${esc(row.projected_savings_bucket||row.crunch_savings_bucket||'none')}</span></td>
+        <td class="tokens">${(usage.decision_count||0).toLocaleString()} <span class="badge ${phaseMemoryBadge(usage.last_status)}">${esc(usage.last_status||'none')}</span></td>
+        <td class="flags">${phaseMemoryBlockerBadges(row.blocker_reasons)}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="15" style="color:#8b949e">No session phase memory rows yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+
 async function refreshSessions(){
   try{
     const [r,full]=await Promise.all([fetch('/agentflow/stats/sessions'),loadFullStats()]);
@@ -14807,6 +15028,7 @@ refreshOptimizationPromotionFunnel();
 refreshOptimizationEvalQueue();
 refreshManaged();
 refreshPhaseRouting();
+refreshSessionPhaseMemory();
 refreshSessions();
 setInterval(refreshSafety,30000);
 setInterval(refreshActivity,5000);
@@ -14827,6 +15049,7 @@ setInterval(refreshOptimizationPromotionFunnel,30000);
 setInterval(refreshOptimizationEvalQueue,30000);
 setInterval(refreshManaged,30000);
 setInterval(refreshPhaseRouting,30000);
+setInterval(refreshSessionPhaseMemory,30000);
 setInterval(refreshSessions,30000);
 </script>
 </body>

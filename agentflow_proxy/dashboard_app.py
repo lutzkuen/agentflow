@@ -141,6 +141,10 @@ def create_dashboard_router(
     async def stats_phase_routing(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_phase_routing(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/session-phase-memory")
+    async def stats_session_phase_memory(limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_session_phase_memory(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/policies")
     async def stats_policies() -> dict[str, Any]:
         return await stats_views.stats_policies()
