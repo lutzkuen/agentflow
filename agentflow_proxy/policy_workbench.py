@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import yaml
 
@@ -11,6 +12,7 @@ from agentflow_proxy.policy_files import _draft_workspace_root, utc_now
 
 
 POLICY_DRAFT_VALIDATE_SCHEMA = "agentflow.policy_draft_validate.v1"
+POLICY_DRAFT_APPLY_SCHEMA = "agentflow.policy_draft_apply.v1"
 POLICY_DRAFT_VALIDATE_PRIVACY = {
     "local_only": True,
     "metadata_only": True,
@@ -25,6 +27,11 @@ POLICY_DRAFT_VALIDATE_PRIVACY = {
     "provider_calls_made": False,
     "managed_server_calls_made": False,
 }
+POLICY_DRAFT_APPLY_PRIVACY = POLICY_DRAFT_VALIDATE_PRIVACY | {
+    "loopback_admin_calls_made": False,
+}
+
+ReloadPolicyState = Callable[[], Awaitable[dict[str, Any]]]
 
 
 def _safe_read_json(path: Path) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -166,6 +173,118 @@ def _blocker_codes(*items: list[dict[str, Any]]) -> list[str]:
                     codes.add(value.strip())
                     break
     return sorted(codes)
+
+
+def _sha256_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _apply_id(draft_id: str | None) -> str:
+    safe = "".join(char for char in str(draft_id or "draft") if char.isalnum() or char in {"-", "_"}).strip("-_")
+    safe = (safe or "draft")[:48]
+    stamp = utc_now().replace(":", "").replace("+", "Z").replace(".", "")
+    return f"{stamp}-{safe}"
+
+
+def _atomic_write_policy_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_policy_text(path: Path) -> tuple[str | None, bool]:
+    try:
+        return path.read_text(encoding="utf-8"), True
+    except FileNotFoundError:
+        return None, False
+
+
+def _backup_path(path: Path, apply_id: str) -> Path:
+    return path.with_name(f"{path.name}.bak-{apply_id}")
+
+
+def _file_result(plan: dict[str, Any], *, restored: bool = False) -> dict[str, Any]:
+    result = {
+        "section": plan["section"],
+        "path": str(plan["path"]),
+        "changed": bool(plan["changed"]),
+        "backup_path": str(plan["backup_path"]) if plan.get("backup_path") is not None else None,
+        "sha256_before": plan.get("sha256_before"),
+        "sha256_after": plan.get("sha256_after"),
+        "bytes_after": plan.get("bytes_after"),
+        "existed_before": bool(plan.get("existed_before")),
+    }
+    if restored:
+        result["restored"] = True
+        result["sha256_restored"] = plan.get("sha256_before")
+    return result
+
+
+def _restore_transaction_plans(plans: list[dict[str, Any]]) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for plan in plans:
+        if not plan.get("changed"):
+            continue
+        path = plan["path"]
+        try:
+            if plan.get("existed_before"):
+                _atomic_write_policy_text(path, plan.get("old_text") or "")
+            elif path.exists():
+                path.unlink()
+            files.append(_file_result(plan, restored=True))
+        except OSError as exc:
+            errors.append({"section": plan["section"], "path": str(path), "message": str(exc)})
+    return {
+        "ok": not errors,
+        "files": files,
+        "errors": errors,
+    }
+
+
+def _section_file_state(policies: dict[str, Any], section: str) -> dict[str, Any]:
+    raw = policies.get(section) if isinstance(policies.get(section), dict) else {}
+    return raw.get("file") if isinstance(raw.get("file"), dict) else {}
+
+
+def _verify_reloaded_policy_state(
+    policies: dict[str, Any],
+    plans: list[dict[str, Any]],
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for plan in plans:
+        if not plan.get("requested"):
+            continue
+        section = plan["section"]
+        file_state = _section_file_state(policies, section)
+        loaded = file_state.get("loaded") if isinstance(file_state.get("loaded"), dict) else {}
+        current = file_state.get("current") if isinstance(file_state.get("current"), dict) else {}
+        expected_sha = plan.get("sha256_after")
+        loaded_sha = loaded.get("sha256")
+        current_sha = current.get("sha256")
+        reload_required = bool(file_state.get("reload_required"))
+        ok = loaded_sha == expected_sha and current_sha == expected_sha and not reload_required
+        check = {
+            "section": section,
+            "path": str(plan["path"]),
+            "ok": ok,
+            "expected_sha256": expected_sha,
+            "loaded_sha256": loaded_sha,
+            "current_sha256": current_sha,
+            "reload_required": reload_required,
+        }
+        checks.append(check)
+        if not ok:
+            failures.append(check)
+    return {
+        "ok": not failures,
+        "checks": checks,
+        "failures": failures,
+    }
 
 
 def _section_changed(manifest: dict[str, Any] | None, review: dict[str, Any], section: str) -> bool:
@@ -402,4 +521,340 @@ async def validate_staged_policy_draft(
             "message": "staged policy draft did not pass the local pre-apply gate",
             "blocker_reason_codes": sorted(set(apply_blockers)),
         },
+    }
+
+
+async def _default_reload_policy_state() -> dict[str, Any]:
+    from agentflow_proxy.admin import reload_policy_modules
+
+    return await reload_policy_modules()
+
+
+def _requested_sections(sections: list[str] | tuple[str, ...] | None) -> tuple[list[str], list[str]]:
+    requested = list(sections or APPLY_POLICY_SECTIONS)
+    invalid = sorted(set(requested) - set(APPLY_POLICY_SECTIONS))
+    ordered = [section for section in APPLY_POLICY_SECTIONS if section in set(requested)]
+    return ordered, invalid
+
+
+def _draft_apply_error_result(
+    *,
+    status: str,
+    draft_id: str,
+    apply_id: str,
+    config_dir: str | Path,
+    validation: dict[str, Any] | None,
+    error: dict[str, Any],
+    sections: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": POLICY_DRAFT_APPLY_SCHEMA,
+        "ok": False,
+        "status": status,
+        "draft_id": draft_id,
+        "apply_id": apply_id,
+        "backup_id": apply_id,
+        "config_dir": str(Path(config_dir).expanduser()),
+        "requested_sections": list(sections or APPLY_POLICY_SECTIONS),
+        "applied_sections": [],
+        "changed_sections": [],
+        "files": [],
+        "backups": [],
+        "reloaded_modules": False,
+        "reload": None,
+        "verification": None,
+        "validation": validation,
+        "restored": False,
+        "restore": None,
+        "rollback_command": None,
+        "privacy": POLICY_DRAFT_APPLY_PRIVACY,
+        "error": error,
+    }
+
+
+async def apply_validated_policy_draft(
+    path_or_id: str,
+    *,
+    workspace: str | Path | None = None,
+    config_dir: str | Path | None = None,
+    db_path: str | None = None,
+    impact_limit: int = 1000,
+    codex_recent_limit: int = 200,
+    sections: list[str] | tuple[str, ...] | None = None,
+    reload_policy_state: ReloadPolicyState | None = None,
+    apply_id: str | None = None,
+    event_source: str = "workbench",
+    loopback_admin_calls_made: bool = False,
+) -> dict[str, Any]:
+    from agentflow_proxy.policy_bundle import _policy_apply_yaml
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.policy_files import POLICY_DRAFT_SECTION_FILES
+
+    config_path = Path(config_dir or Path.home() / ".agentflow").expanduser()
+    validation = await validate_staged_policy_draft(
+        path_or_id,
+        workspace=workspace,
+        config_dir=config_path,
+        db_path=db_path,
+        impact_limit=impact_limit,
+        codex_recent_limit=codex_recent_limit,
+    )
+    draft_id = str((validation.get("draft") or {}).get("draft_id") or validation.get("draft_id") or path_or_id)
+    transaction_id = apply_id or _apply_id(draft_id)
+    privacy = POLICY_DRAFT_APPLY_PRIVACY | {"loopback_admin_calls_made": bool(loopback_admin_calls_made)}
+
+    requested, invalid_sections = _requested_sections(sections)
+    if invalid_sections:
+        result = _draft_apply_error_result(
+            status="failed",
+            draft_id=draft_id,
+            apply_id=transaction_id,
+            config_dir=config_path,
+            validation=validation,
+            sections=sections,
+            error={
+                "type": "invalid_sections",
+                "message": "unknown or review-only policy section requested",
+                "sections": invalid_sections,
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("draft-apply", ok=False, details={"source": event_source, **_policy_apply_event_details(result)})
+        return result
+
+    if not validation.get("can_apply"):
+        result = _draft_apply_error_result(
+            status="blocked",
+            draft_id=draft_id,
+            apply_id=transaction_id,
+            config_dir=config_path,
+            validation=validation,
+            sections=sections,
+            error=validation.get("error") if isinstance(validation.get("error"), dict) else {
+                "type": "apply_blocked",
+                "message": "staged policy draft did not pass validation",
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("draft-apply", ok=False, details={"source": event_source, **_policy_apply_event_details(result)})
+        return result
+
+    loaded = load_staged_policy_draft(path_or_id, workspace=workspace)
+    if not loaded.get("ok"):
+        result = _draft_apply_error_result(
+            status="failed",
+            draft_id=draft_id,
+            apply_id=transaction_id,
+            config_dir=config_path,
+            validation=validation,
+            sections=sections,
+            error=loaded.get("error") if isinstance(loaded.get("error"), dict) else {
+                "type": "draft_not_found",
+                "message": "staged draft could not be loaded for apply",
+            },
+        )
+        result["privacy"] = privacy
+        log_policy_event("draft-apply", ok=False, details={"source": event_source, **_policy_apply_event_details(result)})
+        return result
+
+    bundle = loaded["bundle"]
+    policies = bundle.get("policies") if isinstance(bundle.get("policies"), dict) else {}
+    plans: list[dict[str, Any]] = []
+    for section in APPLY_POLICY_SECTIONS:
+        requested_section = section in requested
+        policy = policies.get(section) if isinstance(policies.get(section), dict) else {}
+        text = yaml.safe_dump(_policy_apply_yaml(section, policy), sort_keys=False)
+        path = config_path / POLICY_DRAFT_SECTION_FILES[section]
+        old_text, existed_before = _read_policy_text(path)
+        changed = old_text != text
+        backup = _backup_path(path, transaction_id) if changed and existed_before else None
+        plans.append({
+            "section": section,
+            "requested": requested_section,
+            "path": path,
+            "new_text": text,
+            "old_text": old_text,
+            "existed_before": existed_before,
+            "changed": bool(changed and requested_section),
+            "backup_path": backup,
+            "sha256_before": _sha256_text(old_text),
+            "sha256_after": _sha256_text(text),
+            "bytes_after": len(text.encode("utf-8")),
+        })
+
+    write_plans = [plan for plan in plans if plan["requested"] and plan["changed"]]
+    backups: list[dict[str, Any]] = []
+    try:
+        for plan in write_plans:
+            if plan.get("backup_path") is None:
+                continue
+            backup_path = plan["backup_path"]
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            backup_path.write_text(plan.get("old_text") or "", encoding="utf-8")
+            backups.append({
+                "section": plan["section"],
+                "backup_id": transaction_id,
+                "path": str(backup_path),
+                "sha256": plan.get("sha256_before"),
+            })
+        for plan in write_plans:
+            _atomic_write_policy_text(plan["path"], plan["new_text"])
+    except OSError as exc:
+        restore = _restore_transaction_plans(write_plans)
+        result = {
+            "schema": POLICY_DRAFT_APPLY_SCHEMA,
+            "ok": False,
+            "status": "failed",
+            "draft_id": draft_id,
+            "apply_id": transaction_id,
+            "backup_id": transaction_id,
+            "config_dir": str(config_path),
+            "requested_sections": requested,
+            "applied_sections": [],
+            "changed_sections": [],
+            "files": [_file_result(plan) for plan in plans if plan["requested"]],
+            "backups": backups,
+            "reloaded_modules": False,
+            "reload": None,
+            "verification": None,
+            "validation": validation,
+            "restored": True,
+            "restore": restore,
+            "rollback_command": None,
+            "privacy": privacy,
+            "error": {"type": "write_failed", "message": str(exc)},
+        }
+        log_policy_event("draft-apply", ok=False, details={"source": event_source, **_policy_apply_event_details(result)})
+        return result
+
+    reload_payload: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
+    restore: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    reloader = reload_policy_state or _default_reload_policy_state
+    if write_plans:
+        try:
+            reload_payload = await reloader()
+            if not isinstance(reload_payload, dict) or not reload_payload.get("ok"):
+                error = {
+                    "type": "reload_failed",
+                    "message": "policy reload did not return ok=true",
+                    "reload": reload_payload,
+                }
+            else:
+                policies_after = reload_payload.get("policies") if isinstance(reload_payload.get("policies"), dict) else {}
+                verification = _verify_reloaded_policy_state(policies_after, [plan for plan in plans if plan["requested"]])
+                if not verification.get("ok"):
+                    error = {
+                        "type": "verification_failed",
+                        "message": "reloaded policy snapshots did not match applied files",
+                        "failures": verification.get("failures", []),
+                    }
+        except Exception as exc:  # pragma: no cover - exercised through tests by type, not branch internals
+            error = {"type": "reload_failed", "message": str(exc)}
+
+    if error is not None:
+        restore = _restore_transaction_plans(write_plans)
+        restore_reload: dict[str, Any] | None = None
+        try:
+            restore_reload = await reloader()
+        except Exception as exc:  # pragma: no cover
+            restore_reload = {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+        restore["reload"] = restore_reload
+        result = {
+            "schema": POLICY_DRAFT_APPLY_SCHEMA,
+            "ok": False,
+            "status": "failed",
+            "draft_id": draft_id,
+            "apply_id": transaction_id,
+            "backup_id": transaction_id,
+            "config_dir": str(config_path),
+            "requested_sections": requested,
+            "applied_sections": [],
+            "changed_sections": [],
+            "files": [_file_result(plan) for plan in plans if plan["requested"]],
+            "backups": backups,
+            "reloaded_modules": bool(reload_payload and reload_payload.get("ok")),
+            "reload": reload_payload,
+            "verification": verification,
+            "validation": validation,
+            "restored": True,
+            "restore": restore,
+            "rollback_command": None,
+            "privacy": privacy,
+            "error": error,
+        }
+        log_policy_event("draft-apply", ok=False, details={"source": event_source, **_policy_apply_event_details(result)})
+        return result
+
+    changed_sections = [plan["section"] for plan in write_plans]
+    rollback_command = None
+    if changed_sections:
+        rollback_command = " ".join(
+            ["agentflow-policy-rollback", "--config-dir", str(config_path)]
+            + [part for section in changed_sections for part in ("--section", section)]
+        )
+    result = {
+        "schema": POLICY_DRAFT_APPLY_SCHEMA,
+        "ok": True,
+        "status": "applied",
+        "draft_id": draft_id,
+        "apply_id": transaction_id,
+        "backup_id": transaction_id,
+        "config_dir": str(config_path),
+        "requested_sections": requested,
+        "applied_sections": requested,
+        "changed_sections": changed_sections,
+        "files": [_file_result(plan) for plan in plans if plan["requested"]],
+        "backups": backups,
+        "reloaded_modules": bool(write_plans),
+        "reload": reload_payload,
+        "verification": verification or {"ok": True, "checks": [], "failures": []},
+        "validation": validation,
+        "restored": False,
+        "restore": None,
+        "rollback_command": rollback_command,
+        "rollback": {
+            "backup_id": transaction_id,
+            "command": rollback_command,
+            "backup_paths": [backup["path"] for backup in backups],
+        },
+        "privacy": privacy,
+        "error": None,
+    }
+    log_policy_event("draft-apply", ok=True, details={"source": event_source, **_policy_apply_event_details(result)})
+    return result
+
+
+def _policy_apply_event_details(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "draft_id": result.get("draft_id"),
+        "apply_id": result.get("apply_id"),
+        "backup_id": result.get("backup_id"),
+        "config_dir": result.get("config_dir"),
+        "status": result.get("status"),
+        "requested_sections": result.get("requested_sections", []),
+        "applied_sections": result.get("applied_sections", []),
+        "changed_sections": result.get("changed_sections", []),
+        "changed_files": [
+            file.get("path")
+            for file in result.get("files", [])
+            if isinstance(file, dict) and file.get("changed")
+        ],
+        "backup_paths": [
+            backup.get("path")
+            for backup in result.get("backups", [])
+            if isinstance(backup, dict) and backup.get("path")
+        ],
+        "reloaded_modules": ((result.get("reload") or {}).get("reloaded_modules", []) if isinstance(result.get("reload"), dict) else []),
+        "verification_ok": ((result.get("verification") or {}).get("ok") if isinstance(result.get("verification"), dict) else None),
+        "validation_status": ((result.get("validation") or {}).get("status") if isinstance(result.get("validation"), dict) else None),
+        "validation_can_apply": ((result.get("validation") or {}).get("can_apply") if isinstance(result.get("validation"), dict) else None),
+        "restored": result.get("restored"),
+        "restore_ok": ((result.get("restore") or {}).get("ok") if isinstance(result.get("restore"), dict) else None),
+        "rollback_command": result.get("rollback_command"),
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+        "exit_code": 0 if result.get("ok") else 1,
     }

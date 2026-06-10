@@ -1171,6 +1171,165 @@ def policy_draft_validate_cli(
     return 0 if result.get("ok") else 1
 
 
+async def _reload_policy_state_via_url(url: str, *, timeout: float) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(url)
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {
+            "ok": response.is_success,
+            "status_code": response.status_code,
+            "body": response.text,
+            "url": url,
+        }
+    if isinstance(payload, dict):
+        payload.setdefault("status_code", response.status_code)
+        payload.setdefault("url", url)
+        if not response.is_success:
+            payload.setdefault("ok", False)
+        return payload
+    return {
+        "ok": response.is_success,
+        "status_code": response.status_code,
+        "response": payload,
+        "url": url,
+    }
+
+
+def policy_draft_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Apply a validated staged AgentFlow policy draft transactionally, with backup, reload, and verification"
+    )
+    parser.add_argument(
+        "draft",
+        help="Staged draft ID, draft directory, draft.json path, or policy_bundle.json path.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local SQLite DB path for metadata-only impact simulation.",
+    )
+    parser.add_argument(
+        "--section",
+        action="append",
+        choices=["routing", "crunch", "cache", "routing_experiments", "codex_app"],
+        help="Apply only one policy section. Repeat to apply multiple sections.",
+    )
+    parser.add_argument(
+        "--reload-url",
+        default=os.getenv("AGENTFLOW_ADMIN_URL", _default_policy_reload_url()),
+        help=f"Admin reload URL, default: {_default_policy_reload_url()}",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_ADMIN_TIMEOUT", "10")),
+        help="HTTP timeout in seconds for the loopback reload call, default: 10.",
+    )
+    parser.add_argument(
+        "--allow-non-loopback",
+        action="store_true",
+        help="Allow posting reload to a non-loopback URL. Use only for explicit trusted tunnels.",
+    )
+    parser.add_argument(
+        "--impact-limit",
+        type=int,
+        default=1000,
+        help="Recent provider metadata rows to inspect for impact simulation, default: 1000.",
+    )
+    parser.add_argument(
+        "--codex-recent-limit",
+        type=int,
+        default=200,
+        help="Recent Codex app metadata rows to inspect for Codex app dry-run projection, default: 200.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print apply JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    if not args.allow_non_loopback and not _is_loopback_url(args.reload_url):
+        from agentflow_proxy.policy_events import log_policy_event
+        from agentflow_proxy.policy_workbench import POLICY_DRAFT_APPLY_SCHEMA
+
+        result = {
+            "schema": POLICY_DRAFT_APPLY_SCHEMA,
+            "ok": False,
+            "status": "blocked",
+            "draft_id": args.draft,
+            "apply_id": None,
+            "backup_id": None,
+            "config_dir": args.config_dir,
+            "requested_sections": args.section or ["routing", "crunch", "cache", "routing_experiments", "codex_app"],
+            "applied_sections": [],
+            "changed_sections": [],
+            "files": [],
+            "backups": [],
+            "reloaded_modules": False,
+            "reload": None,
+            "verification": None,
+            "validation": None,
+            "restored": False,
+            "restore": None,
+            "rollback_command": None,
+            "privacy": {"provider_calls_made": False, "managed_server_calls_made": False, "loopback_admin_calls_made": False},
+            "error": {
+                "type": "unsafe_url",
+                "message": "policy draft apply only posts reloads to loopback URLs unless --allow-non-loopback is set",
+                "url": args.reload_url,
+            },
+        }
+        log_policy_event(
+            "draft-apply",
+            ok=False,
+            details={"source": "cli", "draft_id": args.draft, "error_type": "unsafe_url", "exit_code": 2},
+        )
+        _write_policy_draft_apply_result(stderr, result, pretty=args.pretty)
+        return 2
+
+    from agentflow_proxy.policy_workbench import apply_validated_policy_draft
+
+    async def reload_state() -> dict[str, Any]:
+        return await _reload_policy_state_via_url(args.reload_url, timeout=args.timeout)
+
+    result = asyncio.run(apply_validated_policy_draft(
+        args.draft,
+        workspace=args.workspace,
+        config_dir=args.config_dir,
+        db_path=args.db,
+        impact_limit=args.impact_limit,
+        codex_recent_limit=args.codex_recent_limit,
+        sections=args.section,
+        reload_policy_state=reload_state,
+        event_source="cli",
+        loopback_admin_calls_made=True,
+    ))
+
+    _write_policy_draft_apply_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
 async def _queue_codex_app_dry_run_lifecycle_events(store: Any, result: dict[str, Any]) -> dict[str, Any]:
     from agentflow_proxy.recommendations import queue_policy_event_feedback
 
@@ -3931,6 +4090,13 @@ def _write_policy_draft_validate_result(stream: Any, payload: dict[str, Any], *,
         _write_json(stream, payload)
 
 
+def _write_policy_draft_apply_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
 def _write_rollout_actions_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -4755,6 +4921,10 @@ def policy_draft_stage_main() -> None:
 
 def policy_draft_validate_main() -> None:
     raise SystemExit(policy_draft_validate_cli())
+
+
+def policy_draft_apply_main() -> None:
+    raise SystemExit(policy_draft_apply_cli())
 
 
 def codex_app_policy_dry_run_main() -> None:

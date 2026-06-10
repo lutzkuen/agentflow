@@ -14,6 +14,7 @@ from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy import codex_app_policy as codex_app_policy_module
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, stage_policy_draft, utc_now
+from agentflow_proxy.policy_workbench import apply_validated_policy_draft
 from agentflow_proxy.policy_bundle import (
     MANAGED_POLICY_HMAC_SECRET_ENV,
     MANAGED_POLICY_VERIFICATION_SECRET_ENV,
@@ -718,6 +719,153 @@ crunch:
             self.assertFalse(result["wrote_active_policy_files"])
             self.assertFalse(workspace.exists())
             self.assertIn("$.raw_request", {error["path"] for error in result["error"]["errors"]})
+
+    def test_policy_draft_apply_transaction_writes_backup_reloads_and_verifies(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            event_log = Path(tmp) / "policy_events.jsonl"
+
+            env = {
+                "AGENTFLOW_CACHE_RULES": str(cache_path),
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(event_log),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-apply",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+
+                    result = asyncio.run(apply_validated_policy_draft(
+                        "cache-apply",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=reload_policy_modules,
+                        event_source="test",
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["schema"], "agentflow.policy_draft_apply.v1")
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(result["changed_sections"], ["cache"])
+            self.assertTrue(result["reloaded_modules"])
+            self.assertTrue(result["verification"]["ok"])
+            self.assertFalse(result["restored"])
+            self.assertIn("agentflow-policy-rollback", result["rollback_command"])
+            rendered = yaml.safe_load(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(rendered["semantic_cache"]["threshold"], 0.91)
+            backup_path = Path(result["backups"][0]["path"])
+            self.assertTrue(backup_path.exists())
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
+            events = [json.loads(line) for line in event_log.read_text(encoding="utf-8").splitlines()]
+            event = [item for item in events if item.get("action") == "draft-apply"][-1]
+            self.assertEqual(event["action"], "draft-apply")
+            self.assertTrue(event["ok"])
+            self.assertEqual(event["details"]["apply_id"], result["apply_id"])
+            self.assertFalse(event["details"]["provider_calls_made"])
+            self.assertFalse(event["details"]["managed_server_calls_made"])
+
+    def test_policy_draft_apply_restores_file_when_reload_fails(self):
+        async def failing_reload():
+            raise RuntimeError("reload unavailable")
+
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+
+            with patch.dict(os.environ, {"AGENTFLOW_CACHE_RULES": str(cache_path)}, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-reload-fail",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+
+                    result = asyncio.run(apply_validated_policy_draft(
+                        "cache-reload-fail",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=failing_reload,
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["type"], "reload_failed")
+            self.assertTrue(result["restored"])
+            self.assertTrue(result["restore"]["ok"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
+
+    def test_policy_draft_apply_restores_file_when_verification_fails(self):
+        async def stale_reload():
+            return {
+                "ok": True,
+                "reloaded_modules": ["agentflow_proxy.cache"],
+                "policies": {
+                    "cache": {
+                        "file": {
+                            "loaded": {"sha256": "wrong"},
+                            "current": {"sha256": "wrong"},
+                            "reload_required": False,
+                        }
+                    }
+                },
+            }
+
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / ".agentflow"
+            config_dir.mkdir()
+            cache_path = config_dir / "cache_rules.yaml"
+            original = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            cache_path.write_text(original, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+
+            with patch.dict(os.environ, {"AGENTFLOW_CACHE_RULES": str(cache_path)}, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    stage = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-verify-fail",
+                        workspace=workspace,
+                    ))
+                    self.assertTrue(stage["ok"])
+
+                    result = asyncio.run(apply_validated_policy_draft(
+                        "cache-verify-fail",
+                        workspace=workspace,
+                        config_dir=config_dir,
+                        sections=["cache"],
+                        reload_policy_state=stale_reload,
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["type"], "verification_failed")
+            self.assertFalse(result["verification"]["ok"])
+            self.assertTrue(result["restored"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), original)
 
     def test_policy_bundle_exports_manual_policy_source_and_file_status(self):
         with TemporaryDirectory() as tmp:
