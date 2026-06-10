@@ -6193,6 +6193,389 @@ async def stats_optimization_eval_queue(store_obj: Any, limit: int = 500) -> dic
     }
 
 
+def _promotion_privacy_summary() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "raw_transcripts_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "raw_session_ids_included": False,
+        "filesystem_paths_included": False,
+        "api_keys_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "basis": "optimization eval plan metadata, sanitized promotion verdicts, policy-event summaries, and stored canary decision metadata only",
+    }
+
+
+def _promotion_canary_meta_from_decision(decision: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("phase_canary", "promotion_canary", "optimization_promotion_canary"):
+        value = decision.get(key)
+        if isinstance(value, dict) and (value.get("target_candidate_id") or value.get("promotion_action_id") or value.get("action_id")):
+            return value
+    canary = decision.get("canary")
+    if isinstance(canary, dict) and (canary.get("target_candidate_id") or canary.get("promotion_action_id") or canary.get("action_id")):
+        return canary
+    return None
+
+
+def _promotion_new_observed_bucket(candidate_id: str, action_id: str | None = None) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "action_id": action_id,
+        "policy_section": None,
+        "policy_source": None,
+        "canary_fraction": None,
+        "holdout_fraction": None,
+        "observed_count": 0,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "skipped_count": 0,
+        "bypassed_count": 0,
+        "safety_stop_count": 0,
+        "applied_error_count": 0,
+        "holdout_error_count": 0,
+        "applied_retry_count": 0,
+        "holdout_retry_count": 0,
+        "applied_latency_ms_total": 0,
+        "holdout_latency_ms_total": 0,
+        "applied_latency_count": 0,
+        "holdout_latency_count": 0,
+        "observed_savings_usd": 0.0,
+        "last_observed_at": None,
+        "reason_counts": {},
+        "source_surface_counts": {},
+    }
+
+
+def _promotion_observed_canary_rows(store_obj: Any, limit: int) -> dict[str, dict[str, Any]]:
+    rows = store_obj.conn.execute(
+        """
+        select created_at, source_surface, status_code, latency_ms, retry_count,
+               cost_est_usd, cost_baseline_usd, routing_json, crunch_json, cache_json
+        from calls
+        where routing_json is not null or crunch_json is not null or cache_json is not null
+        order by created_at desc
+        limit ?
+        """,
+        (max(1, min(int(limit or 500), 10_000)),),
+    ).fetchall()
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        decisions = (
+            _json_obj(row.get("routing_json")),
+            _json_obj(row.get("crunch_json")),
+            _json_obj(row.get("cache_json")),
+        )
+        meta = next((item for item in (_promotion_canary_meta_from_decision(decision) for decision in decisions) if item), None)
+        if not meta:
+            continue
+        candidate_id = str(meta.get("target_candidate_id") or meta.get("candidate_id") or "unknown")
+        if candidate_id == "unknown":
+            continue
+        action_id = meta.get("promotion_action_id") or meta.get("action_id")
+        bucket = buckets.setdefault(candidate_id, _promotion_new_observed_bucket(candidate_id, str(action_id) if action_id else None))
+        if action_id and not bucket.get("action_id"):
+            bucket["action_id"] = str(action_id)
+        for key in ("policy_section", "policy_source", "canary_fraction", "holdout_fraction"):
+            if bucket.get(key) is None and meta.get(key) is not None:
+                bucket[key] = meta.get(key)
+        source_surface = str(row.get("source_surface") or meta.get("source_surface") or "unknown")
+        _increment_count(bucket["source_surface_counts"], source_surface)
+
+        status = str(meta.get("status") or "")
+        cohort = str(meta.get("cohort") or "")
+        reason = str(meta.get("reason") or "")
+        if reason:
+            _increment_count(bucket["reason_counts"], reason)
+        safety = meta.get("safety_stop") if isinstance(meta.get("safety_stop"), dict) else {}
+        for code in safety.get("reason_codes") or []:
+            _increment_count(bucket["reason_counts"], code)
+
+        bucket["observed_count"] += 1
+        if status == "applied" or cohort == "canary_applied":
+            bucket["applied_count"] += 1
+            if _as_int(row.get("status_code")) >= 400:
+                bucket["applied_error_count"] += 1
+            if _as_int(row.get("retry_count")) > 0:
+                bucket["applied_retry_count"] += 1
+            latency = _as_int(row.get("latency_ms"))
+            if latency > 0:
+                bucket["applied_latency_ms_total"] += latency
+                bucket["applied_latency_count"] += 1
+            savings = _as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd"))
+            if savings > 0:
+                bucket["observed_savings_usd"] += savings
+        elif status == "holdout" or cohort == "canary_holdout":
+            bucket["holdout_count"] += 1
+            if _as_int(row.get("status_code")) >= 400:
+                bucket["holdout_error_count"] += 1
+            if _as_int(row.get("retry_count")) > 0:
+                bucket["holdout_retry_count"] += 1
+            latency = _as_int(row.get("latency_ms"))
+            if latency > 0:
+                bucket["holdout_latency_ms_total"] += latency
+                bucket["holdout_latency_count"] += 1
+        elif status == "safety_stopped" or reason in {"local-canary-safety-stop", "safety-stop-tripped"} or safety.get("tripped"):
+            bucket["safety_stop_count"] += 1
+            bucket["bypassed_count"] += 1
+        elif status in {"skipped", "not_selected"} or cohort == "skipped":
+            bucket["skipped_count"] += 1
+        else:
+            bucket["bypassed_count"] += 1
+        created_at = row.get("created_at")
+        if created_at and (not bucket.get("last_observed_at") or str(created_at) > str(bucket.get("last_observed_at"))):
+            bucket["last_observed_at"] = str(created_at)
+    return buckets
+
+
+def _promotion_lifecycle_rows(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for event in events:
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        if not details:
+            continue
+        text = " ".join(str(value or "") for value in (event.get("action"), details.get("command"), details.get("lifecycle_kind"), details.get("schema")))
+        if "optimization" not in text and "promotion" not in text:
+            continue
+        candidate_ids = details.get("candidate_ids")
+        if not isinstance(candidate_ids, list):
+            candidate = details.get("target_candidate_id") or details.get("candidate_id")
+            candidate_ids = [candidate] if candidate else []
+        action_ids = details.get("action_ids")
+        if not isinstance(action_ids, list):
+            action = details.get("promotion_action_id") or details.get("action_id")
+            action_ids = [action] if action else []
+        for candidate in candidate_ids:
+            candidate_id = str(candidate or "")
+            if not candidate_id:
+                continue
+            bucket = buckets.setdefault(candidate_id, {
+                "candidate_id": candidate_id,
+                "latest_event_at": None,
+                "event_count": 0,
+                "action_ids": set(),
+                "applied_count": 0,
+                "holdout_count": 0,
+                "skipped_count": 0,
+                "safety_stop_count": 0,
+                "rollback_count": 0,
+                "reason_counts": {},
+            })
+            bucket["event_count"] += 1
+            if event.get("created_at") and (not bucket.get("latest_event_at") or str(event.get("created_at")) > str(bucket.get("latest_event_at"))):
+                bucket["latest_event_at"] = str(event.get("created_at"))
+            for action_id in action_ids:
+                if action_id:
+                    bucket["action_ids"].add(str(action_id))
+            bucket["applied_count"] += _as_int(details.get("actual_canary_applied_count") or details.get("canary_applied_count") or details.get("applied_count"))
+            bucket["holdout_count"] += _as_int(details.get("actual_canary_holdout_count") or details.get("canary_holdout_count") or details.get("holdout_count"))
+            bucket["skipped_count"] += _as_int(details.get("skipped_count"))
+            bucket["safety_stop_count"] += _as_int(details.get("safety_stop_count"))
+            if str(event.get("action") or "").endswith("rollback") or str(details.get("event_type") or "") == "rollback":
+                bucket["rollback_count"] += 1
+            for key in ("reason", "status", "event_type", "local_result_status"):
+                if details.get(key):
+                    _increment_count(bucket["reason_counts"], details.get(key))
+            reason_counts = details.get("reason_counts") or details.get("reason_code_counts")
+            if isinstance(reason_counts, dict):
+                for reason, count in reason_counts.items():
+                    bucket["reason_counts"][str(reason)] = bucket["reason_counts"].get(str(reason), 0) + _as_int(count)
+    result: dict[str, dict[str, Any]] = {}
+    for candidate_id, bucket in buckets.items():
+        public = dict(bucket)
+        public["action_ids"] = sorted(public["action_ids"])
+        public["reason_counts"] = _count_breakdown(public["reason_counts"])
+        result[candidate_id] = public
+    return result
+
+
+def _promotion_finalize_observed(bucket: dict[str, Any] | None) -> dict[str, Any]:
+    if not bucket:
+        return {
+            "observed_count": 0,
+            "applied_count": 0,
+            "holdout_count": 0,
+            "skipped_count": 0,
+            "bypassed_count": 0,
+            "safety_stop_count": 0,
+            "observed_savings_usd": 0.0,
+            "applied_error_rate": 0.0,
+            "holdout_error_rate": 0.0,
+            "error_rate_delta": 0.0,
+            "retry_rate_delta": 0.0,
+            "latency_delta_ms": None,
+            "last_observed_at": None,
+            "reason_counts": [],
+            "source_surface_counts": [],
+        }
+    applied = _as_int(bucket.get("applied_count"))
+    holdout = _as_int(bucket.get("holdout_count"))
+    applied_latency = None
+    holdout_latency = None
+    if _as_int(bucket.get("applied_latency_count")):
+        applied_latency = _as_float(bucket.get("applied_latency_ms_total")) / _as_int(bucket.get("applied_latency_count"))
+    if _as_int(bucket.get("holdout_latency_count")):
+        holdout_latency = _as_float(bucket.get("holdout_latency_ms_total")) / _as_int(bucket.get("holdout_latency_count"))
+    applied_error_rate = (_as_int(bucket.get("applied_error_count")) / applied) if applied else 0.0
+    holdout_error_rate = (_as_int(bucket.get("holdout_error_count")) / holdout) if holdout else 0.0
+    applied_retry_rate = (_as_int(bucket.get("applied_retry_count")) / applied) if applied else 0.0
+    holdout_retry_rate = (_as_int(bucket.get("holdout_retry_count")) / holdout) if holdout else 0.0
+    return {
+        "action_id": bucket.get("action_id"),
+        "policy_section": bucket.get("policy_section"),
+        "policy_source": bucket.get("policy_source"),
+        "canary_fraction": bucket.get("canary_fraction"),
+        "holdout_fraction": bucket.get("holdout_fraction"),
+        "observed_count": _as_int(bucket.get("observed_count")),
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "skipped_count": _as_int(bucket.get("skipped_count")),
+        "bypassed_count": _as_int(bucket.get("bypassed_count")),
+        "safety_stop_count": _as_int(bucket.get("safety_stop_count")),
+        "observed_savings_usd": round(_as_float(bucket.get("observed_savings_usd")), 8),
+        "applied_error_rate": round(applied_error_rate, 6),
+        "holdout_error_rate": round(holdout_error_rate, 6),
+        "error_rate_delta": round(applied_error_rate - holdout_error_rate, 6),
+        "applied_retry_rate": round(applied_retry_rate, 6),
+        "holdout_retry_rate": round(holdout_retry_rate, 6),
+        "retry_rate_delta": round(applied_retry_rate - holdout_retry_rate, 6),
+        "latency_delta_ms": round(applied_latency - holdout_latency, 2) if applied_latency is not None and holdout_latency is not None else None,
+        "last_observed_at": bucket.get("last_observed_at"),
+        "reason_counts": _count_breakdown(bucket.get("reason_counts") or {}),
+        "source_surface_counts": _count_breakdown(bucket.get("source_surface_counts") or {}),
+    }
+
+
+def _promotion_primary_state(verdict: str, eval_evidence: dict[str, Any], observed: dict[str, Any], lifecycle: dict[str, Any] | None) -> str:
+    if _as_int(observed.get("safety_stop_count")) or _as_int((lifecycle or {}).get("safety_stop_count")):
+        return "safety-stopped"
+    if verdict == "rollback" or _as_int((lifecycle or {}).get("rollback_count")):
+        return "rollback-recommended"
+    if verdict == "widen":
+        return "widening-eligible"
+    if _as_int(observed.get("applied_count")) or _as_int(observed.get("holdout_count")):
+        return "canary-active"
+    if _as_int(eval_evidence.get("pass_count")):
+        return "eval-passed"
+    return "needs-eval"
+
+
+async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
+    from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+    from agentflow_proxy.policy_events import recent_policy_events
+
+    capped_limit = max(1, min(int(limit or 500), 10_000))
+    plan = await build_optimization_eval_plan(store_obj, limit=capped_limit, min_samples=1)
+    promotion = build_optimization_promotion_report(store_obj, plan=plan, limit=capped_limit)
+    observed = _promotion_observed_canary_rows(store_obj, capped_limit * 5)
+    events = recent_policy_events(limit=500).get("events", [])
+    lifecycle = _promotion_lifecycle_rows(events if isinstance(events, list) else [])
+
+    candidates: list[dict[str, Any]] = []
+    state_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    all_candidate_ids = {
+        str(row.get("candidate_id"))
+        for row in promotion.get("candidates", [])
+        if isinstance(row, dict) and row.get("candidate_id")
+    } | set(observed) | set(lifecycle)
+    verdicts = {
+        str(row.get("candidate_id")): row
+        for row in promotion.get("candidates", [])
+        if isinstance(row, dict) and row.get("candidate_id")
+    }
+    for candidate_id in sorted(all_candidate_ids):
+        verdict_row = verdicts.get(candidate_id, {"candidate_id": candidate_id, "verdict": "needs_eval", "eval_evidence": {}})
+        observed_row = _promotion_finalize_observed(observed.get(candidate_id))
+        lifecycle_row = lifecycle.get(candidate_id)
+        verdict = str(verdict_row.get("verdict") or "needs_eval")
+        eval_evidence = verdict_row.get("eval_evidence") if isinstance(verdict_row.get("eval_evidence"), dict) else {}
+        primary_state = _promotion_primary_state(verdict, eval_evidence, observed_row, lifecycle_row)
+        _increment_count(state_counts, primary_state)
+        row_reasons = _optimization_eval_reason_codes(verdict_row.get("reason_codes"))
+        for reason in row_reasons:
+            _increment_count(reason_counts, reason)
+        for reason in (observed_row.get("reason_counts") or [])[:5]:
+            _increment_count(reason_counts, reason.get("value"))
+        candidates.append({
+            "candidate_id": candidate_id,
+            "action_id": observed_row.get("action_id") or ((lifecycle_row or {}).get("action_ids") or [None])[0],
+            "action_family": str(verdict_row.get("action_family") or "unknown"),
+            "optimization_family": str(verdict_row.get("optimization_family") or "unknown"),
+            "source_surface": str(verdict_row.get("source_surface") or "unknown"),
+            "app_family": str(verdict_row.get("app_family") or "unknown"),
+            "candidate_target_model": verdict_row.get("candidate_target_model"),
+            "candidate_profile": verdict_row.get("candidate_profile"),
+            "projected_savings_usd": round(_as_float(verdict_row.get("projected_savings_usd")), 8),
+            "observed_savings_usd": observed_row.get("observed_savings_usd", 0.0),
+            "verdict": verdict,
+            "primary_state": primary_state,
+            "eval_pass_count": _as_int(eval_evidence.get("pass_count")),
+            "eval_fail_count": _as_int(eval_evidence.get("fail_count")),
+            "eval_result_count": _as_int(eval_evidence.get("result_count")),
+            "eval_evidence_stale": bool(eval_evidence.get("stale")),
+            "canary": observed_row,
+            "lifecycle": lifecycle_row or {},
+            "reason_codes": row_reasons,
+            "top_reason_counts": observed_row.get("reason_counts") or [],
+            "last_evidence_at": max(
+                (
+                    str(value)
+                    for value in (
+                        eval_evidence.get("latest_result_at"),
+                        observed_row.get("last_observed_at"),
+                        (lifecycle_row or {}).get("latest_event_at"),
+                    )
+                    if value
+                ),
+                default=None,
+            ),
+            "privacy": _promotion_privacy_summary(),
+        })
+
+    candidates.sort(key=lambda row: (str(row.get("primary_state")), str(row.get("action_family")), str(row.get("candidate_id"))))
+    return {
+        "schema": "agentflow.optimization_promotion_funnel.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "summary": {
+            "candidate_count": len(candidates),
+            "needs_eval_count": state_counts.get("needs-eval", 0),
+            "eval_passed_count": state_counts.get("eval-passed", 0),
+            "canary_active_count": state_counts.get("canary-active", 0),
+            "widening_eligible_count": state_counts.get("widening-eligible", 0),
+            "rollback_recommended_count": state_counts.get("rollback-recommended", 0),
+            "safety_stopped_count": state_counts.get("safety-stopped", 0),
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in candidates), 8),
+            "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in candidates), 8),
+            "canary_applied_count": sum(_as_int((row.get("canary") or {}).get("applied_count")) for row in candidates),
+            "canary_holdout_count": sum(_as_int((row.get("canary") or {}).get("holdout_count")) for row in candidates),
+            "last_evidence_at": max((str(row.get("last_evidence_at")) for row in candidates if row.get("last_evidence_at")), default=None),
+        },
+        "state_counts": _count_breakdown(state_counts),
+        "reason_counts": _count_breakdown(reason_counts),
+        "candidates": candidates,
+        "source_reports": {
+            "eval_plan_schema": plan.get("schema") if isinstance(plan, dict) else None,
+            "promotion_report_schema": promotion.get("schema") if isinstance(promotion, dict) else None,
+            "policy_event_count": len(events) if isinstance(events, list) else 0,
+        },
+        "privacy": _promotion_privacy_summary(),
+    }
+
+
 def _increment_count(grouped: dict[str, int], key: Any) -> None:
     label = str(key or "unknown")
     grouped[label] = grouped.get(label, 0) + 1
@@ -10744,6 +11127,24 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-evalqueue">
 <div class="section">
+  <h2>Optimization promotion funnel</h2>
+  <table data-table-id="optimization-promotion-funnel-summary" data-filter-label="Filter promotion funnel summary">
+    <thead><tr>
+      <th data-sort-type="number">Candidates</th><th data-sort-type="number">Needs eval</th><th data-sort-type="number">Eval passed</th><th data-sort-type="number">Canary active</th><th data-sort-type="number">Widening eligible</th><th data-sort-type="number">Rollback recommended</th><th data-sort-type="number">Safety stopped</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="money">Projected savings</th><th data-sort-type="money">Observed savings</th><th data-sort-type="time">Last evidence</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-promotion-funnel-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Optimization promotion canary impact</h2>
+  <table class="activity-table" data-table-id="optimization-promotion-funnel-candidates" data-filter-label="Filter promotion funnel candidates">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Action</th><th data-sort-type="text">Family</th><th data-sort-type="text">Surface</th><th data-sort-type="money">Projected</th><th data-sort-type="money">Observed</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Reasons</th><th data-sort-type="time">Last evidence</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-promotion-funnel-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Optimization eval queue summary</h2>
   <table data-table-id="optimization-eval-summary" data-filter-label="Filter eval queue summary">
     <thead><tr>
@@ -12053,10 +12454,10 @@ async function refreshOpenAIScoreboard(){
   }catch(e){}
 }
 function evalQueueBadge(status){
-  if(status==='widen')return'hit';
-  if(status==='rollback'||status==='privacy_blocked')return'err';
-  if(status==='hold')return'routed';
-  if(status==='needs_eval'||status==='missing'||status==='blocked')return'miss';
+  if(status==='widen'||status==='widening-eligible'||status==='eval-passed')return'hit';
+  if(status==='rollback'||status==='rollback-recommended'||status==='privacy_blocked'||status==='safety-stopped')return'err';
+  if(status==='hold'||status==='canary-active')return'routed';
+  if(status==='needs_eval'||status==='needs-eval'||status==='missing'||status==='blocked')return'miss';
   return'provider';
 }
 function evalEvidenceBadges(row){
@@ -12073,6 +12474,61 @@ function reasonBadges(reasons,emptyLabel){
   reasons=reasons||[];
   if(!reasons.length)return`<span class="badge hit">${esc(emptyLabel||'none')}</span>`;
   return reasons.slice(0,5).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
+}
+function promotionReasonBadges(row){
+  const counts=row.top_reason_counts||[];
+  const reasons=(row.reason_codes||[]).map(reason=>({value:reason,count:null}));
+  const combined=counts.length?counts:reasons;
+  if(!combined.length)return'<span class="badge hit">none</span>';
+  return combined.slice(0,5).map(item=>`<span class="badge miss">${esc(item.value||item)}${item.count!=null?' '+Number(item.count||0).toLocaleString():''}</span>`).join(' ');
+}
+async function refreshOptimizationPromotionFunnel(){
+  try{
+    const r=await fetch('/agentflow/stats/optimization-promotion-funnel?limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('optimization-promotion-funnel-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.needs_eval_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.eval_passed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_active_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.widening_eligible_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.rollback_recommended_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safety_stopped_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_holdout_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.projected_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(s.observed_savings_usd||0,6)}</td>
+      <td class="ts">${s.last_evidence_at?ago(s.last_evidence_at):'—'}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">request IDs omitted</span></td>
+    </tr>`;
+    const rows=d.candidates||[];
+    document.getElementById('optimization-promotion-funnel-candidates-tbody').innerHTML=rows.map(row=>{
+      const canary=row.canary||{};
+      const action=row.action_id||canary.action_id||'—';
+      return `<tr>
+        <td><span class="badge ${evalQueueBadge(row.primary_state)}">${esc(row.primary_state||'unknown')}</span></td>
+        <td><span class="badge ${evalQueueBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.candidate_id||'unknown')}</td>
+        <td class="model">${esc(action)}</td>
+        <td class="flags"><span class="badge provider">${esc(row.action_family||'unknown')}</span> <span class="badge miss">${esc(row.optimization_family||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+        <td class="savings">${fmt(row.observed_savings_usd||0,6)}</td>
+        <td class="tokens">${(canary.applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(canary.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(canary.safety_stop_count||0).toLocaleString()}</td>
+        <td class="${(canary.error_rate_delta||0)>0?'cost':'tokens'}">${fmtPctValue(canary.error_rate_delta||0)}</td>
+        <td class="${(canary.retry_rate_delta||0)>0?'cost':'tokens'}">${fmtPctValue(canary.retry_rate_delta||0)}</td>
+        <td class="latency">${fmtMs(canary.latency_delta_ms)}</td>
+        <td class="flags">${promotionReasonBadges(row)}${row.eval_evidence_stale?' <span class="badge routed">stale evidence</span>':''}</td>
+        <td class="ts">${row.last_evidence_at?ago(row.last_evidence_at):'—'}</td>
+        <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">payload omitted</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="17" style="color:#8b949e">No optimization promotion canary impact rows found in local metadata</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
 }
 async function refreshOptimizationEvalQueue(){
   try{
@@ -12559,6 +13015,7 @@ refreshLimiter();
 refreshSafety();
 refreshPolicies();
 refreshOpenAIScoreboard();
+refreshOptimizationPromotionFunnel();
 refreshOptimizationEvalQueue();
 refreshManaged();
 refreshPhaseRouting();
@@ -12575,6 +13032,7 @@ setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
 setInterval(refreshOpenAIScoreboard,30000);
+setInterval(refreshOptimizationPromotionFunnel,30000);
 setInterval(refreshOptimizationEvalQueue,30000);
 setInterval(refreshManaged,30000);
 setInterval(refreshPhaseRouting,30000);

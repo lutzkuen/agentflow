@@ -78,6 +78,7 @@ class DashboardImportTests(unittest.TestCase):
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
             openai_scoreboard = client.get("/agentflow/stats/openai-scoreboard")
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
+            optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
             local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
             phase_routing = client.get("/agentflow/stats/phase-routing")
@@ -103,6 +104,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(optimization_eval_queue.status_code, 200)
             self.assertEqual(optimization_eval_queue.json()["schema"], "agentflow.optimization_eval_queue.v1")
             self.assertFalse(optimization_eval_queue.json()["privacy"]["provider_calls_made"])
+            self.assertEqual(optimization_promotion_funnel.status_code, 200)
+            self.assertEqual(optimization_promotion_funnel.json()["schema"], "agentflow.optimization_promotion_funnel.v1")
+            self.assertFalse(optimization_promotion_funnel.json()["privacy"]["provider_calls_made"])
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
@@ -173,6 +177,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/optimization-eval-queue", dashboard.text)
             self.assertIn("Optimization eval and promotion candidates", dashboard.text)
             self.assertIn("optimization-eval-candidates-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/optimization-promotion-funnel", dashboard.text)
+            self.assertIn("Optimization promotion canary impact", dashboard.text)
+            self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
@@ -374,6 +381,222 @@ class DashboardImportTests(unittest.TestCase):
         finally:
             store.conn.close()
             tmp.close()
+
+    def test_optimization_promotion_funnel_endpoint_and_dashboard_are_metadata_only(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        store = Store(tmp.name)
+
+        def plan_row(candidate_id, *, applied=0, holdout=0, projected=0.02):
+            return {
+                "schema": "agentflow.optimization_eval_plan_row.v1",
+                "candidate_id": candidate_id,
+                "optimization_family": "phase_routing",
+                "action_family": "routing",
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "granularity": "provider_request",
+                "workflow_phase": "tool_execution",
+                "category": "tool-result",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "projected_savings_usd": projected,
+                "sample_count": max(1, applied + holdout),
+                "current_canary_count": applied,
+                "holdout_count": holdout,
+                "blocker_reason_codes": [],
+                "recommended_eval_mode": "score-canary-holdout",
+                "replayability_level": "features_only",
+                "evidence": {
+                    "canary_evidence": {
+                        "applied": {"count": applied, "error_rate": 0.0, "net_savings_usd": projected},
+                        "holdout": {"count": holdout, "error_rate": 0.0},
+                    },
+                    "raw_prompt": "raw promotion funnel prompt must stay local",
+                    "request_id": "promotion-funnel-request-secret",
+                    "cache_key": "promotion-funnel-cache-secret",
+                    "file_path": "/tmp/promotion-funnel-secret.py",
+                },
+                "privacy": {"metadata_only": True},
+            }
+
+        fake_plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                plan_row("promotion-widen", applied=2, holdout=1, projected=0.05),
+                plan_row("promotion-eval-passed", projected=0.03),
+                plan_row("promotion-canary-active", projected=0.02),
+                plan_row("promotion-safety-stop", projected=0.01),
+            ],
+        }
+
+        async def fake_build_optimization_eval_plan(store_obj, *, limit=500, min_samples=1):
+            self.assertIs(store_obj, store)
+            return fake_plan
+
+        def log_canary_call(call_id, candidate_id, *, status, cohort, status_code=200, retry_count=0, baseline=0.03, cost=0.01):
+            store.log_call(
+                id=call_id,
+                created_at="2026-06-10T05:00:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001" if status == "applied" else "claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=100 if cohort == "canary_applied" else 120,
+                input_tokens_est=1000,
+                output_tokens_est=100,
+                actual_input_tokens=1000,
+                actual_output_tokens=100,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({
+                    "phase_canary": {
+                        "promotion_action_id": f"promotion-action-{candidate_id}",
+                        "target_candidate_id": candidate_id,
+                        "policy_section": "routing",
+                        "policy_source": "managed-recommended",
+                        "status": status,
+                        "cohort": cohort,
+                        "reason": "selected-canary" if status == "applied" else ("selected-holdout" if status == "holdout" else "local-canary-safety-stop"),
+                        "canary_fraction": 0.1,
+                        "holdout_fraction": 0.1,
+                        "safety_stop": {
+                            "tripped": status == "safety_stopped",
+                            "reason_codes": ["error-rate"] if status == "safety_stopped" else [],
+                        },
+                    },
+                    "raw_request": "raw promotion funnel routing body must stay local",
+                }),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw promotion funnel request must stay local"}]}),
+                response_json=stable_json({"content": "raw promotion funnel response must stay local"}),
+                session_id="promotion-funnel-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+            )
+
+        try:
+            from agentflow_proxy.policy_events import log_policy_event
+
+            store.log_optimization_eval_result(
+                id="promotion-widen-eval",
+                run_id="promotion-funnel-run",
+                created_at="2026-06-10T04:00:00+00:00",
+                candidate_id="promotion-widen",
+                source_surface="anthropic_messages",
+                optimization_family="phase_routing",
+                action_family="routing",
+                status_class="pass",
+                reason_codes_json=stable_json(["offline-fixture-passed"]),
+                score_json=stable_json({"output_similarity": 0.99}),
+                cost_json=stable_json({"projected_savings_usd": 0.05}),
+                result_json=stable_json({"raw_response": "raw promotion eval result must stay local"}),
+            )
+            store.log_optimization_eval_result(
+                id="promotion-eval-passed-eval",
+                run_id="promotion-funnel-run",
+                created_at="2026-06-10T04:05:00+00:00",
+                candidate_id="promotion-eval-passed",
+                source_surface="anthropic_messages",
+                optimization_family="phase_routing",
+                action_family="routing",
+                status_class="pass",
+                reason_codes_json=stable_json(["offline-fixture-passed"]),
+                score_json=stable_json({"output_similarity": 0.99}),
+                cost_json=stable_json({"projected_savings_usd": 0.03}),
+                result_json=stable_json({"request_id": "promotion-eval-result-request-secret"}),
+            )
+            log_canary_call("promotion-active-applied", "promotion-canary-active", status="applied", cohort="canary_applied")
+            log_canary_call("promotion-active-holdout", "promotion-canary-active", status="holdout", cohort="canary_holdout", baseline=0.03, cost=0.03)
+            log_canary_call("promotion-safety-stopped", "promotion-safety-stop", status="safety_stopped", cohort="bypassed_or_disabled", status_code=500, retry_count=1)
+            log_policy_event(
+                "optimization-promotion-canary-impact",
+                ok=True,
+                details={
+                    "candidate_ids": ["promotion-canary-active"],
+                    "action_ids": ["promotion-action-promotion-canary-active"],
+                    "actual_canary_applied_count": 1,
+                    "actual_canary_holdout_count": 1,
+                    "path": "/tmp/raw-promotion-action.json",
+                    "request_id": "policy-event-request-secret",
+                    "cache_key": "policy-event-cache-secret",
+                    "raw_prompt": "raw policy event prompt must stay local",
+                    "reason": "canary-observed",
+                },
+            )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            with patch("agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
+                response = client.get("/agentflow/stats/optimization-promotion-funnel?limit=50")
+                dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.optimization_promotion_funnel.v1")
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            by_candidate = {row["candidate_id"]: row for row in payload["candidates"]}
+            self.assertEqual(by_candidate["promotion-widen"]["primary_state"], "widening-eligible")
+            self.assertEqual(by_candidate["promotion-eval-passed"]["primary_state"], "eval-passed")
+            self.assertEqual(by_candidate["promotion-canary-active"]["primary_state"], "canary-active")
+            self.assertEqual(by_candidate["promotion-safety-stop"]["primary_state"], "safety-stopped")
+            self.assertEqual(by_candidate["promotion-canary-active"]["canary"]["applied_count"], 1)
+            self.assertEqual(by_candidate["promotion-canary-active"]["canary"]["holdout_count"], 1)
+            self.assertGreater(by_candidate["promotion-canary-active"]["observed_savings_usd"], 0)
+            self.assertEqual(payload["summary"]["canary_applied_count"], 1)
+            self.assertEqual(payload["summary"]["canary_holdout_count"], 1)
+            self.assertIn("Optimization promotion canary impact", dashboard.text)
+            self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            for forbidden in (
+                "raw promotion funnel prompt must stay local",
+                "promotion-funnel-request-secret",
+                "promotion-funnel-cache-secret",
+                "/tmp/promotion-funnel-secret.py",
+                "raw promotion funnel routing body must stay local",
+                "raw promotion funnel request must stay local",
+                "raw promotion funnel response must stay local",
+                "promotion-funnel-session-secret",
+                "raw promotion eval result must stay local",
+                "promotion-eval-result-request-secret",
+                "/tmp/raw-promotion-action.json",
+                "policy-event-request-secret",
+                "policy-event-cache-secret",
+                "raw policy event prompt must stay local",
+                '"raw_prompt"',
+                '"request_id"',
+                '"cache_key"',
+                '"file_path"',
+                '"session_id"',
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            if old_event_log is None:
+                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+            store.conn.close()
+            tmp.close()
+            event_tmp.cleanup()
 
     def test_local_pattern_coverage_endpoint_summarizes_family_readiness(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
