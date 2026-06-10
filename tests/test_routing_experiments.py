@@ -2,13 +2,17 @@ import asyncio
 import importlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from agentflow_proxy import cli
 from agentflow_proxy.managed_egress import assert_managed_egress_safe
 from agentflow_proxy.recommendations import queue_policy_event_feedback
 from agentflow_proxy.store import Store, stable_json, utc_now
+from agentflow_proxy import stats
 import agentflow_proxy.routing_experiments as experiments
 
 
@@ -793,6 +797,209 @@ categories:
         self.assertEqual(row["endpoint"], "/v1/policy-events")
         self.assertEqual(row["status"], "queued")
         self.assertEqual(row["attempts"], 0)
+
+    def _reload_with_promotion_fixture_policy(self, tmp_path: Path, *, daily_budget_usd: float = 10.0):
+        config = tmp_path / "config"
+        config.mkdir(exist_ok=True)
+        (config / "routing_experiments.yaml").write_text(
+            f"""
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: {daily_budget_usd}
+providers:
+  - openai
+source_surfaces:
+  - codex_turn
+model_pairs:
+  - requested_model: gpt-5-codex
+    routed_model: gpt-5-mini
+categories:
+  - codex-turn
+min_samples_for_confidence: 3
+similarity_threshold: 0.86
+""",
+            encoding="utf-8",
+        )
+        os.chdir(tmp_path)
+        return importlib.reload(experiments)
+
+    def _log_shadow_promotion_sample(
+        self,
+        store: Store,
+        *,
+        idx: int,
+        created_at: str | None = None,
+        mode: str = "shadow_candidate_pass_through",
+        passed: bool = True,
+        shadow_status_code: int | None = 200,
+        error: str | None = None,
+        workflow_phase: str = "summary",
+        fallback: bool = False,
+    ) -> None:
+        created_at = created_at or utc_now()
+        similarity = 0.94 if passed else 0.7
+        experiment_json = {
+            "mode": mode,
+            "counterfactual": mode == "shadow_candidate_pass_through",
+            "shadow_only": mode == "shadow_candidate_pass_through",
+            "workflow_phase": workflow_phase,
+            "raw_prompt": "raw promotion secret",
+            "request_id": "req-secret",
+            "session_id": "session-secret",
+            "file_path": "/tmp/secret.py",
+            "cache_key": "cache-secret",
+        }
+        routing_json = {"workflow_phase": workflow_phase}
+        if fallback:
+            routing_json["fallback_reason"] = "rate_limited"
+        store.log_routing_experiment(
+            id=f"promotion-sample-{mode}-{idx}",
+            call_id=f"promotion-call-{idx}",
+            created_at=created_at,
+            provider="openai",
+            source_surface="codex_turn",
+            requested_model="gpt-5-codex",
+            routed_model="gpt-5-mini",
+            primary_model="gpt-5-codex",
+            shadow_model="gpt-5-mini",
+            category="codex-turn",
+            routing_reason="sampled-shadow-candidate-pass-through",
+            input_tokens_est=100,
+            primary_status_code=200,
+            shadow_status_code=shadow_status_code,
+            primary_latency_ms=120,
+            shadow_latency_ms=80,
+            primary_output_chars=20,
+            shadow_output_chars=18,
+            primary_output_sha256=f"primary-{idx}",
+            shadow_output_sha256=f"shadow-{idx}",
+            output_similarity=similarity if shadow_status_code and shadow_status_code < 400 else None,
+            passed_threshold=1 if passed else 0,
+            primary_cost_est_usd=0.003,
+            shadow_cost_est_usd=0.001,
+            routing_json=stable_json(routing_json),
+            experiment_json=stable_json(experiment_json),
+            error=error,
+        )
+
+    def _promotion_report_for_samples(self, *, sample_count: int = 3, **sample_kwargs):
+        tmp = TemporaryDirectory()
+        tmp_path = Path(tmp.name)
+        manual = self._reload_with_promotion_fixture_policy(
+            tmp_path,
+            daily_budget_usd=sample_kwargs.pop("daily_budget_usd", 10.0),
+        )
+        store = Store(str(tmp_path / "agentflow.sqlite3"))
+        try:
+            for idx in range(sample_count):
+                self._log_shadow_promotion_sample(store, idx=idx, **sample_kwargs)
+            return manual.build_routing_experiment_report(store, limit=10)
+        finally:
+            store.conn.close()
+            tmp.cleanup()
+
+    def test_shadow_promotion_report_marks_healthy_candidate_promote_without_raw_fields(self):
+        report = self._promotion_report_for_samples()
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["promotion_verdict"], "promote")
+        self.assertEqual(candidate["promotion"]["evidence_kind"], "shadow_pass_through")
+        self.assertEqual(candidate["promotion"]["promotion_scope"], "stage_local_canary_from_shadow")
+        self.assertFalse(candidate["promotion"]["canary_evidence"])
+        self.assertIn("promotion-thresholds-met", candidate["promotion_reason_codes"])
+        self.assertEqual(report["summary"]["promotion_ready_candidates"], 1)
+        self.assertEqual(report["summary"]["promotion_verdict_counts"]["promote"], 1)
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "raw promotion secret",
+            "req-secret",
+            "session-secret",
+            "/tmp/secret.py",
+            "cache-secret",
+            '"raw_prompt"',
+            '"request_id"',
+            '"session_id"',
+            '"file_path"',
+            '"cache_key"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_shadow_promotion_report_needs_more_samples_for_low_count(self):
+        report = self._promotion_report_for_samples(sample_count=2)
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["promotion_verdict"], "needs_more_samples")
+        self.assertIn("insufficient-samples", candidate["promotion_reason_codes"])
+        self.assertIn("insufficient-compared-samples", candidate["promotion_reason_codes"])
+
+    def test_shadow_promotion_report_holds_stale_evidence(self):
+        stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        report = self._promotion_report_for_samples(created_at=stale)
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["promotion_verdict"], "hold")
+        self.assertIn("stale-evidence", candidate["promotion_reason_codes"])
+
+    def test_shadow_promotion_report_rejects_low_similarity_pass_rate(self):
+        report = self._promotion_report_for_samples(passed=False)
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["promotion_verdict"], "reject")
+        self.assertIn("below-similarity-pass-rate", candidate["promotion_reason_codes"])
+
+    def test_shadow_promotion_report_rejects_high_shadow_error_rate(self):
+        report = self._promotion_report_for_samples(shadow_status_code=500, error="shadow failed")
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["promotion_verdict"], "reject")
+        self.assertIn("shadow-error-rate-high", candidate["promotion_reason_codes"])
+
+    def test_shadow_promotion_report_holds_budget_exhaustion(self):
+        report = self._promotion_report_for_samples(daily_budget_usd=0.0)
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["promotion_verdict"], "hold")
+        self.assertIn("daily-budget-exhausted", candidate["promotion_reason_codes"])
+
+    def test_shadow_promotion_report_separates_shadow_and_applied_modes(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manual = self._reload_with_promotion_fixture_policy(tmp_path)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            try:
+                for idx in range(3):
+                    self._log_shadow_promotion_sample(store, idx=idx, mode="shadow_candidate_pass_through")
+                    self._log_shadow_promotion_sample(store, idx=idx + 10, mode="applied_routed_down")
+                report = manual.build_routing_experiment_report(store, limit=10)
+            finally:
+                store.conn.close()
+
+        modes = {candidate["mode"]: candidate for candidate in report["candidates"]}
+        self.assertEqual(set(modes), {"shadow_candidate_pass_through", "applied_routed_down"})
+        self.assertFalse(modes["shadow_candidate_pass_through"]["promotion"]["canary_evidence"])
+        self.assertTrue(modes["applied_routed_down"]["promotion"]["canary_evidence"])
+
+    def test_routing_experiment_report_cli_and_stats_full_expose_promotion_verdicts(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self._reload_with_promotion_fixture_policy(tmp_path)
+            db_path = str(tmp_path / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                for idx in range(3):
+                    self._log_shadow_promotion_sample(store, idx=idx)
+                out = StringIO()
+                code = cli.routing_experiment_report_cli(["--db", db_path], stdout=out)
+                payload = json.loads(out.getvalue())
+                full = asyncio.run(stats.stats_full(store))
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["candidates"][0]["promotion_verdict"], "promote")
+        self.assertEqual(full["routing_experiment_report"]["candidates"][0]["promotion_verdict"], "promote")
+        self.assertEqual(full["summary"]["routing_experiment_promotion_ready_candidates"], 1)
 
 
 if __name__ == "__main__":

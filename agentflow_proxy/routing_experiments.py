@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -162,6 +163,12 @@ ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD = float(ROUTING_EXPERIMENT_POLICY["simil
 ROUTING_EXPERIMENT_MIN_SAMPLES = int(ROUTING_EXPERIMENT_POLICY["min_samples_for_confidence"])
 ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES = bool(ROUTING_EXPERIMENT_POLICY["store_response_bodies"])
 ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE = "routing_experiment_outcome"
+ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS = 168
+ROUTING_PROMOTION_MIN_COMPARED_COVERAGE = 0.80
+ROUTING_PROMOTION_MIN_PASS_RATE = 0.90
+ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE = 0.05
+ROUTING_PROMOTION_MAX_PRIMARY_ERROR_RATE = 0.05
+ROUTING_PROMOTION_SCHEMA = "agentflow.routing_experiment_promotion_verdict.v1"
 
 
 def _today_shadow_spend_usd(store_obj: Any | None, *, provider: str | None = None, source_surface: str | None = None) -> float:
@@ -650,59 +657,312 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
     return event
 
 
+def _parse_jsonish(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = yaml.safe_load(value) or {}
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _age_hours(value: Any) -> float | None:
+    parsed = _parse_utc(value)
+    now = _parse_utc(utc_now())
+    if parsed is None or now is None:
+        return None
+    return max(0.0, (now - parsed).total_seconds() / 3600.0)
+
+
+def _mean(values: list[float]) -> float | None:
+    clean = [float(v) for v in values if v is not None]
+    if not clean:
+        return None
+    return sum(clean) / len(clean)
+
+
+def _sample_mode_from_experiment(experiment: dict[str, Any]) -> str:
+    mode = str(experiment.get("mode") or "").strip()
+    if mode:
+        return mode
+    if experiment.get("shadow_only") or experiment.get("counterfactual"):
+        return "shadow_candidate_pass_through"
+    return "applied_routed_down"
+
+
+def _workflow_phase_from_payloads(experiment: dict[str, Any], routing: dict[str, Any]) -> str:
+    for source in (experiment, routing):
+        value = source.get("workflow_phase") if isinstance(source, dict) else None
+        if value not in (None, ""):
+            return str(value)
+    feedback = experiment.get("managed_feedback") if isinstance(experiment, dict) else None
+    if isinstance(feedback, dict) and feedback.get("workflow_phase") not in (None, ""):
+        return str(feedback["workflow_phase"])
+    return "unknown"
+
+
+def _promotion_scope_for_mode(mode: str) -> str:
+    if mode == "shadow_candidate_pass_through":
+        return "stage_local_canary_from_shadow"
+    if mode == "applied_routed_down":
+        return "widen_applied_canary"
+    return "review_only"
+
+
+def _score_routing_promotion_candidate(
+    item: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    today_spend_usd: float,
+    budget_limit_usd: float,
+) -> dict[str, Any]:
+    samples = int(item.get("samples") or 0)
+    compared = int(item.get("compared_samples") or 0)
+    pass_rate = item.get("pass_rate")
+    shadow_error_rate = float(item.get("shadow_error_rate") or 0.0)
+    primary_error_rate = float(item.get("primary_error_rate") or 0.0)
+    cost_delta = float(item.get("cost_delta_usd") or 0.0)
+    last_sample_age_hours = item.get("last_sample_age_hours")
+    min_samples = int(policy.get("min_samples_for_confidence") or ROUTING_EXPERIMENT_MIN_SAMPLES)
+    compared_coverage = round(compared / samples, 4) if samples else 0.0
+    budget_exhausted = bool(ROUTING_EXPERIMENT_ENABLED and (budget_limit_usd <= 0 or today_spend_usd >= budget_limit_usd))
+    stale = last_sample_age_hours is None or float(last_sample_age_hours) > ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS
+
+    reason_codes: list[str] = []
+    verdict = "promote"
+    if samples < min_samples:
+        verdict = "needs_more_samples"
+        reason_codes.append("insufficient-samples")
+    if compared < min_samples:
+        verdict = "needs_more_samples"
+        reason_codes.append("insufficient-compared-samples")
+    if compared_coverage < ROUTING_PROMOTION_MIN_COMPARED_COVERAGE:
+        verdict = "needs_more_samples"
+        reason_codes.append("insufficient-compared-coverage")
+    if stale:
+        if verdict == "promote":
+            verdict = "hold"
+        reason_codes.append("stale-evidence")
+    if budget_exhausted:
+        if verdict == "promote":
+            verdict = "hold"
+        reason_codes.append("daily-budget-exhausted")
+    if primary_error_rate > ROUTING_PROMOTION_MAX_PRIMARY_ERROR_RATE:
+        if verdict == "promote":
+            verdict = "hold"
+        reason_codes.append("primary-error-rate-high")
+    if shadow_error_rate > ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE:
+        verdict = "reject"
+        reason_codes.append("shadow-error-rate-high")
+    if pass_rate is None:
+        if verdict == "promote":
+            verdict = "needs_more_samples"
+        reason_codes.append("missing-similarity-pass-rate")
+    elif float(pass_rate) < ROUTING_PROMOTION_MIN_PASS_RATE:
+        verdict = "reject"
+        reason_codes.append("below-similarity-pass-rate")
+    if cost_delta < 0:
+        verdict = "reject"
+        reason_codes.append("shadow-more-expensive")
+    if int(item.get("fallback_or_retry_count") or 0) > 0:
+        if verdict == "promote":
+            verdict = "hold"
+        reason_codes.append("fallback-or-retry-observed")
+    if not reason_codes:
+        reason_codes.append("promotion-thresholds-met")
+
+    mode = str(item.get("mode") or "unknown")
+    return {
+        "schema": ROUTING_PROMOTION_SCHEMA,
+        "verdict": verdict,
+        "promotion_ready": verdict == "promote",
+        "reason_codes": sorted(set(reason_codes)),
+        "evidence_kind": "shadow_pass_through" if mode == "shadow_candidate_pass_through" else "applied_canary",
+        "promotion_scope": _promotion_scope_for_mode(mode),
+        "canary_evidence": mode == "applied_routed_down",
+        "shadow_only": mode == "shadow_candidate_pass_through",
+        "thresholds": {
+            "min_samples": min_samples,
+            "min_compared_coverage": ROUTING_PROMOTION_MIN_COMPARED_COVERAGE,
+            "min_similarity_pass_rate": ROUTING_PROMOTION_MIN_PASS_RATE,
+            "max_shadow_error_rate": ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE,
+            "max_primary_error_rate": ROUTING_PROMOTION_MAX_PRIMARY_ERROR_RATE,
+            "freshness_max_age_hours": ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS,
+        },
+        "coverage": {
+            "samples": samples,
+            "compared_samples": compared,
+            "sample_coverage": round(min(1.0, samples / min_samples), 4) if min_samples else 0.0,
+            "compared_coverage": compared_coverage,
+        },
+        "budget": {
+            "daily_budget_usd": round(budget_limit_usd, 6),
+            "today_shadow_spend_usd": round(today_spend_usd, 6),
+            "daily_budget_exhausted": budget_exhausted,
+        },
+    }
+
+
 def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[str, Any]:
     capped = max(1, min(int(limit or 1), 1000))
     conn = store_obj.conn
     rows = conn.execute(
         """
-        select coalesce(provider, 'anthropic') as provider,
+        select created_at,
+               coalesce(provider, 'anthropic') as provider,
                coalesce(source_surface, 'anthropic_messages') as source_surface,
                requested_model,
                routed_model,
+               primary_model,
+               shadow_model,
                coalesce(category, 'unknown') as category,
                coalesce(routing_reason, 'unknown') as routing_reason,
-               count(*) as samples,
-               sum(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then 1 else 0 end) as compared_samples,
-               avg(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then output_similarity else null end) as avg_similarity,
-               avg(case when primary_status_code < 400
-                         and shadow_status_code < 400
-                         and output_similarity is not null
-                        then passed_threshold else null end) as pass_rate,
-               round(sum(coalesce(primary_cost_est_usd, 0)), 6) as primary_cost_usd,
-               round(sum(coalesce(shadow_cost_est_usd, 0)), 6) as shadow_cost_usd,
-               round(sum(coalesce(primary_cost_est_usd, 0) - coalesce(shadow_cost_est_usd, 0)), 6) as cost_delta_usd,
-               round(avg(case when primary_latency_ms is not null and shadow_latency_ms is not null
-                              then primary_latency_ms - shadow_latency_ms else null end), 2) as avg_latency_delta_ms,
-               max(created_at) as last_sample_at
+               primary_status_code,
+               shadow_status_code,
+               primary_latency_ms,
+               shadow_latency_ms,
+               output_similarity,
+               passed_threshold,
+               primary_cost_est_usd,
+               shadow_cost_est_usd,
+               error,
+               routing_json,
+               experiment_json
         from routing_experiments
-        group by coalesce(provider, 'anthropic'), coalesce(source_surface, 'anthropic_messages'),
-                 requested_model, routed_model, coalesce(category, 'unknown'), coalesce(routing_reason, 'unknown')
-        order by samples desc, last_sample_at desc
-        limit ?
-        """,
-        (capped,),
+        order by created_at desc
+        limit 50000
+        """
     ).fetchall()
-    candidates: list[dict[str, Any]] = []
+    grouped: dict[tuple[str, str, str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
-        item = dict(row)
+        experiment = _parse_jsonish(row["experiment_json"])
+        routing = _parse_jsonish(row["routing_json"])
+        mode = _sample_mode_from_experiment(experiment)
+        workflow_phase = _workflow_phase_from_payloads(experiment, routing)
+        key = (
+            str(row["provider"]),
+            str(row["source_surface"]),
+            str(row["requested_model"] or ""),
+            str(row["routed_model"] or ""),
+            str(row["category"] or "unknown"),
+            workflow_phase,
+            mode,
+        )
+        item = grouped.setdefault(
+            key,
+            {
+                "provider": key[0],
+                "source_surface": key[1],
+                "requested_model": key[2],
+                "routed_model": key[3],
+                "category": key[4],
+                "workflow_phase": key[5],
+                "mode": key[6],
+                "routing_reasons": {},
+                "mode_composition": {},
+                "samples": 0,
+                "compared_samples": 0,
+                "primary_error_samples": 0,
+                "shadow_error_samples": 0,
+                "fallback_or_retry_count": 0,
+                "primary_cost_usd": 0.0,
+                "shadow_cost_usd": 0.0,
+                "similarities": [],
+                "passed": [],
+                "latency_deltas": [],
+                "last_sample_at": None,
+            },
+        )
+        item["samples"] += 1
+        item["mode_composition"][mode] = item["mode_composition"].get(mode, 0) + 1
+        reason = str(row["routing_reason"] or "unknown")
+        item["routing_reasons"][reason] = item["routing_reasons"].get(reason, 0) + 1
+        primary_status = row["primary_status_code"]
+        shadow_status = row["shadow_status_code"]
+        primary_ok = primary_status is not None and int(primary_status) < 400
+        shadow_ok = shadow_status is not None and int(shadow_status) < 400
+        if not primary_ok:
+            item["primary_error_samples"] += 1
+        if not shadow_ok or row["error"]:
+            item["shadow_error_samples"] += 1
+        if primary_ok and shadow_ok and row["output_similarity"] is not None:
+            item["compared_samples"] += 1
+            item["similarities"].append(float(row["output_similarity"]))
+            item["passed"].append(1.0 if row["passed_threshold"] else 0.0)
+        if row["primary_latency_ms"] is not None and row["shadow_latency_ms"] is not None:
+            item["latency_deltas"].append(float(row["primary_latency_ms"]) - float(row["shadow_latency_ms"]))
+        item["primary_cost_usd"] += float(row["primary_cost_est_usd"] or 0.0)
+        item["shadow_cost_usd"] += float(row["shadow_cost_est_usd"] or 0.0)
+        if routing.get("fallback_reason") or routing.get("retry_count") or experiment.get("fallback_reason") or experiment.get("retry_count"):
+            item["fallback_or_retry_count"] += 1
+        if item["last_sample_at"] is None or str(row["created_at"]) > str(item["last_sample_at"]):
+            item["last_sample_at"] = row["created_at"]
+
+    today_spend = _today_shadow_spend_usd(store_obj)
+    budget_limit = ROUTING_EXPERIMENT_DAILY_BUDGET_USD
+    candidates: list[dict[str, Any]] = []
+    for item in grouped.values():
         compared_samples = int(item.get("compared_samples") or 0)
-        avg_similarity = item.get("avg_similarity")
-        pass_rate = item.get("pass_rate")
+        avg_similarity = _mean(item.pop("similarities"))
+        pass_rate = _mean(item.pop("passed"))
+        avg_latency_delta = _mean(item.pop("latency_deltas"))
         confidence_score = 0.0
         if avg_similarity is not None and compared_samples > 0:
             confidence_score = float(avg_similarity) * min(1.0, compared_samples / ROUTING_EXPERIMENT_MIN_SAMPLES)
         item["compared_samples"] = compared_samples
         item["avg_similarity"] = round(float(avg_similarity), 6) if avg_similarity is not None else None
         item["pass_rate"] = round(float(pass_rate), 4) if pass_rate is not None else None
+        item["compared_coverage"] = round(compared_samples / int(item["samples"]), 4) if item["samples"] else 0.0
+        item["primary_error_rate"] = round(int(item["primary_error_samples"]) / int(item["samples"]), 4) if item["samples"] else 0.0
+        item["shadow_error_rate"] = round(int(item["shadow_error_samples"]) / int(item["samples"]), 4) if item["samples"] else 0.0
+        item["primary_cost_usd"] = round(float(item["primary_cost_usd"]), 6)
+        item["shadow_cost_usd"] = round(float(item["shadow_cost_usd"]), 6)
+        item["cost_delta_usd"] = round(float(item["primary_cost_usd"]) - float(item["shadow_cost_usd"]), 6)
+        item["avg_latency_delta_ms"] = round(float(avg_latency_delta), 2) if avg_latency_delta is not None else None
+        last_age = _age_hours(item.get("last_sample_at"))
+        item["last_sample_age_hours"] = round(last_age, 2) if last_age is not None else None
         item["confidence_score"] = round(confidence_score, 6)
         item["min_samples_for_confidence"] = ROUTING_EXPERIMENT_MIN_SAMPLES
+        item["promotion"] = _score_routing_promotion_candidate(
+            item,
+            policy=ROUTING_EXPERIMENT_POLICY,
+            today_spend_usd=today_spend,
+            budget_limit_usd=budget_limit,
+        )
+        item["promotion_verdict"] = item["promotion"]["verdict"]
+        item["promotion_reason_codes"] = item["promotion"]["reason_codes"]
+        routing_reasons = [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(item["routing_reasons"].items(), key=lambda entry: (-entry[1], entry[0]))
+        ]
+        item["routing_reasons"] = routing_reasons
+        item["routing_reason"] = routing_reasons[0]["reason"] if routing_reasons else "unknown"
         candidates.append(item)
+    promotion_verdict_counts: dict[str, int] = {}
+    promotion_reason_counts: dict[str, int] = {}
+    for item in candidates:
+        verdict = str(item.get("promotion_verdict") or "unknown")
+        promotion_verdict_counts[verdict] = promotion_verdict_counts.get(verdict, 0) + 1
+        for reason in item.get("promotion_reason_codes") or []:
+            reason = str(reason)
+            promotion_reason_counts[reason] = promotion_reason_counts.get(reason, 0) + 1
+    candidates.sort(key=lambda item: (int(item["samples"]), str(item.get("last_sample_at") or "")), reverse=True)
+    candidates = candidates[:capped]
 
     summary_row = conn.execute(
         """
@@ -727,8 +987,6 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         from routing_experiments
         """
     ).fetchone()
-    today_spend = _today_shadow_spend_usd(store_obj)
-    budget_limit = ROUTING_EXPERIMENT_DAILY_BUDGET_USD
     feedback_status_counts: dict[str, int] = {}
     sample_mode_counts: dict[str, int] = {}
     for row in conn.execute("select experiment_json from routing_experiments where experiment_json is not null").fetchall():
@@ -827,6 +1085,9 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "sample_mode_counts": sample_mode_counts,
             "applied_routed_down_samples": int(sample_mode_counts.get("applied_routed_down", 0)),
             "shadow_candidate_pass_through_samples": int(sample_mode_counts.get("shadow_candidate_pass_through", 0)),
+            "promotion_verdict_counts": promotion_verdict_counts,
+            "promotion_reason_counts": promotion_reason_counts,
+            "promotion_ready_candidates": int(promotion_verdict_counts.get("promote", 0)),
         },
         "decision_reasons": decision_reasons,
         "candidates": candidates,
