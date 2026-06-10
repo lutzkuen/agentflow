@@ -1,12 +1,13 @@
 # AgentFlow
 
-AgentFlow is a **local proxy and dashboard for coding-agent LLM traffic**.
+AgentFlow is a **local proxy for token savings and telemtry on LLM traffic**.
 
 Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. AgentFlow forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
+It will apply crunching, caching and routing to decrease your token spend while preserving quality.
 
 By default, AgentFlow does **not** store raw prompts or responses.
 
-## What is this?
+## How does it work?
 
 AgentFlow sits between tools such as Codex, Claude Code, VS Code extensions, or your own API app and the provider API.
 
@@ -26,7 +27,9 @@ The OpenAI and Anthropic proxies run as separate provider modes. Run two AgentFl
 
 ## How does it help me?
 
-AgentFlow gives you local visibility into coding-agent traffic:
+Agentflow reduces your LLM spend.
+
+Beyond that AgentFlow gives you local visibility into coding-agent traffic:
 
 - estimated tokens, spend, savings, and recent activity
 - which app, session, provider, and model generated calls
