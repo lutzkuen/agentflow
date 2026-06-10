@@ -31,6 +31,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         for key in self.ENV_KEYS:
             os.environ.pop(key, None)
         os.environ["HOME"] = self.home.name
+        os.chdir(self.home.name)
         importlib.reload(experiments)
 
     def tearDown(self):
@@ -45,6 +46,7 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
 
     def test_default_policy_skips_without_sampling(self):
         self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["profile_id"], "first-safe-openai-codex-ab-v1")
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["mode"], "applied_routed_down")
         self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["providers"], ["openai"])
         self.assertIn("openai_responses", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
         self.assertIn("codex_turn", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
@@ -212,6 +214,59 @@ max_text_chars: 8000
             self.assertEqual(meta["shadow_model"], "gpt-5-codex")
             self.assertEqual(meta["reason"], "sampled-routed-down-call")
 
+    def test_shadow_candidate_pass_through_mode_samples_unrouted_openai_call(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+profile_id: first-safe-openai-codex-ab-v1
+mode: shadow_candidate_pass_through
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 10.0
+providers:
+  - openai
+source_surfaces:
+  - openai_responses
+model_pairs:
+  - requested_model: gpt-5.4
+    routed_model: gpt-5.4-mini
+categories:
+  - chat
+max_text_chars: 8000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            meta = manual.routing_experiment_decision(
+                {"model": "gpt-5.4", "input": "short prompt"},
+                {
+                    "requested_model": "gpt-5.4",
+                    "routed_model": "gpt-5.4",
+                    "category": "chat",
+                    "text_chars": 12,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="openai_responses",
+                random_value=lambda: 0.0,
+            )
+
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(meta["counterfactual"])
+        self.assertTrue(meta["shadow_only"])
+        self.assertEqual(meta["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(meta["requested_model"], "gpt-5.4")
+        self.assertEqual(meta["routed_model"], "gpt-5.4-mini")
+        self.assertEqual(meta["primary_model"], "gpt-5.4")
+        self.assertEqual(meta["user_visible_model"], "gpt-5.4")
+        self.assertEqual(meta["shadow_model"], "gpt-5.4-mini")
+
     def test_budget_spend_blocks_after_cap_is_exhausted(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -342,6 +397,7 @@ categories:
                         "routing_experiment": {
                             "status": "skipped",
                             "reason": "streaming",
+                            "mode": "shadow_candidate_pass_through",
                             "provider": "openai",
                             "source_surface": "openai_responses",
                         }
@@ -354,6 +410,7 @@ categories:
 
         self.assertEqual(report["policy"]["profile_id"], "first-safe-openai-codex-ab-v1")
         self.assertEqual(report["summary"]["sample_count"], 0)
+        self.assertEqual(report["policy"]["mode"], experiments.ROUTING_EXPERIMENT_MODE)
         self.assertEqual(report["decision_reasons"][0]["provider"], "openai")
         self.assertEqual(report["decision_reasons"][0]["source_surface"], "openai_responses")
         self.assertEqual(report["decision_reasons"][0]["reason"], "streaming")
@@ -377,6 +434,9 @@ categories:
                 "routed_model": "claude-haiku-4-5-20251001",
                 "similarity_threshold": 0.86,
                 "text_chars": 7000,
+                "mode": "shadow_candidate_pass_through",
+                "counterfactual": True,
+                "shadow_only": True,
             },
             routing_meta={
                 "category": "tool-result",
@@ -394,6 +454,9 @@ categories:
         )
 
         self.assertEqual(result["schema"], "agentflow.routing_experiment_feedback.v1")
+        self.assertEqual(result["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(result["counterfactual"])
+        self.assertTrue(result["shadow_only"])
         self.assertEqual(result["status"], "compared")
         self.assertEqual(result["candidate_bucket"], "tool-result:claude-sonnet-4-6->claude-haiku-4-5-20251001")
         self.assertEqual(result["text_chars_bucket"], "2k-8k")
@@ -414,6 +477,9 @@ categories:
                 "routed_model": "claude-haiku-4-5-20251001",
                 "similarity_threshold": 0.86,
                 "text_chars": 7000,
+                "mode": "shadow_candidate_pass_through",
+                "counterfactual": True,
+                "shadow_only": True,
             },
             routing_meta={
                 "category": "tool-result",
@@ -442,6 +508,10 @@ categories:
 
         assert_managed_egress_safe(event)
         self.assertEqual(event["schema"], "agentflow.routing_experiment_outcome_event.v1")
+        self.assertEqual(event["candidate"]["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(event["candidate"]["counterfactual"])
+        self.assertTrue(event["candidate"]["shadow_only"])
+        self.assertEqual(event["outcome"]["mode"], "shadow_candidate_pass_through")
         self.assertEqual(event["source_surface"], "anthropic_messages")
         self.assertEqual(event["app_family"], "claude_code")
         self.assertEqual(event["workflow_phase"], "tool-execution")

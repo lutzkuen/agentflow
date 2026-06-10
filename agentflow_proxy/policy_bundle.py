@@ -1111,6 +1111,8 @@ def _validate_routing_experiment_policy(policy: dict[str, Any], errors: list[dic
         base = f"{base}.policy"
     if "enabled" in experiment:
         _validate_boolish(errors, f"{base}.enabled", experiment["enabled"])
+    if "mode" in experiment and experiment["mode"] not in {"applied_routed_down", "shadow_candidate_pass_through"}:
+        _add_error(errors, f"{base}.mode", "expected applied_routed_down or shadow_candidate_pass_through")
     for key in ("sample_rate", "similarity_threshold"):
         if key in experiment:
             _validate_floatish(errors, f"{base}.{key}", experiment[key], min_value=0.0, max_value=1.0)

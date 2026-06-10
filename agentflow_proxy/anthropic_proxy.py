@@ -379,7 +379,7 @@ async def _run_anthropic_routing_experiment(
 ) -> None:
     experiment_id = str(uuid.uuid4())
     shadow_model = str(experiment_meta.get("shadow_model") or routing_meta.get("requested_model") or "")
-    primary_model = str(request_body.get("model") or routing_meta.get("routed_model") or "")
+    primary_model = str(experiment_meta.get("primary_model") or request_body.get("model") or routing_meta.get("routed_model") or "")
     shadow_body = copy.deepcopy(request_body)
     shadow_body["model"] = shadow_model
     shadow_status_code: Optional[int] = None
@@ -498,8 +498,8 @@ async def _run_anthropic_routing_experiment(
         created_at=utc_now(),
         provider=experiment_meta.get("provider") or "anthropic",
         source_surface=experiment_meta.get("source_surface") or "anthropic_messages",
-        requested_model=routing_meta.get("requested_model"),
-        routed_model=routing_meta.get("routed_model"),
+        requested_model=experiment_meta.get("requested_model") or routing_meta.get("requested_model"),
+        routed_model=experiment_meta.get("routed_model") or routing_meta.get("routed_model"),
         primary_model=primary_model,
         shadow_model=shadow_model,
         category=routing_meta.get("category"),

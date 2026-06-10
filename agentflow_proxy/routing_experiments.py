@@ -28,6 +28,7 @@ def _as_bool(value: Any, default: bool) -> bool:
 def _default_experiment_policy() -> dict[str, Any]:
     return {
         "profile_id": "first-safe-openai-codex-ab-v1",
+        "mode": "applied_routed_down",
         "enabled": False,
         "kill_switch": False,
         "sample_rate": 0.0,
@@ -61,6 +62,10 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
 def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     if data.get("profile_id") not in (None, ""):
         policy["profile_id"] = str(data["profile_id"])
+    if data.get("mode") not in (None, ""):
+        mode = str(data["mode"]).strip()
+        if mode in {"applied_routed_down", "shadow_candidate_pass_through"}:
+            policy["mode"] = mode
     policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
     policy["kill_switch"] = _as_bool(data.get("kill_switch"), policy["kill_switch"])
     if data.get("sample_rate") is not None:
@@ -148,6 +153,7 @@ ROUTING_EXPERIMENT_POLICY, ROUTING_EXPERIMENT_POLICY_SOURCE, ROUTING_EXPERIMENT_
 ROUTING_EXPERIMENT_RULES_LOADED_AT = utc_now()
 ROUTING_EXPERIMENT_RULES_LOADED_FILE = policy_file_snapshot(ROUTING_EXPERIMENT_RULES_PATH)
 ROUTING_EXPERIMENT_ENABLED = bool(ROUTING_EXPERIMENT_POLICY["enabled"])
+ROUTING_EXPERIMENT_MODE = str(ROUTING_EXPERIMENT_POLICY.get("mode") or "applied_routed_down")
 ROUTING_EXPERIMENT_SAMPLE_RATE = float(ROUTING_EXPERIMENT_POLICY["sample_rate"])
 ROUTING_EXPERIMENT_DAILY_BUDGET_USD = float(ROUTING_EXPERIMENT_POLICY["daily_budget_usd"])
 ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD = float(ROUTING_EXPERIMENT_POLICY["similarity_threshold"])
@@ -193,6 +199,18 @@ def _model_pair_allowed(requested: str, routed: str) -> bool:
     return False
 
 
+def _route_down_candidate_for_requested(requested: str) -> str | None:
+    for pair in ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []:
+        if not isinstance(pair, dict):
+            continue
+        if str(pair.get("requested_model") or "") != requested:
+            continue
+        routed = str(pair.get("routed_model") or "").strip()
+        if routed and routed != requested:
+            return routed
+    return None
+
+
 def _value_allowed(value: str, configured: Any) -> bool:
     values = {str(item) for item in configured or []}
     return not values or value in values
@@ -210,6 +228,7 @@ def routing_experiment_decision(
 ) -> dict[str, Any]:
     requested = str(routing_meta.get("requested_model") or body.get("model") or "")
     routed = str(routing_meta.get("routed_model") or body.get("model") or "")
+    mode = ROUTING_EXPERIMENT_MODE
     category = str(routing_meta.get("category") or "")
     workflow_phase = str(routing_meta.get("workflow_phase") or "")
     text_chars = int(routing_meta.get("text_chars") or 0)
@@ -221,10 +240,13 @@ def routing_experiment_decision(
     meta = {
         "schema": "agentflow.routing_experiment_decision.v1",
         "enabled": ROUTING_EXPERIMENT_ENABLED,
+        "mode": mode,
         "kill_switch": bool(ROUTING_EXPERIMENT_POLICY.get("kill_switch")),
         "status": "skipped",
         "sampled": False,
         "reason": "disabled",
+        "counterfactual": False,
+        "shadow_only": False,
         "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
         "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
         "sample_rate": ROUTING_EXPERIMENT_SAMPLE_RATE,
@@ -240,6 +262,8 @@ def routing_experiment_decision(
         "requested_model": requested,
         "routed_model": routed,
         "shadow_model": requested,
+        "primary_model": routed,
+        "user_visible_model": routed,
         "category": category,
         "workflow_phase": workflow_phase,
         "text_chars": text_chars,
@@ -266,11 +290,32 @@ def routing_experiment_decision(
     if stream:
         meta["reason"] = "streaming"
         return meta
-    if not requested or requested == routed:
-        meta["reason"] = "not-routed-down"
+    if not requested:
+        meta["reason"] = "missing-requested-model"
         return meta
-    if not _model_pair_allowed(requested, routed):
-        meta["reason"] = "model-pair-not-enabled"
+    if mode == "shadow_candidate_pass_through":
+        if requested != routed:
+            meta["reason"] = "already-routed-down"
+            return meta
+        candidate = _route_down_candidate_for_requested(requested)
+        if not candidate:
+            meta["reason"] = "model-pair-not-enabled"
+            return meta
+        meta["routed_model"] = candidate
+        meta["shadow_model"] = candidate
+        meta["primary_model"] = requested
+        meta["user_visible_model"] = requested
+        meta["counterfactual"] = True
+        meta["shadow_only"] = True
+    elif mode == "applied_routed_down":
+        if requested == routed:
+            meta["reason"] = "not-routed-down"
+            return meta
+        if not _model_pair_allowed(requested, routed):
+            meta["reason"] = "model-pair-not-enabled"
+            return meta
+    else:
+        meta["reason"] = "unsupported-mode"
         return meta
     if routing_meta.get("fallback_reason"):
         meta["reason"] = "fallback-used"
@@ -305,7 +350,11 @@ def routing_experiment_decision(
 
     meta["status"] = "selected"
     meta["sampled"] = True
-    meta["reason"] = "sampled-routed-down-call"
+    meta["reason"] = (
+        "sampled-shadow-candidate-pass-through"
+        if mode == "shadow_candidate_pass_through"
+        else "sampled-routed-down-call"
+    )
     return meta
 
 
@@ -433,8 +482,8 @@ def routing_experiment_feedback_features(
     error: str | None = None,
 ) -> dict[str, Any]:
     category = str(routing_meta.get("category") or experiment_meta.get("category") or "unknown")
-    requested_model = str(routing_meta.get("requested_model") or experiment_meta.get("requested_model") or "")
-    routed_model = str(routing_meta.get("routed_model") or experiment_meta.get("routed_model") or "")
+    requested_model = str(experiment_meta.get("requested_model") or routing_meta.get("requested_model") or "")
+    routed_model = str(experiment_meta.get("routed_model") or routing_meta.get("routed_model") or "")
     compared = (
         primary_status_code is not None
         and primary_status_code < 400
@@ -462,6 +511,9 @@ def routing_experiment_feedback_features(
         "schema": "agentflow.routing_experiment_feedback.v1",
         "experiment_id": experiment_id,
         "sampled": bool(experiment_meta.get("sampled")),
+        "mode": experiment_meta.get("mode") or "applied_routed_down",
+        "counterfactual": bool(experiment_meta.get("counterfactual")),
+        "shadow_only": bool(experiment_meta.get("shadow_only")),
         "status": status,
         "provider": experiment_meta.get("provider") or "anthropic",
         "source_surface": experiment_meta.get("source_surface") or "anthropic_messages",
@@ -521,6 +573,9 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
     primary_status_class = _status_class(feedback_features.get("primary_status_code"))
     shadow_status_class = _status_class(feedback_features.get("shadow_status_code"))
     compared = feedback_features.get("status") == "compared"
+    mode = str(feedback_features.get("mode") or "applied_routed_down")
+    counterfactual = bool(feedback_features.get("counterfactual"))
+    shadow_only = bool(feedback_features.get("shadow_only"))
     reason_codes = [
         str(item)
         for item in feedback_features.get("reason_codes") or []
@@ -537,6 +592,9 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
         "category": feedback_features.get("category") or "unknown",
         "candidate": {
             "schema": "agentflow.routing_experiment_candidate.v1",
+            "mode": mode,
+            "counterfactual": counterfactual,
+            "shadow_only": shadow_only,
             "candidate_bucket": (
                 f"{feedback_features.get('category') or 'unknown'}:{requested_family or 'unknown'}->{routed_family or 'unknown'}"
             ),
@@ -547,6 +605,9 @@ def routing_experiment_outcome_event(feedback_features: dict[str, Any]) -> dict[
         },
         "outcome": {
             "schema": "agentflow.routing_experiment_outcome_summary.v1",
+            "mode": mode,
+            "counterfactual": counterfactual,
+            "shadow_only": shadow_only,
             "sampled": bool(feedback_features.get("sampled")),
             "status": feedback_features.get("status"),
             "compared": compared,
@@ -667,15 +728,19 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     today_spend = _today_shadow_spend_usd(store_obj)
     budget_limit = ROUTING_EXPERIMENT_DAILY_BUDGET_USD
     feedback_status_counts: dict[str, int] = {}
+    sample_mode_counts: dict[str, int] = {}
     for row in conn.execute("select experiment_json from routing_experiments where experiment_json is not null").fetchall():
         try:
             experiment = yaml.safe_load(row["experiment_json"]) or {}
         except Exception:
             status = "invalid-json"
+            mode = "invalid-json"
         else:
             feedback = experiment.get("managed_feedback") if isinstance(experiment, dict) else None
             status = str((feedback or {}).get("status") or "not-exported") if isinstance(feedback, dict) else "not-exported"
+            mode = str(experiment.get("mode") or "applied_routed_down") if isinstance(experiment, dict) else "unknown"
         feedback_status_counts[status] = feedback_status_counts.get(status, 0) + 1
+        sample_mode_counts[mode] = sample_mode_counts.get(mode, 0) + 1
 
     decision_reason_counts: dict[tuple[str, str, str, str], int] = {}
     try:
@@ -729,6 +794,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         "generated_at": utc_now(),
         "policy": {
             "profile_id": str(ROUTING_EXPERIMENT_POLICY.get("profile_id") or ""),
+            "mode": ROUTING_EXPERIMENT_MODE,
             "enabled": ROUTING_EXPERIMENT_ENABLED,
             "kill_switch": bool(ROUTING_EXPERIMENT_POLICY.get("kill_switch")),
             "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
@@ -756,6 +822,9 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "cost_delta_usd": float((summary_row or {}).get("cost_delta_usd") or 0.0),
             "avg_latency_delta_ms": (summary_row or {}).get("avg_latency_delta_ms"),
             "feedback_status_counts": feedback_status_counts,
+            "sample_mode_counts": sample_mode_counts,
+            "applied_routed_down_samples": int(sample_mode_counts.get("applied_routed_down", 0)),
+            "shadow_candidate_pass_through_samples": int(sample_mode_counts.get("shadow_candidate_pass_through", 0)),
         },
         "decision_reasons": decision_reasons,
         "candidates": candidates,

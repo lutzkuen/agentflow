@@ -38,14 +38,25 @@ def _provenance_env(secret: str | None = None) -> dict[str, str]:
 class PolicyFileStatusTest(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
+        self.old_cwd = os.getcwd()
+        os.chdir(self.tmp.name)
         self.old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        self.old_home = os.environ.get("HOME")
+        os.environ["HOME"] = self.tmp.name
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(self.tmp.name) / "policy_events.jsonl")
+        asyncio.run(reload_policy_modules())
 
     def tearDown(self):
         if self.old_event_log is None:
             os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
         else:
             os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = self.old_event_log
+        if self.old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self.old_home
+        asyncio.run(reload_policy_modules())
+        os.chdir(self.old_cwd)
         self.tmp.cleanup()
 
     def test_policy_bundle_exports_effective_default_policy_state(self):

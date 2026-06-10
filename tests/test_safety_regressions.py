@@ -469,10 +469,12 @@ class SafetyRegressionRouteTests(unittest.TestCase):
 
         patches = [
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_ENABLED", True),
+            patch.object(routing_experiments, "ROUTING_EXPERIMENT_MODE", "applied_routed_down"),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 0.05),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD", 0.86),
             patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {
+                "mode": "applied_routed_down",
                 "providers": ["anthropic"],
                 "source_surfaces": ["anthropic_messages"],
                 "model_pairs": [
@@ -494,6 +496,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             patches[2],
             patches[3],
             patches[4],
+            patches[5],
             patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
         ):
             response = TestClient(server.app).post("/v1/messages", json=request_body)

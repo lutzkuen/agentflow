@@ -1,12 +1,15 @@
 # AgentFlow default A/B routing experiment policy.
 # Copy to ~/.agentflow/routing_experiments.yaml (or set AGENTFLOW_ROUTING_EXPERIMENTS)
-# to sample routed-down non-streaming calls and compare the cheaper response against
-# the originally requested model.
+# to sample routing experiments. The default mode compares already-applied routed-down
+# calls against the originally requested model. Use mode: shadow_candidate_pass_through
+# to keep the user-visible call on the requested model and send only a shadow request
+# to the configured cheaper candidate.
 #
 # This is disabled by default because it sends an additional shadow request upstream.
 # Response bodies are not stored unless store_response_bodies is explicitly enabled.
 
 profile_id: first-safe-openai-codex-ab-v1
+mode: applied_routed_down
 enabled: false
 kill_switch: false
 sample_rate: 0.0

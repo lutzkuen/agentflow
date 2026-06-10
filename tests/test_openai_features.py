@@ -507,6 +507,9 @@ class OpenAIFeatureUnitTests(unittest.TestCase):
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class OpenAIFeatureRouteTests(unittest.TestCase):
     def setUp(self):
+        self.old_cwd = os.getcwd()
+        self.cwd_tmp = tempfile.TemporaryDirectory()
+        os.chdir(self.cwd_tmp.name)
         self.old_store = server.store
         self.old_provider = server.PROVIDER
         self.old_anthropic_upstream = server.ANTHROPIC_UPSTREAM
@@ -518,6 +521,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.saved_routing_experiments = os.environ.get("AGENTFLOW_ROUTING_EXPERIMENTS")
         os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
         os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
+        importlib.reload(routing_experiments_module)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.LOG_BODIES = False
@@ -552,6 +556,8 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = self.saved_routing_experiments
         importlib.reload(router_module)
         importlib.reload(routing_experiments_module)
+        os.chdir(self.old_cwd)
+        self.cwd_tmp.cleanup()
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
@@ -1319,6 +1325,102 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(queue_row["status"], "queued")
         self.assertNotIn("SECRET_OPENAI_AB", queue_row["payload_json"])
         self.assertNotIn("SECRET_OPENAI_AB", call_row["routing_json"])
+
+    def test_openai_shadow_candidate_pass_through_keeps_primary_requested_model(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as policy_file:
+            policy_file.write("\n".join([
+                "profile_id: first-safe-openai-codex-ab-v1",
+                "mode: shadow_candidate_pass_through",
+                "enabled: true",
+                "sample_rate: 1.0",
+                "daily_budget_usd: 10.0",
+                "providers:",
+                "  - openai",
+                "source_surfaces:",
+                "  - openai_responses",
+                "model_pairs:",
+                "  - requested_model: gpt-5.4",
+                "    routed_model: gpt-5.4-mini",
+                "categories:",
+                "  - short-completion",
+                "  - chat",
+                "max_text_chars: 8000",
+                "store_response_bodies: false",
+                "",
+            ]))
+            policy_path = policy_file.name
+        self.addCleanup(lambda: os.path.exists(policy_path) and os.unlink(policy_path))
+        os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = policy_path
+        importlib.reload(routing_experiments_module)
+        CapturingOpenAIClient.calls = []
+        CapturingOpenAIClient.status_code = 200
+        CapturingOpenAIClient.response_body = {
+            "id": "resp_primary",
+            "object": "response",
+            "model": "gpt-5.4",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "pass through ok"}],
+                }
+            ],
+            "usage": {"input_tokens": 11, "output_tokens": 3},
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post(
+                "/v1/responses",
+                json={"model": "gpt-5.4", "input": "short prompt SECRET_SHADOW_AB"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["model"], "gpt-5.4")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5.4")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5.4-mini")
+
+        [experiment_row] = server.store.conn.execute(
+            """
+            select provider, source_surface, requested_model, routed_model,
+                   primary_model, shadow_model, primary_status_code, shadow_status_code,
+                   primary_response_json, shadow_response_json, experiment_json
+            from routing_experiments
+            """
+        ).fetchall()
+        experiment = json.loads(experiment_row["experiment_json"])
+        [call_row] = server.store.conn.execute(
+            "select requested_model, routed_model, routing_json, request_json, response_json from calls"
+        ).fetchall()
+        routing = json.loads(call_row["routing_json"])
+        queue_row = server.store.conn.execute(
+            "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue "
+            "where source_surface = 'routing_experiment_outcome'"
+        ).fetchone()
+        payload = json.loads(queue_row["payload_json"])
+
+        self.assertEqual(call_row["requested_model"], "gpt-5.4")
+        self.assertEqual(call_row["routed_model"], "gpt-5.4")
+        self.assertEqual(experiment_row["requested_model"], "gpt-5.4")
+        self.assertEqual(experiment_row["routed_model"], "gpt-5.4-mini")
+        self.assertEqual(experiment_row["primary_model"], "gpt-5.4")
+        self.assertEqual(experiment_row["shadow_model"], "gpt-5.4-mini")
+        self.assertEqual(experiment_row["primary_status_code"], 200)
+        self.assertEqual(experiment_row["shadow_status_code"], 200)
+        self.assertIsNone(experiment_row["primary_response_json"])
+        self.assertIsNone(experiment_row["shadow_response_json"])
+        self.assertEqual(experiment["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(experiment["counterfactual"])
+        self.assertTrue(experiment["shadow_only"])
+        self.assertEqual(experiment["reason"], "sampled-shadow-candidate-pass-through")
+        self.assertEqual(routing["routing_experiment"]["primary_model"], "gpt-5.4")
+        self.assertEqual(routing["routing_experiment"]["shadow_model"], "gpt-5.4-mini")
+        self.assertEqual(payload["candidate"]["mode"], "shadow_candidate_pass_through")
+        self.assertTrue(payload["candidate"]["counterfactual"])
+        self.assertTrue(payload["candidate"]["shadow_only"])
+        self.assertNotIn("SECRET_SHADOW_AB", queue_row["payload_json"])
+        self.assertNotIn("SECRET_SHADOW_AB", call_row["routing_json"])
+        self.assertIsNone(call_row["request_json"])
+        self.assertIsNone(call_row["response_json"])
 
 
 if __name__ == "__main__":
