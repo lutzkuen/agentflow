@@ -472,7 +472,20 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SAMPLE_RATE", 1.0),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_DAILY_BUDGET_USD", 0.05),
             patch.object(routing_experiments, "ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD", 0.86),
-            patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {"categories": [], "min_text_chars": 0, "max_text_chars": 30000, "daily_budget_usd": 0.05}),
+            patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {
+                "providers": ["anthropic"],
+                "source_surfaces": ["anthropic_messages"],
+                "model_pairs": [
+                    {
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                    }
+                ],
+                "categories": [],
+                "min_text_chars": 0,
+                "max_text_chars": 30000,
+                "daily_budget_usd": 0.05,
+            }),
         ]
         with (
             self._managed_feedback_env(),

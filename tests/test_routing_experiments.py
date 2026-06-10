@@ -8,7 +8,7 @@ import unittest
 
 from agentflow_proxy.managed_egress import assert_managed_egress_safe
 from agentflow_proxy.recommendations import queue_policy_event_feedback
-from agentflow_proxy.store import Store
+from agentflow_proxy.store import Store, stable_json, utc_now
 import agentflow_proxy.routing_experiments as experiments
 
 
@@ -44,6 +44,11 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         importlib.reload(experiments)
 
     def test_default_policy_skips_without_sampling(self):
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["profile_id"], "first-safe-openai-codex-ab-v1")
+        self.assertEqual(experiments.ROUTING_EXPERIMENT_POLICY["providers"], ["openai"])
+        self.assertIn("openai_responses", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
+        self.assertIn("codex_turn", experiments.ROUTING_EXPERIMENT_POLICY["source_surfaces"])
+
         meta = experiments.routing_experiment_decision(
             {"model": "claude-haiku-4-5-20251001"},
             {
@@ -71,6 +76,13 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
 enabled: true
 sample_rate: 1.0
 daily_budget_usd: 0.05
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
 categories:
   - tool-result
 max_text_chars: 5000
@@ -151,6 +163,55 @@ categories:
             self.assertTrue(meta["budget_exhausted"])
             self.assertEqual(meta["privacy"]["metadata_only"], True)
 
+    def test_first_safe_openai_profile_can_sample_codex_pair(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+profile_id: first-safe-openai-codex-ab-v1
+enabled: true
+sample_rate: 1.0
+daily_budget_usd: 0.05
+providers:
+  - openai
+source_surfaces:
+  - openai_responses
+  - openai_chat
+  - codex_turn
+model_pairs:
+  - requested_model: gpt-5-codex
+    routed_model: gpt-5-mini
+categories:
+  - chat
+  - short-completion
+max_text_chars: 8000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            meta = manual.routing_experiment_decision(
+                {"model": "gpt-5-mini", "input": "short prompt"},
+                {
+                    "requested_model": "gpt-5-codex",
+                    "routed_model": "gpt-5-mini",
+                    "category": "short-completion",
+                    "text_chars": 12,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="openai_responses",
+                random_value=lambda: 0.0,
+            )
+
+            self.assertTrue(meta["sampled"])
+            self.assertEqual(meta["profile_id"], "first-safe-openai-codex-ab-v1")
+            self.assertEqual(meta["shadow_model"], "gpt-5-codex")
+            self.assertEqual(meta["reason"], "sampled-routed-down-call")
+
     def test_budget_spend_blocks_after_cap_is_exhausted(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 
@@ -163,6 +224,13 @@ categories:
 enabled: true
 sample_rate: 1.0
 daily_budget_usd: 0.01
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
 categories:
   - tool-result
 """,
@@ -231,6 +299,65 @@ categories:
         self.assertEqual(result["primary_output_sha256"], result["shadow_output_sha256"])
         self.assertEqual(result["output_similarity"], 1.0)
         self.assertTrue(result["passed_threshold"])
+
+    def test_response_comparison_extracts_openai_output_text_without_raw_storage(self):
+        primary = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "ok from primary"}],
+                }
+            ]
+        }
+        shadow = {"choices": [{"message": {"content": "ok from primary"}}]}
+
+        result = experiments.compare_response_outputs(primary, shadow)
+
+        self.assertEqual(result["primary_output_chars"], 15)
+        self.assertEqual(result["shadow_output_chars"], 15)
+        self.assertEqual(result["primary_output_sha256"], result["shadow_output_sha256"])
+        self.assertEqual(result["output_similarity"], 1.0)
+
+    def test_report_explains_unqualified_traffic_with_decision_reasons(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_call(
+                    id="call-streaming-skip",
+                    created_at=utc_now(),
+                    path="/v1/responses",
+                    provider="openai",
+                    source_surface="openai_responses",
+                    requested_model="gpt-5-codex",
+                    routed_model="gpt-5-codex",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=10,
+                    input_tokens_est=10,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    routing_json=stable_json({
+                        "routing_experiment": {
+                            "status": "skipped",
+                            "reason": "streaming",
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                        }
+                    }),
+                    category="short-completion",
+                )
+                report = experiments.build_routing_experiment_report(store, limit=5)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["policy"]["profile_id"], "first-safe-openai-codex-ab-v1")
+        self.assertEqual(report["summary"]["sample_count"], 0)
+        self.assertEqual(report["decision_reasons"][0]["provider"], "openai")
+        self.assertEqual(report["decision_reasons"][0]["source_surface"], "openai_responses")
+        self.assertEqual(report["decision_reasons"][0]["reason"], "streaming")
+        self.assertEqual(report["decision_reasons"][0]["count"], 1)
 
     def test_feedback_features_are_metadata_only(self):
         comparison = {

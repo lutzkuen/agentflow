@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -54,6 +55,15 @@ from agentflow_proxy.optimization.openai_pipeline import (
 )
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.provider_context import ProviderContext
+from agentflow_proxy.recommendations import queue_policy_event_feedback
+from agentflow_proxy.routing_experiments import (
+    ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+    ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
+    compare_response_outputs,
+    routing_experiment_decision,
+    routing_experiment_feedback_features,
+    routing_experiment_outcome_event,
+)
 from agentflow_proxy.router import extract_text, has_tools
 from agentflow_proxy.store import stable_json, utc_now
 
@@ -162,6 +172,172 @@ def _session_id(request: Request) -> str:
     return request.headers.get("x-session-id") or hashlib.sha256(
         (client_ip + datetime.now(timezone.utc).strftime("%Y-%m-%d")).encode()
     ).hexdigest()[:16]
+
+
+async def _run_openai_routing_experiment(
+    *,
+    context: ProviderContext,
+    call_id: str,
+    path: str,
+    headers: dict[str, str],
+    request_body: dict[str, Any],
+    routing_meta: dict[str, Any],
+    experiment_meta: dict[str, Any],
+    primary_response_body: dict[str, Any],
+    primary_status_code: int,
+    primary_latency_ms: int,
+    primary_cost_est_usd: Optional[float],
+    input_tokens_est: int,
+) -> None:
+    experiment_id = str(uuid.uuid4())
+    shadow_model = str(experiment_meta.get("shadow_model") or routing_meta.get("requested_model") or "")
+    primary_model = str(request_body.get("model") or routing_meta.get("routed_model") or "")
+    shadow_body = copy.deepcopy(request_body)
+    shadow_body["model"] = shadow_model
+    shadow_status_code: Optional[int] = None
+    shadow_response_body: Optional[dict[str, Any]] = None
+    shadow_latency_ms: Optional[int] = None
+    shadow_cost: Optional[float] = None
+    error: Optional[str] = None
+
+    shadow_started = time.time()
+    try:
+        async with context.limiter.semaphores[model_tier(shadow_model)]:
+            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                await context.limiter.await_backoff(shadow_model)
+                await context.limiter.throttle_forward()
+                r = await client.post(context.openai_upstream.rstrip("/") + path, headers=headers, json=shadow_body)
+        shadow_latency_ms = int((time.time() - shadow_started) * 1000)
+        shadow_status_code = r.status_code
+        try:
+            shadow_response_body = r.json()
+        except Exception:
+            error = upstream_error_text(r.text, r.status_code)
+            shadow_response_body = None
+    except Exception as exc:
+        shadow_latency_ms = int((time.time() - shadow_started) * 1000)
+        error = repr(exc)
+
+    if shadow_response_body is not None:
+        shadow_in, shadow_out, cache_read, _reasoning_tokens = usage_tokens(shadow_response_body)
+        shadow_out_est = estimate_tokens_from_text(response_output_text(shadow_response_body))
+        shadow_cost = estimate_cost(
+            shadow_model,
+            shadow_in if shadow_in is not None else input_tokens_est,
+            shadow_out if shadow_out is not None else shadow_out_est,
+            cache_read=cache_read,
+            provider="openai",
+        )
+
+    comparison = compare_response_outputs(primary_response_body, shadow_response_body)
+    feedback_features = routing_experiment_feedback_features(
+        experiment_id=experiment_id,
+        experiment_meta=experiment_meta,
+        routing_meta=routing_meta,
+        comparison=comparison,
+        primary_model=primary_model,
+        shadow_model=shadow_model,
+        primary_status_code=primary_status_code,
+        shadow_status_code=shadow_status_code,
+        primary_latency_ms=primary_latency_ms,
+        shadow_latency_ms=shadow_latency_ms,
+        primary_cost_est_usd=primary_cost_est_usd,
+        shadow_cost_est_usd=shadow_cost,
+        error=error,
+    )
+    experiment_meta.update(
+        {
+            "experiment_id": experiment_id,
+            "status": feedback_features["status"],
+            "primary_model": primary_model,
+            "shadow_model": shadow_model,
+            "primary_status_code": primary_status_code,
+            "shadow_status_code": shadow_status_code,
+            "primary_output_chars": comparison["primary_output_chars"],
+            "shadow_output_chars": comparison["shadow_output_chars"],
+            "primary_output_sha256": comparison["primary_output_sha256"],
+            "shadow_output_sha256": comparison["shadow_output_sha256"],
+            "output_similarity": comparison["output_similarity"],
+            "passed_threshold": comparison["passed_threshold"],
+            "reason_codes": feedback_features.get("reason_codes", []),
+            "cost_delta_usd": feedback_features.get("cost_delta_usd"),
+            "latency_delta_ms": feedback_features.get("latency_delta_ms"),
+            "optimization_feedback": feedback_features,
+            "managed_feedback": {
+                "enabled": False,
+                "status": "not-exported",
+                "reason": "managed-feedback-not-attempted",
+            },
+        }
+    )
+    try:
+        event = routing_experiment_outcome_event(feedback_features)
+        feedback_meta = await queue_policy_event_feedback(
+            context.store,
+            event,
+            source_surface=ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+            queue_when_disabled=True,
+            flush_immediately=False,
+        )
+    except Exception as exc:
+        feedback_meta = {
+            "enabled": True,
+            "status": "error",
+            "reason": "queue-failed",
+            "endpoint": "/v1/policy-events",
+            "error": repr(exc),
+        }
+    experiment_meta["managed_feedback"] = {
+        "enabled": bool(feedback_meta.get("enabled")),
+        "status": feedback_meta.get("status"),
+        "reason": feedback_meta.get("reason"),
+        "endpoint": feedback_meta.get("endpoint"),
+        "queue_id": feedback_meta.get("queue_id"),
+        "attempts": feedback_meta.get("attempts"),
+        "status_code": feedback_meta.get("status_code"),
+        "latency_ms": feedback_meta.get("latency_ms"),
+        "source_surface": ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
+        "payload_included": False,
+    }
+    store_bodies = context.log_bodies or ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES
+    context.store.log_routing_experiment(
+        id=experiment_id,
+        call_id=call_id,
+        created_at=utc_now(),
+        provider=experiment_meta.get("provider") or "openai",
+        source_surface=experiment_meta.get("source_surface") or "openai_responses",
+        requested_model=routing_meta.get("requested_model"),
+        routed_model=routing_meta.get("routed_model"),
+        primary_model=primary_model,
+        shadow_model=shadow_model,
+        category=routing_meta.get("category"),
+        routing_reason=routing_meta.get("reason"),
+        input_tokens_est=input_tokens_est,
+        primary_status_code=primary_status_code,
+        shadow_status_code=shadow_status_code,
+        primary_latency_ms=primary_latency_ms,
+        shadow_latency_ms=shadow_latency_ms,
+        primary_output_chars=comparison["primary_output_chars"],
+        shadow_output_chars=comparison["shadow_output_chars"],
+        primary_output_sha256=comparison["primary_output_sha256"],
+        shadow_output_sha256=comparison["shadow_output_sha256"],
+        output_similarity=comparison["output_similarity"],
+        passed_threshold=1 if comparison["passed_threshold"] else 0,
+        primary_cost_est_usd=primary_cost_est_usd,
+        shadow_cost_est_usd=shadow_cost,
+        budget_limit_usd=experiment_meta.get("daily_budget_usd"),
+        budget_spent_before_usd=experiment_meta.get("budget_spent_usd"),
+        budget_remaining_before_usd=experiment_meta.get("budget_remaining_usd"),
+        budget_spent_after_usd=round(
+            float(experiment_meta.get("budget_spent_usd") or 0.0) + float(shadow_cost or 0.0),
+            6,
+        ),
+        error=error,
+        routing_json=stable_json(routing_meta),
+        experiment_json=stable_json(experiment_meta),
+        primary_response_json=stable_json(primary_response_body) if store_bodies else None,
+        shadow_response_json=stable_json(shadow_response_body) if store_bodies and shadow_response_body is not None else None,
+    )
 
 
 async def _check_session_cost_alert(context: ProviderContext, sid: str) -> None:
@@ -314,6 +490,16 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         resolved_requested_model = local_policy.resolved_requested_model
         managed_cache_profile = local_policy.managed_cache_profile
         headers = build_forward_headers(context, request)
+        call_fields = openai_call_store_fields(path, requested_model, str(crunched.get("model")))
+        experiment_meta = routing_experiment_decision(
+            crunched,
+            routing_meta,
+            stream=stream,
+            provider="openai",
+            source_surface=str(call_fields.get("source_surface") or "openai_responses"),
+            store_obj=context.store,
+        )
+        routing_meta["routing_experiment"] = experiment_meta
 
         if stream:
             async def gen() -> AsyncIterator[bytes]:
@@ -805,6 +991,21 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
         latency_ms = int((time.time() - started) * 1000)
         error = None if status_code < 400 else upstream_error_text(response_body, status_code)
+        if experiment_meta.get("sampled") and status_code < 400 and response_body is not None:
+            await _run_openai_routing_experiment(
+                context=context,
+                call_id=call_id,
+                path=path,
+                headers=headers,
+                request_body=crunched,
+                routing_meta=routing_meta,
+                experiment_meta=experiment_meta,
+                primary_response_body=response_body,
+                primary_status_code=status_code,
+                primary_latency_ms=latency_ms,
+                primary_cost_est_usd=cost,
+                input_tokens_est=input_tokens,
+            )
         attach_openai_outcome_summary(
             path=path,
             requested_model=requested_model,

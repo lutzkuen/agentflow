@@ -9,7 +9,6 @@ from typing import Any, Callable
 import yaml
 
 from agentflow_proxy.crunch import build_embedding, sha256_text
-from agentflow_proxy.cache import response_output_text
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import cosine_similarity, stable_json
 
@@ -28,17 +27,21 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 def _default_experiment_policy() -> dict[str, Any]:
     return {
+        "profile_id": "first-safe-openai-codex-ab-v1",
         "enabled": False,
         "kill_switch": False,
         "sample_rate": 0.0,
         "daily_budget_usd": 0.0,
         "min_text_chars": 0,
-        "max_text_chars": 30000,
-        "providers": ["anthropic"],
-        "source_surfaces": ["anthropic_messages"],
-        "model_pairs": [],
+        "max_text_chars": 8000,
+        "providers": ["openai"],
+        "source_surfaces": ["openai_responses", "openai_chat", "codex_turn"],
+        "model_pairs": [
+            {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
+            {"requested_model": "gpt-5.4", "routed_model": "gpt-5.4-mini"},
+        ],
         "workflow_phases": [],
-        "categories": [],
+        "categories": ["chat", "short-completion"],
         "similarity_threshold": 0.86,
         "min_samples_for_confidence": 20,
         "store_response_bodies": False,
@@ -56,6 +59,8 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
 
 
 def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    if data.get("profile_id") not in (None, ""):
+        policy["profile_id"] = str(data["profile_id"])
     policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
     policy["kill_switch"] = _as_bool(data.get("kill_switch"), policy["kill_switch"])
     if data.get("sample_rate") is not None:
@@ -224,6 +229,7 @@ def routing_experiment_decision(
         "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
         "sample_rate": ROUTING_EXPERIMENT_SAMPLE_RATE,
         "daily_budget_usd": round(budget_limit, 6),
+        "profile_id": str(ROUTING_EXPERIMENT_POLICY.get("profile_id") or ""),
         "budget_spent_usd": round(budget_spent, 6),
         "budget_remaining_usd": round(budget_remaining, 6),
         "budget_exhausted": budget_limit <= 0 or budget_spent >= budget_limit,
@@ -301,6 +307,37 @@ def routing_experiment_decision(
     meta["sampled"] = True
     meta["reason"] = "sampled-routed-down-call"
     return meta
+
+
+def response_output_text(resp: dict[str, Any]) -> str:
+    if not isinstance(resp, dict):
+        return ""
+    if isinstance(resp.get("output_text"), str):
+        return resp["output_text"]
+    parts: list[str] = []
+    for block in resp.get("content") or []:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    for item in resp.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for block in item.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block.get("content"), str):
+                parts.append(block["content"])
+    for choice in resp.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message") or {}
+        if isinstance(message.get("content"), str):
+            parts.append(message["content"])
+        delta = choice.get("delta") or {}
+        if isinstance(delta.get("content"), str):
+            parts.append(delta["content"])
+    return "\n".join(parts)
 
 
 def compare_response_outputs(primary_response: dict[str, Any] | None, shadow_response: dict[str, Any] | None) -> dict[str, Any]:
@@ -640,6 +677,50 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             status = str((feedback or {}).get("status") or "not-exported") if isinstance(feedback, dict) else "not-exported"
         feedback_status_counts[status] = feedback_status_counts.get(status, 0) + 1
 
+    decision_reason_counts: dict[tuple[str, str, str, str], int] = {}
+    try:
+        decision_rows = conn.execute(
+            """
+            select coalesce(provider, 'anthropic') as provider,
+                   coalesce(source_surface, 'anthropic_messages') as source_surface,
+                   routing_json
+            from calls
+            where routing_json is not null
+              and routing_json like '%"routing_experiment"%'
+            order by created_at desc
+            limit 5000
+            """
+        ).fetchall()
+    except Exception:
+        decision_rows = []
+    for row in decision_rows:
+        try:
+            routing = yaml.safe_load(row["routing_json"]) or {}
+        except Exception:
+            reason = "invalid-routing-json"
+            status = "unknown"
+        else:
+            experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
+            if not isinstance(experiment, dict):
+                continue
+            reason = str(experiment.get("reason") or "unknown")
+            status = str(experiment.get("status") or "unknown")
+        key = (str(row["provider"]), str(row["source_surface"]), status, reason)
+        decision_reason_counts[key] = decision_reason_counts.get(key, 0) + 1
+    decision_reasons = [
+        {
+            "provider": provider,
+            "source_surface": source_surface,
+            "status": status,
+            "reason": reason,
+            "count": count,
+        }
+        for (provider, source_surface, status, reason), count in sorted(
+            decision_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
     compared_total = int((summary_row or {}).get("compared_samples") or 0)
     avg_similarity_total = (summary_row or {}).get("avg_similarity")
     pass_rate_total = (summary_row or {}).get("pass_rate")
@@ -647,6 +728,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         "schema": "agentflow.routing_experiment_report.v1",
         "generated_at": utc_now(),
         "policy": {
+            "profile_id": str(ROUTING_EXPERIMENT_POLICY.get("profile_id") or ""),
             "enabled": ROUTING_EXPERIMENT_ENABLED,
             "kill_switch": bool(ROUTING_EXPERIMENT_POLICY.get("kill_switch")),
             "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
@@ -656,6 +738,13 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "today_shadow_spend_usd": round(today_spend, 6),
             "today_budget_remaining_usd": round(max(0.0, budget_limit - today_spend), 6),
             "daily_budget_exhausted": bool(ROUTING_EXPERIMENT_ENABLED and (budget_limit <= 0 or today_spend >= budget_limit)),
+            "providers": list(ROUTING_EXPERIMENT_POLICY.get("providers") or []),
+            "source_surfaces": list(ROUTING_EXPERIMENT_POLICY.get("source_surfaces") or []),
+            "model_pairs": list(ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []),
+            "categories": list(ROUTING_EXPERIMENT_POLICY.get("categories") or []),
+            "workflow_phases": list(ROUTING_EXPERIMENT_POLICY.get("workflow_phases") or []),
+            "min_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("min_text_chars") or 0),
+            "max_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0),
         },
         "summary": {
             "sample_count": int((summary_row or {}).get("samples") or 0),
@@ -668,6 +757,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "avg_latency_delta_ms": (summary_row or {}).get("avg_latency_delta_ms"),
             "feedback_status_counts": feedback_status_counts,
         },
+        "decision_reasons": decision_reasons,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,

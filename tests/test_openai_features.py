@@ -12,6 +12,7 @@ from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import openai_features
 from agentflow_proxy.optimization import openai_pipeline
 from agentflow_proxy import router as router_module
+import agentflow_proxy.routing_experiments as routing_experiments_module
 from agentflow_proxy.store import stable_json
 
 
@@ -514,7 +515,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.old_log_bodies = server.LOG_BODIES
         self.saved_recommendation_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
         self.saved_routing_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
+        self.saved_routing_experiments = os.environ.get("AGENTFLOW_ROUTING_EXPERIMENTS")
         os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+        os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.LOG_BODIES = False
@@ -543,7 +546,12 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
         else:
             os.environ["AGENTFLOW_ROUTING_RULES"] = self.saved_routing_rules
+        if self.saved_routing_experiments is None:
+            os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
+        else:
+            os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = self.saved_routing_experiments
         importlib.reload(router_module)
+        importlib.reload(routing_experiments_module)
         server.store.conn.close()
         self.tmp.close()
         server.store = self.old_store
@@ -1218,6 +1226,99 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(canary["status"], "applied")
         self.assertEqual(canary["fallback_reason"], "rate_limited")
         self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
+
+    def test_openai_routing_experiment_records_primary_shadow_metadata_only(self):
+        self._enable_openai_canary(canary_fraction=1.0)
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as policy_file:
+            policy_file.write("\n".join([
+                "profile_id: first-safe-openai-codex-ab-v1",
+                "enabled: true",
+                "sample_rate: 1.0",
+                "daily_budget_usd: 0.05",
+                "providers:",
+                "  - openai",
+                "source_surfaces:",
+                "  - openai_responses",
+                "model_pairs:",
+                "  - requested_model: gpt-5-codex",
+                "    routed_model: gpt-5-mini",
+                "categories:",
+                "  - short-completion",
+                "  - chat",
+                "max_text_chars: 8000",
+                "store_response_bodies: false",
+                "",
+            ]))
+            policy_path = policy_file.name
+        self.addCleanup(lambda: os.path.exists(policy_path) and os.unlink(policy_path))
+        os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = policy_path
+        importlib.reload(routing_experiments_module)
+        CapturingOpenAIClient.calls = []
+        CapturingOpenAIClient.status_code = 200
+        CapturingOpenAIClient.response_body = {
+            "id": "resp_1",
+            "object": "response",
+            "model": "gpt-5-mini",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "experiment ok"}],
+                }
+            ],
+            "usage": {"input_tokens": 11, "output_tokens": 3},
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post(
+                "/v1/responses",
+                json={"model": "gpt-5-codex", "input": "short prompt SECRET_OPENAI_AB"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        self.assertEqual(CapturingOpenAIClient.calls[1]["json"]["model"], "gpt-5-codex")
+
+        [experiment_row] = server.store.conn.execute(
+            """
+            select provider, source_surface, requested_model, routed_model,
+                   primary_model, shadow_model, primary_status_code, shadow_status_code,
+                   output_similarity, primary_response_json, shadow_response_json, experiment_json
+            from routing_experiments
+            """
+        ).fetchall()
+        experiment = json.loads(experiment_row["experiment_json"])
+        [call_row] = server.store.conn.execute(
+            "select routing_json, request_json, response_json from calls"
+        ).fetchall()
+        routing = json.loads(call_row["routing_json"])
+        queue_row = server.store.conn.execute(
+            "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue "
+            "where source_surface = 'routing_experiment_outcome'"
+        ).fetchone()
+
+        self.assertEqual(experiment_row["provider"], "openai")
+        self.assertEqual(experiment_row["source_surface"], "openai_responses")
+        self.assertEqual(experiment_row["requested_model"], "gpt-5-codex")
+        self.assertEqual(experiment_row["routed_model"], "gpt-5-mini")
+        self.assertEqual(experiment_row["primary_model"], "gpt-5-mini")
+        self.assertEqual(experiment_row["shadow_model"], "gpt-5-codex")
+        self.assertEqual(experiment_row["primary_status_code"], 200)
+        self.assertEqual(experiment_row["shadow_status_code"], 200)
+        self.assertEqual(experiment_row["output_similarity"], 1.0)
+        self.assertIsNone(experiment_row["primary_response_json"])
+        self.assertIsNone(experiment_row["shadow_response_json"])
+        self.assertEqual(experiment["status"], "compared")
+        self.assertEqual(experiment["managed_feedback"]["status"], "queued")
+        self.assertEqual(routing["routing_experiment"]["status"], "compared")
+        self.assertEqual(routing["routing_experiment"]["profile_id"], "first-safe-openai-codex-ab-v1")
+        self.assertIsNone(call_row["request_json"])
+        self.assertIsNone(call_row["response_json"])
+        self.assertEqual(queue_row["source_surface"], "routing_experiment_outcome")
+        self.assertEqual(queue_row["endpoint"], "/v1/policy-events")
+        self.assertEqual(queue_row["status"], "queued")
+        self.assertNotIn("SECRET_OPENAI_AB", queue_row["payload_json"])
+        self.assertNotIn("SECRET_OPENAI_AB", call_row["routing_json"])
 
 
 if __name__ == "__main__":
