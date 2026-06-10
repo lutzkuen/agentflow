@@ -6008,6 +6008,202 @@ async def stats_openai_scoreboard(store_obj: Any, limit: int = 1000) -> dict[str
     }
 
 
+def _openai_canary_policy_state() -> dict[str, Any]:
+    from agentflow_proxy import router as routing
+
+    policy = dict(getattr(routing, "ROUTING_OPENAI_CANARY", {}) or {})
+    safety = policy.get("safety_stop") if isinstance(policy.get("safety_stop"), dict) else {}
+    return {
+        "enabled": bool(policy.get("enabled")),
+        "policy_id": policy.get("policy_id"),
+        "promotion_action_id": policy.get("promotion_action_id"),
+        "target_candidate_id": policy.get("target_candidate_id"),
+        "policy_source": policy.get("policy_source") or getattr(routing, "ROUTING_RULES_SOURCE", None),
+        "rule_path": getattr(routing, "ROUTING_RULES_PATH", None),
+        "target_model": policy.get("target_model"),
+        "model_pattern": policy.get("model_pattern"),
+        "canary_fraction": _as_float(policy.get("canary_fraction")),
+        "holdout_fraction": _as_float(policy.get("holdout_fraction")),
+        "eligible_categories": list(policy.get("eligible_categories") or []),
+        "excluded_categories": list(policy.get("excluded_categories") or []),
+        "allow_tools": bool(policy.get("allow_tools")),
+        "allow_stream": bool(policy.get("allow_stream")),
+        "min_text_chars": _as_int(policy.get("min_text_chars")),
+        "max_text_chars": _as_int(policy.get("max_text_chars")),
+        "min_input_tokens_est": _as_int(policy.get("min_input_tokens_est")),
+        "max_input_tokens_est": _as_int(policy.get("max_input_tokens_est")),
+        "safety_stop": {
+            "enabled": bool(safety.get("enabled", True)),
+            "window_hours": _as_int(safety.get("window_hours")),
+            "min_samples": _as_int(safety.get("min_samples")),
+            "min_holdout_samples": _as_int(safety.get("min_holdout_samples")),
+            "max_error_rate": _as_float(safety.get("max_error_rate")),
+            "max_retry_rate": _as_float(safety.get("max_retry_rate")),
+            "max_fallback_rate": _as_float(safety.get("max_fallback_rate")),
+            "max_latency_regression_ratio": _as_float(safety.get("max_latency_regression_ratio")),
+            "limit": _as_int(safety.get("limit")),
+        },
+    }
+
+
+def _openai_canary_readiness_state(policy: dict[str, Any], impact: dict[str, Any]) -> tuple[str, str]:
+    if not policy.get("enabled"):
+        return "disabled", "local OpenAI canary policy is disabled"
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    if _as_int(summary.get("candidate_count")) <= 0:
+        return "collecting_evidence", "enabled policy has no matched local canary metadata yet"
+    verdict_counts = {
+        str(row.get("value")): _as_int(row.get("count"))
+        for row in summary.get("verdict_counts", [])
+        if isinstance(row, dict)
+    }
+    if verdict_counts.get("rollback", 0) > 0:
+        return "rollback", "at least one candidate has a rollback verdict"
+    if verdict_counts.get("hold", 0) > 0:
+        return "hold", "at least one candidate is holding on risk or stale evidence"
+    if verdict_counts.get("widen", 0) > 0:
+        return "ready_to_widen", "candidate evidence meets widening thresholds"
+    return "collecting_evidence", "canary metadata exists but needs more applied and holdout evidence"
+
+
+def _openai_canary_top_blockers(impact: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    blockers: dict[str, int] = {}
+    for row in summary.get("reason_code_counts", []):
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get("value") or "unknown")
+        if value in {"target-savings-met"}:
+            continue
+        blockers[value] = blockers.get(value, 0) + _as_int(row.get("count"))
+    for candidate in impact.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        for row in candidate.get("reason_buckets", []):
+            if not isinstance(row, dict):
+                continue
+            value = str(row.get("value") or "unknown")
+            if value in {"selected-canary", "selected-holdout"}:
+                continue
+            blockers[value] = blockers.get(value, 0) + _as_int(row.get("count"))
+    return _managed_breakdown(blockers)[:10]
+
+
+def _openai_canary_candidate_rows(impact: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for candidate in impact.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        counts = candidate.get("cohort_counts") if isinstance(candidate.get("cohort_counts"), dict) else {}
+        deltas = (
+            candidate.get("applied_vs_holdout_deltas")
+            if isinstance(candidate.get("applied_vs_holdout_deltas"), dict)
+            else {}
+        )
+        rows.append({
+            "candidate_id": candidate.get("candidate_id"),
+            "policy_id": candidate.get("policy_id"),
+            "policy_source": candidate.get("policy_source"),
+            "source_surface": candidate.get("source_surface"),
+            "original_model": candidate.get("original_model"),
+            "candidate_target_model": candidate.get("candidate_target_model"),
+            "verdict": candidate.get("verdict"),
+            "next_action": candidate.get("next_action"),
+            "reason_codes": candidate.get("reason_codes") or [],
+            "warning_codes": candidate.get("warning_codes") or [],
+            "sample_count": _as_int(candidate.get("sample_count")),
+            "applied_count": _as_int(counts.get("canary_applied")),
+            "holdout_count": _as_int(counts.get("canary_holdout")),
+            "not_selected_count": _as_int(counts.get("skipped")),
+            "disabled_or_bypassed_count": _as_int(counts.get("bypassed_or_disabled")),
+            "safety_stopped_count": _as_int(counts.get("safety_stopped")),
+            "observed_savings_usd": _as_float(candidate.get("observed_savings_usd")),
+            "projected_savings_usd": _as_float(candidate.get("projected_savings_usd")),
+            "error_rate_delta": _as_float(deltas.get("applied_minus_holdout_error_rate")),
+            "retry_rate_delta": _as_float(deltas.get("applied_minus_holdout_retry_rate")),
+            "fallback_rate_delta": _as_float(deltas.get("applied_minus_holdout_fallback_rate")),
+            "latency_delta_ms": deltas.get("applied_minus_holdout_latency_avg_ms"),
+            "latest_observed_at": candidate.get("latest_observed_at"),
+            "stale_evidence": candidate.get("stale_evidence"),
+            "top_reasons": candidate.get("reason_buckets") or [],
+            "privacy": candidate.get("privacy") or {},
+        })
+    return rows
+
+
+async def stats_openai_canary_readiness(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
+
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    impact = build_openai_canary_impact_report(store_obj, limit=capped_limit)
+    policy = _openai_canary_policy_state()
+    state, reason = _openai_canary_readiness_state(policy, impact)
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    top_blockers = _openai_canary_top_blockers(impact)
+    candidates = _openai_canary_candidate_rows(impact)
+    latest_verdicts = [
+        {
+            "candidate_id": row.get("candidate_id"),
+            "verdict": row.get("verdict"),
+            "next_action": row.get("next_action"),
+            "reason_codes": row.get("reason_codes"),
+            "latest_observed_at": row.get("latest_observed_at"),
+        }
+        for row in candidates[:10]
+    ]
+    return {
+        "schema": "agentflow.openai_canary_readiness.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "state": state,
+        "state_reason": reason,
+        "policy": policy,
+        "summary": {
+            "eligible_candidate_count": _as_int(summary.get("candidate_count")),
+            "sampled_call_count": _as_int(summary.get("sampled_call_count")),
+            "observed_openai_canary_metadata_row_count": _as_int(
+                summary.get("observed_openai_canary_metadata_row_count")
+            ),
+            "canary_applied_count": _as_int(summary.get("canary_applied_count")),
+            "canary_holdout_count": _as_int(summary.get("canary_holdout_count")),
+            "not_selected_count": sum(_as_int(row.get("not_selected_count")) for row in candidates),
+            "disabled_or_bypassed_count": sum(_as_int(row.get("disabled_or_bypassed_count")) for row in candidates),
+            "safety_stopped_count": _as_int(summary.get("safety_stopped_count")),
+            "active_safety_stop_count": _as_int(summary.get("safety_stopped_count")),
+            "observed_savings_usd": _as_float(summary.get("observed_savings_usd")),
+            "projected_savings_usd": _as_float(summary.get("projected_savings_usd")),
+            "verdict_counts": summary.get("verdict_counts") or [],
+            "top_blockers": top_blockers,
+            "latest_verdicts": latest_verdicts,
+        },
+        "candidates": candidates,
+        "impact_report": impact,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "api_keys_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "policy_file_paths_included": bool(policy.get("rule_path")),
+            "basis": "local routing policy metadata plus sanitized OpenAI canary impact aggregates",
+        },
+    }
+
+
 async def stats_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_routing_report import build_openai_routing_report
 
@@ -11239,6 +11435,24 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-openai">
 <div class="section">
+  <h2>OpenAI local canary readiness</h2>
+  <table data-table-id="openai-canary-readiness-summary" data-filter-label="Filter OpenAI canary readiness">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Source</th><th data-sort-type="text">Target</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Not selected</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-canary-readiness-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI local canary impact</h2>
+  <table class="activity-table" data-table-id="openai-canary-readiness-candidates" data-filter-label="Filter OpenAI canary candidates">
+    <thead><tr>
+      <th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Policy source</th><th data-sort-type="text">Route</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Not selected</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed</th><th data-sort-type="money">Projected</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Reasons</th><th data-sort-type="time">Latest evidence</th>
+    </tr></thead>
+    <tbody id="openai-canary-readiness-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>OpenAI optimization scoreboard</h2>
   <table data-table-id="openai-scoreboard-summary" data-filter-label="Filter OpenAI scoreboard summary">
     <thead><tr>
@@ -12548,6 +12762,61 @@ function openaiBreakdownBadges(rows,kind){
     return `<span class="badge ${cls}">${esc(value)} ${(row.count||0).toLocaleString()}</span>`;
   }).join(' ');
 }
+function openaiCanaryStateBadge(state){
+  if(state==='ready_to_widen'||state==='widen')return'hit';
+  if(state==='rollback')return'err';
+  if(state==='hold'||state==='collecting_evidence'||state==='needs_eval')return'routed';
+  if(state==='disabled')return'miss';
+  return'provider';
+}
+function openaiCanaryReasonBadges(reasons){
+  reasons=reasons||[];
+  if(!reasons.length)return'<span class="badge hit">none</span>';
+  return reasons.slice(0,5).map(reason=>`<span class="badge ${String(reason).includes('rollback')?'err':'miss'}">${esc(reason)}</span>`).join(' ');
+}
+async function refreshOpenAICanaryReadiness(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-canary-readiness?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const p=d.policy||{};
+    const privacy=d.privacy||{};
+    document.getElementById('openai-canary-readiness-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${openaiCanaryStateBadge(d.state)}">${esc(d.state||'unknown')}</span><div class="sub">${esc(d.state_reason||'')}</div></td>
+      <td class="model">${esc(p.policy_id||'—')}</td>
+      <td class="flags"><span class="badge provider">${esc(p.policy_source||'unknown')}</span><div class="sub">${esc(p.rule_path||'—')}</div></td>
+      <td class="model">${esc(shortModel(p.model_pattern||'—'))}<span class="arrow">→</span>${esc(shortModel(p.target_model||'—'))}</td>
+      <td class="tokens">${(s.eligible_candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.not_selected_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.active_safety_stop_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.observed_savings_usd||0,6)}</td>
+      <td class="flags">${openaiBreakdownBadges(s.top_blockers,'reason')}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${privacy.provider_calls_made?'<span class="badge err">provider call</span>':'<span class="badge hit">offline</span>'}</td>
+    </tr>`;
+    const candidates=d.candidates||[];
+    document.getElementById('openai-canary-readiness-candidates-tbody').innerHTML=candidates.map(row=>`<tr>
+      <td><span class="badge ${openaiCanaryStateBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+      <td class="model">${esc(row.candidate_id||'uncategorized')}</td>
+      <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+      <td class="model">${esc(shortModel(row.original_model||'—'))}<span class="arrow">→</span>${esc(shortModel(row.candidate_target_model||'—'))}</td>
+      <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.not_selected_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.safety_stopped_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(row.observed_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtPctValue(row.error_rate_delta||0)}</td>
+      <td class="tokens">${fmtPctValue(row.retry_rate_delta||0)}</td>
+      <td class="latency">${row.latency_delta_ms==null?'—':fmtMs(row.latency_delta_ms)}</td>
+      <td class="flags">${openaiCanaryReasonBadges(row.reason_codes)}</td>
+      <td class="ts">${ago(row.latest_observed_at)}</td>
+    </tr>`).join('')||'<tr><td colspan="16" style="color:#8b949e">No OpenAI local canary metadata in this local window</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshOpenAIScoreboard(){
   try{
     const r=await fetch('/agentflow/stats/openai-scoreboard?limit=1000');
@@ -13199,6 +13468,7 @@ refreshErrors();
 refreshLimiter();
 refreshSafety();
 refreshPolicies();
+refreshOpenAICanaryReadiness();
 refreshOpenAIScoreboard();
 refreshOptimizationPromotionFunnel();
 refreshOptimizationEvalQueue();
@@ -13216,6 +13486,7 @@ setInterval(refreshCache,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
+setInterval(refreshOpenAICanaryReadiness,30000);
 setInterval(refreshOpenAIScoreboard,30000);
 setInterval(refreshOptimizationPromotionFunnel,30000);
 setInterval(refreshOptimizationEvalQueue,30000);

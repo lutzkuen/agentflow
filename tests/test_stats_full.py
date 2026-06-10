@@ -835,6 +835,111 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(cli_payload["summary"]["openai_call_count"], 1)
         self.assertNotIn("hidden-session", output.getvalue())
 
+    def test_openai_canary_readiness_endpoint_uses_impact_fixture_metadata(self):
+        def log_canary_call(call_id, *, cohort, created_at, status_code=200, latency_ms=100, actual=0.001, baseline=0.003):
+            status = "applied" if cohort == "canary_applied" else "holdout"
+            canary = {
+                "enabled": True,
+                "policy_id": "local-openai-canary-fixture",
+                "rule_id": "local-openai-canary-fixture",
+                "target_candidate_id": "openai-mini-fixture",
+                "candidate_id": "openai-mini-fixture",
+                "status": status,
+                "cohort": cohort,
+                "reason": "selected-canary" if status == "applied" else "selected-holdout",
+                "original_model": "gpt-5-codex",
+                "requested_model": "gpt-5-codex",
+                "target_model": "gpt-5-mini",
+                "actual_forwarded_model": "gpt-5-mini" if status == "applied" else "gpt-5-codex",
+                "source_surface": "openai_provider_request",
+                "app_family": "generic_openai",
+                "category": "chat",
+                "projected_input_savings_usd": 0.002,
+                "canary_fraction": 0.5,
+                "holdout_fraction": 0.25,
+                "policy_source": "local-manual",
+                "cohort_key_hash": f"sha256:{call_id}",
+            }
+            server.store.log_call(
+                id=call_id,
+                created_at=created_at,
+                path="/v1/responses",
+                requested_model="gpt-5-codex",
+                routed_model=canary["actual_forwarded_model"],
+                stream=0,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                input_tokens_est=500,
+                output_tokens_est=100,
+                actual_input_tokens=500,
+                actual_output_tokens=100,
+                cost_est_usd=actual,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"openai_canary": canary}),
+                cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+                error='{"message":"raw provider error must stay local"}' if status_code >= 400 else None,
+                request_json=None,
+                response_json=None,
+                session_id="raw-openai-session-secret",
+                category="chat",
+                retry_count=0,
+                provider="openai",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+            )
+
+        log_canary_call("openai-canary-ready-a1", cohort="canary_applied", created_at="2026-06-10T04:00:00+00:00")
+        log_canary_call("openai-canary-ready-a2", cohort="canary_applied", created_at="2026-06-10T04:01:00+00:00")
+        log_canary_call(
+            "openai-canary-ready-h1",
+            cohort="canary_holdout",
+            created_at="2026-06-10T04:02:00+00:00",
+            actual=0.003,
+            baseline=0.003,
+        )
+
+        from agentflow_proxy import router
+
+        with patch.dict(
+            router.ROUTING_OPENAI_CANARY,
+            {
+                "enabled": True,
+                "policy_id": "local-openai-canary-fixture",
+                "target_candidate_id": "openai-mini-fixture",
+                "target_model": "gpt-5-mini",
+                "canary_fraction": 0.5,
+                "holdout_fraction": 0.25,
+                "policy_source": "local-manual",
+            },
+            clear=False,
+        ):
+            result = asyncio.run(stats_views.stats_openai_canary_readiness(server.store, limit=10))
+
+        self.assertEqual(result["schema"], "agentflow.openai_canary_readiness.v1")
+        self.assertEqual(result["state"], "ready_to_widen")
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertEqual(result["policy"]["policy_id"], "local-openai-canary-fixture")
+        self.assertEqual(result["summary"]["eligible_candidate_count"], 1)
+        self.assertEqual(result["summary"]["canary_applied_count"], 2)
+        self.assertEqual(result["summary"]["canary_holdout_count"], 1)
+        self.assertEqual(result["summary"]["not_selected_count"], 0)
+        self.assertEqual(result["summary"]["active_safety_stop_count"], 0)
+        self.assertAlmostEqual(result["summary"]["observed_savings_usd"], 0.004, places=6)
+        self.assertEqual(result["candidates"][0]["verdict"], "widen")
+        self.assertEqual(result["candidates"][0]["applied_count"], 2)
+        self.assertEqual(result["candidates"][0]["holdout_count"], 1)
+        rendered = json.dumps(result)
+        self.assertNotIn("raw-openai-session-secret", rendered)
+        self.assertNotIn("raw provider error must stay local", rendered)
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+
     def test_managed_pattern_adoption_funnel_covers_outcomes_and_lifecycle(self):
         pattern_hash = "sha256:" + ("a" * 64)
 
