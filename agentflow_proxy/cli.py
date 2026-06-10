@@ -963,6 +963,170 @@ def policy_apply_cli(
     return 0 if result["ok"] else 1
 
 
+def codex_app_policy_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run managed Codex app policy rules against local metadata-only turn windows")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Policy bundle JSON path, or '-' for stdin. Ignored when --url is set.",
+    )
+    parser.add_argument(
+        "--url",
+        default=os.getenv(POLICY_BUNDLE_RECOMMENDATION_URL_ENV),
+        help=f"Managed policy bundle recommendation URL. May also be set with {POLICY_BUNDLE_RECOMMENDATION_URL_ENV}.",
+    )
+    parser.add_argument("--api-key", help="Managed optimizer API key. Prefer --api-key-env for shell history safety.")
+    parser.add_argument(
+        "--api-key-env",
+        default=MANAGED_POLICY_API_KEY_ENV,
+        help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
+    )
+    parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
+    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--min-samples", type=int, default=10, help="Minimum candidate samples to request when fetching.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum candidate error rate to request when fetching.")
+    parser.add_argument("--limit", type=int, default=50, help="Maximum candidates to request when fetching.")
+    parser.add_argument("--source-surface", help="Optional managed server source_surface filter.")
+    parser.add_argument("--app-family", help="Optional managed server app_family filter.")
+    parser.add_argument("--category", help="Optional managed server category filter.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        help="HTTP timeout in seconds, default: 10.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="SQLite metadata database path for recent Codex turn windows, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    parser.add_argument("--recent-limit", type=int, default=200, help="Maximum recent Codex turn/start rows to project, default: 200.")
+    parser.add_argument("--fixture", help="Optional JSON fixture rows/features to include in the projection.")
+    parser.add_argument(
+        "--no-synthetic",
+        action="store_true",
+        help="Do not include the built-in synthetic summary-turn fixture row.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print dry-run JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    fetch = None
+    managed_server_calls_made = False
+    if args.url:
+        bundle, fetch, fetch_exit = _read_rollout_actions_from_url(args)
+        managed_server_calls_made = fetch.get("status") not in {"skipped", None} if isinstance(fetch, dict) else False
+        if fetch_exit is not None:
+            result = {
+                "schema": "agentflow.codex_app_policy_dry_run.v1",
+                "ok": False,
+                "dry_run": True,
+                "applied": False,
+                "wrote_local_policy_files": False,
+                "cache_table_mutated": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": managed_server_calls_made,
+                "fetch": fetch,
+                "error": fetch.get("error") if isinstance(fetch, dict) else None,
+            }
+            _write_rollout_actions_result(stderr, result, pretty=args.pretty)
+            return fetch_exit
+    else:
+        bundle, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+        fetch = {"status": "skipped", "reason": "local-input"}
+        if read_error:
+            result = {
+                "schema": "agentflow.codex_app_policy_dry_run.v1",
+                "ok": False,
+                "dry_run": True,
+                "applied": False,
+                "wrote_local_policy_files": False,
+                "cache_table_mutated": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "fetch": fetch,
+                "validation": read_error,
+                "error": {"type": "read_failed", "message": "policy bundle could not be read"},
+            }
+            _write_rollout_actions_result(stderr, result, pretty=args.pretty)
+            return 1
+
+    from agentflow_proxy.codex_app_dry_run import dry_run_codex_app_policy, load_codex_app_fixture_features
+    from agentflow_proxy.policy_bundle import validate_policy_bundle
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.store import Store
+
+    validation = validate_policy_bundle(bundle)
+    if not validation["ok"]:
+        result = {
+            "schema": "agentflow.codex_app_policy_dry_run.v1",
+            "ok": False,
+            "dry_run": True,
+            "applied": False,
+            "wrote_local_policy_files": False,
+            "cache_table_mutated": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": managed_server_calls_made,
+            "fetch": fetch,
+            "validation": validation,
+            "error": {"type": "validation_failed", "message": "policy bundle is invalid"},
+        }
+        log_policy_event(
+            "codex-app-policy-dry-run",
+            ok=False,
+            details={"source": "cli", "validation_error_count": len(validation.get("errors", [])), "exit_code": 1},
+        )
+        _write_rollout_actions_result(stderr, result, pretty=args.pretty)
+        return 1
+
+    fixture_features = load_codex_app_fixture_features(args.fixture) if args.fixture else []
+    store = Store(args.db)
+    try:
+        result = dry_run_codex_app_policy(
+            bundle,
+            store=store,
+            recent_limit=max(0, args.recent_limit),
+            fixture_features=fixture_features,
+            include_synthetic=not args.no_synthetic,
+        )
+    finally:
+        store.conn.close()
+    result["validation"] = validation
+    result["fetch"] = fetch
+    result["managed_server_calls_made"] = managed_server_calls_made
+    result["privacy"]["managed_server_calls_made"] = managed_server_calls_made
+    log_policy_event(
+        "codex-app-policy-dry-run",
+        ok=bool(result["ok"]),
+        details={
+            "source": "cli",
+            "path": None if args.url else args.path,
+            "url": _redact_url(args.url),
+            "candidate_count": result.get("summary", {}).get("candidate_count", 0),
+            "projected_applied_count": result.get("summary", {}).get("projected_applied_count", 0),
+            "projected_holdout_count": result.get("summary", {}).get("projected_holdout_count", 0),
+            "projected_skip_count": result.get("summary", {}).get("projected_skip_count", 0),
+            "projected_savings_usd": result.get("summary", {}).get("projected_savings_usd", 0.0),
+            "provider_calls_made": False,
+            "managed_server_calls_made": managed_server_calls_made,
+            "exit_code": 0,
+        },
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
+    return 0
+
+
 def _read_rollout_actions_from_url(args: argparse.Namespace) -> tuple[Any, dict[str, Any] | None, int | None]:
     headers, auth_configured, auth_source = _managed_policy_auth(args)
     safe_url = _redact_url(args.url)
@@ -4197,6 +4361,10 @@ def policy_fetch_review_main() -> None:
 
 def policy_apply_main() -> None:
     raise SystemExit(policy_apply_cli())
+
+
+def codex_app_policy_dry_run_main() -> None:
+    raise SystemExit(codex_app_policy_dry_run_cli())
 
 
 def managed_rollout_actions_review_main() -> None:
