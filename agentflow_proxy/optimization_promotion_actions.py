@@ -86,6 +86,44 @@ def _reason_codes(values: Any) -> list[str]:
     return sorted(reason for reason in reasons if reason)
 
 
+def _normalize_pattern_hash(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    digest = text.removeprefix("sha256:") if text.startswith("sha256:") else text
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return f"sha256:{digest}"
+
+
+def _collect_pattern_hashes(value: Any) -> list[str]:
+    hashes: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_l = str(key).lower()
+            if (
+                key_l in {"pattern_hash", "normalized_pattern_hash", "crunch_pattern_hash", "cache_pattern_hash", "pattern_hashes", "hashes"}
+                or key_l.endswith(("_pattern_hash", "_pattern_sha256"))
+                or ("pattern" in key_l and key_l.endswith(("_hash", "_hashes", "_sha256")))
+            ):
+                if isinstance(item, list):
+                    hashes.extend(hash_value for nested in item if (hash_value := _normalize_pattern_hash(nested)))
+                elif (hash_value := _normalize_pattern_hash(item)) is not None:
+                    hashes.append(hash_value)
+            hashes.extend(_collect_pattern_hashes(item))
+    elif isinstance(value, list):
+        for item in value:
+            hashes.extend(_collect_pattern_hashes(item))
+    return sorted(set(hashes))
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def _counter_rows(values: list[str]) -> list[dict[str, Any]]:
     counts = Counter(values)
     rows = [{"value": value, "count": count} for value, count in counts.items()]
@@ -251,6 +289,64 @@ def _action(
         max_canary_fraction=max_canary_fraction,
     )
     target_rule_id = _target_rule_id(policy, candidate)
+    local_policy_update: dict[str, Any] = {
+        "kind": "yaml-rule-canary",
+        "policy_source": "managed-recommended",
+        "managed_enforced": False,
+        "required_local_review": True,
+        "candidate_target_model": candidate.get("candidate_target_model"),
+        "candidate_profile": candidate.get("candidate_profile"),
+    }
+    if policy["policy_section"] == "cache":
+        pattern_hashes = _collect_pattern_hashes(candidate)
+        conditions: dict[str, Any] = {}
+        if pattern_hashes:
+            conditions["pattern_hashes"] = pattern_hashes
+        for key in (
+            "source_surface",
+            "app_family",
+            "category",
+            "workflow_phase",
+            "text_bucket",
+            "token_bucket",
+            "cacheability_bucket",
+        ):
+            value = candidate.get(key)
+            if value is not None:
+                conditions[key] = str(value)
+        cacheability = candidate.get("cacheability") if isinstance(candidate.get("cacheability"), dict) else {}
+        if "cacheability_bucket" not in conditions and cacheability.get("cacheability_bucket") is not None:
+            conditions["cacheability_bucket"] = str(cacheability["cacheability_bucket"])
+        for key in ("has_tools", "stream"):
+            if key in candidate:
+                conditions[key] = bool(candidate.get(key))
+        replayability_levels = _string_list(candidate.get("replayability_levels") or candidate.get("replayability_level"))
+        if replayability_levels:
+            conditions["replayability_levels"] = replayability_levels
+        for key in (
+            "static_information_hint",
+            "time_sensitive_hint",
+            "user_specific_hint",
+            "exact_cache_candidate_hint",
+        ):
+            if key in candidate:
+                conditions[key] = bool(candidate.get(key))
+            elif key in cacheability:
+                conditions[key] = bool(cacheability.get(key))
+        safe_invalidation = bool(candidate.get("safe_invalidation_evidence") or candidate.get("file_dependency_evidence_available"))
+        local_policy_update["conditions"] = conditions
+        local_policy_update["action"] = {
+            "type": "exact_cache_pattern",
+            "allow_tool_calls": bool(candidate.get("has_tools")),
+            "safe_invalidation": safe_invalidation,
+            "safe_invalidation_evidence": safe_invalidation,
+            "streaming": bool(candidate.get("stream")),
+            "estimated_saved_cost_usd": round(_as_float(candidate.get("projected_savings_usd")), 8),
+        }
+        local_policy_update["safety_stop"] = {
+            "min_outcome_samples": 5,
+            "rollback_threshold": 0.2,
+        }
     action = {
         "schema": ACTION_SCHEMA,
         "action_id": _stable_id("promotion-rollout-action", candidate_id, action_type, policy["policy_section"], target_rule_id),
@@ -265,14 +361,7 @@ def _action(
         "app_family": str(candidate.get("app_family") or "unknown"),
         "policy_section": policy["policy_section"],
         "target_local_policy_section": policy["target_local_policy_section"],
-        "local_policy_update": {
-            "kind": "yaml-rule-canary",
-            "policy_source": "managed-recommended",
-            "managed_enforced": False,
-            "required_local_review": True,
-            "candidate_target_model": candidate.get("candidate_target_model"),
-            "candidate_profile": candidate.get("candidate_profile"),
-        },
+        "local_policy_update": local_policy_update,
         "current_canary_fraction": _current_canary_fraction(candidate),
         "canary_fraction": canary_fraction,
         "holdout_fraction": 0.0 if action_type == "rollback" else _bounded_fraction(holdout_fraction),

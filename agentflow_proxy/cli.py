@@ -2909,7 +2909,7 @@ def optimization_promotion_canary_apply_cli(
     stdout: Any = None,
     stderr: Any = None,
 ) -> int:
-    parser = argparse.ArgumentParser(description="Apply optimization promotion canaries to local routing and crunch policy files")
+    parser = argparse.ArgumentParser(description="Apply optimization promotion canaries to local routing, crunch, and cache policy files")
     parser.add_argument(
         "promotion_actions",
         nargs="?",
@@ -2924,8 +2924,8 @@ def optimization_promotion_canary_apply_cli(
     parser.add_argument(
         "--section",
         action="append",
-        choices=["routing", "crunch"],
-        help="Policy section to apply. May be repeated. Default: routing and crunch.",
+        choices=["routing", "crunch", "cache"],
+        help="Policy section to apply. May be repeated. Default: routing, crunch, and cache.",
     )
     parser.add_argument(
         "--dry-run",

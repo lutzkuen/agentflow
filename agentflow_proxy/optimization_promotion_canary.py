@@ -16,7 +16,11 @@ PROMOTION_CANARY_APPLY_SCHEMA = "agentflow.optimization_promotion_canary_apply.v
 PROMOTION_CANARY_DECISION_SCHEMA = "agentflow.optimization_promotion_canary_decision.v1"
 PROMOTION_CANARY_SAFETY_SCHEMA = "agentflow.optimization_promotion_canary_safety_stop.v1"
 
-_POLICY_SECTION_FILES = {"routing": "routing_rules.yaml", "crunch": "crunch_rules.yaml"}
+_POLICY_SECTION_FILES = {
+    "routing": "routing_rules.yaml",
+    "crunch": "crunch_rules.yaml",
+    "cache": "cache_rules.yaml",
+}
 _COHORT_SAFE_KEYS = (
     "request_fingerprint",
     "session_id_hash",
@@ -96,6 +100,18 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return default
 
 
 def _safe_cohort_features(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -495,6 +511,197 @@ def _crunch_pattern_rule(action: dict[str, Any], *, existing: dict[str, Any] | N
     return rule, None
 
 
+def _nested_get_bool(*sources: Any, default: bool = False) -> bool:
+    for value in sources:
+        if value is not None:
+            return _as_bool(value, default)
+    return default
+
+
+def _cache_pattern_rule(action: dict[str, Any], *, existing: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    conditions_update = local_update.get("conditions") if isinstance(local_update.get("conditions"), dict) else {}
+    action_update = local_update.get("action") if isinstance(local_update.get("action"), dict) else {}
+    if not action_update and isinstance(local_update.get("cache_action"), dict):
+        action_update = local_update["cache_action"]
+
+    disabled = str(action.get("action_type") or "") == "rollback"
+    pattern_hashes = (
+        _collect_pattern_hashes(conditions_update)
+        or _collect_pattern_hashes(local_update)
+        or _collect_pattern_hashes(action)
+    )
+    if not pattern_hashes and isinstance(existing, dict):
+        pattern_hashes = _collect_pattern_hashes(existing.get("conditions")) or _collect_pattern_hashes(existing)
+    if not pattern_hashes:
+        return None, "missing-pattern-hashes"
+
+    existing_conditions = existing.get("conditions") if isinstance(existing, dict) and isinstance(existing.get("conditions"), dict) else {}
+    conditions: dict[str, Any] = {"pattern_hashes": pattern_hashes}
+    for key in (
+        "model_pattern",
+        "category",
+        "workflow_phase",
+        "source_surface",
+        "app_family",
+        "text_bucket",
+        "token_bucket",
+        "cacheability_bucket",
+    ):
+        value = conditions_update.get(key, local_update.get(key, existing_conditions.get(key)))
+        if value is not None:
+            conditions[key] = str(value)
+    for key in ("replayability_levels", "replayability_level", "category_not_in"):
+        value = conditions_update.get(key, local_update.get(key, existing_conditions.get(key)))
+        if value is not None:
+            conditions[key] = _safe_string_list(value)
+    if "replayability_levels" not in conditions and "replayability_level" not in conditions:
+        conditions["replayability_levels"] = _safe_string_list(
+            local_update.get("replayability_level")
+            or action.get("replayability_level")
+            or existing_conditions.get("replayability_levels")
+            or "local-exact-response"
+        )
+    for key in (
+        "has_tools",
+        "stream",
+        "static_information_hint",
+        "time_sensitive_hint",
+        "user_specific_hint",
+        "exact_cache_candidate_hint",
+    ):
+        if key in conditions_update or key in local_update or key in existing_conditions:
+            conditions[key] = _nested_get_bool(
+                conditions_update.get(key),
+                local_update.get(key),
+                existing_conditions.get(key),
+            )
+
+    existing_action = existing.get("action") if isinstance(existing, dict) and isinstance(existing.get("action"), dict) else {}
+    has_tools = _nested_get_bool(
+        conditions.get("has_tools"),
+        action_update.get("allow_tool_calls"),
+        local_update.get("has_tools"),
+        action.get("has_tools"),
+        existing_conditions.get("has_tools"),
+        default=False,
+    )
+    stream = _nested_get_bool(
+        conditions.get("stream"),
+        action_update.get("streaming"),
+        local_update.get("stream"),
+        action.get("stream"),
+        existing_conditions.get("stream"),
+        default=False,
+    )
+    category = str(conditions.get("category") or action.get("category") or "").lower()
+    tool_or_stream_related = has_tools or stream or category in {"tool-result", "tool-heavy", "tool-light"}
+    allow_tool_calls = _nested_get_bool(
+        action_update.get("allow_tool_calls"),
+        existing_action.get("allow_tool_calls"),
+        has_tools,
+        default=False,
+    )
+    safe_invalidation = _nested_get_bool(
+        action_update.get("safe_invalidation"),
+        action_update.get("safe_invalidation_evidence"),
+        local_update.get("safe_invalidation"),
+        local_update.get("safe_invalidation_evidence"),
+        local_update.get("file_dependency_evidence_available"),
+        action.get("safe_invalidation_evidence"),
+        action.get("file_dependency_evidence_available"),
+        existing_action.get("safe_invalidation"),
+        existing_action.get("safe_invalidation_evidence"),
+        default=False,
+    )
+    if tool_or_stream_related and not safe_invalidation and not disabled:
+        return None, "missing-safe-invalidation-evidence"
+    if (has_tools or category.startswith("tool-")) and not allow_tool_calls and not disabled:
+        return None, "tool-cache-not-allowed"
+
+    conditions["has_tools"] = has_tools
+    conditions["stream"] = stream
+    pattern_action: dict[str, Any] = {
+        "type": str(action_update.get("type") or existing_action.get("type") or "exact_cache_pattern"),
+        "allow_tool_calls": bool(allow_tool_calls),
+        "safe_invalidation": bool(safe_invalidation),
+        "safe_invalidation_evidence": bool(safe_invalidation),
+        "streaming": bool(
+            _nested_get_bool(
+                action_update.get("streaming"),
+                existing_action.get("streaming"),
+                stream,
+                default=False,
+            )
+        ),
+    }
+    if pattern_action["type"] not in {"exact_cache", "exact_cache_pattern"}:
+        pattern_action["type"] = "exact_cache_pattern"
+    estimated_saved = action_update.get("estimated_saved_cost_usd")
+    if estimated_saved is None and isinstance(action.get("evidence_summary"), dict):
+        estimated_saved = action["evidence_summary"].get("projected_savings_usd")
+    if estimated_saved is not None:
+        try:
+            pattern_action["estimated_saved_cost_usd"] = max(0.0, float(estimated_saved))
+        except (TypeError, ValueError):
+            pass
+
+    safety_update = local_update.get("safety_stop") if isinstance(local_update.get("safety_stop"), dict) else {}
+    existing_rollout = existing.get("rollout") if isinstance(existing, dict) and isinstance(existing.get("rollout"), dict) else {}
+    rollout: dict[str, Any] = {
+        "schema": "agentflow.pattern_policy_rollout.v1",
+        "recommendation_mode": "canary",
+        "canary_enabled": not disabled,
+        "canary_fraction": 0.0 if disabled else _as_float(action.get("canary_fraction")),
+        "holdout_fraction": 0.0 if disabled else _as_float(action.get("holdout_fraction")),
+        "canary_salt": str(action.get("action_id") or action.get("target_candidate_id") or action.get("target_rule_id") or ""),
+        "canary_unit": str(local_update.get("canary_unit") or existing_rollout.get("canary_unit") or "request_fingerprint"),
+        "rollback_threshold": safety_update.get(
+            "rollback_threshold",
+            safety_update.get("max_regression_rate", existing_rollout.get("rollback_threshold", 0.2)),
+        ),
+        "min_outcome_samples": _as_int(
+            safety_update.get("min_outcome_samples", safety_update.get("min_samples", existing_rollout.get("min_outcome_samples", 5))),
+            5,
+        ),
+        "local_feedback_fields": [
+            "cache.status",
+            "cache.reason",
+            "cache.pattern_rule.canary.cohort",
+            "status_code",
+            "retry_count",
+            "latency_ms",
+        ],
+    }
+
+    rule: dict[str, Any] = {
+        "id": str(action.get("target_rule_id") or action.get("target_candidate_id") or (existing or {}).get("id") or "promotion-cache-canary"),
+        "enabled": not disabled,
+        "policy_source": "managed-recommended",
+        "candidate_id": action.get("target_candidate_id") or (existing or {}).get("candidate_id"),
+        "promotion_action_id": action.get("action_id"),
+        "conditions": conditions,
+        "action": pattern_action,
+        "rollout": rollout,
+        "rollout_action": {
+            "schema": ACTION_SCHEMA,
+            "action_type": action.get("action_type"),
+            "target_candidate_id": action.get("target_candidate_id"),
+            "target_rule_id": action.get("target_rule_id"),
+            "canary_fraction": rollout["canary_fraction"],
+            "holdout_fraction": rollout["holdout_fraction"],
+            "managed_enforced": False,
+        },
+    }
+    module_family = local_update.get("module_family") or local_update.get("candidate_profile") or action.get("candidate_profile")
+    if module_family is not None:
+        rule["module_family"] = str(module_family)
+    description = local_update.get("description") or (existing or {}).get("description")
+    if description is not None:
+        rule["description"] = str(description)
+    return rule, None
+
+
 def _find_pattern_rule(rules: list[Any], action: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None]:
     target_rule_id = str(action.get("target_rule_id") or "").strip()
     target_candidate_id = str(action.get("target_candidate_id") or "").strip()
@@ -540,7 +747,7 @@ def apply_optimization_promotion_canaries(
         if section not in file_plans:
             path = config_path / _POLICY_SECTION_FILES[section]
             data, old_text = _load_yaml(path)
-            if section == "crunch" and not isinstance(data.get("pattern_rules"), list):
+            if section in {"crunch", "cache"} and not isinstance(data.get("pattern_rules"), list):
                 data["pattern_rules"] = []
             file_plans[section] = {"section": section, "path": path, "data": data, "old_text": old_text}
         return file_plans[section]
@@ -597,35 +804,38 @@ def apply_optimization_promotion_canaries(
             pattern_rules = plan["data"]["pattern_rules"]
             rule_index, existing_rule = _find_pattern_rule(pattern_rules, action)
             if existing_rule is not None and str(existing_rule.get("policy_source") or "") != "managed-recommended":
-                errors.append({"path": f"$.actions[{index}]", "message": "promotion canary targets a non-managed-recommended crunch rule"})
+                errors.append({"path": f"$.actions[{index}]", "message": f"promotion canary targets a non-managed-recommended {section} rule"})
                 actions.append({
                     "path": f"$.actions[{index}]",
                     "status": "rejected",
                     "reason": "unsafe-policy-source",
-                    "policy_section": "crunch",
+                    "policy_section": section,
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": action.get("target_rule_id"),
                 })
                 continue
             if str(action.get("action_type") or "") == "rollback" and existing_rule is None:
-                errors.append({"path": f"$.actions[{index}]", "message": "rollback targets an unknown crunch rule"})
+                errors.append({"path": f"$.actions[{index}]", "message": f"rollback targets an unknown {section} rule"})
                 actions.append({
                     "path": f"$.actions[{index}]",
                     "status": "rejected",
                     "reason": "unknown-rule",
-                    "policy_section": "crunch",
+                    "policy_section": section,
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": action.get("target_rule_id"),
                 })
                 continue
-            rule, reason = _crunch_pattern_rule(action, existing=existing_rule)
+            if section == "cache":
+                rule, reason = _cache_pattern_rule(action, existing=existing_rule)
+            else:
+                rule, reason = _crunch_pattern_rule(action, existing=existing_rule)
             if rule is None:
-                errors.append({"path": f"$.actions[{index}]", "message": reason or "invalid crunch pattern rule"})
+                errors.append({"path": f"$.actions[{index}]", "message": reason or f"invalid {section} pattern rule"})
                 actions.append({
                     "path": f"$.actions[{index}]",
                     "status": "rejected",
-                    "reason": reason or "invalid-crunch-pattern-rule",
-                    "policy_section": "crunch",
+                    "reason": reason or f"invalid-{section}-pattern-rule",
+                    "policy_section": section,
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": action.get("target_rule_id"),
                 })
@@ -637,7 +847,7 @@ def apply_optimization_promotion_canaries(
             actions.append({
                 "path": f"$.actions[{index}]",
                 "status": "planned",
-                "policy_section": "crunch",
+                "policy_section": section,
                 "action_type": action.get("action_type"),
                 "target_candidate_id": action.get("target_candidate_id"),
                 "target_rule_id": action.get("target_rule_id"),

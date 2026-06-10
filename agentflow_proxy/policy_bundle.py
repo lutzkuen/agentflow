@@ -822,6 +822,11 @@ _CACHE_PATTERN_CONDITION_KEYS = {
     "app_family",
     "text_bucket",
     "token_bucket",
+    "cacheability_bucket",
+    "static_information_hint",
+    "time_sensitive_hint",
+    "user_specific_hint",
+    "exact_cache_candidate_hint",
     "has_tools",
     "stream",
     "replayability_level",
@@ -873,7 +878,7 @@ def _validate_cache_pattern_rules(value: Any, errors: list[dict[str, str]], *, b
                 _validate_non_empty_string(errors, f"{path}.conditions.pattern_hashes[{hash_index}]", item)
         else:
             _add_error(errors, f"{path}.conditions.pattern_hashes", "expected string or list")
-        for key in ("model_pattern", "category", "workflow_phase", "source_surface", "app_family", "text_bucket", "token_bucket"):
+        for key in ("model_pattern", "category", "workflow_phase", "source_surface", "app_family", "text_bucket", "token_bucket", "cacheability_bucket"):
             if key in conditions:
                 _validate_non_empty_string(errors, f"{path}.conditions.{key}", conditions[key])
         for key in ("replayability_level", "replayability_levels", "category_not_in"):
@@ -886,7 +891,7 @@ def _validate_cache_pattern_rules(value: Any, errors: list[dict[str, str]], *, b
                         _validate_non_empty_string(errors, f"{path}.conditions.{key}[{value_index}]", item)
                 else:
                     _add_error(errors, f"{path}.conditions.{key}", "expected string or list")
-        for key in ("has_tools", "stream"):
+        for key in ("has_tools", "stream", "static_information_hint", "time_sensitive_hint", "user_specific_hint", "exact_cache_candidate_hint"):
             if key in conditions:
                 _validate_boolish(errors, f"{path}.conditions.{key}", conditions[key])
         action = rule.get("action")

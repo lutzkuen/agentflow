@@ -259,6 +259,23 @@
         "source_surface": "anthropic_messages",
         "app_family": "claude_code",
         "candidate_profile": "replay-safe-exact-candidate",
+        "pattern_hashes": [
+          "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        ],
+        "category": "short-completion",
+        "workflow_phase": "summary",
+        "text_bucket": "lt_2k_chars",
+        "token_bucket": "lt_1k_tokens",
+        "has_tools": false,
+        "stream": false,
+        "replayability_level": "local-exact-response",
+        "cacheability": {
+          "cacheability_bucket": "high",
+          "static_information_hint": true,
+          "time_sensitive_hint": false,
+          "user_specific_hint": false,
+          "exact_cache_candidate_hint": true
+        },
         "projected_savings_usd": 0.03,
         "sample_count": 2,
         "cohort_counts": {

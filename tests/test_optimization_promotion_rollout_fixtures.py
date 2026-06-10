@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import yaml
 
+from agentflow_proxy import cache as cache_module
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization_promotion_actions import ACTION_SCHEMA, SCHEMA as PROMOTION_ACTIONS_SCHEMA, build_optimization_promotion_actions
 from agentflow_proxy.optimization_promotion_canary import (
@@ -141,6 +142,100 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "privacy": {"metadata_only": True, "content_free": True},
         }
 
+    def _cache_promotion_bundle(
+        self,
+        *,
+        action_type="widen",
+        raw_like=False,
+        managed_enforced=False,
+        include_invalidation=True,
+        has_tools=True,
+        stream=False,
+        canary_fraction=0.25,
+    ):
+        pattern_hash = "sha256:" + ("c" * 64)
+        safe_invalidation = bool(include_invalidation)
+        local_update = {
+            "kind": "yaml-rule-canary",
+            "policy_source": "managed-enforced" if managed_enforced else "managed-recommended",
+            "managed_enforced": managed_enforced,
+            "required_local_review": True,
+            "candidate_profile": "replay-safe-exact-candidate",
+            "conditions": {
+                "pattern_hashes": [pattern_hash],
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-result" if has_tools else "short-completion",
+                "workflow_phase": "tool-execution" if has_tools else "summary",
+                "text_bucket": "2k_8k_chars" if has_tools else "lt_2k_chars",
+                "token_bucket": "1k_4k_tokens" if has_tools else "lt_1k_tokens",
+                "has_tools": has_tools,
+                "stream": stream,
+                "replayability_levels": ["local-exact-response"],
+            },
+            "action": {
+                "type": "exact_cache_pattern",
+                "allow_tool_calls": has_tools,
+                "safe_invalidation": safe_invalidation,
+                "safe_invalidation_evidence": safe_invalidation,
+                "streaming": stream,
+                "estimated_saved_cost_usd": 0.012,
+            },
+            "safety_stop": {
+                "min_outcome_samples": 9,
+                "rollback_threshold": 0.15,
+            },
+        }
+        if raw_like:
+            local_update["cache_key"] = "fixture-cache-key-secret"
+        fraction = 0.0 if action_type == "rollback" else canary_fraction
+        action = {
+            "schema": ACTION_SCHEMA,
+            "action_id": f"promotion-rollout-action:fixture-cache-{action_type}",
+            "status": "planned",
+            "action_type": action_type,
+            "verdict": "rollback" if action_type == "rollback" else "widen",
+            "target_candidate_id": "fixture-cache-candidate",
+            "target_rule_id": "promotion-cache-fixture",
+            "action_family": "cache",
+            "optimization_family": "cache_replayability",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "policy_section": "cache",
+            "target_local_policy_section": "cache.rules",
+            "local_policy_update": local_update,
+            "current_canary_fraction": 0.1,
+            "canary_fraction": fraction,
+            "holdout_fraction": 0.1 if action_type != "rollback" else 0.0,
+            "evidence_summary": {"eval_pass_count": 2, "eval_fail_count": 0, "projected_savings_usd": 0.012},
+            "rollback_metadata": {"preserve_previous_rule_required": True},
+            "local_review": {"required": True, "apply_preview_command": "agentflow-optimization-promotion-canaries-apply --dry-run"},
+            "privacy": {
+                "metadata_only": True,
+                "content_free": True,
+                "raw_prompts_included": False,
+                "raw_provider_bodies_included": False,
+                "raw_responses_included": False,
+                "request_ids_included": False,
+                "raw_session_ids_included": False,
+                "filesystem_paths_included": False,
+                "cache_keys_included": False,
+            },
+        }
+        return {
+            "schema": PROMOTION_ACTIONS_SCHEMA,
+            "generated_at": "2026-06-10T06:00:00+00:00",
+            "ok": True,
+            "read_only": True,
+            "wrote_local_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "summary": {"candidate_count": 1, "action_count": 1, "omitted_count": 0},
+            "actions": [action],
+            "omitted": [],
+            "privacy": {"metadata_only": True, "content_free": True},
+        }
+
     def _write_policy_sentinels(self, tmp: str):
         crunch_path = Path(tmp) / "crunch_rules.yaml"
         routing_path = Path(tmp) / "routing_rules.yaml"
@@ -227,11 +322,9 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             self.assertTrue(dry_run["ok"])
             self.assertTrue(dry_run["dry_run"])
             self.assertFalse(dry_run["wrote_policy_files"])
-            self.assertEqual(dry_run["summary"]["planned_action_count"], 1)
-            self.assertEqual(dry_run["summary"]["skipped_action_count"], 1)
-            skipped = next(row for row in dry_run["actions"] if row["status"] == "skipped")
-            self.assertEqual(skipped["policy_section"], "cache")
-            self.assertEqual(skipped["reason"], "not-requested")
+            self.assertEqual(dry_run["summary"]["planned_action_count"], 2)
+            self.assertEqual(dry_run["summary"]["skipped_action_count"], 0)
+            self.assertEqual({row["policy_section"] for row in dry_run["actions"]}, {"routing", "cache"})
             self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
 
         unsafe_bundle = copy.deepcopy(bundle)
@@ -369,6 +462,173 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
                 self.assertEqual(crunch_path.read_text(encoding="utf-8"), before["crunch"])
                 self.assertEqual(routing_path.read_text(encoding="utf-8"), before["routing"])
                 self.assertEqual(cache_path.read_text(encoding="utf-8"), before["cache"])
+
+    def test_cache_promotion_canary_apply_dry_run_write_and_lookup_metadata(self):
+        bundle = self._cache_promotion_bundle(has_tools=False, canary_fraction=0.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            before_crunch = crunch_path.read_text(encoding="utf-8")
+            before_routing = routing_path.read_text(encoding="utf-8")
+            before_cache = cache_path.read_text(encoding="utf-8")
+
+            dry_run = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=True)
+            self.assertTrue(dry_run["ok"])
+            self.assertTrue(dry_run["dry_run"])
+            self.assertFalse(dry_run["wrote_policy_files"])
+            self.assertEqual(dry_run["summary"]["planned_action_count"], 1)
+            self.assertEqual(dry_run["files"][0]["section"], "cache")
+            self.assertTrue(dry_run["files"][0]["changed"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before_cache)
+
+            applied = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=False)
+            written = yaml.safe_load(cache_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(applied["ok"])
+            self.assertTrue(applied["wrote_policy_files"])
+            self.assertEqual(applied["files"][0]["section"], "cache")
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before_crunch)
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
+
+        rules = written["pattern_rules"]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        pattern_hash = "sha256:" + ("c" * 64)
+        self.assertEqual(rule["id"], "promotion-cache-fixture")
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(rule["policy_source"], "managed-recommended")
+        self.assertEqual(rule["candidate_id"], "fixture-cache-candidate")
+        self.assertEqual(rule["conditions"]["pattern_hashes"], [pattern_hash])
+        self.assertEqual(rule["conditions"]["replayability_levels"], ["local-exact-response"])
+        self.assertFalse(rule["conditions"]["has_tools"])
+        self.assertEqual(rule["action"]["type"], "exact_cache_pattern")
+        self.assertFalse(rule["action"]["allow_tool_calls"])
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.0)
+        self.assertEqual(rule["rollout"]["holdout_fraction"], 0.1)
+        self.assertEqual(rule["rollout"]["min_outcome_samples"], 9)
+
+        normalized = cache_module.normalize_cache_pattern_rules(rules)
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = tuple(normalized)
+            can_exact, can_semantic, meta = cache_module.cache_lookup_meta(
+                has_tool_blocks=False,
+                pattern_features={
+                    "pattern_hashes": [pattern_hash],
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "short-completion",
+                    "workflow_phase": "summary",
+                    "text_bucket": "lt_2k_chars",
+                    "token_bucket": "lt_1k_tokens",
+                    "has_tools": False,
+                    "stream": False,
+                    "request_fingerprint": "fixture-fingerprint",
+                    "raw_pattern_strings_included": False,
+                },
+            )
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+        self.assertTrue(can_exact)
+        self.assertFalse(can_semantic)
+        holdout = meta["pattern_rules"]["skip_reasons"][-1]
+        self.assertEqual(holdout["reason"], "canary_holdout")
+        self.assertEqual(holdout["candidate_id"], "fixture-cache-candidate")
+        self.assertEqual(holdout["canary"]["status"], "holdout")
+        self.assertFalse(holdout["canary"]["raw_pattern_strings_included"])
+        self._assert_metadata_only(meta)
+
+    def test_cache_promotion_canary_rejects_tool_rule_without_invalidation_evidence(self):
+        bundle = self._cache_promotion_bundle(include_invalidation=False, has_tools=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            before = {
+                "crunch": crunch_path.read_text(encoding="utf-8"),
+                "routing": routing_path.read_text(encoding="utf-8"),
+                "cache": cache_path.read_text(encoding="utf-8"),
+            }
+
+            result = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=False)
+
+            self.assertFalse(result["ok"])
+            self.assertFalse(result["wrote_policy_files"])
+            self.assertEqual(result["actions"][0]["reason"], "missing-safe-invalidation-evidence")
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before["crunch"])
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before["routing"])
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before["cache"])
+
+    def test_cache_promotion_canary_rollback_disables_only_matching_managed_rule(self):
+        bundle = self._cache_promotion_bundle(action_type="rollback")
+        managed_rule = {
+            "id": "promotion-cache-fixture",
+            "enabled": True,
+            "policy_source": "managed-recommended",
+            "candidate_id": "fixture-cache-candidate",
+            "conditions": {
+                "pattern_hashes": ["sha256:" + ("c" * 64)],
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "tool-result",
+                "has_tools": True,
+                "stream": False,
+                "replayability_levels": ["local-exact-response"],
+            },
+            "action": {
+                "type": "exact_cache_pattern",
+                "allow_tool_calls": True,
+                "safe_invalidation": True,
+                "safe_invalidation_evidence": True,
+                "streaming": False,
+            },
+            "rollout": {
+                "schema": "agentflow.pattern_policy_rollout.v1",
+                "recommendation_mode": "canary",
+                "canary_enabled": True,
+                "canary_fraction": 0.25,
+                "holdout_fraction": 0.1,
+                "canary_salt": "fixture",
+                "canary_unit": "request_fingerprint",
+            },
+        }
+        local_manual_rule = {
+            "id": "local-manual-cache-rule",
+            "enabled": True,
+            "policy_source": "local-manual",
+            "candidate_id": "local-cache-candidate",
+            "conditions": {"pattern_hashes": ["sha256:" + ("d" * 64)], "has_tools": False},
+            "action": {"type": "exact_cache_pattern", "allow_tool_calls": False},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crunch_path, routing_path, cache_path = self._write_policy_sentinels(tmp)
+            cache_path.write_text(
+                yaml.safe_dump(
+                    {"exact_cache": {"enabled": True, "cache_tool_calls": False}, "pattern_rules": [managed_rule, local_manual_rule]},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            before_crunch = crunch_path.read_text(encoding="utf-8")
+            before_routing = routing_path.read_text(encoding="utf-8")
+
+            result = apply_optimization_promotion_canaries(bundle, config_dir=tmp, dry_run=False)
+            written = yaml.safe_load(cache_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["wrote_policy_files"])
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before_crunch)
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
+
+        rolled_back = next(rule for rule in written["pattern_rules"] if rule["id"] == "promotion-cache-fixture")
+        untouched = next(rule for rule in written["pattern_rules"] if rule["id"] == "local-manual-cache-rule")
+        self.assertFalse(rolled_back["enabled"])
+        self.assertFalse(rolled_back["rollout"]["canary_enabled"])
+        self.assertEqual(rolled_back["rollout"]["canary_fraction"], 0.0)
+        self.assertEqual(rolled_back["rollout"]["holdout_fraction"], 0.0)
+        self.assertTrue(untouched["enabled"])
+        self.assertEqual(untouched["policy_source"], "local-manual")
 
     def test_shared_canary_safety_stop_and_lifecycle_feedback_are_metadata_only(self):
         fixture = self._fixture()
