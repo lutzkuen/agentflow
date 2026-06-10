@@ -1,95 +1,245 @@
 # AgentFlow
 
-Local visibility and cost control for coding-agent LLM traffic.
+AgentFlow is a **local proxy and dashboard for coding-agent LLM traffic**.
 
-AgentFlow runs on your machine between tools such as Claude Code, Claude CLI, Codex, and LLM provider APIs. It records local usage metadata, shows token and spend behavior in a dashboard, and applies conservative optimizations such as model routing, prompt crunching, and safe local caching.
+Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. AgentFlow forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
 
-AgentFlow is local-first:
+By default, AgentFlow does **not** store raw prompts or responses.
 
-- provider calls still happen from your machine with your credentials
-- prompt and response bodies are not stored by default
-- the dashboard is read-only
-- routing, crunching, and cache decisions are visible and auditable
-- when AgentFlow is unsure, it forwards the request unchanged and records why
+## What is this?
 
-## What it helps you answer
+AgentFlow sits between tools such as Codex, Claude Code, VS Code extensions, or your own API app and the provider API.
 
-- How many tokens did my agents use today?
-- Which sessions, apps, or providers drove spend?
-- Which calls were routed, crunched, cached, skipped, or errored?
-- How much did local optimization save?
-- Which policies are active right now?
-- Did any local policy file change and need reload?
+```text
+your app / IDE plugin -> AgentFlow on localhost -> OpenAI or Anthropic
+```
 
-## Current support
+It currently supports:
 
-| Surface | Status |
+| Provider mode | Routes |
 | --- | --- |
-| Anthropic `/v1/messages` | Primary supported proxy path |
-| OpenAI `/v1/responses` and `/v1/chat/completions` | Supported API-compatible proxy path |
-| Codex app-server | Experimental telemetry path; token/cost accounting and optimization are being expanded |
-| Dashboard | Read-only local/LAN observability |
-| Local policy files | Routing, crunching, cache, review/apply/rollback tools |
+| Anthropic / Claude-compatible | `POST /v1/messages` |
+| OpenAI-compatible | `POST /v1/responses`, `POST /v1/chat/completions`, WebSocket `/v1/responses`, plus files/uploads passthrough |
+| Codex app-server | Experimental proxy/telemetry path |
+
+The OpenAI and Anthropic proxies run as separate provider modes. Run two AgentFlow processes if you want both at the same time.
+
+## How does it help me?
+
+AgentFlow gives you local visibility into coding-agent traffic:
+
+- estimated tokens, spend, savings, and recent activity
+- which app, session, provider, and model generated calls
+- routing, prompt-crunching, cache, retry, backoff, and error decisions
+- policy state and whether local policy files need reload
+- metadata-only Codex app-server telemetry
+
+It is meant for answering "where did the tokens and cost go?" without sending prompts or responses to another service.
 
 ## Install
 
+Requires Python 3.10+.
+
 ```bash
+git clone https://github.com/lutzkuen/agentflow.git
+cd agentflow
+
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-Run tests with:
+Smoke-test the install:
+
+```bash
+agentflow-proxy --help
+```
+
+Run tests:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-## Quick start: Claude / Anthropic
+## Start AgentFlow
 
-Start the local Anthropic-compatible proxy:
+### Claude / Anthropic-compatible proxy
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 agentflow-proxy --provider anthropic --host 127.0.0.1 --port 4000
 ```
 
-Point Claude-compatible clients at the local proxy. Exact environment variables can differ by client version, but the intended setup is:
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
-export ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
-claude
-```
-
-The proxy accepts incoming Anthropic auth headers and forwards them upstream. Do not expose this proxy port outside localhost unless you add your own network/auth boundary.
-
-Open the dashboard:
+This serves:
 
 ```text
+http://127.0.0.1:4000/v1/messages
 http://127.0.0.1:4000/agentflow/dashboard
 ```
 
-## Quick start: OpenAI-compatible clients
-
-Run the OpenAI-compatible proxy on a separate port:
+### OpenAI-compatible proxy
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 agentflow-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
 ```
 
-Example Codex API-compatible usage:
+This serves:
+
+```text
+http://127.0.0.1:4003/v1/responses
+http://127.0.0.1:4003/v1/chat/completions
+http://127.0.0.1:4003/agentflow/dashboard
+```
+
+`--openai-auth-mode proxy` means AgentFlow uses `AGENTFLOW_OPENAI_API_KEY` or `OPENAI_API_KEY` from the proxy environment when forwarding upstream. Use `--openai-auth-mode client` if you want each client request's `Authorization` header to be forwarded.
+
+## Point an existing app at AgentFlow
+
+### Existing OpenAI API app
+
+Change the OpenAI base URL to:
+
+```text
+http://127.0.0.1:4003/v1
+```
+
+Keep the same models and API key. Examples:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    base_url="http://127.0.0.1:4003/v1",
+)
+```
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: "http://127.0.0.1:4003/v1",
+});
+```
+
+```bash
+curl http://127.0.0.1:4003/v1/responses \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.5","input":"Reply with ok"}'
+```
+
+### Existing Claude / Anthropic API app
+
+Change the Anthropic base URL to:
+
+```text
+http://127.0.0.1:4000
+```
+
+Keep the same `x-api-key` / `Authorization` and `anthropic-version` headers.
+
+```python
+import os
+from anthropic import Anthropic
+
+client = Anthropic(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    base_url="http://127.0.0.1:4000",
+)
+```
+
+```bash
+curl http://127.0.0.1:4000/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4.5","max_tokens":32,"messages":[{"role":"user","content":"Reply with ok"}]}'
+```
+
+## Run VS Code so Codex and Claude use AgentFlow
+
+Start the relevant proxy first, then launch VS Code from the same terminal so extensions inherit the environment:
+
+```bash
+code .
+```
+
+### Codex VS Code extension
+
+Put the OpenAI proxy base URL in your **user-level** Codex config:
+
+```toml
+# ~/.codex/config.toml
+openai_base_url = "http://127.0.0.1:4003/v1"
+```
+
+Then launch VS Code from a shell that has your OpenAI key:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+code .
+```
+
+For a one-off CLI check:
 
 ```bash
 codex exec --config 'openai_base_url="http://127.0.0.1:4003/v1"' "Reply with ok"
 ```
 
-Provider modes are intentionally separate. An Anthropic-mode process serves `/v1/messages`; an OpenAI-mode process serves `/v1/responses` and `/v1/chat/completions`.
+Do not put this provider setting in a project `.codex/config.toml`; Codex treats provider/auth settings as machine-local.
+
+### Claude / Claude Code VS Code integration
+
+Run the Anthropic proxy, then launch VS Code from a shell with the Claude proxy environment:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
+export ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
+code .
+```
+
+If your extension does not inherit shell environment variables, configure the same variables in that extension's environment/wrapper. Keep secrets in your user environment, not in repository files.
+
+## Dashboard
+
+When a proxy is running, open the dashboard from that proxy:
+
+```text
+http://127.0.0.1:4000/agentflow/dashboard
+http://127.0.0.1:4003/agentflow/dashboard
+```
+
+Or run a dashboard-only process that reads the same local database:
+
+```bash
+agentflow-dashboard --host 127.0.0.1 --port 4002
+```
+
+Then open:
+
+```text
+http://127.0.0.1:4002/agentflow/dashboard
+```
+
+The dashboard tells you:
+
+- recent calls and sessions
+- estimated tokens, cost, and savings
+- usage by provider, model, app, and session when labels are available
+- cache hits/misses/skips
+- routing and prompt-crunch decisions
+- retries, errors, rate-limit/backoff state
+- active local policies and reload status
+- Codex app-server telemetry when used
 
 ## Codex app-server telemetry
 
-For Codex OAuth/subscription quota, the API-compatible `openai_base_url` path may not be the right fit. AgentFlow also includes an experimental Codex app-server relay:
+For Codex OAuth/subscription flows, the OpenAI-compatible base URL path may not be the right fit. AgentFlow also includes an experimental app-server relay:
 
 ```bash
 codex app-server --listen ws://127.0.0.1:4014
@@ -97,251 +247,55 @@ agentflow-codex-app-proxy --host 127.0.0.1 --port 4013 --upstream ws://127.0.0.1
 printf 'Reply with exactly: ok\n' | agentflow-codex-app-client --url ws://127.0.0.1:4013 --cd "$PWD"
 ```
 
-This path currently focuses on telemetry. It records redacted JSON-RPC method names and size-derived metadata without storing raw prompts by default. Codex token/cost accounting, routing, crunching, and cache support are being expanded incrementally.
+This path focuses on telemetry. It records redacted JSON-RPC method names and size-derived metadata, not raw prompts by default.
 
-To inspect whether recent live Codex turns were routable, crunchable, or cache-eligible, run:
+Inspect recent Codex telemetry:
 
 ```bash
 agentflow-codex-diagnose --db ~/.agentflow/agentflow.sqlite3 --pretty
 ```
 
-The same read-only report is available from a running dashboard or proxy at:
+## Defaults and privacy
 
-```text
-/agentflow/stats/codex-effectiveness?limit=500
-```
-
-The report uses stored metadata, sizes, and decision JSON only. It does not include raw prompts, params, responses, transcripts, or tool payloads.
-
-To measure replay-safe cache opportunity and blockers across recent Anthropic, OpenAI, and Codex metadata, run:
+- Local database: `~/.agentflow/agentflow.sqlite3`
+- Prompt/response body logging: off by default
+- Enable raw body logging only for local debugging:
 
 ```bash
-agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty
+export AGENTFLOW_LOG_BODIES=1
 ```
 
-The report groups local metadata by replay fingerprint and includes stream/tool flags, workflow phase, cacheability bucket, safe invalidation evidence, current cache decision, blocker counts, and projected repeated-call cost. It does not print raw prompts, responses, tool payloads, request IDs, cache keys, file paths, transcripts, or raw session IDs.
+- Keep proxy ports on `127.0.0.1` unless you add your own network/auth boundary.
+- AgentFlow is not an authentication gateway.
+- Cost and token numbers are estimates unless the upstream provider returns exact usage.
+- If AgentFlow is unsure about routing, crunching, or caching, it forwards the request unchanged and records why.
 
-To smoke-check whether existing exact local cache rows can produce hits, and why recent traffic did or did not hit them, run:
-
-```bash
-agentflow-cache-smoke-diagnostic --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The diagnostic reports cache row counts, model breakdowns, newest row metadata, lookup/miss/hit/skip/invalidation counts, and duplicate-shape opportunity. It does not print raw prompts, responses, tool payloads, request IDs, cache keys, file paths, transcripts, or raw session IDs.
-
-To dry-run proposed cache replay pattern rules against recent local traffic without writing cache rows, replaying responses, or calling providers, run:
-
-```bash
-agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The dry-run reports projected exact and streaming hits, canary holdouts, blocked rows, invalidation-required rows, unsupported source surfaces, stale-risk blockers, rule IDs, candidate IDs, and estimated repeated-call savings from metadata-derived replay fingerprints only.
-
-To measure Anthropic phase-routing opportunity and blockers before changing routing behavior, run:
-
-```bash
-agentflow-phase-routing-report --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The report groups recent local metadata by provisional workflow phase and downgrade pair, with projected savings, current routed counts, blocker counts, and risk exclusions. It does not print raw prompts, responses, session IDs, request IDs, file paths, or error bodies.
-
-To dry-run a proposed phase-aware routing policy or managed policy bundle against recent local traffic without writing policy files or changing provider routing, run:
-
-```bash
-agentflow-phase-routing-report --db ~/.agentflow/agentflow.sqlite3 --dry-run-policy proposed-routing.yaml --pretty
-```
-
-The dry-run reports matched counts, projected candidate counts and savings, exclusions such as thinking, high error rate, stale evidence, unsupported shadow/streaming evidence, missing baseline support, insufficient samples, candidate rule IDs, and metadata-only privacy flags.
-
-To opt into a local, budgeted routing A/B experiment for safe non-streaming routed-down provider requests, copy `routing_experiments.yaml` to `~/.agentflow/routing_experiments.yaml`, set `enabled: true`, a nonzero `daily_budget_usd`, an explicit `sample_rate`, and optional provider, source-surface, model-pair, workflow-phase, and category filters. With `daily_budget_usd: 0.0`, no shadow calls are made and the routing metadata records a budget reason.
-
-```bash
-agentflow-routing-experiment-report --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The report shows sample count, comparison count, pass rate, cost delta, latency delta, and daily budget state from local metadata only. It does not print raw prompts, responses, provider bodies, request IDs, session IDs, file paths, or secrets.
-
-To measure OpenAI local routing opportunity and blockers before enabling any OpenAI canary policy, run:
-
-```bash
-agentflow-openai-routing-report --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The report groups recent OpenAI metadata by endpoint, model family, category, tool/stream flags, text/token buckets, cache status, and local safety blockers. It projects candidate savings without mutating requests, writing policy files, calling providers, or printing raw prompts, responses, tool payloads, request IDs, cache keys, session IDs, file paths, or secrets.
-
-After an OpenAI local routing canary has recorded applied and holdout cohorts, measure impact and promotion verdicts with:
-
-```bash
-agentflow-openai-canary-impact --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The impact report groups metadata by OpenAI canary candidate, compares applied and holdout cohorts, and emits `widen`, `hold`, `rollback`, or `needs_eval` verdicts without printing raw prompts, responses, tool payloads, request IDs, cache keys, session IDs, file paths, or secrets.
-
-To export family-agnostic optimization candidates for local evaluation, run:
-
-```bash
-agentflow-optimization-eval-plan --db ~/.agentflow/agentflow.sqlite3 --pretty > eval-plan.json
-```
-
-To score an eval plan with local fixture evidence or record explicit blockers without changing live traffic or policy files, run:
-
-```bash
-agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty
-```
-
-The shadow-eval command writes metadata-only result records. Provider execution is off by default and requires both `--execute` and a positive `--budget-usd`; rows without replayable local inputs are recorded as blocked instead of attempting a call.
-
-## Dashboard
-
-The dashboard shows local usage and optimization behavior, including:
-
-- tokens, spend, savings, and hard-floor estimates
-- recent calls and Codex turns
-- usage by app, engineer, or session when labels are available
-- routing, crunching, cache, and limiter decisions
-- error breakdowns
-- active local policy state and reload status
-
-The proxy serves the dashboard at `/agentflow/dashboard`. For a separate read-only dashboard process, run:
-
-```bash
-agentflow-dashboard --host 0.0.0.0 --port 4002
-```
-
-The standalone dashboard reads the same local database. It does not expose provider proxy routes.
-
-## Safety and privacy defaults
-
-- Proxy ports should stay on `127.0.0.1` unless you add your own access control.
-- Prompt and response bodies are not stored by default.
-- Body logging is only for local debugging:
-
-  ```bash
-  export AGENTFLOW_LOG_BODIES=1
-  ```
-
-- The LAN dashboard is read-only.
-- Tool-call caching is off by default because tool calls often depend on live filesystem state.
-- Exact local cache decisions include explicit hit/miss/skip reasons.
-- Policy changes are local files and can be reviewed before apply.
-
-## Local policies
-
-AgentFlow can use local YAML-backed policy files for routing, crunching, cache, routing experiments, and safe Codex app-server summary/cache actions. The dashboard shows which policies are loaded and whether any file needs reload.
-
-Common policy commands:
-
-| Command | Purpose |
-| --- | --- |
-| `agentflow-policy-export --pretty` | Export the current effective local policy bundle |
-| `agentflow-policy-validate bundle.json` | Validate a policy bundle before use |
-| `agentflow-policy-diff before.json after.json --pretty` | Compare two policy bundles |
-| `agentflow-policy-review proposed.json --pretty` | Review changes and warnings before apply |
-| `agentflow-policy-fetch-review --url http://127.0.0.1:4100/v1/policy-bundle-recommendation --allow-unauthenticated --pretty` | Fetch an opt-in managed recommendation and review it without applying |
-| `agentflow-cache-replayability-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Measure replay-safe cache opportunity and blockers from local metadata |
-| `agentflow-routing-experiment-report --db ~/.agentflow/agentflow.sqlite3 --pretty` | Report local budgeted routing A/B sample counts, pass rate, cost/latency deltas, and budget state |
-| `agentflow-cache-replay-dry-run proposed-cache-policy.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run cache replay pattern rules against recent local metadata without mutating cache entries |
-| `agentflow-optimization-eval-plan --db ~/.agentflow/agentflow.sqlite3 --pretty` | Export metadata-only optimization candidates for local evaluation |
-| `agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Record metadata-only local shadow-eval pass/fail/blocked/unknown results without provider calls by default |
-| `agentflow-optimization-eval-next --db ~/.agentflow/agentflow.sqlite3 --limit 10 --pretty` | Select a bounded highest-value eval queue batch and record local eval evidence without provider calls by default |
-| `agentflow-optimization-promotion-report eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Score local eval, canary, and holdout evidence into widen/hold/rollback/needs_eval promotion verdicts |
-| `agentflow-optimization-promotion-actions promotion-report.json --pretty` | Convert passing promotion verdicts into privacy-safe local rollout-action bundles with explicit omissions |
-| `agentflow-optimization-rollout-actions-review --url http://127.0.0.1:4100/v1/optimization-rollout-actions --allow-unauthenticated --pretty` | Review managed eval-gated optimization rollout actions before any local apply step |
-| `agentflow-optimization-promotion-canaries-apply promotion-actions.json --config-dir ~/.agentflow --dry-run --pretty` | Preview promotion canary routing edits before writing local YAML files |
-| `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
-| `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
-| `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |
-| `agentflow-policy-apply proposed.json --config-dir ~/.agentflow` | Apply reviewed local policy files |
-| `agentflow-policy-rollback --config-dir ~/.agentflow --dry-run --pretty` | Preview rollback to the newest backup |
-| `agentflow-policy-reload` | Reload changed policies in a running local proxy |
-| `agentflow-managed-feedback-status --pretty` | Inspect the local managed feedback queue without printing payloads |
-| `agentflow-managed-feedback-flush --limit 5 --dry-run --pretty` | Preview a bounded retry batch for due managed feedback |
-| `agentflow-managed-feedback-flush --limit 5 --pretty` | Flush due managed feedback when managed recommendations are enabled |
-| `agentflow-managed-pattern-rollups --limit 500 --pretty` | Export metadata-only managed pattern canary cohort outcome rollups for review |
-| `agentflow-managed-rollout-actions-review --url http://127.0.0.1:4100/v1/pattern-rollout-actions --allow-unauthenticated --pretty` | Review managed pattern rollout actions against local crunch/cache rule files |
-| `agentflow-managed-rollout-actions-dry-run actions.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Estimate rollout action impact against recent local traffic metadata without writing policy files |
-| `agentflow-managed-rollout-actions-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply metadata against rollout-action dry-run projections |
-| `agentflow-managed-rollout-actions-apply actions.json --config-dir ~/.agentflow --dry-run --pretty` | Preview approved rollout action edits before writing local YAML files |
-
-Policy operations can append compact local audit events under `~/.agentflow/policy_events.jsonl`. Set `AGENTFLOW_POLICY_EVENTS=0` to disable that audit log.
-Managed fetch/review is disabled unless a recommendation URL is supplied, and authenticated
-managed servers should use `AGENTFLOW_MANAGED_API_KEY` or `--api-key-env` rather than putting
-secrets in command history. The command validates and reviews the bundle only; use
-`agentflow-policy-apply --dry-run` separately before writing local YAML files.
-Managed rollout actions are also recommendation-only: review/apply commands reject unknown
-local rules, raw prompt-like payloads, managed-enforced actions, and unsafe rule sources before
-writing. Apply only updates matching local `pattern_rules` metadata in `crunch_rules.yaml` or
-`cache_rules.yaml`, creates backups, and still requires explicit policy reload afterward.
-If `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET` or
-`AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS` is configured, managed policy bundles must
-include matching HMAC provenance before `agentflow-policy-apply` writes local YAML files.
-Managed optimization rollout action review fails closed for missing provenance, expired
-bundles, incompatible local executors, stale/missing local eval evidence, managed-enforced
-actions, or raw prompt-like payloads. Managed rollout action bundles use the same
-verification secrets when configured.
-Unsigned local-default/local-manual bundles remain valid for offline use.
-Managed outcome and rollout-action lifecycle feedback retries are disabled unless
-`AGENTFLOW_RECOMMENDATION_ENABLED=1`. Status and flush output is metadata-only; queued
-feedback payload JSON is not printed.
-Pattern rollup output is aggregate-only and omits raw prompts, messages, responses,
-transcripts, tool payloads, cache keys, file paths, request IDs, and local session IDs.
-
-The runtime managed recommendation bridge is also opt-in. With
-`AGENTFLOW_RECOMMENDATION_ENABLED=0`, AgentFlow runs in local-only mode and does not contact
-the managed optimizer. To enable the bridge, set:
-
-```bash
-export AGENTFLOW_RECOMMENDATION_ENABLED=1
-export AGENTFLOW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100
-export AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS=1.5
-export AGENTFLOW_RECOMMENDATION_FAILURE_MODE=fallback-local
-export AGENTFLOW_MANAGED_API_KEY="..."  # when the managed server requires auth
-```
-
-`fallback-local` is the only supported runtime failure mode today. If the server URL is unset,
-unreachable, times out, returns non-2xx, returns invalid JSON/schema, recommends an unsupported
-target model, or includes a replacement prompt, AgentFlow keeps the local routing/crunch/cache
-decision and records the fallback reason in local managed recommendation metadata. Managed API
-keys are sent as bearer tokens only when configured and are not included in dashboard or CLI
-metadata.
-
-Before eligible provider calls and Codex app turns, the bridge posts an
-`agentflow.optimization_unit_features.v1` metadata-only feature unit to the managed
-recommendation endpoint. The payload includes derived request size, category, local policy
-decisions, candidate target model, privacy summary, and hashed grouping identifiers. It does
-not include prompts, messages, params, provider request bodies, responses, transcripts, tool
-payloads, API keys, or raw local session IDs in the default profile.
-
-## Configuration
+## Common configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AGENTFLOW_DB` | `~/.agentflow/agentflow.sqlite3` | Local SQLite cache/log database |
+| `AGENTFLOW_DB` | `~/.agentflow/agentflow.sqlite3` | Local SQLite metadata DB |
 | `AGENTFLOW_DATABASE_URL` | unset | Use Postgres instead of SQLite |
 | `AGENTFLOW_CACHE` | `1` | Enable exact local cache where safe |
-| `AGENTFLOW_CACHE_TOOL_CALLS` | `0` | Allow caching tool-call requests; keep off unless you understand the risk |
+| `AGENTFLOW_CACHE_TOOL_CALLS` | `0` | Cache tool-call requests only if you accept the risk |
 | `AGENTFLOW_ROUTING` | `1` | Enable local model routing |
-| `AGENTFLOW_LOG_BODIES` | `0` | Store raw request/response bodies for local debugging |
-| `AGENTFLOW_RECOMMENDATION_ENABLED` | `0` | Opt into runtime managed optimizer recommendations; disabled means local-only with no managed network call |
-| `AGENTFLOW_RECOMMENDATION_SERVER_URL` | `http://127.0.0.1:4100` | Managed optimizer base URL; runtime recommendations post feature units to `/v1/recommendation` |
-| `AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS` | `1.5` | Bounded timeout for managed recommendation and feedback calls |
-| `AGENTFLOW_RECOMMENDATION_FAILURE_MODE` | `fallback-local` | Keep local policy authoritative on managed bridge failure |
-| `AGENTFLOW_MANAGED_API_KEY` | unset | Optional bearer token for managed optimizer requests; value is not printed in status metadata |
-| `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Host for `agentflow-dashboard` |
-| `AGENTFLOW_DASHBOARD_PORT` | `4002` | Port for `agentflow-dashboard` |
-| `AGENTFLOW_CODEX_APP_MODEL` | current bundled default | Model used for Codex app-server token/cost estimates |
-| `AGENTFLOW_CODEX_APP_RULES` | `~/.agentflow/codex_app_rules.yaml` | Optional local Codex app-server rule file for safe summary model hints and exact summary cache |
-| `AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT` | `0` | Opt into local canary routing for safe Codex app summary turns |
-| `AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT_TARGET` | `gpt-5-codex` | Target model for the summary-turn model hint canary |
-| `AGENTFLOW_CODEX_APP_CACHE` | `0` | Opt into exact Codex app summary-turn replay for safe, action-free JSON-RPC turns |
-| `AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD` | `AGENTFLOW_SESSION_COST_ALERT_USD` or `5.0` | Log a local warning when one Codex app thread/session crosses a daily estimated spend threshold |
+| `AGENTFLOW_LOG_BODIES` | `0` | Store raw request/response bodies |
+| `AGENTFLOW_HOST` | `0.0.0.0` | Proxy host default |
+| `AGENTFLOW_PORT` | `4000` | Proxy port default |
+| `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Standalone dashboard host |
+| `AGENTFLOW_DASHBOARD_PORT` | `4002` | Standalone dashboard port |
 
-When `AGENTFLOW_DATABASE_URL` is set, AgentFlow uses Postgres with a small connection pool. SQLite remains the default because the local proxy must work offline.
+## Advanced policy and diagnostics
 
-## Limitations
+The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available as CLI entry points installed by `pip install -e .`.
 
-- Cost and token numbers are estimates unless the upstream provider returns exact usage.
-- Streaming requests are forwarded and logged, but local exact-cache replay is intentionally conservative.
-- Codex app-server support is experimental and currently more limited than direct provider proxying.
-- Aggressive routing or caching can break agent behavior. Start conservative and inspect the dashboard.
-- AgentFlow is not an authentication gateway. Keep provider proxy ports local.
+List them with:
+
+```bash
+python - <<'PY'
+import importlib.metadata as md
+for ep in md.entry_points(group="console_scripts"):
+    if ep.name.startswith("agentflow-"):
+        print(ep.name)
+PY
+```
