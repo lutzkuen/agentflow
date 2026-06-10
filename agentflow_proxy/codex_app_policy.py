@@ -167,6 +167,13 @@ def _default_codex_app_policy() -> dict[str, Any]:
         "exact_cache": {
             "enabled": False,
             "namespace": os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default"),
+            "ttl_seconds": 24 * 60 * 60,
+            "canary": {
+                "fraction": 1.0,
+                "holdout_fraction": 0.0,
+                "salt": "codex-app-exact-cache",
+                "unit": "source_hash",
+            },
         },
         "crunch": {
             "profiles": ["codex-repeated-scaffolding"],
@@ -210,6 +217,25 @@ def _apply_codex_app_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -
         )
         if exact_cache.get("namespace") is not None:
             policy["exact_cache"]["namespace"] = str(exact_cache["namespace"]).strip() or "default"
+        if exact_cache.get("ttl_seconds") is not None:
+            try:
+                policy["exact_cache"]["ttl_seconds"] = max(0, int(exact_cache["ttl_seconds"]))
+            except (TypeError, ValueError):
+                pass
+        canary = exact_cache.get("canary") or {}
+        if isinstance(canary, dict):
+            policy_canary = policy["exact_cache"]["canary"]
+            policy_canary["fraction"] = _bounded_fraction(canary.get("fraction"), policy_canary["fraction"])
+            policy_canary["holdout_fraction"] = _bounded_fraction(
+                canary.get("holdout_fraction"),
+                policy_canary["holdout_fraction"],
+            )
+            if canary.get("salt") is not None:
+                policy_canary["salt"] = str(canary["salt"]).strip() or policy_canary["salt"]
+            if canary.get("unit") is not None:
+                unit = str(canary["unit"]).strip().lower().replace("-", "_")
+                if unit in {"source_hash", "thread_id", "model_and_size"}:
+                    policy_canary["unit"] = unit
 
     crunch = data.get("crunch") or {}
     if isinstance(crunch, dict):
@@ -271,6 +297,31 @@ def _load_codex_app_policy() -> tuple[dict[str, Any], str, str]:
         "AGENTFLOW_CODEX_APP_CACHE_NAMESPACE",
         os.getenv("AGENTFLOW_CACHE_NAMESPACE", str(policy["exact_cache"]["namespace"])),
     ).strip() or "default"
+    try:
+        policy["exact_cache"]["ttl_seconds"] = max(
+            0,
+            int(os.getenv("AGENTFLOW_CODEX_APP_CACHE_TTL_SECONDS", str(policy["exact_cache"]["ttl_seconds"]))),
+        )
+    except ValueError:
+        pass
+    policy["exact_cache"]["canary"]["fraction"] = _bounded_fraction(
+        os.getenv("AGENTFLOW_CODEX_APP_CACHE_CANARY_FRACTION"),
+        policy["exact_cache"]["canary"]["fraction"],
+    )
+    policy["exact_cache"]["canary"]["holdout_fraction"] = _bounded_fraction(
+        os.getenv("AGENTFLOW_CODEX_APP_CACHE_HOLDOUT_FRACTION"),
+        policy["exact_cache"]["canary"]["holdout_fraction"],
+    )
+    policy["exact_cache"]["canary"]["salt"] = os.getenv(
+        "AGENTFLOW_CODEX_APP_CACHE_CANARY_SALT",
+        str(policy["exact_cache"]["canary"]["salt"]),
+    ).strip() or "codex-app-exact-cache"
+    cache_unit = os.getenv(
+        "AGENTFLOW_CODEX_APP_CACHE_CANARY_UNIT",
+        str(policy["exact_cache"]["canary"]["unit"]),
+    ).strip().lower().replace("-", "_")
+    if cache_unit in {"source_hash", "thread_id", "model_and_size"}:
+        policy["exact_cache"]["canary"]["unit"] = cache_unit
     return policy, "local-default", str(defaults_path)
 
 
@@ -423,6 +474,57 @@ def codex_app_cache_namespace() -> str:
     return str(CODEX_APP_POLICY["exact_cache"]["namespace"]).strip() or "default"
 
 
+def codex_app_cache_ttl_seconds() -> int:
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        try:
+            return max(0, int(os.getenv(
+                "AGENTFLOW_CODEX_APP_CACHE_TTL_SECONDS",
+                str(CODEX_APP_POLICY["exact_cache"].get("ttl_seconds") or 0),
+            )))
+        except ValueError:
+            return 0
+    try:
+        return max(0, int(CODEX_APP_POLICY["exact_cache"].get("ttl_seconds") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def codex_app_cache_canary() -> dict[str, Any]:
+    canary = CODEX_APP_POLICY["exact_cache"].get("canary")
+    if not isinstance(canary, dict):
+        canary = {}
+    if CODEX_APP_POLICY_SOURCE == "local-default":
+        fraction = _bounded_fraction(
+            os.getenv("AGENTFLOW_CODEX_APP_CACHE_CANARY_FRACTION"),
+            _bounded_fraction(canary.get("fraction"), 1.0),
+        )
+        holdout_fraction = _bounded_fraction(
+            os.getenv("AGENTFLOW_CODEX_APP_CACHE_HOLDOUT_FRACTION"),
+            _bounded_fraction(canary.get("holdout_fraction"), 0.0),
+        )
+        salt = os.getenv(
+            "AGENTFLOW_CODEX_APP_CACHE_CANARY_SALT",
+            str(canary.get("salt") or "codex-app-exact-cache"),
+        ).strip() or "codex-app-exact-cache"
+        unit = os.getenv(
+            "AGENTFLOW_CODEX_APP_CACHE_CANARY_UNIT",
+            str(canary.get("unit") or "source_hash"),
+        ).strip().lower().replace("-", "_")
+    else:
+        fraction = _bounded_fraction(canary.get("fraction"), 1.0)
+        holdout_fraction = _bounded_fraction(canary.get("holdout_fraction"), 0.0)
+        salt = str(canary.get("salt") or "codex-app-exact-cache").strip()
+        unit = str(canary.get("unit") or "source_hash").strip().lower().replace("-", "_")
+    if unit not in {"source_hash", "thread_id", "model_and_size"}:
+        unit = "source_hash"
+    return {
+        "fraction": fraction,
+        "holdout_fraction": holdout_fraction,
+        "salt": salt,
+        "unit": unit,
+    }
+
+
 def codex_app_upstream() -> str:
     return os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", DEFAULT_CODEX_APP_UPSTREAM)
 
@@ -447,6 +549,8 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
 
     optimize_enabled = codex_app_optimize_enabled()
     cache_enabled = codex_app_cache_enabled()
+    cache_ttl_seconds = codex_app_cache_ttl_seconds()
+    cache_canary = codex_app_cache_canary()
     summary_model_hint_enabled = codex_app_summary_model_hint_enabled()
     summary_model_hint_target = codex_app_summary_model_hint_target()
     summary_model_hint_canary = codex_app_summary_model_hint_canary()
@@ -494,6 +598,8 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
             "exact_cache": {
                 "enabled": cache_enabled,
                 "namespace": namespace,
+                "ttl_seconds": cache_ttl_seconds,
+                "canary": cache_canary,
                 "provider": "codex-app",
                 "upstream": upstream,
                 "request_basis": "jsonrpc turn/start frame with request id removed",
@@ -528,6 +634,8 @@ def codex_app_surface_policy_state(provider_policy_state: dict[str, Any]) -> dic
 def codex_app_bundle_policy_state() -> dict[str, Any]:
     optimize_enabled = codex_app_optimize_enabled()
     cache_enabled = codex_app_cache_enabled()
+    cache_ttl_seconds = codex_app_cache_ttl_seconds()
+    cache_canary = codex_app_cache_canary()
     hint_enabled = codex_app_summary_model_hint_enabled()
     hint_target = codex_app_summary_model_hint_target()
     hint_canary = codex_app_summary_model_hint_canary()
@@ -587,6 +695,8 @@ def codex_app_bundle_policy_state() -> dict[str, Any]:
         "exact_cache": {
             "enabled": cache_enabled,
             "namespace": namespace,
+            "ttl_seconds": cache_ttl_seconds,
+            "canary": cache_canary,
         },
         "crunch": {
             "profiles": list(CODEX_APP_POLICY.get("crunch", {}).get("profiles") or []),

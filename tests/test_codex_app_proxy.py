@@ -1030,6 +1030,124 @@ summary_model_hint:
             self.assertEqual(json.loads(forwarded)["id"], "turn-cache-2")
             test_store.conn.close()
 
+    def test_codex_exact_cache_canary_produces_miss_and_holdout_cohorts(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            seen = {}
+            try:
+                with (
+                    patch.object(codex_app_proxy, "store", test_store),
+                    patch.object(codex_app_proxy, "CODEX_APP_CACHE", True),
+                    patch.object(codex_app_proxy, "CODEX_APP_CACHE_CANARY", {
+                        "fraction": 0.5,
+                        "holdout_fraction": 0.5,
+                        "salt": "cache-canary-test",
+                        "unit": "source_hash",
+                    }),
+                ):
+                    for idx in range(100):
+                        message = {
+                            "jsonrpc": "2.0",
+                            "id": f"turn-cache-canary-{idx}",
+                            "method": "turn/start",
+                            "params": {
+                                "threadId": f"thread-cache-canary-{idx}",
+                                "model": "gpt-5-codex",
+                                "input": [{"type": "text", "text": f"Summarize the completed work for run {idx}."}],
+                                "temperature": 0,
+                            },
+                        }
+                        _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                        seen.setdefault(metadata["cache"]["outcome_bucket"], metadata["cache"])
+                        if {"miss", "holdout"}.issubset(seen):
+                            break
+            finally:
+                test_store.conn.close()
+
+        self.assertIn("miss", seen)
+        self.assertIn("holdout", seen)
+        self.assertEqual(seen["miss"]["status"], "miss")
+        self.assertEqual(seen["miss"]["canary_cohort"], "canary_applied")
+        self.assertEqual(seen["holdout"]["status"], "holdout")
+        self.assertEqual(seen["holdout"]["reason"], "codex-app-cache-canary-holdout")
+        self.assertEqual(seen["holdout"]["canary_cohort"], "canary_holdout")
+        self.assertFalse(seen["holdout"]["canary_sample"]["raw_basis_included"])
+        self.assertNotIn("_agentflow_cache_key", seen["holdout"])
+
+    def test_unsafe_codex_cached_response_is_deleted_and_not_replayed(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-unsafe-cache-1",
+                "method": "turn/start",
+                "params": {
+                    "model": "gpt-5-codex",
+                    "input": [{"type": "text", "text": "Summarize the completed work."}],
+                    "temperature": 0,
+                },
+            }
+            cache_key = codex_app_proxy._codex_cache_key_for_message(message)
+            test_store.set_cache(
+                cache_key,
+                "codex-app",
+                100,
+                {
+                    "agentflow_cache_type": "codex-app-jsonrpc-response",
+                    "version": 1,
+                    "response": {
+                        "jsonrpc": "2.0",
+                        "id": "turn-unsafe-cache-1",
+                        "result": {"tool_call": {"name": "shell"}},
+                    },
+                },
+            )
+            try:
+                with patch.object(codex_app_proxy, "store", test_store), patch.object(codex_app_proxy, "CODEX_APP_CACHE", True):
+                    _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                    remaining = test_store.conn.execute(
+                        "select 1 from cache where cache_key = ?",
+                        (cache_key,),
+                    ).fetchone()
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(metadata["cache"]["status"], "unsafe-skip")
+        self.assertEqual(metadata["cache"]["reason"], "unsafe-cached-envelope")
+        self.assertEqual(metadata["cache"]["outcome_bucket"], "unsafe-skip")
+        self.assertIsNone(remaining)
+        self.assertNotIn("_agentflow_replay_frame", metadata["cache"])
+
+    def test_codex_cache_stale_risk_skips_path_without_dependency_evidence(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp, tempfile.TemporaryDirectory() as root:
+            test_store = Store(tmp.name)
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-stale-risk",
+                "method": "turn/start",
+                "params": {
+                    "model": "gpt-5-codex",
+                    "input": [{"type": "text", "text": "Summarize ./missing-file.txt for the run log."}],
+                    "temperature": 0,
+                },
+            }
+            try:
+                with (
+                    patch.object(codex_app_proxy, "store", test_store),
+                    patch.object(codex_app_proxy, "CODEX_APP_CACHE", True),
+                    patch("agentflow_proxy.cache.CACHE_FILE_WATCH_ROOT", root),
+                ):
+                    _forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(metadata["cache"]["status"], "skipped")
+        self.assertEqual(metadata["cache"]["reason"], "dependency-missing")
+        self.assertEqual(metadata["cache"]["outcome_bucket"], "stale-risk")
+        self.assertTrue(metadata["cache"]["eligible"])
+        self.assertFalse(metadata["cache"]["file_dependency_audit"]["paths_included"])
+        self.assertNotIn("_agentflow_cache_key", metadata["cache"])
+
     def test_codex_cache_disabled_records_safe_summary_eligibility_metadata(self):
         message = {
             "jsonrpc": "2.0",

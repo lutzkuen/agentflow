@@ -15,6 +15,12 @@ summary_model_hint:
 exact_cache:
   enabled: false
   namespace: default
+  ttl_seconds: 86400
+  canary:
+    fraction: 1.0
+    holdout_fraction: 0.0
+    salt: codex-app-exact-cache
+    unit: source_hash
 crunch:
   profiles:
     - codex-repeated-scaffolding

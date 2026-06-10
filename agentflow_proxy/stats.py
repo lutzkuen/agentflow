@@ -2414,6 +2414,7 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "hit_type": "exact",
             "policy_source": "legacy-inferred",
             "source_surface": source_surface,
+            "outcome_bucket": "hit",
         }
     if _as_int(row.get("stream")):
         return {
@@ -2422,6 +2423,7 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "hit_type": "",
             "policy_source": "legacy-inferred",
             "source_surface": source_surface,
+            "outcome_bucket": "disabled",
         }
     if status_code >= 400:
         return {
@@ -2430,6 +2432,7 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
             "hit_type": "",
             "policy_source": "legacy-inferred",
             "source_surface": source_surface,
+            "outcome_bucket": "unsafe-skip",
         }
     return {
         "status": "missing",
@@ -2437,7 +2440,35 @@ def _legacy_cache_decision(row: dict[str, Any]) -> dict[str, str]:
         "hit_type": "",
         "policy_source": "legacy-inferred",
         "source_surface": source_surface,
+        "outcome_bucket": "unknown",
     }
+
+
+def _cache_outcome_bucket(status: str, reason: str, explicit: Any = None) -> str:
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    if reason in {"codex-app-cache-disabled", "cache-disabled", "streaming-cache-disabled"}:
+        return "disabled"
+    if status == "hit":
+        return "hit"
+    if status == "holdout" or reason in {"codex-app-cache-canary-holdout", "canary_holdout"}:
+        return "holdout"
+    if status == "unsafe-skip" or reason in {
+        "action-like-params",
+        "non-text-input",
+        "unknown-param-shape",
+        "terminal-interaction-text",
+        "file-affecting-text",
+        "unsafe-cached-envelope",
+    }:
+        return "unsafe-skip"
+    if reason in {"dependency-changed", "dependency-deleted", "codex-cache-ttl-expired"}:
+        return "invalidated"
+    if reason in {"stale-risk-blockers", "file-dependency-missing", "dependency-missing", "dependency-cap-exceeded", "file-watch-disabled"}:
+        return "stale-risk"
+    if status == "miss":
+        return "miss"
+    return status or "unknown"
 
 
 def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
@@ -2456,6 +2487,7 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                     "hit_type": "",
                     "policy_source": policy_source,
                     "source_surface": source_surface,
+                    "outcome_bucket": "disabled",
                 }
             if legacy_hit_type == "miss":
                 return {
@@ -2464,6 +2496,7 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                     "hit_type": "",
                     "policy_source": policy_source,
                     "source_surface": source_surface,
+                    "outcome_bucket": "miss",
                 }
             if legacy_hit_type == "hit":
                 return {
@@ -2472,6 +2505,7 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                     "hit_type": "exact",
                     "policy_source": policy_source,
                     "source_surface": source_surface,
+                    "outcome_bucket": "hit",
                 }
             return {
                 "status": "missing",
@@ -2479,19 +2513,23 @@ def _cache_decision_for_breakdown(row: dict[str, Any]) -> dict[str, str]:
                 "hit_type": legacy_hit_type,
                 "policy_source": policy_source,
                 "source_surface": source_surface,
+                "outcome_bucket": "unknown",
             }
+        status = str(cache.get("status") or "missing")
+        reason = str(cache.get("reason") or "unknown")
         return {
-            "status": str(cache.get("status") or "missing"),
-            "reason": str(cache.get("reason") or "unknown"),
+            "status": status,
+            "reason": reason,
             "hit_type": str(cache.get("hit_type") or ""),
             "policy_source": policy_source,
             "source_surface": source_surface,
+            "outcome_bucket": _cache_outcome_bucket(status, reason, cache.get("outcome_bucket")),
         }
     return _legacy_cache_decision(row)
 
 
 def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         if today_only and not row.get("is_today"):
             continue
@@ -2502,6 +2540,7 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
             decision["reason"],
             decision["hit_type"],
             decision["policy_source"],
+            decision["outcome_bucket"],
         )
         bucket = grouped.setdefault(
             key,
@@ -2511,6 +2550,7 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
                 "reason": key[2],
                 "hit_type": key[3],
                 "policy_source": key[4],
+                "outcome_bucket": key[5],
                 "count": 0,
             },
         )

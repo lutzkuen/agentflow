@@ -3906,6 +3906,63 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(cache_rows[("codex_turn", "hit", "exact-match", "exact")], 2)
         self.assertNotIn(("codex_app_turn", "hit", "exact-match", "exact"), cache_rows)
 
+    def test_codex_cache_breakdown_reports_canary_outcome_buckets_metadata_only(self):
+        secret = "secret summary prompt must not appear in reports"
+        rows = [
+            {"status": "skipped", "reason": "codex-app-cache-disabled", "outcome_bucket": "disabled"},
+            {"status": "holdout", "reason": "codex-app-cache-canary-holdout", "outcome_bucket": "holdout"},
+            {"status": "unsafe-skip", "reason": "unsafe-cached-envelope", "outcome_bucket": "unsafe-skip"},
+            {"status": "miss", "reason": "exact-miss", "outcome_bucket": "miss"},
+            {"status": "hit", "reason": "exact-match", "hit_type": "exact", "outcome_bucket": "hit"},
+            {"status": "miss", "reason": "dependency-changed", "outcome_bucket": "invalidated"},
+            {"status": "skipped", "reason": "file-dependency-missing", "outcome_bucket": "stale-risk"},
+        ]
+        for index, cache_json in enumerate(rows):
+            server.store.log_codex_app_event(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=f"req-codex-cache-bucket-{index}",
+                thread_id="thread-codex-cache-buckets",
+                message_chars=100 + index,
+                params_chars=80,
+                input_items=1,
+                input_text_chars=len(secret),
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="codex-cache-bucket-session-secret",
+                cache_json=stable_json({
+                    **cache_json,
+                    "policy_source": "local-default",
+                    "surface": "codex_turn",
+                    "cache_key_included": False,
+                }),
+            )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        buckets = {
+            row["outcome_bucket"]
+            for row in result["today_cache_decision_breakdown"]
+            if row["source_surface"] == "codex_turn"
+        }
+
+        self.assertTrue({
+            "disabled",
+            "holdout",
+            "unsafe-skip",
+            "miss",
+            "hit",
+            "invalidated",
+            "stale-risk",
+        }.issubset(buckets))
+        rendered = json.dumps(result["today_cache_decision_breakdown"], sort_keys=True)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("codex-cache-bucket-session-secret", rendered)
+        self.assertNotIn("cache_key", rendered)
+
     def test_cache_replayability_report_groups_repeated_skipped_shapes_and_blockers(self):
         def log_provider_call(
             *,

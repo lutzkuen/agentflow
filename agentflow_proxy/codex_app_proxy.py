@@ -30,8 +30,10 @@ from agentflow_proxy.codex_app_policy import (
     CODEX_APP_POLICY_SOURCE,
     DEFAULT_CODEX_APP_UPSTREAM,
     codex_model_state_signal,
+    codex_app_cache_canary,
     codex_app_cache_enabled,
     codex_app_cache_namespace,
+    codex_app_cache_ttl_seconds,
     codex_app_optimize_enabled,
     codex_app_summary_model_hint_enabled,
     codex_app_summary_model_hint_canary,
@@ -61,6 +63,8 @@ LOG_EVENTS = os.getenv("AGENTFLOW_CODEX_APP_LOG_EVENTS", "1") != "0"
 DB_BUSY_TIMEOUT_MS = int(os.getenv("AGENTFLOW_CODEX_APP_DB_BUSY_TIMEOUT_MS", "100"))
 CODEX_APP_OPTIMIZE = codex_app_optimize_enabled()
 CODEX_APP_CACHE = codex_app_cache_enabled()
+CODEX_APP_CACHE_TTL_SECONDS = codex_app_cache_ttl_seconds()
+CODEX_APP_CACHE_CANARY = codex_app_cache_canary()
 CODEX_APP_SUMMARY_MODEL_HINT = codex_app_summary_model_hint_enabled()
 CODEX_APP_SUMMARY_MODEL_HINT_TARGET = codex_app_summary_model_hint_target()
 CODEX_APP_SUMMARY_MODEL_HINT_CANARY = codex_app_summary_model_hint_canary()
@@ -88,6 +92,11 @@ _CODEX_FILE_AFFECTING_TEXT_RE = re.compile(
     r"\b(apply\s+patch|edit|modify|delete|remove|rename|move|save\s+to|write\s+to|write\s+.*\bfile|create\s+(?:a\s+)?file|touch\s+|mkdir\s+|rm\s+|mv\s+|cp\s+)\b",
     re.IGNORECASE,
 )
+_CODEX_STALE_RISK_TEXT_RE = re.compile(
+    r"\b(today|latest|current|recent|now|this\s+(?:run|session|turn|state)|up[- ]?to[- ]?date)\b",
+    re.IGNORECASE,
+)
+_CODEX_PATH_LIKE_TEXT_RE = re.compile(r"(^|\s)(/|\.{1,2}/|~/|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
 _codex_app_session_alert_windows: dict[tuple[str, str, str], int] = {}
 
 
@@ -579,6 +588,9 @@ def _codex_cache_decision(
     invalidation_reason: str | None = None,
     workflow_phase: str | None = None,
     workflow_phase_reason: str | None = None,
+    outcome_bucket: str | None = None,
+    canary_sample: dict[str, Any] | None = None,
+    ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     meta = _policy_decision("cache", status, reason, enabled=enabled)
     meta.update({
@@ -586,9 +598,12 @@ def _codex_cache_decision(
         "hit_type": hit_type or "",
         "exact_enabled": bool(CODEX_APP_CACHE),
         "replayability_level": replayability_level,
+        "cache_key_present": bool(cache_key),
+        "cache_key_included": False,
+        "outcome_bucket": outcome_bucket or _codex_cache_outcome_bucket(status, reason),
     })
-    if cache_key:
-        meta["cache_key"] = cache_key
+    if ttl_seconds is not None:
+        meta["ttl_seconds"] = max(0, int(ttl_seconds))
     if file_dependency_audit_meta is None and file_dependencies:
         file_dependency_audit_meta = cache_file_dependency_audit(snapshots=file_dependencies)
     if file_dependency_audit_meta:
@@ -604,7 +619,46 @@ def _codex_cache_decision(
         meta["workflow_phase"] = workflow_phase
     if workflow_phase_reason:
         meta["workflow_phase_reason"] = workflow_phase_reason
+    if canary_sample:
+        meta["canary"] = "codex-app-exact-cache"
+        meta["canary_cohort"] = canary_sample.get("cohort")
+        meta["canary_sample"] = canary_sample
     return meta
+
+
+def _codex_cache_outcome_bucket(status: str, reason: str) -> str:
+    if reason == "codex-app-cache-disabled":
+        return "disabled"
+    if status == "hit":
+        return "hit"
+    if status == "holdout" or reason in {"codex-app-cache-canary-holdout", "canary_holdout"}:
+        return "holdout"
+    if status == "unsafe-skip" or reason in {
+        "action-like-params",
+        "non-text-input",
+        "unknown-param-shape",
+        "terminal-interaction-text",
+        "file-affecting-text",
+        "unsafe-cached-envelope",
+    }:
+        return "unsafe-skip"
+    if reason in {
+        "dependency-changed",
+        "dependency-deleted",
+        "codex-cache-ttl-expired",
+    }:
+        return "invalidated"
+    if reason in {
+        "stale-risk-blockers",
+        "file-dependency-missing",
+        "dependency-missing",
+        "dependency-cap-exceeded",
+        "file-watch-disabled",
+    }:
+        return "stale-risk"
+    if status == "miss":
+        return "miss"
+    return status or "unknown"
 
 
 def _not_applied_metadata(reason: str, *, enabled: bool = CODEX_APP_OPTIMIZE) -> dict[str, dict[str, Any]]:
@@ -760,6 +814,52 @@ def _summary_model_hint_canary_sample(
         cohort = "not_selected"
         status = "eligible-skipped"
         reason = "summary-model-hint-canary-not-selected"
+    return {
+        "enabled": True,
+        "cohort": cohort,
+        "status": status,
+        "reason": reason,
+        "fraction": fraction,
+        "holdout_fraction": holdout_fraction,
+        "sample_unit": unit,
+        "sample_bucket": round(sample, 6),
+        "hash_basis": "local-only-salted-policy-sample",
+        "raw_basis_included": False,
+    }
+
+
+def _codex_exact_cache_canary_sample(params: dict[str, Any], *, requested_model: str) -> dict[str, Any]:
+    canary = dict(CODEX_APP_CACHE_CANARY or {})
+    fraction = min(max(float(canary.get("fraction", 1.0) or 0.0), 0.0), 1.0)
+    holdout_fraction = min(max(float(canary.get("holdout_fraction", 0.0) or 0.0), 0.0), 1.0)
+    salt = str(canary.get("salt") or "codex-app-exact-cache")
+    unit = str(canary.get("unit") or "source_hash").strip().lower().replace("-", "_")
+    if unit == "thread_id":
+        material = str(_thread_id(params) or "")
+        if not material:
+            unit = "source_hash"
+    if unit == "model_and_size":
+        material = f"{requested_model}:{_input_text_chars(params.get('input'))}"
+    elif unit == "thread_id":
+        material = str(_thread_id(params) or "")
+    else:
+        unit = "source_hash"
+        material = stable_json(params)
+    digest = hashlib.sha256(f"{salt}\0{unit}\0{material}".encode("utf-8")).hexdigest()
+    sample = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    applied_cutoff = min(1.0, holdout_fraction + fraction)
+    if sample < holdout_fraction:
+        cohort = "canary_holdout"
+        status = "holdout"
+        reason = "codex-app-cache-canary-holdout"
+    elif sample < applied_cutoff:
+        cohort = "canary_applied"
+        status = "applied"
+        reason = "safe-summary-exact-cache-canary"
+    else:
+        cohort = "not_selected"
+        status = "eligible-skipped"
+        reason = "codex-app-cache-canary-not-selected"
     return {
         "enabled": True,
         "cohort": cohort,
@@ -1053,6 +1153,18 @@ def _codex_text_safety_skip_reason(params: dict[str, Any]) -> str | None:
     return None
 
 
+def _codex_stale_risk_skip_reason(params: dict[str, Any], file_dependency_audit_meta: dict[str, Any]) -> str | None:
+    text = "\n".join(_codex_input_texts(params.get("input")))
+    invalidation_reason = file_dependency_audit_meta.get("invalidation_reason")
+    if invalidation_reason in {"dependency-missing", "dependency-cap-exceeded", "file-watch-disabled"}:
+        return str(invalidation_reason)
+    if _CODEX_PATH_LIKE_TEXT_RE.search(text) and not file_dependency_audit_meta.get("safe_invalidation_evidence"):
+        return "file-dependency-missing"
+    if _CODEX_STALE_RISK_TEXT_RE.search(text) and not file_dependency_audit_meta.get("safe_invalidation_evidence"):
+        return "stale-risk-blockers"
+    return None
+
+
 def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
     if "temperature" in params:
         try:
@@ -1127,28 +1239,63 @@ def _is_safe_codex_response_obj(value: Any, request_id: Any) -> bool:
     return not _contains_action_hint(value.get("result"))
 
 
-def _codex_cache_payload(response_obj: dict[str, Any]) -> dict[str, Any]:
+def _codex_cache_payload(
+    response_obj: dict[str, Any],
+    *,
+    ttl_seconds: int,
+    file_deps: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "agentflow_cache_type": "codex-app-jsonrpc-response",
         "version": 1,
+        "created_at": utc_now(),
+        "ttl_seconds": max(0, int(ttl_seconds)),
+        "metadata": {
+            "schema": "agentflow.codex_app_exact_cache_entry.v1",
+            "response_body_storage": "local-cache-table",
+            "file_dependency_count": len(file_deps or []),
+            "file_dependency_evidence_available": bool(file_deps),
+            "raw_request_included": False,
+            "cache_key_included": False,
+        },
         "response": response_obj,
     }
 
 
-def _codex_cached_response(payload: Any, request_id: Any) -> str | None:
+def _codex_payload_expired(payload: dict[str, Any]) -> bool:
+    ttl_seconds = _as_int(payload.get("ttl_seconds"))
+    if ttl_seconds <= 0:
+        return False
+    created_at = payload.get("created_at")
+    if not isinstance(created_at, str) or not created_at:
+        return False
+    try:
+        text = created_at[:-1] + "+00:00" if created_at.endswith("Z") else created_at
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return age_seconds > ttl_seconds
+
+
+def _codex_cached_response(payload: Any, request_id: Any) -> tuple[str | None, str | None]:
     if not isinstance(payload, dict):
-        return None
+        return None, "invalid-cache-payload"
     if payload.get("agentflow_cache_type") != "codex-app-jsonrpc-response":
-        return None
+        return None, "invalid-cache-payload"
+    if _codex_payload_expired(payload):
+        return None, "codex-cache-ttl-expired"
     response = payload.get("response")
     if not isinstance(response, dict):
-        return None
+        return None, "unsafe-cached-envelope"
     replay = copy.deepcopy(response)
     if request_id is not None:
         replay["id"] = request_id
     if not _is_safe_codex_response_obj(replay, request_id):
-        return None
-    return json.dumps(replay, separators=(",", ":"), ensure_ascii=False)
+        return None, "unsafe-cached-envelope"
+    return json.dumps(replay, separators=(",", ":"), ensure_ascii=False), None
 
 
 def _public_metadata(metadata: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]] | None:
@@ -1581,6 +1728,8 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
             replayability_level="local-exact-response" if eligible else "features_only",
             workflow_phase=workflow_phase,
             workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="disabled",
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
         )
     elif not eligible:
         cache_meta = _codex_cache_decision(
@@ -1590,6 +1739,8 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
             eligible=False,
             workflow_phase=workflow_phase,
             workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="unsafe-skip",
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
         )
         if eligibility_meta.get("unknown_keys"):
             cache_meta["unknown_keys"] = eligibility_meta["unknown_keys"]
@@ -1597,54 +1748,116 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
         cache_key = _codex_cache_key_for_message(optimized)
         file_deps = cache_file_dependency_snapshots(routed_params)
         file_dependency_audit_meta = cache_file_dependency_audit(routed_params)
-        cached, invalidation_reason = store.get_cache_with_reason(cache_key)
-        if cached is not None:
-            replay_frame = _codex_cached_response(cached, msg.get("id"))
-            if replay_frame is not None:
-                cache_meta = _codex_cache_decision(
-                    "hit",
-                    "exact-match",
-                    enabled=True,
-                    eligible=True,
-                    hit_type="exact",
-                    cache_key=cache_key,
-                    replayability_level="local-exact-response",
-                    file_dependencies=file_deps,
-                    file_dependency_audit_meta=file_dependency_audit_meta,
-                    workflow_phase=workflow_phase,
-                    workflow_phase_reason=workflow_phase_reason,
-                )
-                cache_meta[_INTERNAL_REPLAY_FRAME_KEY] = replay_frame
-            else:
-                store.delete_cache(cache_key)
-                cache_meta = _codex_cache_decision(
-                    "miss",
-                    "unsafe-cached-envelope",
-                    enabled=True,
-                    eligible=True,
-                    cache_key=cache_key,
-                    replayability_level="local-exact-response",
-                    file_dependencies=file_deps,
-                    file_dependency_audit_meta=file_dependency_audit_meta,
-                    workflow_phase=workflow_phase,
-                    workflow_phase_reason=workflow_phase_reason,
-                )
-                cache_meta[_INTERNAL_CACHE_KEY] = cache_key
-        else:
+        requested_model = str(routed_params.get(eligibility_meta.get("model_field") or "model") or "")
+        canary_sample = _codex_exact_cache_canary_sample(routed_params, requested_model=requested_model)
+        if canary_sample["status"] == "holdout":
             cache_meta = _codex_cache_decision(
-                "miss",
-                invalidation_reason or "exact-miss",
+                "holdout",
+                canary_sample["reason"],
                 enabled=True,
                 eligible=True,
-                cache_key=cache_key,
                 replayability_level="local-exact-response",
                 file_dependencies=file_deps,
                 file_dependency_audit_meta=file_dependency_audit_meta,
-                invalidation_reason=invalidation_reason,
                 workflow_phase=workflow_phase,
                 workflow_phase_reason=workflow_phase_reason,
+                outcome_bucket="holdout",
+                canary_sample=canary_sample,
+                ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
             )
-            cache_meta[_INTERNAL_CACHE_KEY] = cache_key
+        elif canary_sample["status"] == "eligible-skipped":
+            cache_meta = _codex_cache_decision(
+                "skipped",
+                canary_sample["reason"],
+                enabled=True,
+                eligible=True,
+                replayability_level="local-exact-response",
+                file_dependencies=file_deps,
+                file_dependency_audit_meta=file_dependency_audit_meta,
+                workflow_phase=workflow_phase,
+                workflow_phase_reason=workflow_phase_reason,
+                outcome_bucket="disabled",
+                canary_sample=canary_sample,
+                ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+            )
+        elif stale_reason := _codex_stale_risk_skip_reason(routed_params, file_dependency_audit_meta):
+            cache_meta = _codex_cache_decision(
+                "skipped",
+                stale_reason,
+                enabled=True,
+                eligible=True,
+                replayability_level="local-exact-response",
+                file_dependencies=file_deps,
+                file_dependency_audit_meta=file_dependency_audit_meta,
+                workflow_phase=workflow_phase,
+                workflow_phase_reason=workflow_phase_reason,
+                outcome_bucket="stale-risk",
+                canary_sample=canary_sample,
+                ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+            )
+        else:
+            cached, invalidation_reason = store.get_cache_with_reason(cache_key)
+            if cached is None:
+                cache_meta = _codex_cache_decision(
+                    "miss",
+                    invalidation_reason or "exact-miss",
+                    enabled=True,
+                    eligible=True,
+                    cache_key=cache_key,
+                    replayability_level="local-exact-response",
+                    file_dependencies=file_deps,
+                    file_dependency_audit_meta=file_dependency_audit_meta,
+                    invalidation_reason=invalidation_reason,
+                    workflow_phase=workflow_phase,
+                    workflow_phase_reason=workflow_phase_reason,
+                    outcome_bucket="invalidated" if invalidation_reason else "miss",
+                    canary_sample=canary_sample,
+                    ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+                )
+                cache_meta[_INTERNAL_CACHE_KEY] = cache_key
+            else:
+                replay_frame, cached_skip_reason = _codex_cached_response(cached, msg.get("id"))
+                if cached_skip_reason in {"unsafe-cached-envelope", "codex-cache-ttl-expired"}:
+                    store.delete_cache(cache_key)
+                elif cached_skip_reason:
+                    replay_frame = None
+                if replay_frame is not None:
+                    cache_meta = _codex_cache_decision(
+                        "hit",
+                        "exact-match",
+                        enabled=True,
+                        eligible=True,
+                        hit_type="exact",
+                        cache_key=cache_key,
+                        replayability_level="local-exact-response",
+                        file_dependencies=file_deps,
+                        file_dependency_audit_meta=file_dependency_audit_meta,
+                        workflow_phase=workflow_phase,
+                        workflow_phase_reason=workflow_phase_reason,
+                        outcome_bucket="hit",
+                        canary_sample=canary_sample,
+                        ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+                    )
+                    cache_meta[_INTERNAL_REPLAY_FRAME_KEY] = replay_frame
+                else:
+                    reason = cached_skip_reason or "unsafe-cached-envelope"
+                    status = "unsafe-skip" if reason == "unsafe-cached-envelope" else "miss"
+                    cache_meta = _codex_cache_decision(
+                        status,
+                        reason,
+                        enabled=True,
+                        eligible=True,
+                        cache_key=cache_key,
+                        replayability_level="local-exact-response",
+                        file_dependencies=file_deps,
+                        file_dependency_audit_meta=file_dependency_audit_meta,
+                        workflow_phase=workflow_phase,
+                        workflow_phase_reason=workflow_phase_reason,
+                        outcome_bucket=_codex_cache_outcome_bucket(status, reason),
+                        canary_sample=canary_sample,
+                        ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+                    )
+                    cache_meta[_INTERNAL_CACHE_KEY] = cache_key
     if optimized == msg:
         metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
         _attach_codex_local_pattern_features(raw, metadata)
@@ -1874,7 +2087,11 @@ def _maybe_store_codex_cache_response(
         pending["cache_key"],
         "codex-app",
         int(pending.get("request_chars") or 0),
-        _codex_cache_payload(msg),
+        _codex_cache_payload(
+            msg,
+            ttl_seconds=_as_int(pending.get("ttl_seconds")),
+            file_deps=pending.get("file_deps") or [],
+        ),
         file_deps=pending.get("file_deps") or [],
     )
 
@@ -1947,7 +2164,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             await websocket.send_text(replay_frame)
                             continue
                         cache_key = cache_meta.get(_INTERNAL_CACHE_KEY)
-                        if isinstance(cache_key, str) and cache_meta.get("status") == "miss":
+                        if isinstance(cache_key, str) and cache_meta.get("outcome_bucket") in {"miss", "invalidated"}:
                             try:
                                 cached_msg = json.loads(forwarded) if isinstance(forwarded, str) else None
                             except Exception:
@@ -1959,6 +2176,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                                     "cache_key": cache_key,
                                     "request_chars": len(forwarded),
                                     "file_deps": cache_file_dependency_snapshots(params if isinstance(params, dict) else cached_msg),
+                                    "ttl_seconds": cache_meta.get("ttl_seconds"),
                                 }
                         await upstream.send(forwarded)
                     elif msg.get("bytes") is not None:
