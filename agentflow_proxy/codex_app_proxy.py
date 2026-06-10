@@ -41,10 +41,12 @@ from agentflow_proxy.codex_app_policy import (
 )
 from agentflow_proxy.crunch import TOKEN_CHARS, crunch_body, crunch_codex_turn_params
 from agentflow_proxy.recommendations import (
+    build_codex_app_canary_lifecycle_feedback,
     build_codex_turn_optimization_unit,
     build_codex_turn_outcome_feedback,
     fetch_recommendation,
     pattern_feature_diagnostics,
+    queue_codex_app_canary_lifecycle_feedback,
     queue_codex_outcome_feedback,
 )
 from agentflow_proxy.pricing import codex_app_model, codex_app_processing_mode, estimate_cost
@@ -2057,6 +2059,106 @@ async def _record_codex_managed_outcome(
             print(f"AgentFlow Codex app managed feedback metadata update skipped: {exc}", file=sys.stderr)
 
 
+def _attach_codex_canary_lifecycle_pending(
+    raw: str | bytes,
+    optimization_metadata: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict) or msg.get("method") != "turn/start":
+        return None
+    request_id = _request_id(msg)
+    if request_id is None:
+        return None
+    metadata = optimization_metadata or {}
+    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
+    crunch = metadata.get("crunch") if isinstance(metadata.get("crunch"), dict) else {}
+    cache = metadata.get("cache") if isinstance(metadata.get("cache"), dict) else {}
+    actions: list[str] = []
+    if routing.get("canary") == "codex-app-summary-model-hint":
+        actions.append("routing")
+    if cache.get("canary") == "codex-app-exact-cache" or isinstance(cache.get("canary_sample"), dict):
+        actions.append("cache")
+    if not actions:
+        return None
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    return {
+        "request_id": str(request_id),
+        "routing": routing,
+        "crunch": crunch,
+        "cache": cache,
+        "actions": actions,
+        "input_text_chars": _input_text_chars(params.get("input")),
+    }
+
+
+async def _record_codex_canary_lifecycle_outcome(
+    raw: str | bytes,
+    *,
+    request_started: dict[str, float],
+    pending_lifecycle: dict[str, dict[str, Any]],
+) -> None:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict):
+        return
+    request_id = _request_id(msg)
+    if request_id is None:
+        return
+    pending = pending_lifecycle.pop(request_id, None)
+    if not pending:
+        return
+    result = msg.get("result")
+    error = msg.get("error")
+    started = request_started.get(request_id)
+    latency_ms = int((time.time() - started) * 1000) if started is not None else None
+    result_chars = len(stable_json(result)) if result is not None else None
+    error_code = error.get("code") if isinstance(error, dict) else None
+    error_message = error.get("message") if isinstance(error, dict) and isinstance(error.get("message"), str) else None
+
+    feedback_results: dict[str, Any] = {}
+    for action in pending.get("actions") or []:
+        event = build_codex_app_canary_lifecycle_feedback(
+            action_family=str(action),
+            routing_meta=pending["routing"],
+            crunch_meta=pending["crunch"],
+            cache_meta=pending["cache"],
+            result_chars=result_chars,
+            error_code=error_code,
+            error_message=error_message,
+            latency_ms=latency_ms,
+            input_text_chars=pending.get("input_text_chars"),
+        )
+        if event is None:
+            continue
+        meta = await queue_codex_app_canary_lifecycle_feedback(
+            store,
+            event,
+            flush_immediately=False,
+        )
+        feedback_results[str(action)] = {
+            "enabled": bool(meta.get("enabled")),
+            "status": meta.get("status"),
+            "reason": meta.get("reason"),
+            "endpoint": meta.get("endpoint"),
+            "queue_id": meta.get("queue_id"),
+            "attempts": meta.get("attempts"),
+            "payload_included": False,
+        }
+    if not feedback_results:
+        return
+    pending["routing"]["managed_lifecycle_feedback"] = {
+        "schema": "agentflow.codex_app_canary_lifecycle_queue_meta.v1",
+        "source_surface": "codex_app_canary_lifecycle",
+        "results": feedback_results,
+        "payload_included": False,
+    }
+    start_event_id = pending.get("start_event_id")
+    if isinstance(start_event_id, str):
+        try:
+            store.update_codex_app_event_routing_json(start_event_id, stable_json(pending["routing"]))
+        except Exception as exc:
+            print(f"AgentFlow Codex app canary lifecycle feedback metadata update skipped: {exc}", file=sys.stderr)
+
+
 def _maybe_store_codex_cache_response(
     raw: str | bytes,
     *,
@@ -2118,6 +2220,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     request_started: dict[str, float] = {}
     pending_cache: dict[str, dict[str, Any]] = {}
     pending_managed: dict[str, dict[str, Any]] = {}
+    pending_lifecycle: dict[str, dict[str, Any]] = {}
     active_turn_windows: dict[str, dict[str, Any]] = {}
     model_states: dict[str, dict[str, Any]] = {}
 
@@ -2145,6 +2248,10 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         if managed_pending and isinstance(managed_pending.get("request_id"), str):
                             managed_pending["start_event_id"] = start_event_id
                             pending_managed[str(managed_pending["request_id"])] = managed_pending
+                        lifecycle_pending = _attach_codex_canary_lifecycle_pending(forwarded, optimization_metadata)
+                        if lifecycle_pending and isinstance(lifecycle_pending.get("request_id"), str):
+                            lifecycle_pending["start_event_id"] = start_event_id
+                            pending_lifecycle[str(lifecycle_pending["request_id"])] = lifecycle_pending
                         replay_frame = cache_meta.get(_INTERNAL_REPLAY_FRAME_KEY)
                         if isinstance(replay_frame, str):
                             await _record_codex_managed_outcome(
@@ -2152,6 +2259,11 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                                 session_id=session_id,
                                 request_started=request_started,
                                 pending_managed=pending_managed,
+                            )
+                            await _record_codex_canary_lifecycle_outcome(
+                                replay_frame,
+                                request_started=request_started,
+                                pending_lifecycle=pending_lifecycle,
                             )
                             _record_message(
                                 replay_frame,
@@ -2194,6 +2306,10 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         if managed_pending and isinstance(managed_pending.get("request_id"), str):
                             managed_pending["start_event_id"] = start_event_id
                             pending_managed[str(managed_pending["request_id"])] = managed_pending
+                        lifecycle_pending = _attach_codex_canary_lifecycle_pending(forwarded, optimization_metadata)
+                        if lifecycle_pending and isinstance(lifecycle_pending.get("request_id"), str):
+                            lifecycle_pending["start_event_id"] = start_event_id
+                            pending_lifecycle[str(lifecycle_pending["request_id"])] = lifecycle_pending
                         await upstream.send(forwarded)
 
             async def upstream_to_client() -> None:
@@ -2204,6 +2320,11 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                         session_id=session_id,
                         request_started=request_started,
                         pending_managed=pending_managed,
+                    )
+                    await _record_codex_canary_lifecycle_outcome(
+                        msg,
+                        request_started=request_started,
+                        pending_lifecycle=pending_lifecycle,
                     )
                     _record_message(
                         msg,

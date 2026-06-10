@@ -1334,6 +1334,82 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(result["routing_experiments"]["reason_code_breakdown"], [{"value": "passed", "count": 1}])
         self.assertFalse(result["routing_experiments"]["payload_json_included"])
 
+    def test_feedback_status_includes_codex_canary_lifecycle_queue_summary(self):
+        base_event = {
+            "schema": "agentflow.codex_app_canary_lifecycle_feedback.v1",
+            "event_type": "codex_app_canary_lifecycle",
+            "source_surface": "codex_turn",
+            "app_family": "codex",
+            "lifecycle_kind": "codex_app_canary",
+            "action_family": "routing",
+            "policy_id": "local-codex-app-summary-model-hint-canary",
+            "workflow_phase": "summary",
+            "canary_cohort": "canary_applied",
+            "outcome": {"status": "applied", "status_class": "success"},
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "request_ids_included": False,
+                "cache_keys_included": False,
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                now = utc_now()
+                store.enqueue_managed_outcome_feedback(
+                    id="codex-canary-queue-1",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface="codex_app_canary_lifecycle",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(base_event),
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at=now,
+                )
+                cache_event = dict(base_event)
+                cache_event["action_family"] = "cache"
+                cache_event["policy_id"] = "local-codex-app-exact-cache-canary"
+                cache_event["canary_cohort"] = "canary_holdout"
+                cache_event["outcome"] = {"status": "holdout", "status_class": "success"}
+                store.enqueue_managed_outcome_feedback(
+                    id="codex-canary-sent-1",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface="codex_app_canary_lifecycle",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(cache_event),
+                    status="sent",
+                    attempts=1,
+                    next_attempt_at=now,
+                    sent_at=now,
+                )
+                result = feedback.managed_feedback_status_result(
+                    store,
+                    source_surface="codex_app_canary_lifecycle",
+                    sample_limit=5,
+                )
+            finally:
+                store.conn.close()
+
+        codex_status = result["codex_app_canaries"]
+        self.assertEqual(codex_status["schema"], "agentflow.codex_app_canary_lifecycle_queue_status.v1")
+        self.assertEqual(codex_status["queue_rows"], 2)
+        self.assertEqual(codex_status["queue_state_breakdown"], [
+            {"value": "pending", "count": 1},
+            {"value": "sent", "count": 1},
+        ])
+        self.assertEqual(codex_status["action_family_breakdown"], [
+            {"value": "cache", "count": 1},
+            {"value": "routing", "count": 1},
+        ])
+        self.assertFalse(codex_status["payload_json_included"])
+
     def test_openai_outcome_summary_is_feature_only(self):
         routing_meta = {"reason": "test"}
         openai_outcomes.attach_openai_outcome_summary(

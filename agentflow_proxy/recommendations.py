@@ -40,6 +40,7 @@ OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE = "old_context_summary_outcome"
 PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE = "phase_routing_lifecycle"
 PHASE_ROUTING_OUTCOME_SOURCE_SURFACE = "phase_routing_outcome"
 OPTIMIZATION_PROMOTION_LIFECYCLE_SOURCE_SURFACE = "optimization_promotion_lifecycle"
+CODEX_APP_CANARY_LIFECYCLE_SOURCE_SURFACE = "codex_app_canary_lifecycle"
 
 TOKEN_CHARS = 4
 CHAR_BUCKETS = (
@@ -2320,6 +2321,204 @@ def build_codex_turn_outcome_feedback(
     return _sanitize_features(features)
 
 
+def _codex_lifecycle_outcome(
+    *,
+    action_family: str,
+    routing_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    error_code: int | None,
+) -> str:
+    if error_code is not None:
+        return "error"
+    if action_family == "routing":
+        status = str(routing_meta.get("status") or "")
+        reason = str(routing_meta.get("reason") or "")
+        if status == "applied":
+            return "applied"
+        if status == "holdout" or reason == "summary-model-hint-canary-holdout":
+            return "holdout"
+        if status in {"skipped", "eligible-skipped"}:
+            return "skipped"
+        return status or "unknown"
+    status = str(cache_meta.get("status") or "")
+    reason = str(cache_meta.get("reason") or "")
+    if status == "hit":
+        return "hit"
+    if status == "miss":
+        return "invalidated" if reason in {"dependency-changed", "dependency-deleted", "codex-cache-ttl-expired"} else "miss"
+    if status == "holdout" or reason == "codex-app-cache-canary-holdout":
+        return "holdout"
+    if status in {"skipped", "unsafe-skip"}:
+        return "skipped"
+    return status or "unknown"
+
+
+def _codex_canary_for_action(action_family: str, routing_meta: dict[str, Any], cache_meta: dict[str, Any]) -> dict[str, Any]:
+    if action_family == "routing":
+        sample = routing_meta.get("canary_sample") if isinstance(routing_meta.get("canary_sample"), dict) else {}
+        policy = routing_meta.get("canary_policy") if isinstance(routing_meta.get("canary_policy"), dict) else {}
+        return {
+            "name": "codex-app-summary-model-hint",
+            "enabled": bool(routing_meta.get("canary_enabled") or sample.get("enabled")),
+            "cohort": routing_meta.get("canary_cohort") or sample.get("cohort"),
+            "status": sample.get("status") or routing_meta.get("status"),
+            "fraction": sample.get("fraction") if sample.get("fraction") is not None else policy.get("fraction"),
+            "holdout_fraction": (
+                sample.get("holdout_fraction")
+                if sample.get("holdout_fraction") is not None
+                else policy.get("holdout_fraction")
+            ),
+            "sample_unit": sample.get("sample_unit") or policy.get("sample_unit"),
+            "raw_basis_included": False,
+        }
+    sample = cache_meta.get("canary_sample") if isinstance(cache_meta.get("canary_sample"), dict) else {}
+    return {
+        "name": "codex-app-exact-cache",
+        "enabled": bool(sample.get("enabled")),
+        "cohort": cache_meta.get("canary_cohort") or sample.get("cohort"),
+        "status": sample.get("status") or cache_meta.get("status"),
+        "fraction": sample.get("fraction"),
+        "holdout_fraction": sample.get("holdout_fraction"),
+        "sample_unit": sample.get("sample_unit"),
+        "raw_basis_included": False,
+    }
+
+
+def build_codex_app_canary_lifecycle_feedback(
+    *,
+    action_family: str,
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    result_chars: int | None,
+    error_code: int | None,
+    error_message: str | None,
+    latency_ms: int | None,
+    input_text_chars: int | None,
+) -> dict[str, Any] | None:
+    if action_family not in {"routing", "cache"}:
+        return None
+    if action_family == "routing":
+        if routing_meta.get("canary") != "codex-app-summary-model-hint":
+            return None
+        policy_id = routing_meta.get("policy_id") or "local-codex-app-summary-model-hint-canary"
+        target_model = routing_meta.get("target_model") or routing_meta.get("routed_model")
+        decision_status = routing_meta.get("status")
+        decision_reason = routing_meta.get("reason")
+        replayability_level = "features_only"
+        cache_status = cache_meta.get("status")
+    else:
+        if cache_meta.get("canary") != "codex-app-exact-cache" and not isinstance(cache_meta.get("canary_sample"), dict):
+            return None
+        policy_id = "local-codex-app-exact-cache-canary"
+        target_model = routing_meta.get("routed_model") or routing_meta.get("requested_model")
+        decision_status = cache_meta.get("status")
+        decision_reason = cache_meta.get("reason")
+        replayability_level = cache_meta.get("replayability_level") or "features_only"
+        cache_status = cache_meta.get("status")
+
+    input_tokens_est = max(0, int((input_text_chars or 0) / TOKEN_CHARS))
+    output_tokens_est = max(0, int((result_chars or 0) / TOKEN_CHARS))
+    requested_model = routing_meta.get("requested_model")
+    routed_model = routing_meta.get("routed_model") or requested_model
+    routed_cost = estimate_cost(
+        str(routed_model or codex_app_model()),
+        input_tokens_est,
+        output_tokens_est,
+        provider="openai",
+        processing_mode=codex_app_processing_mode(),
+    )
+    requested_cost = estimate_cost(
+        str(requested_model or routed_model or codex_app_model()),
+        input_tokens_est,
+        output_tokens_est,
+        provider="openai",
+        processing_mode=codex_app_processing_mode(),
+    )
+    cost_delta = (
+        float(requested_cost) - float(routed_cost)
+        if requested_cost is not None and routed_cost is not None
+        else None
+    )
+    error_bits = _compact_error(error_message, 500 if error_code is not None else 200) if error_code is not None else {}
+    safety_stop = routing_meta.get("safety_stop") if isinstance(routing_meta.get("safety_stop"), dict) else {}
+    canary = _codex_canary_for_action(action_family, routing_meta, cache_meta)
+    feedback = {
+        "schema": "agentflow.codex_app_canary_lifecycle_feedback.v1",
+        "event_type": "codex_app_canary_lifecycle",
+        "occurred_at": utc_now(),
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "app_family": "codex",
+        "lifecycle_kind": "codex_app_canary",
+        "action_family": action_family,
+        "policy_id": policy_id,
+        "candidate_id": f"{policy_id}:{canary.get('cohort') or 'unknown'}",
+        "workflow_phase": (
+            routing_meta.get("workflow_phase")
+            or cache_meta.get("workflow_phase")
+            or routing_meta.get("category")
+            or "unknown"
+        ),
+        "workflow_phase_reason": routing_meta.get("workflow_phase_reason") or cache_meta.get("workflow_phase_reason"),
+        "model_family_bucket": _model_family(routed_model or requested_model),
+        "requested_model_family": _model_family(requested_model),
+        "target_model_family": _model_family(target_model),
+        "dimensions": {
+            "text_bucket": _text_bucket(input_text_chars),
+            "input_token_bucket": _token_bucket(input_tokens_est),
+            "output_token_bucket": _token_bucket(output_tokens_est),
+            "model_field_state": "present" if routing_meta.get("model_field") else "unknown",
+            "cache_status": cache_status,
+            "replayability_level": replayability_level,
+        },
+        "canary": canary,
+        "canary_cohort": canary.get("cohort"),
+        "decision": {
+            "status": decision_status,
+            "reason": decision_reason,
+            "policy_source": (
+                routing_meta.get("policy_source")
+                if action_family == "routing"
+                else cache_meta.get("policy_source")
+            ),
+            "applied": bool(routing_meta.get("applied") if action_family == "routing" else cache_meta.get("status") == "hit"),
+            "cache_key_included": False,
+        },
+        "outcome": {
+            "status": _codex_lifecycle_outcome(
+                action_family=action_family,
+                routing_meta=routing_meta,
+                cache_meta=cache_meta,
+                error_code=error_code,
+            ),
+            "status_class": "error" if error_code is not None else "success",
+            "jsonrpc_error": bool(error_code is not None),
+            "latency_bucket": _latency_bucket(latency_ms),
+            "cost_delta_bucket": _net_savings_bucket(cost_delta),
+            "cache_status": cache_status,
+            "crunch_changed": bool(crunch_meta.get("changed")),
+            "safety_stop_reasons": safety_stop.get("reason_codes") or safety_stop.get("trigger_metrics") or [],
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_params_included": False,
+            "raw_transcripts_included": False,
+            "raw_commands_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "thread_ids_included": False,
+            "local_session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "secrets_included": False,
+        },
+    }
+    if error_bits:
+        feedback["outcome"]["error_bucket"] = error_bits.get("error_class")
+    return _sanitize_features({key: value for key, value in feedback.items() if value not in (None, "", [], {})})
+
+
 def disabled_outcome_feedback_meta() -> dict[str, Any]:
     return {
         "enabled": recommendations_enabled(),
@@ -2786,6 +2985,20 @@ async def queue_policy_event_feedback(
         stored = store_obj.get_managed_outcome_feedback(queue_id) if hasattr(store_obj, "get_managed_outcome_feedback") else row
         return _queued_meta(stored or row)
     return await _flush_claimed_outcome_feedback(store_obj, claimed)
+
+
+async def queue_codex_app_canary_lifecycle_feedback(
+    store_obj: Any,
+    event_payload: dict[str, Any],
+    *,
+    flush_immediately: bool = False,
+) -> dict[str, Any]:
+    return await queue_policy_event_feedback(
+        store_obj,
+        event_payload,
+        source_surface=CODEX_APP_CANARY_LIFECYCLE_SOURCE_SURFACE,
+        flush_immediately=flush_immediately,
+    )
 
 
 async def queue_codex_outcome_feedback(

@@ -1540,6 +1540,180 @@ summary_model_hint:
         self.assertEqual(row["attempts"], 1)
         self.assertNotIn("must be stripped", row["payload_json"])
 
+    def test_codex_canary_lifecycle_feedback_queues_summary_and_exact_cache_metadata(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        secret = "raw codex lifecycle secret"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-lifecycle-enabled",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-lifecycle-enabled",
+                "model": "gpt-5.3-codex",
+                "input": [{"type": "text", "text": f"Summarize the completed work. {secret}"}],
+                "temperature": 0,
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-lifecycle-enabled",
+            "result": {"message": "summary complete"},
+        }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", True),
+                        patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_TARGET", "gpt-5-codex"),
+                        patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_CANARY", {
+                            "fraction": 1.0,
+                            "holdout_fraction": 0.0,
+                            "salt": "summary-lifecycle-test",
+                            "unit": "source_hash",
+                        }),
+                        patch.object(codex_app_proxy, "CODEX_APP_CACHE", True),
+                        patch.object(codex_app_proxy, "CODEX_APP_CACHE_CANARY", {
+                            "fraction": 1.0,
+                            "holdout_fraction": 0.0,
+                            "salt": "cache-lifecycle-test",
+                            "unit": "source_hash",
+                        }),
+                    ):
+                        forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                        request_started = {}
+                        start_event_id = codex_app_proxy._record_message(
+                            forwarded,
+                            direction="client_to_server",
+                            session_id="session-lifecycle-enabled",
+                            request_started=request_started,
+                            optimization_metadata=metadata,
+                        )
+                        pending = codex_app_proxy._attach_codex_canary_lifecycle_pending(forwarded, metadata)
+                        pending["start_event_id"] = start_event_id
+                        pending_lifecycle = {pending["request_id"]: pending}
+                        await codex_app_proxy._record_codex_canary_lifecycle_outcome(
+                            json.dumps(response),
+                            request_started=request_started,
+                            pending_lifecycle=pending_lifecycle,
+                        )
+                        rows = test_store.conn.execute(
+                            "select source_surface, endpoint, status, payload_json from managed_outcome_feedback_queue order by created_at"
+                        ).fetchall()
+                        routing_row = test_store.conn.execute(
+                            "select routing_json from codex_app_events where id = ?",
+                            (start_event_id,),
+                        ).fetchone()
+                        return [dict(row) for row in rows], json.loads(routing_row["routing_json"])
+                finally:
+                    test_store.conn.close()
+
+        rows, routing = asyncio.run(run_fixture())
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["source_surface"] for row in rows}, {"codex_app_canary_lifecycle"})
+        self.assertEqual({row["endpoint"] for row in rows}, {"/v1/policy-events"})
+        self.assertEqual({row["status"] for row in rows}, {"queued"})
+        payloads = [json.loads(row["payload_json"]) for row in rows]
+        self.assertEqual(
+            {payload["action_family"] for payload in payloads},
+            {"routing", "cache"},
+        )
+        for payload in payloads:
+            self.assertEqual(payload["schema"], "agentflow.codex_app_canary_lifecycle_feedback.v1")
+            self.assertTrue(payload["privacy"]["metadata_only"])
+            self.assertFalse(payload["privacy"]["raw_params_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertNotIn(secret, json.dumps(payload))
+            self.assertNotIn("turn-lifecycle-enabled", json.dumps(payload))
+            self.assertNotIn("thread-lifecycle-enabled", json.dumps(payload))
+            forbidden = {"prompt", "messages", "content", "params", "request_id", "thread_id", "cache_key"}
+            self.assertTrue(forbidden.isdisjoint(self._keys_in(payload)))
+        feedback_meta = routing["managed_lifecycle_feedback"]
+        self.assertFalse(feedback_meta["payload_included"])
+        self.assertEqual(feedback_meta["results"]["routing"]["status"], "queued")
+        self.assertEqual(feedback_meta["results"]["cache"]["status"], "queued")
+
+    def test_codex_canary_lifecycle_feedback_disabled_records_skip_without_queue(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-lifecycle-disabled",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5.3-codex",
+                "input": [{"type": "text", "text": "Summarize the completed work."}],
+                "temperature": 0,
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-lifecycle-disabled",
+            "result": {"message": "summary complete"},
+        }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT", True),
+                        patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_TARGET", "gpt-5-codex"),
+                        patch.object(codex_app_proxy, "CODEX_APP_SUMMARY_MODEL_HINT_CANARY", {
+                            "fraction": 1.0,
+                            "holdout_fraction": 0.0,
+                            "salt": "summary-lifecycle-disabled",
+                            "unit": "source_hash",
+                        }),
+                        patch.object(codex_app_proxy, "CODEX_APP_CACHE", True),
+                        patch.object(codex_app_proxy, "CODEX_APP_CACHE_CANARY", {
+                            "fraction": 1.0,
+                            "holdout_fraction": 0.0,
+                            "salt": "cache-lifecycle-disabled",
+                            "unit": "source_hash",
+                        }),
+                    ):
+                        forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+                        request_started = {}
+                        start_event_id = codex_app_proxy._record_message(
+                            forwarded,
+                            direction="client_to_server",
+                            session_id="session-lifecycle-disabled",
+                            request_started=request_started,
+                            optimization_metadata=metadata,
+                        )
+                        pending = codex_app_proxy._attach_codex_canary_lifecycle_pending(forwarded, metadata)
+                        pending["start_event_id"] = start_event_id
+                        await codex_app_proxy._record_codex_canary_lifecycle_outcome(
+                            json.dumps(response),
+                            request_started=request_started,
+                            pending_lifecycle={pending["request_id"]: pending},
+                        )
+                        count = test_store.conn.execute(
+                            "select count(*) as c from managed_outcome_feedback_queue"
+                        ).fetchone()["c"]
+                        routing_row = test_store.conn.execute(
+                            "select routing_json from codex_app_events where id = ?",
+                            (start_event_id,),
+                        ).fetchone()
+                        return count, json.loads(routing_row["routing_json"])
+                finally:
+                    test_store.conn.close()
+
+        count, routing = asyncio.run(run_fixture())
+
+        self.assertEqual(count, 0)
+        feedback_meta = routing["managed_lifecycle_feedback"]
+        self.assertEqual(feedback_meta["results"]["routing"]["status"], "disabled")
+        self.assertEqual(feedback_meta["results"]["routing"]["reason"], "disabled")
+        self.assertEqual(feedback_meta["results"]["cache"]["status"], "disabled")
+        self.assertEqual(feedback_meta["results"]["cache"]["reason"], "disabled")
+        self.assertFalse(feedback_meta["payload_included"])
+
 
 if __name__ == "__main__":
     unittest.main()

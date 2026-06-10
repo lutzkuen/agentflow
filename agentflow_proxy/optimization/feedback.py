@@ -151,6 +151,54 @@ def _routing_experiment_status(
     }
 
 
+def _codex_app_canary_lifecycle_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    queue_state_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    outcome_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    for row in rows:
+        payload = _safe_payload_json(row)
+        if payload.get("schema") != "agentflow.codex_app_canary_lifecycle_feedback.v1":
+            continue
+        row_count += 1
+        raw_status = str(row.get("status") or "unknown")
+        if raw_status == "sent":
+            queue_state = "sent"
+        elif raw_status in {"queued", "sending", "retryable-error"}:
+            queue_state = "pending"
+        elif raw_status in {"error", "dropped-after-limit"}:
+            queue_state = "error"
+        else:
+            queue_state = raw_status
+        queue_state_counts[queue_state] = queue_state_counts.get(queue_state, 0) + 1
+        action = str(payload.get("action_family") or "unknown")
+        action_counts[action] = action_counts.get(action, 0) + 1
+        outcome = payload.get("outcome") if isinstance(payload.get("outcome"), dict) else {}
+        outcome_status = str(outcome.get("status") or payload.get("status") or "unknown")
+        outcome_counts[outcome_status] = outcome_counts.get(outcome_status, 0) + 1
+        cohort = str(payload.get("canary_cohort") or "unknown")
+        cohort_counts[cohort] = cohort_counts.get(cohort, 0) + 1
+    return {
+        "schema": "agentflow.codex_app_canary_lifecycle_queue_status.v1",
+        "queue_rows": row_count,
+        "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
+        "action_family_breakdown": breakdown_from_counts(action_counts),
+        "outcome_status_breakdown": breakdown_from_counts(outcome_counts),
+        "canary_cohort_breakdown": breakdown_from_counts(cohort_counts),
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -240,6 +288,7 @@ def managed_feedback_status_result(
     }
     pattern_evidence = _pattern_evidence_status(store, source_surface=source_surface)
     routing_experiments = _routing_experiment_status(store, source_surface=source_surface)
+    codex_app_canaries = _codex_app_canary_lifecycle_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -249,6 +298,7 @@ def managed_feedback_status_result(
         "summary": summary,
         "pattern_evidence": pattern_evidence,
         "routing_experiments": routing_experiments,
+        "codex_app_canaries": codex_app_canaries,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,
