@@ -212,6 +212,7 @@ Common policy commands:
 | `agentflow-optimization-shadow-eval eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Record metadata-only local shadow-eval pass/fail/blocked/unknown results without provider calls by default |
 | `agentflow-optimization-eval-next --db ~/.agentflow/agentflow.sqlite3 --limit 10 --pretty` | Select a bounded highest-value eval queue batch and record local eval evidence without provider calls by default |
 | `agentflow-optimization-promotion-report eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Score local eval, canary, and holdout evidence into widen/hold/rollback/needs_eval promotion verdicts |
+| `agentflow-optimization-promotion-actions promotion-report.json --pretty` | Convert passing promotion verdicts into privacy-safe local rollout-action bundles with explicit omissions |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
 | `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
 | `agentflow-policy-apply proposed.json --dry-run --pretty` | Preview local file writes |

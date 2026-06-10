@@ -9,6 +9,7 @@ from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
 from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
+from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
 from agentflow_proxy.store import Store, stable_json
@@ -362,6 +363,88 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
         self._assert_privacy_clean(report)
+
+    def test_promotion_actions_emit_local_rollout_actions_and_explicit_omissions(self):
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "routing-action-candidate",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "candidate_target_model": "claude-haiku-4-5-20251001",
+                    "projected_savings_usd": 0.05,
+                    "sample_count": 3,
+                    "cohort_counts": {"canary_applied": 2, "canary_holdout": 1, "bypassed_or_disabled": 0},
+                    "eval_evidence": {
+                        "result_count": 1,
+                        "pass_count": 1,
+                        "fail_count": 0,
+                        "blocked_count": 0,
+                        "latest_result_at": "2026-06-10T03:30:00+00:00",
+                        "score_summary": {"avg_output_similarity": 0.98, "avg_quality_score": 0.97},
+                    },
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "cache-action-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "candidate_profile": "replay-safe-exact-candidate",
+                    "projected_savings_usd": 0.03,
+                    "sample_count": 4,
+                    "cohort_counts": {"canary_applied": 2, "canary_holdout": 2, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "blocked-action-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.01,
+                    "sample_count": 0,
+                    "cohort_counts": {"canary_applied": 0, "canary_holdout": 0, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 0, "pass_count": 0, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing", "insufficient-eval-pass-results"],
+                    "privacy": {"raw_prompts_included": False},
+                },
+            ],
+        }
+
+        result = build_optimization_promotion_actions(report, widen_step=0.25, holdout_fraction=0.1)
+
+        self.assertEqual(result["schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertEqual(result["summary"]["action_count"], 2)
+        self.assertEqual(result["summary"]["omitted_count"], 1)
+        by_candidate = {row["target_candidate_id"]: row for row in result["actions"]}
+        routing = by_candidate["routing-action-candidate"]
+        cache = by_candidate["cache-action-candidate"]
+        self.assertEqual(routing["policy_section"], "routing")
+        self.assertEqual(routing["target_local_policy_section"], "routing.rules")
+        self.assertEqual(routing["action_type"], "widen")
+        self.assertEqual(routing["canary_fraction"], 0.916667)
+        self.assertEqual(routing["holdout_fraction"], 0.1)
+        self.assertEqual(routing["evidence_summary"]["eval_pass_count"], 1)
+        self.assertEqual(cache["policy_section"], "cache")
+        self.assertEqual(cache["local_policy_update"]["candidate_profile"], "replay-safe-exact-candidate")
+        self.assertEqual(result["omitted"][0]["target_candidate_id"], "blocked-action-candidate")
+        self.assertEqual(result["omitted"][0]["reason"], "insufficient-eval-evidence")
+        self._assert_privacy_clean(result)
 
     def test_feedback_status_result_is_metadata_only(self):
         result = feedback.managed_feedback_status_result(

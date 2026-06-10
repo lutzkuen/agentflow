@@ -1182,6 +1182,93 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIn("eval-failed", candidate["reason_codes"])
         self.assertEqual(candidate["eval_evidence"]["fail_count"], 1)
 
+    def test_optimization_promotion_actions_cli_emits_rollout_bundle_from_report(self):
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "routing-cli-action",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "candidate_target_model": "claude-haiku-4-5-20251001",
+                    "projected_savings_usd": 0.02,
+                    "sample_count": 3,
+                    "cohort_counts": {"canary_applied": 2, "canary_holdout": 1, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"raw_prompts_included": False},
+                    "prompt": "raw promotion action prompt must stay local",
+                    "request_id": "promotion-action-request-secret",
+                    "session_id": "promotion-action-session-secret",
+                    "file_path": "/tmp/promotion-action-secret.py",
+                },
+                {
+                    "candidate_id": "cache-cli-action",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "candidate_profile": "replay-safe-exact-candidate",
+                    "projected_savings_usd": 0.03,
+                    "sample_count": 3,
+                    "cohort_counts": {"canary_applied": 2, "canary_holdout": 1, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "blocked-cli-action",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.01,
+                    "sample_count": 0,
+                    "cohort_counts": {"canary_applied": 0, "canary_holdout": 0, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 0, "pass_count": 0, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing"],
+                    "privacy": {"raw_prompts_included": False},
+                },
+            ],
+        }
+        stdout = io.StringIO()
+
+        code = cli.optimization_promotion_actions_cli(
+            ["--widen-step", "0.25", "--holdout-fraction", "0.1", "-"],
+            stdin=io.StringIO(json.dumps(report)),
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(payload["summary"]["action_count"], 2)
+        self.assertEqual(payload["summary"]["omitted_count"], 1)
+        sections = {row["policy_section"] for row in payload["actions"]}
+        self.assertEqual(sections, {"routing", "cache"})
+        omitted = payload["omitted"][0]
+        self.assertEqual(omitted["target_candidate_id"], "blocked-cli-action")
+        self.assertEqual(omitted["reason"], "insufficient-eval-evidence")
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw promotion action prompt",
+            "promotion-action-request-secret",
+            "promotion-action-session-secret",
+            "/tmp/promotion-action-secret.py",
+            '"prompt"',
+            '"request_id"',
+            '"session_id"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+
     def test_optimization_shadow_eval_cli_requires_budget_for_execute(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

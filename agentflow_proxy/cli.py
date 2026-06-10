@@ -2713,6 +2713,93 @@ def optimization_promotion_report_cli(
     return 0
 
 
+def optimization_promotion_actions_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Emit local rollout actions from optimization promotion verdicts")
+    parser.add_argument(
+        "promotion_report",
+        nargs="?",
+        help="Optional optimization promotion report JSON path, or '-' to read from stdin. If omitted, a fresh report is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh promotion report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Maximum candidates to score when building a fresh promotion report, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=1,
+        help="Minimum samples when building a fresh eval plan for a fresh promotion report, default: 1",
+    )
+    parser.add_argument("--initial-canary-fraction", type=float, default=0.10, help="Canary fraction for first local rollout actions, default: 0.10")
+    parser.add_argument("--widen-step", type=float, default=0.25, help="Fraction added when widening an existing canary, default: 0.25")
+    parser.add_argument("--max-canary-fraction", type=float, default=1.0, help="Maximum recommended canary fraction, default: 1.0")
+    parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Deterministic holdout fraction to preserve, default: 0.10")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    try:
+        if args.promotion_report:
+            report = _read_json_input(str(args.promotion_report), stdin=stdin)
+        else:
+            from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+
+            store = _open_store_for_db(str(args.db))
+            try:
+                report = build_optimization_promotion_report(
+                    store,
+                    limit=args.limit,
+                    min_samples=args.min_samples,
+                )
+            finally:
+                store.conn.close()
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_promotion_rollout_actions_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
+
+    result = build_optimization_promotion_actions(
+        report,
+        initial_canary_fraction=args.initial_canary_fraction,
+        widen_step=args.widen_step,
+        max_canary_fraction=args.max_canary_fraction,
+        holdout_fraction=args.holdout_fraction,
+    )
+
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -3451,6 +3538,10 @@ def optimization_eval_queue_main() -> None:
 
 def optimization_promotion_report_main() -> None:
     raise SystemExit(optimization_promotion_report_cli())
+
+
+def optimization_promotion_actions_main() -> None:
+    raise SystemExit(optimization_promotion_actions_cli())
 
 
 def managed_feedback_status_main() -> None:
