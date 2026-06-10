@@ -80,6 +80,20 @@ SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.
 MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
 
 
+def _record_routing_rate_limit_fallback(
+    routing_meta: dict[str, Any],
+    *,
+    requested_model: str,
+    from_model: Any,
+) -> None:
+    routing_meta["fallback_reason"] = "rate_limited"
+    phase_canary = routing_meta.get("phase_canary")
+    if isinstance(phase_canary, dict):
+        phase_canary["fallback_reason"] = "rate_limited"
+        phase_canary["fallback_from_model"] = str(from_model)
+        phase_canary["actual_forwarded_model"] = str(requested_model)
+
+
 def _attach_session_memory_hints(
     *,
     context: ProviderContext,
@@ -926,7 +940,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                             if stream_retry_count == 1 and crunched.get("model") != resolved_requested_model:
                                                 _rate_limited_model = crunched.get("model")
                                                 crunched["model"] = resolved_requested_model
-                                                routing_meta["fallback_reason"] = "rate_limited"
+                                                _record_routing_rate_limit_fallback(
+                                                    routing_meta,
+                                                    requested_model=str(resolved_requested_model),
+                                                    from_model=_rate_limited_model,
+                                                )
                                                 print(f"rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                                             await asyncio.sleep(delay)
                                             continue
@@ -1225,7 +1243,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                         if retry_count == 1 and crunched.get("model") != resolved_requested_model:
                             _rate_limited_model = crunched.get("model")
                             crunched["model"] = resolved_requested_model
-                            routing_meta["fallback_reason"] = "rate_limited"
+                            _record_routing_rate_limit_fallback(
+                                routing_meta,
+                                requested_model=str(resolved_requested_model),
+                                from_model=_rate_limited_model,
+                            )
                             print(f"rate_limit_fallback: routing {_rate_limited_model!r} -> {resolved_requested_model!r}")
                         await asyncio.sleep(delay)
                         continue

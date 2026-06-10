@@ -260,6 +260,8 @@ def _default_phase_canary_policy() -> dict[str, Any]:
     return {
         "enabled": False,
         "policy_id": "local-phase-sonnet-haiku-canary-v1",
+        "source_surface": "anthropic_messages",
+        "app_family": "anthropic",
         "model_pattern": "sonnet",
         "target_model": "haiku",
         "eligible_workflow_phases": ["tool-execution", "summary"],
@@ -272,6 +274,7 @@ def _default_phase_canary_policy() -> dict[str, Any]:
         "canary_fraction": 0.0,
         "holdout_fraction": 0.0,
         "salt": "agentflow-phase-routing-canary-v1",
+        "cohort_unit": "request_features",
         "safety_stop": {
             "enabled": True,
             "window_hours": 24,
@@ -353,11 +356,14 @@ def _apply_phase_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, Any
         "policy_id",
         "promotion_action_id",
         "target_candidate_id",
+        "source_surface",
+        "app_family",
         "policy_source",
         "model_pattern",
         "target_model",
         "min_workflow_phase_confidence",
         "salt",
+        "cohort_unit",
     ):
         if data.get(key) not in (None, ""):
             policy[key] = str(data[key])
@@ -489,6 +495,13 @@ def _cohort_score(payload: dict[str, Any], salt: str) -> tuple[str, float]:
     digest = hashlib.sha256(f"{salt}:{stable_json(payload)}".encode("utf-8")).hexdigest()
     score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
     return f"sha256:{digest}", score
+
+
+def _hash_local_identifier(kind: str, value: str | None) -> str | None:
+    if not value:
+        return None
+    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _input_tokens_est(text_chars: int) -> int:
@@ -708,15 +721,18 @@ def _phase_canary_base_meta(
     return {
         "enabled": bool(ROUTING_PHASE_CANARY.get("enabled")),
         "policy_id": str(ROUTING_PHASE_CANARY.get("policy_id") or "local-phase-sonnet-haiku-canary-v1"),
+        "rule_id": str(ROUTING_PHASE_CANARY.get("policy_id") or "local-phase-sonnet-haiku-canary-v1"),
         "promotion_action_id": ROUTING_PHASE_CANARY.get("promotion_action_id"),
         "target_candidate_id": ROUTING_PHASE_CANARY.get("target_candidate_id"),
+        "candidate_id": ROUTING_PHASE_CANARY.get("target_candidate_id") or ROUTING_PHASE_CANARY.get("promotion_action_id"),
         "status": status,
         "cohort": "none",
         "reason": reason,
         "requested_model": requested,
         "target_model": target_model,
-        "source_surface": "anthropic_messages",
-        "app_family": "anthropic",
+        "actual_forwarded_model": requested,
+        "source_surface": str(ROUTING_PHASE_CANARY.get("source_surface") or "anthropic_messages"),
+        "app_family": str(ROUTING_PHASE_CANARY.get("app_family") or "anthropic"),
         "workflow_phase": phase_meta.get("workflow_phase") or "unknown",
         "workflow_phase_confidence": phase_meta.get("workflow_phase_confidence") or "low",
         "category": category,
@@ -853,6 +869,7 @@ def phase_canary_decision(
     tools: bool,
     category: str,
     phase_meta: dict[str, str],
+    session_id: str | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     target_key = str(ROUTING_PHASE_CANARY.get("target_model") or "haiku")
     target_model = _TIER_MAP.get(target_key, target_key)
@@ -868,6 +885,9 @@ def phase_canary_decision(
     )
     if not ROUTING_PHASE_CANARY.get("enabled"):
         return None, meta
+    if meta["source_surface"] != "anthropic_messages":
+        meta.update({"status": "ineligible", "reason": "source-surface-not-supported"})
+        return requested, meta
 
     requested_l = requested.lower()
     model_pattern = str(ROUTING_PHASE_CANARY.get("model_pattern") or "sonnet").lower()
@@ -909,7 +929,7 @@ def phase_canary_decision(
         meta.update({"status": "safety_stopped", "reason": "safety-stop-tripped", "cohort": "bypassed_or_disabled"})
         return requested, meta
 
-    cohort_payload = {
+    request_cohort_payload = {
         "source_surface": meta["source_surface"],
         "app_family": meta["app_family"],
         "requested_model": requested,
@@ -920,21 +940,51 @@ def phase_canary_decision(
         "has_tools": tools,
         "policy_id": meta["policy_id"],
     }
+    cohort_unit = str(ROUTING_PHASE_CANARY.get("cohort_unit") or "request_features")
+    if cohort_unit in {"session", "session_id", "session_hash"}:
+        cohort_payload = {
+            "source_surface": meta["source_surface"],
+            "app_family": meta["app_family"],
+            "requested_model": requested,
+            "target_model": target_model,
+            "policy_id": meta["policy_id"],
+            "cohort_unit": "session",
+            "session_id_hash": _hash_local_identifier("session_id", session_id),
+        }
+    else:
+        cohort_payload = request_cohort_payload
+        cohort_payload["cohort_unit"] = "request_features"
     cohort_hash, score = _cohort_score(cohort_payload, str(ROUTING_PHASE_CANARY.get("salt") or ""))
     holdout_fraction = float(ROUTING_PHASE_CANARY.get("holdout_fraction") or 0.0)
     canary_fraction = float(ROUTING_PHASE_CANARY.get("canary_fraction") or 0.0)
     meta.update({
         "cohort_hash": cohort_hash,
+        "cohort_key_hash": cohort_hash,
         "cohort_score": round(score, 12),
         "cohort_features": cohort_payload,
     })
     if score < holdout_fraction:
-        meta.update({"status": "holdout", "cohort": "canary_holdout", "reason": "selected-holdout"})
+        meta.update({
+            "status": "holdout",
+            "cohort": "canary_holdout",
+            "reason": "selected-holdout",
+            "actual_forwarded_model": requested,
+        })
         return requested, meta
     if score < holdout_fraction + canary_fraction:
-        meta.update({"status": "applied", "cohort": "canary_applied", "reason": "selected-canary"})
+        meta.update({
+            "status": "applied",
+            "cohort": "canary_applied",
+            "reason": "selected-canary",
+            "actual_forwarded_model": target_model,
+        })
         return target_model, meta
-    meta.update({"status": "not_selected", "cohort": "skipped", "reason": "outside-canary-fraction"})
+    meta.update({
+        "status": "not_selected",
+        "cohort": "skipped",
+        "reason": "outside-canary-fraction",
+        "actual_forwarded_model": requested,
+    })
     return requested, meta
 
 
@@ -1255,6 +1305,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             tools=tools,
             category=category,
             phase_meta=phase_meta,
+            session_id=session_id,
         )
         if canary_meta.get("reason") != "requested-model-not-enabled":
             routed = canary_routed or requested

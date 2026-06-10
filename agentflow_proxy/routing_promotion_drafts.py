@@ -379,6 +379,8 @@ def _routing_payload(
         "enabled": True,
         "policy_id": policy_id,
         "target_candidate_id": candidate_id,
+        "source_surface": candidate.get("source_surface"),
+        "app_family": candidate.get("app_family") or "anthropic",
         "policy_source": "local-manual",
         "model_pattern": requested,
         "target_model": routed,
@@ -389,6 +391,7 @@ def _routing_payload(
         "canary_fraction": _bounded_fraction(initial_canary_fraction, 0.10),
         "holdout_fraction": _bounded_fraction(holdout_fraction, 0.10),
         "salt": _stable_id("routing-promotion-salt", candidate_id, requested, routed),
+        "cohort_unit": "session",
         "safety_stop": _safety_stop(candidate),
         "promotion": {
             "schema": "agentflow.routing_promotion_local_draft_metadata.v1",

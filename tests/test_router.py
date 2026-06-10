@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import agentflow_proxy.router as router_module
+from agentflow_proxy.anthropic_proxy import _record_routing_rate_limit_fallback
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.store import Store, stable_json, utc_now
 from agentflow_proxy.router import HAIKU_DEFAULT, SONNET_DEFAULT, classify_workflow_phase, route_model
@@ -690,6 +691,159 @@ rules: []
                     self.assertEqual(meta["phase_canary"]["cohort"], "canary_holdout")
             finally:
                 importlib.reload(router_module)
+
+    def test_phase_canary_disabled_default_keeps_existing_rules(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: false
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+rules:
+  - conditions:
+      model_pattern: sonnet
+      category: tool-result
+    action:
+      route_to: haiku
+      reason: existing tool-result rule
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(meta["reason"], "existing tool-result rule")
+                    self.assertNotIn("phase_canary", meta)
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_rejects_non_anthropic_source_surface(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  source_surface: openai_responses
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["phase_canary"]["status"], "ineligible")
+                    self.assertEqual(meta["phase_canary"]["reason"], "source-surface-not-supported")
+                    self.assertEqual(meta["reason"], "phase canary ineligible: source-surface-not-supported")
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_session_cohort_uses_hashed_session_only(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  target_candidate_id: promoted-shadow-candidate
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  cohort_unit: session
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    first = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+                    second = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {"role": "user", "content": "Make the change."},
+                            {"role": "assistant", "content": "Done."},
+                            {"role": "user", "content": "Summarize the result."},
+                        ],
+                    }
+
+                    first_routed, first_meta = manual_router.route_model(first, session_id="raw-secret-session")
+                    second_routed, second_meta = manual_router.route_model(second, session_id="raw-secret-session")
+
+                    self.assertEqual(first_routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(second_routed, manual_router.HAIKU_DEFAULT)
+                    first_canary = first_meta["phase_canary"]
+                    second_canary = second_meta["phase_canary"]
+                    self.assertEqual(first_canary["candidate_id"], "promoted-shadow-candidate")
+                    self.assertEqual(first_canary["cohort_key_hash"], second_canary["cohort_key_hash"])
+                    self.assertEqual(first_canary["cohort_features"]["cohort_unit"], "session")
+                    self.assertIn("session_id_hash", first_canary["cohort_features"])
+                    rendered = stable_json([first_canary, second_canary])
+                    self.assertNotIn("raw-secret-session", rendered)
+                    self.assertNotIn("content", rendered)
+                    self.assertEqual(managed_egress_violations(first_canary), [])
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_fallback_metadata_updates_canary_block(self):
+        routing_meta = {
+            "phase_canary": {
+                "status": "applied",
+                "cohort": "canary_applied",
+                "target_model": HAIKU_DEFAULT,
+                "actual_forwarded_model": HAIKU_DEFAULT,
+            }
+        }
+
+        _record_routing_rate_limit_fallback(
+            routing_meta,
+            requested_model=SONNET_DEFAULT,
+            from_model=HAIKU_DEFAULT,
+        )
+
+        self.assertEqual(routing_meta["fallback_reason"], "rate_limited")
+        self.assertEqual(routing_meta["phase_canary"]["fallback_reason"], "rate_limited")
+        self.assertEqual(routing_meta["phase_canary"]["fallback_from_model"], HAIKU_DEFAULT)
+        self.assertEqual(routing_meta["phase_canary"]["actual_forwarded_model"], SONNET_DEFAULT)
 
     def test_phase_canary_ineligible_planning_passes_through_before_broad_tool_rule(self):
         with TemporaryDirectory() as tmp:
