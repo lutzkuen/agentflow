@@ -130,6 +130,20 @@ def _default_crunch_policy() -> dict[str, Any]:
             },
         },
         "pattern_rules": [],
+        "session_memory_hints": {
+            "enabled": False,
+            "rule_id": "local-session-plateau-crunch-hint",
+            "crunch_profile": "plateau-repeated-context-review",
+            "old_context_summary_canary": False,
+            "min_call_count": 4,
+            "min_plateau_pairs": 3,
+            "min_text_chars": 8000,
+            "max_error_rate": 0.0,
+            "allowed_phases": ["planning", "verification", "summary"],
+            "block_tool_results": True,
+            "block_thinking": True,
+            "projected_savings_ratio": 0.10,
+        },
         "codex_repeated_scaffolding": {
             "enabled": True,
             "min_request_chars": 12000,
@@ -190,6 +204,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-manual")
+            session_memory_hints = data.get("session_memory_hints") or {}
+            if isinstance(session_memory_hints, dict):
+                _apply_session_memory_hints_policy_yaml(policy, session_memory_hints)
             codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
@@ -231,6 +248,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-default")
+            session_memory_hints = data.get("session_memory_hints") or {}
+            if isinstance(session_memory_hints, dict):
+                _apply_session_memory_hints_policy_yaml(policy, session_memory_hints)
             codex_scaffolding = data.get("codex_repeated_scaffolding") or {}
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
@@ -513,6 +533,29 @@ def _apply_codex_scaffolding_policy_yaml(policy: dict[str, Any], codex_scaffoldi
     ):
         if codex_scaffolding.get(key) is not None:
             target[key] = int(codex_scaffolding[key])
+
+
+def _apply_session_memory_hints_policy_yaml(policy: dict[str, Any], session_memory_hints: dict[str, Any]) -> None:
+    target = policy["session_memory_hints"]
+    target["enabled"] = _as_bool(session_memory_hints.get("enabled"), target["enabled"])
+    for key in ("rule_id", "crunch_profile"):
+        if session_memory_hints.get(key) is not None:
+            target[key] = str(session_memory_hints[key])
+    for key in ("old_context_summary_canary", "block_tool_results", "block_thinking"):
+        if session_memory_hints.get(key) is not None:
+            target[key] = _as_bool(session_memory_hints.get(key), target[key])
+    for key in ("min_call_count", "min_plateau_pairs", "min_text_chars"):
+        if session_memory_hints.get(key) is not None:
+            target[key] = int(session_memory_hints[key])
+    for key in ("max_error_rate", "projected_savings_ratio"):
+        if session_memory_hints.get(key) is not None:
+            target[key] = float(session_memory_hints[key])
+    if session_memory_hints.get("allowed_phases") is not None:
+        raw = session_memory_hints["allowed_phases"]
+        if isinstance(raw, list):
+            target["allowed_phases"] = [str(item) for item in raw]
+        else:
+            target["allowed_phases"] = [str(raw)]
 
 
 CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH = _load_crunch_policy()

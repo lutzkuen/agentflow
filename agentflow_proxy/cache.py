@@ -51,6 +51,21 @@ def _default_cache_policy() -> dict[str, Any]:
             "max_paths": 128,
         },
         "pattern_rules": [],
+        "session_memory_hints": {
+            "enabled": False,
+            "rule_id": "local-session-plateau-cache-hint",
+            "min_call_count": 4,
+            "min_plateau_pairs": 3,
+            "min_text_chars": 8000,
+            "max_error_rate": 0.0,
+            "allowed_phases": ["planning", "verification", "summary"],
+            "block_tool_results": True,
+            "block_thinking": True,
+            "require_safe_invalidation": True,
+            "require_reviewed_pattern_rule": True,
+            "allow_tool_calls": False,
+            "allow_streaming_replay": False,
+        },
     }
 
 
@@ -91,7 +106,39 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
         if file_watch.get("max_paths") is not None:
             policy["file_watch"]["max_paths"] = int(file_watch["max_paths"])
     policy["pattern_rules"] = _load_cache_pattern_rules(data.get("pattern_rules"))
+    hints = data.get("session_memory_hints") or {}
+    if isinstance(hints, dict):
+        _apply_session_memory_hints_policy_yaml(policy, hints)
     return policy
+
+
+def _apply_session_memory_hints_policy_yaml(policy: dict[str, Any], hints: dict[str, Any]) -> None:
+    target = policy["session_memory_hints"]
+    target["enabled"] = _as_bool(hints.get("enabled"), target["enabled"])
+    for key in ("rule_id",):
+        if hints.get(key) is not None:
+            target[key] = str(hints[key])
+    for key in (
+        "block_tool_results",
+        "block_thinking",
+        "require_safe_invalidation",
+        "require_reviewed_pattern_rule",
+        "allow_tool_calls",
+        "allow_streaming_replay",
+    ):
+        if hints.get(key) is not None:
+            target[key] = _as_bool(hints.get(key), target[key])
+    for key in ("min_call_count", "min_plateau_pairs", "min_text_chars"):
+        if hints.get(key) is not None:
+            target[key] = int(hints[key])
+    if hints.get("max_error_rate") is not None:
+        target["max_error_rate"] = float(hints["max_error_rate"])
+    if hints.get("allowed_phases") is not None:
+        raw = hints["allowed_phases"]
+        if isinstance(raw, list):
+            target["allowed_phases"] = [str(item) for item in raw]
+        else:
+            target["allowed_phases"] = [str(raw)]
 
 
 def _normalize_pattern_hash(value: Any) -> str | None:
@@ -600,6 +647,10 @@ def cache_hit_decision_meta(
             "matched_count": 1,
             "rules": [lookup_meta["pattern_rule"]],
         })
+    if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("session_memory_hints"), dict):
+        meta["session_memory_hints"] = lookup_meta["session_memory_hints"]
+    if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("session_memory_replayability"), dict):
+        meta["session_memory_replayability"] = lookup_meta["session_memory_replayability"]
     if estimated_saved_cost_usd is not None:
         meta["estimated_saved_cost_usd"] = round(max(0.0, float(estimated_saved_cost_usd)), 9)
     return meta

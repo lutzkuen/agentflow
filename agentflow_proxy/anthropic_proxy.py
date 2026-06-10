@@ -36,9 +36,10 @@ from agentflow_proxy.crunch import (
     TOKEN_CHARS, estimate_tokens_from_text, build_embedding,
     crunch_body, inject_prompt_cache, has_cache_control_blocks,
     maybe_summarize_old_context, OLD_CONTEXT_SUMMARY_MODEL,
+    CRUNCH_POLICY, CRUNCH_POLICY_SOURCE, CRUNCH_RULES_PATH,
 )
 from agentflow_proxy.cache import (
-    CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
+    CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD, CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH,
     cache_decision_meta, cache_file_dependency_audit, cache_hit_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
     is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
     streaming_cache_lookup_meta, cache_file_dependency_snapshots,
@@ -56,6 +57,7 @@ from agentflow_proxy.routing_experiments import (
     routing_experiment_feedback_features,
     routing_experiment_decision,
 )
+from agentflow_proxy.session_memory_hints import build_session_memory_optimization_hints
 from agentflow_proxy.recommendations import (
     apply_recommendation_to_body,
     build_old_context_summary_outcome_event,
@@ -76,6 +78,49 @@ from agentflow_proxy.store import stable_json, utc_now
 
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
 MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
+
+
+def _attach_session_memory_hints(
+    *,
+    context: ProviderContext,
+    session_id: str | None,
+    stream: bool,
+    has_tool_blocks: bool,
+    category: str | None,
+    text_chars: int,
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    current_thinking: bool,
+) -> None:
+    file_audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else {}
+    pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
+    hints = build_session_memory_optimization_hints(
+        store_obj=context.store,
+        session_id=session_id,
+        stream=stream,
+        has_tool_blocks=has_tool_blocks,
+        category=category,
+        text_chars=text_chars,
+        routing_meta=routing_meta,
+        crunch_policy=CRUNCH_POLICY,
+        crunch_policy_source=CRUNCH_POLICY_SOURCE,
+        crunch_rule_path=CRUNCH_RULES_PATH,
+        cache_policy=CACHE_POLICY,
+        cache_policy_source=CACHE_POLICY_SOURCE,
+        cache_rule_path=CACHE_RULES_PATH,
+        safe_invalidation_evidence=bool(file_audit.get("safe_invalidation_evidence")),
+        reviewed_cache_pattern_rule=bool(pattern_rule),
+        current_thinking=current_thinking,
+    )
+    crunch_meta["session_memory_hints"] = hints["crunch"]
+    cache_meta["session_memory_hints"] = hints["cache"]
+    cache_meta["session_memory_replayability"] = {
+        "status": hints["cache"]["status"],
+        "replayability_level": hints["cache"]["replayability_level"],
+        "cacheability_hint": hints["cache"]["cacheability_hint"],
+        "dry_run_projection": hints["cache"]["dry_run_projection"],
+    }
 
 
 async def _record_managed_outcome_feedback(
@@ -724,6 +769,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 cache_meta["safe_invalidation_evidence"] = bool(
                     cache_meta["file_dependency_audit"]["safe_invalidation_evidence"]
                 )
+            _attach_session_memory_hints(
+                context=context,
+                session_id=session_id,
+                stream=True,
+                has_tool_blocks=has_tool_blocks,
+                category=category,
+                text_chars=input_tokens * TOKEN_CHARS,
+                routing_meta=routing_meta,
+                crunch_meta=crunch_meta,
+                cache_meta=cache_meta,
+                current_thinking=_has_top_level_thinking(crunched),
+            )
             key = cache_key_for(
                 crunched,
                 path,
@@ -1008,6 +1065,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cache_meta["safe_invalidation_evidence"] = bool(
                 cache_meta["file_dependency_audit"]["safe_invalidation_evidence"]
             )
+        _attach_session_memory_hints(
+            context=context,
+            session_id=session_id,
+            stream=False,
+            has_tool_blocks=has_tool_blocks,
+            category=category,
+            text_chars=input_tokens * TOKEN_CHARS,
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            current_thinking=_has_top_level_thinking(crunched),
+        )
         key = cache_key_for(
             crunched,
             path,
