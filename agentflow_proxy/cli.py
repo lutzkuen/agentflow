@@ -2171,6 +2171,43 @@ def openai_scoreboard_cli(argv: Sequence[str] | None = None, *, stdout: Any = No
     return _openai_scoreboard_cli(argv, stdout=stdout)
 
 
+def openai_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure OpenAI local routing opportunity and blockers from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.openai_routing_report import build_openai_routing_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_openai_routing_report(store, limit=args.limit)
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure replay-safe cache opportunity and blockers from local metadata")
     parser.add_argument(
@@ -3961,6 +3998,10 @@ def codex_diagnose_main() -> None:
 
 def openai_scoreboard_main() -> None:
     raise SystemExit(openai_scoreboard_cli())
+
+
+def openai_routing_report_main() -> None:
+    raise SystemExit(openai_routing_report_cli())
 
 
 def phase_routing_report_main() -> None:

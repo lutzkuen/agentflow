@@ -145,6 +145,14 @@ agentflow-phase-routing-report --db ~/.agentflow/agentflow.sqlite3 --dry-run-pol
 
 The dry-run reports matched counts, projected candidate counts and savings, exclusions such as thinking, high error rate, stale evidence, unsupported shadow/streaming evidence, missing baseline support, insufficient samples, candidate rule IDs, and metadata-only privacy flags.
 
+To measure OpenAI local routing opportunity and blockers before enabling any OpenAI canary policy, run:
+
+```bash
+agentflow-openai-routing-report --db ~/.agentflow/agentflow.sqlite3 --pretty
+```
+
+The report groups recent OpenAI metadata by endpoint, model family, category, tool/stream flags, text/token buckets, cache status, and local safety blockers. It projects candidate savings without mutating requests, writing policy files, calling providers, or printing raw prompts, responses, tool payloads, request IDs, cache keys, session IDs, file paths, or secrets.
+
 To export family-agnostic optimization candidates for local evaluation, run:
 
 ```bash
