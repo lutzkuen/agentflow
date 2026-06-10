@@ -13,7 +13,7 @@ import agentflow_proxy.router as router_module
 from agentflow_proxy.admin import reload_policy_modules
 from agentflow_proxy import stats
 from agentflow_proxy import codex_app_policy as codex_app_policy_module
-from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
+from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, stage_policy_draft, utc_now
 from agentflow_proxy.policy_bundle import (
     MANAGED_POLICY_HMAC_SECRET_ENV,
     MANAGED_POLICY_VERIFICATION_SECRET_ENV,
@@ -664,6 +664,60 @@ crunch:
         self.assertFalse(result["ok"])
         self.assertFalse(result["changed"])
         self.assertIn("$.schema", {error["path"] for error in result["before_validation"]["errors"]})
+
+    def test_policy_draft_stages_section_diff_without_touching_active_yaml(self):
+        with TemporaryDirectory() as tmp:
+            active_path = Path(tmp) / "cache_rules.yaml"
+            active_text = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            active_path.write_text(active_text, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+
+            with patch.dict(os.environ, {"AGENTFLOW_CACHE_RULES": str(active_path)}, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    result = asyncio.run(stage_policy_draft(
+                        {"semantic_cache": {"enabled": True, "threshold": 0.91}},
+                        section="cache",
+                        draft_id="cache-threshold-review",
+                        workspace=workspace,
+                    ))
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["schema"], "agentflow.policy_draft_stage.v1")
+            self.assertFalse(result["wrote_active_policy_files"])
+            self.assertFalse(result["reloaded_modules"])
+            self.assertFalse(result["provider_calls_made"])
+            self.assertEqual(active_path.read_text(encoding="utf-8"), active_text)
+            self.assertEqual(result["diff"]["changed_sections"], ["cache"])
+            cache_section = {section["section"]: section for section in result["sections"]}["cache"]
+            self.assertTrue(cache_section["changed"])
+            self.assertEqual(cache_section["target_file"], str(active_path))
+            self.assertTrue(cache_section["reload_required_after_apply"])
+            self.assertIn("$.policies.cache.semantic_cache.threshold", {change["path"] for change in cache_section["changes"]})
+            self.assertTrue((workspace / "cache-threshold-review" / "policy_bundle.json").exists())
+            draft_cache_yaml = workspace / "cache-threshold-review" / "sections" / "cache_rules.yaml"
+            self.assertTrue(draft_cache_yaml.exists())
+            staged = yaml.safe_load(draft_cache_yaml.read_text(encoding="utf-8"))
+            self.assertEqual(staged["semantic_cache"]["threshold"], 0.91)
+
+    def test_policy_draft_rejects_raw_prompt_payloads_before_writing_workspace(self):
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+
+            result = asyncio.run(stage_policy_draft(
+                {"semantic_cache": {"enabled": True}, "raw_request": {"prompt": "do not stage"}},
+                section="cache",
+                draft_id="unsafe",
+                workspace=workspace,
+            ))
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"]["type"], "raw_payload_rejected")
+            self.assertFalse(result["wrote_active_policy_files"])
+            self.assertFalse(workspace.exists())
+            self.assertIn("$.raw_request", {error["path"] for error in result["error"]["errors"]})
 
     def test_policy_bundle_exports_manual_policy_source_and_file_status(self):
         with TemporaryDirectory() as tmp:

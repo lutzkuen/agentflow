@@ -964,6 +964,123 @@ def policy_apply_cli(
     return 0 if result["ok"] else 1
 
 
+def policy_draft_stage_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Stage a local AgentFlow policy draft and return structured diffs without touching active rules"
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Policy bundle JSON/YAML path, section YAML path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--section",
+        choices=["routing", "crunch", "cache", "routing_experiments", "codex_app"],
+        help="Treat input as one local policy section payload and patch it into the current policy bundle.",
+    )
+    parser.add_argument(
+        "--draft-id",
+        help="Optional local draft ID. Unsafe path characters are stripped.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print draft JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.path == "-":
+        raw = stdin.read()
+    else:
+        try:
+            raw = Path(args.path).read_text(encoding="utf-8")
+        except OSError as exc:
+            result = {
+                "schema": "agentflow.policy_draft_stage.v1",
+                "ok": False,
+                "draft": None,
+                "draft_id": args.draft_id,
+                "workspace": args.workspace,
+                "wrote_active_policy_files": False,
+                "reloaded_modules": False,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "diff": None,
+                "sections": [],
+                "error": {
+                    "type": "read_failed",
+                    "message": str(exc),
+                    "errors": [{"path": args.path, "message": str(exc)}],
+                },
+            }
+            _write_policy_draft_stage_result(stdout, result, pretty=args.pretty)
+            return 1
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.policy_files import parse_policy_payload, stage_policy_draft
+
+    payload, parse_error = parse_policy_payload(raw)
+    if parse_error:
+        result = {
+            "schema": "agentflow.policy_draft_stage.v1",
+            "ok": False,
+            "draft": None,
+            "draft_id": args.draft_id,
+            "workspace": args.workspace,
+            "wrote_active_policy_files": False,
+            "reloaded_modules": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "diff": None,
+            "sections": [],
+            "error": {"type": "parse_failed", "message": "policy draft payload could not be parsed", "errors": parse_error["errors"]},
+        }
+    else:
+        result = asyncio.run(stage_policy_draft(
+            payload,
+            section=args.section,
+            draft_id=args.draft_id,
+            workspace=args.workspace,
+        ))
+
+    log_policy_event(
+        "draft-stage",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.path,
+            "section": args.section,
+            "draft_id": result.get("draft_id"),
+            "workspace": result.get("workspace"),
+            "changed": (result.get("diff") or {}).get("changed") if isinstance(result.get("diff"), dict) else None,
+            "changed_sections": (result.get("diff") or {}).get("changed_sections", []) if isinstance(result.get("diff"), dict) else [],
+            "change_count": (result.get("diff") or {}).get("change_count", 0) if isinstance(result.get("diff"), dict) else 0,
+            "wrote_active_policy_files": False,
+            "reloaded_modules": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    _write_policy_draft_stage_result(stdout, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
 async def _queue_codex_app_dry_run_lifecycle_events(store: Any, result: dict[str, Any]) -> dict[str, Any]:
     from agentflow_proxy.recommendations import queue_policy_event_feedback
 
@@ -3710,6 +3827,13 @@ def _write_policy_apply_result(stream: Any, payload: dict[str, Any], *, pretty: 
         _write_json(stream, payload)
 
 
+def _write_policy_draft_stage_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
+    if pretty:
+        stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, payload)
+
+
 def _write_rollout_actions_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -4526,6 +4650,10 @@ def policy_fetch_review_main() -> None:
 
 def policy_apply_main() -> None:
     raise SystemExit(policy_apply_cli())
+
+
+def policy_draft_stage_main() -> None:
+    raise SystemExit(policy_draft_stage_cli())
 
 
 def codex_app_policy_dry_run_main() -> None:

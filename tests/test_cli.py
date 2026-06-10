@@ -5737,6 +5737,69 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertTrue(any(file["section"] == "cache" and file["changed"] for file in payload["files"]))
             self.assertTrue(any(file["section"] == "codex_app" for file in payload["files"]))
 
+    def test_policy_draft_stage_cli_stages_section_diff_without_active_writes(self):
+        with TemporaryDirectory() as tmp:
+            active_path = Path(tmp) / "cache_rules.yaml"
+            active_text = "exact_cache:\n  enabled: true\nsemantic_cache:\n  enabled: false\n  threshold: 0.95\n"
+            active_path.write_text(active_text, encoding="utf-8")
+            workspace = Path(tmp) / "drafts"
+            stdout = io.StringIO()
+
+            from agentflow_proxy import cache as cache_module
+            from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+
+            with (
+                patch.object(cache_module, "CACHE_RULES_PATH", str(active_path)),
+                patch.object(cache_module, "CACHE_POLICY_SOURCE", "local-manual"),
+                patch.object(cache_module, "CACHE_RULES_LOADED_AT", utc_now()),
+                patch.object(cache_module, "CACHE_RULES_LOADED_FILE", policy_file_snapshot(active_path)),
+                patch.object(cache_module, "CACHE_ENABLED", True),
+                patch.object(cache_module, "SEMANTIC_CACHE_ENABLED", False),
+                patch.object(cache_module, "SEMANTIC_CACHE_THRESHOLD", 0.95),
+            ):
+                code = cli.policy_draft_stage_cli(
+                    [
+                        "--section",
+                        "cache",
+                        "--draft-id",
+                        "cli-cache-draft",
+                        "--workspace",
+                        str(workspace),
+                        "-",
+                    ],
+                    stdin=io.StringIO("semantic_cache:\n  enabled: true\n  threshold: 0.91\n"),
+                    stdout=stdout,
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["draft_id"], "cli-cache-draft")
+            self.assertEqual(payload["diff"]["changed_sections"], ["cache"])
+            self.assertFalse(payload["wrote_active_policy_files"])
+            self.assertFalse(payload["provider_calls_made"])
+            self.assertEqual(active_path.read_text(encoding="utf-8"), active_text)
+            self.assertTrue((workspace / "cli-cache-draft" / "draft.json").exists())
+            cache_section = {section["section"]: section for section in payload["sections"]}["cache"]
+            self.assertEqual(cache_section["target_file"], str(active_path))
+            self.assertIn("$.policies.cache.semantic_cache.threshold", {change["path"] for change in cache_section["changes"]})
+
+    def test_policy_draft_stage_cli_rejects_raw_provider_payloads(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.policy_draft_stage_cli(
+                ["--section", "cache", "--workspace", str(Path(tmp) / "drafts"), "-"],
+                stdin=io.StringIO("raw_response:\n  content: secret\n"),
+                stdout=stdout,
+            )
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "raw_payload_rejected")
+            self.assertFalse((Path(tmp) / "drafts").exists())
+
     def test_policy_apply_cli_dry_run_shows_old_context_summary_canary_yaml_diff(self):
         proposed = self._managed_old_context_summary_bundle()
 

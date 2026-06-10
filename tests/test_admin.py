@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -66,6 +67,79 @@ class AdminRouterTests(unittest.TestCase):
         events = recent_policy_events(limit=1)["events"]
         self.assertEqual(events[0]["action"], "reload")
         self.assertEqual(events[0]["details"]["source"], "admin_api")
+
+    def test_policy_draft_stage_route_is_loopback_only(self):
+        app = FastAPI()
+        app.include_router(create_admin_router())
+
+        remote = TestClient(app, client=("192.168.1.50", 50000))
+        blocked = remote.post(
+            "/agentflow/admin/policy-drafts/stage",
+            json={"section": "cache", "policy": {"semantic_cache": {"threshold": 0.91}}},
+        )
+
+        self.assertEqual(blocked.status_code, 403)
+        payload = blocked.json()
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["wrote_active_policy_files"])
+        self.assertFalse(payload["provider_calls_made"])
+
+    def test_policy_draft_stage_route_returns_structured_diff_for_loopback(self):
+        app = FastAPI()
+        app.include_router(create_admin_router())
+
+        local = TestClient(app, client=("127.0.0.1", 50000))
+        workspace = str(Path(self.tmp.name) / "drafts")
+        response = local.post(
+            "/agentflow/admin/policy-drafts/stage",
+            json={
+                "section": "cache",
+                "policy": {"semantic_cache": {"enabled": True, "threshold": 0.91}},
+                "draft_id": "admin-cache-draft",
+                "workspace": workspace,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.policy_draft_stage.v1")
+        self.assertEqual(payload["draft_id"], "admin-cache-draft")
+        self.assertFalse(payload["wrote_active_policy_files"])
+        self.assertFalse(payload["reloaded_modules"])
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertEqual(payload["diff"]["changed_sections"], ["cache"])
+        cache_section = {section["section"]: section for section in payload["sections"]}["cache"]
+        self.assertTrue(cache_section["changed"])
+        self.assertTrue(cache_section["reload_required_after_apply"])
+        self.assertTrue((Path(workspace) / "admin-cache-draft" / "draft.json").exists())
+
+        from agentflow_proxy.policy_events import recent_policy_events
+
+        event_text = json.dumps(recent_policy_events(limit=1)["events"])
+        self.assertIn("draft-stage", event_text)
+        self.assertNotIn("semantic_cache", event_text)
+
+    def test_policy_draft_stage_route_rejects_raw_payloads(self):
+        app = FastAPI()
+        app.include_router(create_admin_router())
+
+        local = TestClient(app, client=("127.0.0.1", 50000))
+        response = local.post(
+            "/agentflow/admin/policy-drafts/stage",
+            json={
+                "section": "cache",
+                "policy": {"raw_request": {"prompt": "do not stage"}},
+                "draft_id": "unsafe-admin-draft",
+                "workspace": str(Path(self.tmp.name) / "drafts"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "raw_payload_rejected")
+        self.assertFalse((Path(self.tmp.name) / "drafts" / "unsafe-admin-draft").exists())
 
 
 if __name__ == "__main__":
