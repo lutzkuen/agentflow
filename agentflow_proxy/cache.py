@@ -308,6 +308,57 @@ def _condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> boo
     return str(actual or "").lower() in {value.lower() for value in expected_values}
 
 
+def _cacheability_from_pattern_features(pattern_features: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(pattern_features, dict):
+        return {}
+    cacheability = pattern_features.get("cacheability")
+    if isinstance(cacheability, dict):
+        return cacheability
+    result: dict[str, Any] = {}
+    for key in (
+        "cacheability_bucket",
+        "static_information_hint",
+        "time_sensitive_hint",
+        "user_specific_hint",
+        "exact_cache_candidate_hint",
+    ):
+        if key in pattern_features:
+            result[key] = pattern_features.get(key)
+    return result
+
+
+def _bool_condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> bool:
+    if key not in conditions:
+        return True
+    return _as_bool(conditions.get(key), False) == bool(actual)
+
+
+def _streaming_static_replay_blocker(
+    *,
+    has_tool_blocks: bool,
+    pattern_features: dict[str, Any] | None,
+    rule: dict[str, Any],
+) -> str | None:
+    if has_tool_blocks:
+        return "streaming-tools-disabled"
+    if str(rule.get("policy_source") or "").lower() == "local-default":
+        return "streaming-rule-source-not-reviewed"
+    cacheability = _cacheability_from_pattern_features(pattern_features)
+    if not cacheability:
+        return "cacheability-features-missing"
+    if str(cacheability.get("cacheability_bucket") or "").lower() != "high":
+        return "low-cacheability"
+    if not bool(cacheability.get("static_information_hint")):
+        return "static-information-required"
+    if bool(cacheability.get("time_sensitive_hint")):
+        return "current-state"
+    if bool(cacheability.get("user_specific_hint")):
+        return "user-specific"
+    if cacheability.get("exact_cache_candidate_hint") is False:
+        return "exact-cache-candidate-required"
+    return None
+
+
 def _cache_pattern_rule_match(
     *,
     has_tool_blocks: bool,
@@ -351,6 +402,23 @@ def _cache_pattern_rule_match(
         if not _condition_matches(conditions, "category", (pattern_features or {}).get("category")):
             skip_reasons.append({"rule_id": rule_id, "reason": "category-mismatch"})
             continue
+        cacheability = _cacheability_from_pattern_features(pattern_features)
+        if not _condition_matches(conditions, "cacheability_bucket", cacheability.get("cacheability_bucket")):
+            skip_reasons.append({"rule_id": rule_id, "reason": "cacheability-bucket-mismatch"})
+            continue
+        bool_mismatch_reason = None
+        for bool_key in (
+            "static_information_hint",
+            "time_sensitive_hint",
+            "user_specific_hint",
+            "exact_cache_candidate_hint",
+        ):
+            if not _bool_condition_matches(conditions, bool_key, cacheability.get(bool_key)):
+                bool_mismatch_reason = f"{bool_key}-mismatch"
+                break
+        if bool_mismatch_reason:
+            skip_reasons.append({"rule_id": rule_id, "reason": bool_mismatch_reason})
+            continue
         excluded_categories = {item.lower() for item in _string_list(conditions.get("category_not_in"))}
         if excluded_categories and str((pattern_features or {}).get("category") or "").lower() in excluded_categories:
             skip_reasons.append({"rule_id": rule_id, "reason": "category-excluded"})
@@ -374,6 +442,15 @@ def _cache_pattern_rule_match(
             if stream and not action.get("streaming"):
                 skip_reasons.append({"rule_id": rule_id, "reason": "streaming-not-allowed"})
                 continue
+            if stream:
+                blocker = _streaming_static_replay_blocker(
+                    has_tool_blocks=has_tool_blocks,
+                    pattern_features=pattern_features,
+                    rule=rule,
+                )
+                if blocker:
+                    skip_reasons.append({"rule_id": rule_id, "reason": blocker})
+                    continue
             if has_tool_blocks and not (action.get("allow_tool_calls") and action.get("safe_invalidation")):
                 skip_reasons.append({"rule_id": rule_id, "reason": "unsafe-tool-cache-pattern"})
                 continue
@@ -658,7 +735,7 @@ def streaming_cache_lookup_meta(
     base_exact_enabled = CACHE_ENABLED
     if managed_profile and managed_profile.get("exact_enabled") is not None:
         base_exact_enabled = bool(managed_profile.get("exact_enabled"))
-    exact_enabled = base_exact_enabled and (CACHE_TOOL_CALLS or not has_tool_blocks)
+    exact_enabled = False
     pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
         has_tool_blocks=has_tool_blocks,
         stream=True,
@@ -666,14 +743,20 @@ def streaming_cache_lookup_meta(
         local_replayability_level="local-exact-response" if CACHE_ENABLED else "features_only",
         store_obj=store_obj,
     )
-    if pattern_rule and CACHE_ENABLED:
+    if pattern_rule and CACHE_ENABLED and base_exact_enabled:
         exact_enabled = True
     if exact_enabled:
         status = "miss"
-        reason = "streaming-exact-pattern-miss" if pattern_rule else "streaming-exact-miss"
+        reason = "streaming-exact-pattern-miss"
+    elif pattern_skip_reasons:
+        status = "skipped"
+        reason = str(pattern_skip_reasons[-1].get("reason") or "streaming-pattern-rule-skipped")
     elif has_tool_blocks and CACHE_ENABLED:
         status = "skipped"
         reason = "streaming-tools-disabled"
+    elif CACHE_ENABLED and base_exact_enabled:
+        status = "skipped"
+        reason = "streaming-pattern-rule-required"
     else:
         status = "skipped"
         reason = "streaming-cache-disabled"
@@ -687,6 +770,17 @@ def streaming_cache_lookup_meta(
     if managed_profile:
         meta["policy_source"] = str(managed_profile.get("policy_source") or "managed-recommended")
         meta["managed_profile"] = managed_profile
+    if pattern_skip_reasons:
+        selected_skip = pattern_skip_reasons[-1]
+        if selected_skip.get("reason") in {"canary_holdout", LOCAL_CANARY_SAFETY_STOP_REASON}:
+            meta["pattern_rule"] = {
+                key: selected_skip.get(key)
+                for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop")
+                if selected_skip.get(key) is not None
+            }
+            if isinstance(selected_skip.get("canary"), dict):
+                meta["canary"] = selected_skip["canary"]
+                meta["canary_cohort"] = selected_skip["canary"].get("cohort")
     return exact_enabled, meta
 
 

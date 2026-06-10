@@ -617,13 +617,63 @@ pattern_rules:
             finally:
                 store.conn.close()
 
-    def test_streaming_cache_lookup_is_exact_only_and_skips_tools_by_default(self):
+    def _streaming_static_features(self, pattern_hash):
+        return {
+            "pattern_hashes": [pattern_hash],
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "short-completion",
+            "workflow_phase": "short-completion",
+            "text_bucket": "lt_2k_chars",
+            "token_bucket": "lt_1k_tokens",
+            "has_tools": False,
+            "stream": True,
+            "cacheability_bucket": "high",
+            "static_information_hint": True,
+            "time_sensitive_hint": False,
+            "user_specific_hint": False,
+            "exact_cache_candidate_hint": True,
+            "raw_pattern_strings_included": False,
+        }
+
+    def _streaming_static_rule(self, pattern_hash, *, canary_fraction=1.0):
+        return cache_module.normalize_cache_pattern_rules([{
+            "id": "reviewed-static-streaming-cache",
+            "policy_source": "managed-recommended",
+            "candidate_id": "streaming-static-candidate",
+            "conditions": {
+                "pattern_hashes": [pattern_hash],
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "category": "short-completion",
+                "stream": True,
+                "cacheability_bucket": "high",
+                "static_information_hint": True,
+                "time_sensitive_hint": False,
+                "user_specific_hint": False,
+            },
+            "rollout": {
+                "schema": "agentflow.pattern_policy_rollout.v1",
+                "recommendation_mode": "canary-only",
+                "canary_enabled": True,
+                "canary_fraction": canary_fraction,
+                "canary_salt": "streaming-static-test",
+                "canary_unit": "request_fingerprint",
+            },
+            "action": {
+                "type": "exact_cache_pattern",
+                "streaming": True,
+                "allow_tool_calls": False,
+            },
+        }])[0]
+
+    def test_streaming_cache_lookup_requires_explicit_static_pattern_rule(self):
         can_cache, meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=False)
 
-        self.assertTrue(can_cache)
-        self.assertEqual(meta["status"], "miss")
-        self.assertEqual(meta["reason"], "streaming-exact-miss")
-        self.assertTrue(meta["exact_enabled"])
+        self.assertFalse(can_cache)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason"], "streaming-pattern-rule-required")
+        self.assertFalse(meta["exact_enabled"])
         self.assertFalse(meta["semantic_enabled"])
 
         can_tool_cache, tool_meta = cache_module.streaming_cache_lookup_meta(has_tool_blocks=True)
@@ -631,6 +681,137 @@ pattern_rules:
         self.assertFalse(can_tool_cache)
         self.assertEqual(tool_meta["status"], "skipped")
         self.assertEqual(tool_meta["reason"], "streaming-tools-disabled")
+
+    def test_streaming_static_rule_selects_canary_and_records_metadata(self):
+        pattern_hash = "sha256:" + "a" * 64
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_static_rule(pattern_hash),)
+            can_cache, meta = cache_module.streaming_cache_lookup_meta(
+                has_tool_blocks=False,
+                pattern_features=self._streaming_static_features(pattern_hash),
+            )
+
+            self.assertTrue(can_cache)
+            self.assertEqual(meta["status"], "miss")
+            self.assertEqual(meta["reason"], "streaming-exact-pattern-miss")
+            self.assertEqual(meta["pattern_rule"]["rule_id"], "reviewed-static-streaming-cache")
+            self.assertEqual(meta["pattern_rule"]["candidate_id"], "streaming-static-candidate")
+            self.assertEqual(meta["pattern_rule"]["replayability_level"], "local-exact-response")
+            self.assertEqual(meta["pattern_rule"]["canary"]["status"], "applied")
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streaming_static_rule_holdout_goes_upstream_with_canary_metadata(self):
+        pattern_hash = "sha256:" + "b" * 64
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_static_rule(pattern_hash, canary_fraction=0.0),)
+            can_cache, meta = cache_module.streaming_cache_lookup_meta(
+                has_tool_blocks=False,
+                pattern_features=self._streaming_static_features(pattern_hash),
+            )
+
+            self.assertFalse(can_cache)
+            self.assertEqual(meta["status"], "skipped")
+            self.assertEqual(meta["reason"], "canary_holdout")
+            self.assertEqual(meta["canary_cohort"], "canary_holdout")
+            self.assertEqual(meta["pattern_rule"]["candidate_id"], "streaming-static-candidate")
+            self.assertEqual(meta["pattern_rule"]["canary"]["status"], "holdout")
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streaming_static_rule_safety_stop_prevents_replay(self):
+        pattern_hash = "sha256:" + "d" * 64
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                rule = self._streaming_static_rule(pattern_hash)
+                rule["rollout"]["min_outcome_samples"] = 2
+                rule["rollout"]["rollback_threshold"] = 0.5
+                cache_module.CACHE_PATTERN_RULES = (rule,)
+                features = self._streaming_static_features(pattern_hash)
+
+                can_cache, meta = cache_module.streaming_cache_lookup_meta(
+                    has_tool_blocks=False,
+                    pattern_features=features,
+                    store_obj=store,
+                )
+                self.assertTrue(can_cache)
+                self.assertEqual(meta["pattern_rule"]["canary"]["status"], "applied")
+
+                for index in range(2):
+                    store.log_call(
+                        id=f"failed-streaming-cache-canary-{index}",
+                        created_at=f"2026-06-09T00:2{index}:00+00:00",
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=1,
+                        cache_hit=0,
+                        status_code=500,
+                        latency_ms=100,
+                        input_tokens_est=100,
+                        output_tokens_est=0,
+                        actual_input_tokens=100,
+                        actual_output_tokens=0,
+                        cost_est_usd=0.0,
+                        cost_baseline_usd=0.0,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({"category": "short-completion"}),
+                        cache_json=stable_json(meta),
+                        error="upstream failed",
+                        request_json=None,
+                        response_json=None,
+                        session_id="streaming-cache-safety-stop",
+                        category="short-completion",
+                        cache_creation_input_tokens=0,
+                        cache_read_input_tokens=0,
+                        retry_count=0,
+                        provider="anthropic",
+                    )
+
+                stopped, stopped_meta = cache_module.streaming_cache_lookup_meta(
+                    has_tool_blocks=False,
+                    pattern_features=features,
+                    store_obj=store,
+                )
+
+                self.assertFalse(stopped)
+                self.assertEqual(stopped_meta["status"], "skipped")
+                self.assertEqual(stopped_meta["reason"], "local-canary-safety-stop")
+                self.assertEqual(stopped_meta["pattern_rule"]["candidate_id"], "streaming-static-candidate")
+                self.assertEqual(stopped_meta["pattern_rule"]["safety_stop"]["sample_count"], 2)
+            finally:
+                store.conn.close()
+                cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streaming_static_rule_skips_low_current_user_specific_and_tool_turns(self):
+        pattern_hash = "sha256:" + "c" * 64
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_static_rule(pattern_hash),)
+            cases = [
+                (False, {"cacheability_bucket": "low"}, "cacheability-bucket-mismatch"),
+                (False, {"time_sensitive_hint": True}, "time_sensitive_hint-mismatch"),
+                (False, {"user_specific_hint": True}, "user_specific_hint-mismatch"),
+                (True, {}, "streaming-tools-disabled"),
+            ]
+            for has_tools_case, overrides, expected_reason in cases:
+                features = self._streaming_static_features(pattern_hash)
+                features.update(overrides)
+                if has_tools_case:
+                    features["has_tools"] = True
+                can_cache, meta = cache_module.streaming_cache_lookup_meta(
+                    has_tool_blocks=has_tools_case,
+                    pattern_features=features,
+                )
+                self.assertFalse(can_cache)
+                self.assertEqual(meta["status"], "skipped")
+                self.assertEqual(meta["reason"], expected_reason)
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
 
     def test_stream_cache_payload_round_trips_sse_frames(self):
         frames = [

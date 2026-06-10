@@ -251,6 +251,7 @@ def _pattern_features(
         for item in local_module_entries
         if isinstance(item, dict) and item.get("family")
     })
+    cacheability_features = _cacheability_pattern_features(local_module_entries)
     pattern_types = sorted({item["type"] for item in pattern_summaries} | set(local_module_families))
     descriptor: dict[str, Any] = {
         "schema": "agentflow.normalized_pattern_descriptor.v1",
@@ -280,7 +281,7 @@ def _pattern_features(
     crunch_hash = _pattern_hash({**descriptor, "pattern_family": "crunch"})
     cache_hash = _pattern_hash({**descriptor, "pattern_family": "cache"})
     hashes = sorted({base_hash, crunch_hash, cache_hash})
-    return {
+    result = {
         "schema": "agentflow.pattern_features.v1",
         "source_surface": source_surface,
         "granularity": granularity,
@@ -311,6 +312,44 @@ def _pattern_features(
         "raw_pattern_storage": False,
         "raw_pattern_strings_included": False,
     }
+    if cacheability_features:
+        result["cacheability"] = cacheability_features
+        result["cacheability_bucket"] = cacheability_features.get("cacheability_bucket")
+        result["static_information_hint"] = bool(cacheability_features.get("static_information_hint"))
+        result["time_sensitive_hint"] = bool(cacheability_features.get("time_sensitive_hint"))
+        result["user_specific_hint"] = bool(cacheability_features.get("user_specific_hint"))
+        result["exact_cache_candidate_hint"] = bool(cacheability_features.get("exact_cache_candidate_hint"))
+    return result
+
+
+def _cacheability_pattern_features(local_module_entries: list[Any]) -> dict[str, Any]:
+    for item in local_module_entries:
+        if not isinstance(item, dict) or item.get("family") != "cacheability":
+            continue
+        features = item.get("features")
+        if not isinstance(features, dict):
+            continue
+        return {
+            key: features.get(key)
+            for key in (
+                "schema",
+                "module_family",
+                "module_version",
+                "cacheability_bucket",
+                "deterministic_answer_likelihood_bucket",
+                "static_information_hint",
+                "time_sensitive_hint",
+                "user_specific_hint",
+                "exact_lookup_requested_hint",
+                "aggregation_requested_hint",
+                "reconciliation_requested_hint",
+                "provider_tool_context_hint",
+                "exact_cache_candidate_hint",
+                "cache_preserved_by_default_reason",
+            )
+            if key in features
+        }
+    return {}
 
 
 def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
@@ -331,7 +370,7 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         pattern_features.get("cache_pattern_hash"),
     ]
     hashes = [str(item) for item in hashes if isinstance(item, str) and item.startswith("sha256:")]
-    return {
+    diagnostics = {
         "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
         "present": bool(hashes),
         "pattern_hash_count": len(sorted(set(hashes))),
@@ -357,6 +396,15 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         "local_pattern_module_count": pattern_features.get("local_pattern_module_count") or 0,
         "raw_pattern_strings_included": False,
     }
+    cacheability = pattern_features.get("cacheability")
+    if isinstance(cacheability, dict):
+        diagnostics["cacheability"] = cacheability
+        diagnostics["cacheability_bucket"] = cacheability.get("cacheability_bucket")
+        diagnostics["static_information_hint"] = bool(cacheability.get("static_information_hint"))
+        diagnostics["time_sensitive_hint"] = bool(cacheability.get("time_sensitive_hint"))
+        diagnostics["user_specific_hint"] = bool(cacheability.get("user_specific_hint"))
+        diagnostics["exact_cache_candidate_hint"] = bool(cacheability.get("exact_cache_candidate_hint"))
+    return diagnostics
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
