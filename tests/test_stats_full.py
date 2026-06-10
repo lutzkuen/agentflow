@@ -1684,6 +1684,213 @@ class StatsFullTest(unittest.TestCase):
         self.assertTrue(forbidden.isdisjoint(self._keys_in(result)))
         self.assertNotIn(forbidden_secret, rendered)
 
+    def test_codex_readiness_reports_canary_cache_policy_and_privacy(self):
+        secret = "raw codex readiness payload must not appear"
+
+        def log_turn(
+            request_id,
+            *,
+            routing,
+            cache,
+            thread_id,
+            input_text_chars=400,
+            result_chars=80,
+        ):
+            server.store.log_codex_app_event(
+                id=f"start-readiness-{request_id}",
+                created_at=utc_now(),
+                direction="client_to_server",
+                method="turn/start",
+                request_id=request_id,
+                thread_id=thread_id,
+                message_chars=input_text_chars + 10,
+                params_chars=input_text_chars + 5,
+                input_items=1,
+                input_text_chars=input_text_chars,
+                result_chars=None,
+                error_code=None,
+                error_message=None,
+                latency_ms=None,
+                session_id="codex-readiness-session-secret",
+                routing_json=stable_json(routing),
+                crunch_json=stable_json({"status": "skipped", "reason": "no-change", "changed": False, "debug": secret}),
+                cache_json=stable_json(cache),
+            )
+            server.store.log_codex_app_event(
+                id=f"response-readiness-{request_id}",
+                created_at=utc_now(),
+                direction="server_to_client",
+                method="turn/completed",
+                request_id=request_id,
+                thread_id=thread_id,
+                message_chars=result_chars + 10,
+                params_chars=None,
+                input_items=None,
+                input_text_chars=None,
+                result_chars=result_chars,
+                error_code=None,
+                error_message=None,
+                latency_ms=100,
+                session_id="codex-readiness-session-secret",
+            )
+
+        log_turn(
+            "applied",
+            thread_id="thread-readiness-applied",
+            routing={
+                "status": "applied",
+                "reason": "safe-summary-model-hint-canary",
+                "applied": True,
+                "policy_source": "local-manual",
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "summary_model_hint": {
+                    "status": "applied",
+                    "eligible": True,
+                    "requested_model": "gpt-5.3-codex",
+                    "target_model": "gpt-5-codex",
+                    "workflow_phase": "summary",
+                    "estimated_cost_delta": {"delta_usd": 0.0001, "cost_known": True},
+                },
+            },
+            cache={
+                "status": "hit",
+                "reason": "exact-match",
+                "hit_type": "exact",
+                "eligible": True,
+                "policy_source": "local-manual",
+                "surface": "codex_turn",
+                "cache_key": "secret-cache-key-must-not-appear",
+            },
+        )
+        log_turn(
+            "holdout",
+            thread_id="thread-readiness-holdout",
+            routing={
+                "status": "skipped",
+                "reason": "summary-model-hint-canary-holdout",
+                "applied": False,
+                "policy_source": "local-manual",
+                "requested_model": "gpt-5.3-codex",
+                "routed_model": "gpt-5.3-codex",
+                "workflow_phase": "summary",
+                "summary_model_hint": {
+                    "status": "holdout",
+                    "eligible": True,
+                    "canary_cohort": "canary_holdout",
+                    "requested_model": "gpt-5.3-codex",
+                    "target_model": "gpt-5-codex",
+                    "workflow_phase": "summary",
+                    "estimated_cost_delta": {"delta_usd": 0.0002, "cost_known": True},
+                },
+            },
+            cache={
+                "status": "holdout",
+                "reason": "codex-app-cache-canary-holdout",
+                "eligible": True,
+                "policy_source": "local-manual",
+                "surface": "codex_turn",
+            },
+        )
+        log_turn(
+            "miss",
+            thread_id="thread-readiness-miss",
+            routing={"status": "skipped", "reason": "not-summary", "workflow_phase": "tool_execution"},
+            cache={"status": "miss", "reason": "exact-miss", "eligible": True, "policy_source": "local-manual", "surface": "codex_turn"},
+        )
+        log_turn(
+            "invalidated",
+            thread_id="thread-readiness-invalidated",
+            routing={"status": "skipped", "reason": "not-summary", "workflow_phase": "verification"},
+            cache={"status": "miss", "reason": "dependency-changed", "eligible": True, "policy_source": "local-manual", "surface": "codex_turn"},
+        )
+        server.store.log_codex_app_event(
+            id="token-readiness-applied",
+            created_at=utc_now(),
+            direction="server_to_client",
+            method="thread/tokenUsage/updated",
+            request_id=None,
+            thread_id="thread-readiness-applied",
+            message_chars=120,
+            params_chars=120,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id="codex-readiness-session-secret",
+            metadata_json=stable_json({
+                "schema": "agentflow.codex_app_metadata.v1",
+                "kind": "token_usage",
+                "method": "thread/tokenUsage/updated",
+                "token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 120,
+                },
+                "raw_payload": secret,
+            }),
+        )
+
+        result = asyncio.run(stats_views.stats_codex_readiness(server.store, limit=20))
+
+        self.assertEqual(result["schema"], "agentflow.codex_optimization_readiness.v1")
+        self.assertEqual(result["source_surface"], "codex_turn")
+        self.assertEqual(result["summary"]["turn_start_rows"], 4)
+        self.assertEqual(result["summary"]["phase_known_rate"], 1.0)
+        self.assertEqual(result["summary"]["token_reconciliation_status"], "reconciled")
+        self.assertEqual(result["summary"]["summary_model_hint_applied"], 1)
+        self.assertEqual(result["summary"]["summary_model_hint_holdout"], 1)
+        self.assertEqual(result["summary"]["exact_cache_hits"], 1)
+        self.assertEqual(result["summary"]["exact_cache_holdouts"], 1)
+        self.assertEqual(result["summary"]["exact_cache_misses"], 1)
+        self.assertEqual(result["summary"]["exact_cache_invalidations"], 1)
+        self.assertGreater(result["summary"]["summary_model_hint_estimated_savings_usd"], 0)
+        self.assertGreater(result["exact_cache"]["estimated_saved_cost_usd"], 0)
+        self.assertIn("policy_source", result["policy"])
+        self.assertIn("rule_path", result["policy"])
+        self.assertIn("readiness_checks", result)
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["raw_params_included"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+        self.assertFalse(result["privacy"]["thread_ids_included"])
+        self.assertFalse(result["privacy"]["local_session_ids_included"])
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+
+        cohorts = {row["cohort"]: row["count"] for row in result["exact_cache"]["cohorts"]}
+        self.assertEqual(cohorts["hit"], 1)
+        self.assertEqual(cohorts["holdout"], 1)
+        self.assertEqual(cohorts["miss"], 1)
+        self.assertEqual(cohorts["invalidated"], 1)
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/codex-readiness?limit=20")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["summary"]["turn_start_rows"], 4)
+        html = stats_views.dashboard_html()
+        self.assertIn("/agentflow/stats/codex-readiness", html)
+        self.assertIn("Codex optimization readiness", html)
+        self.assertIn("codex-readiness-tbody", html)
+        self.assertIn("codex-cache-readiness-tbody", html)
+
+        rendered = json.dumps(result)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("secret-cache-key-must-not-appear", rendered)
+        self.assertNotIn("codex-readiness-session-secret", rendered)
+
     def test_codex_effectiveness_reports_quota_token_usage_without_raw_payloads(self):
         raw_prompt = "seeded raw prompt must not appear"
         raw_command = "seeded raw command must not appear"

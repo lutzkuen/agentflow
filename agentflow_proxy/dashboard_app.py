@@ -113,6 +113,10 @@ def create_dashboard_router(
     async def stats_codex_effectiveness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_codex_effectiveness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/codex-readiness")
+    async def stats_codex_readiness(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_codex_readiness(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/cache-replayability")
     async def stats_cache_replayability(limit: int = 25) -> dict[str, Any]:
         return await stats_views.stats_cache_replayability(_store(store_obj), limit=limit)

@@ -8500,6 +8500,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
     success_count = 0
     total_saved_chars = 0
     total_saved_tokens = 0
+    total_cache_savings_usd = 0.0
     total_codex_scaffolding_saved_chars = 0
     action_like_skips = 0
     unknown_param_skips = 0
@@ -8635,6 +8636,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
                 pass_through_latency.append(latency)
 
         estimates = _codex_estimates_with_cache(row.get("input_text_chars"), result_chars, cache)
+        total_cache_savings_usd += _as_float(estimates.get("cache_savings_usd"))
         phase_bucket = phase_buckets.setdefault(phase, _new_codex_phase_bucket(phase))
         phase_bucket["turns"] += 1
         phase_bucket["input_text_chars"] += _as_int(row.get("input_text_chars"))
@@ -8788,6 +8790,7 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             "crunch_applied": sum(1 for row in turn_rows if _json_obj(row.get("crunch_json_normalized")).get("applied")),
             "cache_hits": sum(1 for row in turn_rows if _json_obj(row.get("cache_json_normalized")).get("status") == "hit"),
             "cache_eligible": sum(1 for row in turn_rows if bool(_json_obj(row.get("cache_json_normalized")).get("eligible"))),
+            "cache_estimated_savings_usd": round(total_cache_savings_usd, 8),
             "summary_model_hint_rows": summary_model_hint_turns,
             "summary_model_hint_applied": sum(
                 _as_int(row.get("turns")) for row in summary_model_hint_buckets if row.get("status") == "applied"
@@ -8950,6 +8953,241 @@ async def stats_codex_effectiveness(store_obj: Any, limit: int = 500) -> dict[st
             },
         ],
         "recent_samples": recent_samples,
+    }
+
+
+def _breakdown_lookup(rows: list[dict[str, Any]], key: str = "value") -> dict[str, int]:
+    return {str(row.get(key) or "unknown"): _as_int(row.get("count")) for row in rows if isinstance(row, dict)}
+
+
+def _codex_cache_readiness_cohort(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "missing")
+    reason = str(row.get("reason") or "unknown")
+    if reason in {"codex-app-cache-disabled", "cache-disabled", "streaming-cache-disabled"}:
+        return "disabled"
+    if status == "hit":
+        return "hit"
+    if status == "holdout" or reason in {"codex-app-cache-canary-holdout", "canary_holdout"}:
+        return "holdout"
+    if reason in {"dependency-changed", "dependency-deleted", "dependency-created", "codex-cache-ttl-expired"}:
+        return "invalidated"
+    if reason in {"file-dependency-missing", "dependency-missing", "dependency-cap-exceeded", "file-watch-disabled"}:
+        return "stale-risk"
+    if status == "unsafe-skip" or reason in {"action-like-params", "non-text-input", "unknown-param-shape", "unsafe-cached-envelope"}:
+        return "unsafe-skip"
+    if status == "miss":
+        return "miss"
+    return status or "unknown"
+
+
+def _codex_cache_readiness_cohorts(cache_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in cache_rows:
+        if not isinstance(row, dict):
+            continue
+        cohort = _codex_cache_readiness_cohort(row)
+        bucket = grouped.setdefault(
+            cohort,
+            {
+                "cohort": cohort,
+                "count": 0,
+                "status_breakdown": {},
+                "reason_breakdown": {},
+                "policy_source_breakdown": {},
+            },
+        )
+        count = _as_int(row.get("count"))
+        bucket["count"] += count
+        for breakdown_key, value in (
+            ("status_breakdown", row.get("status") or "missing"),
+            ("reason_breakdown", row.get("reason") or "unknown"),
+            ("policy_source_breakdown", row.get("policy_source") or "unknown"),
+        ):
+            values = bucket[breakdown_key]
+            label = str(value)
+            values[label] = _as_int(values.get(label)) + count
+
+    result: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        bucket["status_breakdown"] = _count_breakdown(bucket["status_breakdown"])
+        bucket["reason_breakdown"] = _count_breakdown(bucket["reason_breakdown"])
+        bucket["policy_source_breakdown"] = _count_breakdown(bucket["policy_source_breakdown"])
+        result.append(bucket)
+    result.sort(key=lambda item: (_as_int(item.get("count")), str(item.get("cohort") or "")), reverse=True)
+    return result
+
+
+def _codex_readiness_check(name: str, status: str, detail: str, metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "status": status,
+        "detail": detail,
+        "metrics": metrics,
+    }
+
+
+async def stats_codex_readiness(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    effectiveness = await stats_codex_effectiveness(store_obj, limit=capped_limit)
+    policies = await stats_policies()
+    summary = effectiveness.get("summary") if isinstance(effectiveness.get("summary"), dict) else {}
+    quota = effectiveness.get("quota_and_token_usage") if isinstance(effectiveness.get("quota_and_token_usage"), dict) else {}
+    reconciliation = quota.get("reconciliation") if isinstance(quota.get("reconciliation"), dict) else {}
+    hint = effectiveness.get("summary_model_hint") if isinstance(effectiveness.get("summary_model_hint"), dict) else {}
+    hint_summary = hint.get("summary") if isinstance(hint.get("summary"), dict) else {}
+    hint_canary = hint.get("canary") if isinstance(hint.get("canary"), dict) else {}
+    source_surfaces = policies.get("source_surfaces") if isinstance(policies.get("source_surfaces"), dict) else {}
+    surface_policy = source_surfaces.get(CODEX_APP_SOURCE_SURFACE) if isinstance(source_surfaces.get(CODEX_APP_SOURCE_SURFACE), dict) else {}
+    codex_policy = policies.get("codex_app") if isinstance(policies.get("codex_app"), dict) else {}
+    cache_rows = effectiveness.get("cache_breakdown") if isinstance(effectiveness.get("cache_breakdown"), list) else []
+    cache_cohorts = _codex_cache_readiness_cohorts(cache_rows)
+    cache_counts = _breakdown_lookup(cache_cohorts, key="cohort")
+    phase_counts = _breakdown_lookup(effectiveness.get("workflow_phase_counts") or [])
+    phase_unknown = _as_int(summary.get("workflow_phase_unknown") or phase_counts.get("unknown"))
+    turn_count = _as_int(summary.get("turn_start_rows"))
+    phase_known = max(_as_int(summary.get("workflow_phase_known")), 0)
+    phase_known_rate = round(phase_known / turn_count, 4) if turn_count else 0.0
+    unknown_phase_reasons: list[dict[str, Any]] = []
+    for row in effectiveness.get("workflow_phase_breakdown") or []:
+        if isinstance(row, dict) and str(row.get("phase") or "") == "unknown":
+            unknown_phase_reasons = list(row.get("phase_reasons") or [])
+            break
+    feedback_queue = _managed_feedback_queue_health(store_obj, sample_limit=5, source_surface=CODEX_APP_SOURCE_SURFACE)
+    feedback_summary = feedback_queue.get("summary") if isinstance(feedback_queue.get("summary"), dict) else {}
+
+    token_reconciliation_status = str(reconciliation.get("status") or reconciliation.get("total_drift_bucket") or "unknown")
+    checks = [
+        _codex_readiness_check(
+            "Recent Codex telemetry",
+            "ready" if turn_count > 0 else "no-data",
+            "Codex turn/start rows are available for readiness scoring." if turn_count > 0 else "No recent Codex turns are available in the selected sample.",
+            {"turn_start_rows": turn_count, "completed_rows": _as_int(summary.get("completed_rows")), "pending_rows": _as_int(summary.get("pending_rows")), "error_rows": _as_int(summary.get("error_rows"))},
+        ),
+        _codex_readiness_check(
+            "Workflow phase coverage",
+            "ready" if turn_count > 0 and phase_unknown == 0 else ("partial" if phase_known > 0 else "blocked"),
+            "All sampled turns have known workflow phases." if turn_count > 0 and phase_unknown == 0 else "Some sampled turns still have unknown workflow phases.",
+            {"known": phase_known, "unknown": phase_unknown, "known_rate": phase_known_rate},
+        ),
+        _codex_readiness_check(
+            "Token reconciliation",
+            "ready" if token_reconciliation_status == "reconciled" else ("partial" if quota.get("token_usage_update_count") else "no-data"),
+            "Codex tokenUsage updates reconcile to sampled AgentFlow turn windows." if token_reconciliation_status == "reconciled" else "Token usage is not fully reconciled for the sampled Codex turns.",
+            {
+                "status": token_reconciliation_status,
+                "token_usage_updates": _as_int(quota.get("token_usage_update_count")),
+                "total_drift_tokens": _as_int(reconciliation.get("total_drift_tokens")),
+                "drift_size_bucket": reconciliation.get("total_drift_size_bucket"),
+            },
+        ),
+        _codex_readiness_check(
+            "Summary model hint canary",
+            "ready" if _as_int(hint_summary.get("applied")) > 0 and _as_int(hint_summary.get("holdout")) > 0 else ("partial" if _as_int(hint_summary.get("turns")) > 0 else "no-data"),
+            "Applied and holdout summary-model-hint cohorts are both present." if _as_int(hint_summary.get("applied")) > 0 and _as_int(hint_summary.get("holdout")) > 0 else "Summary-model-hint metadata is missing applied or holdout evidence.",
+            {"turns": _as_int(hint_summary.get("turns")), "applied": _as_int(hint_summary.get("applied")), "holdout": _as_int(hint_summary.get("holdout")), "unsafe_skipped": _as_int(hint_summary.get("unsafe_skipped")), "error_rate": _as_float(hint_summary.get("error_rate"))},
+        ),
+        _codex_readiness_check(
+            "Exact response cache canary",
+            "ready" if cache_counts.get("hit", 0) > 0 or cache_counts.get("holdout", 0) > 0 else ("partial" if cache_counts.get("miss", 0) > 0 else "disabled"),
+            "Exact-cache canary cohorts have replay or holdout evidence." if cache_counts.get("hit", 0) > 0 or cache_counts.get("holdout", 0) > 0 else "Exact-cache cohorts are disabled or have only miss/skip evidence.",
+            {"disabled": cache_counts.get("disabled", 0), "miss": cache_counts.get("miss", 0), "hit": cache_counts.get("hit", 0), "holdout": cache_counts.get("holdout", 0), "invalidated": cache_counts.get("invalidated", 0)},
+        ),
+        _codex_readiness_check(
+            "Managed feedback queue",
+            "ready" if _as_int(feedback_summary.get("due")) == 0 and _as_int(feedback_summary.get("retryable_error")) == 0 and _as_int(feedback_summary.get("dropped_after_limit")) == 0 else "blocked",
+            "No due, retryable, or dropped Codex feedback rows are present." if _as_int(feedback_summary.get("due")) == 0 and _as_int(feedback_summary.get("retryable_error")) == 0 and _as_int(feedback_summary.get("dropped_after_limit")) == 0 else "Managed feedback has due, retryable, or dropped rows.",
+            {"queued": _as_int(feedback_summary.get("queued")), "due": _as_int(feedback_summary.get("due")), "retryable_error": _as_int(feedback_summary.get("retryable_error")), "dropped_after_limit": _as_int(feedback_summary.get("dropped_after_limit")), "sent": _as_int(feedback_summary.get("sent"))},
+        ),
+    ]
+    if turn_count <= 0:
+        readiness = "no-data"
+    elif any(check["status"] == "blocked" for check in checks):
+        readiness = "blocked"
+    elif any(check["status"] in {"partial", "disabled", "no-data"} for check in checks):
+        readiness = "partial"
+    else:
+        readiness = "ready"
+
+    return {
+        "schema": "agentflow.codex_optimization_readiness.v1",
+        "generated_at": utc_now(),
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "limit": capped_limit,
+        "status": readiness,
+        "summary": {
+            "turn_start_rows": turn_count,
+            "completed_rows": _as_int(summary.get("completed_rows")),
+            "error_rows": _as_int(summary.get("error_rows")),
+            "pending_rows": _as_int(summary.get("pending_rows")),
+            "phase_known_rate": phase_known_rate,
+            "token_reconciliation_status": token_reconciliation_status,
+            "summary_model_hint_applied": _as_int(hint_summary.get("applied")),
+            "summary_model_hint_holdout": _as_int(hint_summary.get("holdout")),
+            "summary_model_hint_estimated_savings_usd": round(_as_float(hint_summary.get("estimated_savings_usd")), 8),
+            "exact_cache_hits": cache_counts.get("hit", 0),
+            "exact_cache_holdouts": cache_counts.get("holdout", 0),
+            "exact_cache_misses": cache_counts.get("miss", 0),
+            "exact_cache_invalidations": cache_counts.get("invalidated", 0),
+            "managed_feedback_queued": _as_int(feedback_summary.get("queued")),
+            "managed_feedback_due": _as_int(feedback_summary.get("due")),
+        },
+        "policy": {
+            "optimization_enabled": bool(((surface_policy.get("optimization") or {}) if isinstance(surface_policy.get("optimization"), dict) else {}).get("enabled")),
+            "policy_source": codex_policy.get("policy_source") or surface_policy.get("policy_source"),
+            "rule_path": codex_policy.get("rule_path") or surface_policy.get("rule_path"),
+            "reload_required": bool(((codex_policy.get("file") or {}) if isinstance(codex_policy.get("file"), dict) else {}).get("reload_required")),
+            "review_only": bool(codex_policy.get("review_only")),
+            "cache_enabled": bool(((surface_policy.get("cache") or {}) if isinstance(surface_policy.get("cache"), dict) else {}).get("enabled")),
+            "summary_model_hint": ((surface_policy.get("routing") or {}) if isinstance(surface_policy.get("routing"), dict) else {}).get("summary_model_hint") or {},
+        },
+        "readiness_checks": checks,
+        "workflow_phase": {
+            "known": phase_known,
+            "unknown": phase_unknown,
+            "known_rate": phase_known_rate,
+            "counts": effectiveness.get("workflow_phase_counts") or [],
+            "source_breakdown": effectiveness.get("workflow_phase_source_breakdown") or [],
+            "unknown_reasons": unknown_phase_reasons,
+        },
+        "token_reconciliation": {
+            "status": token_reconciliation_status,
+            "drift_tokens": _as_int(reconciliation.get("total_drift_tokens")),
+            "drift_size_bucket": reconciliation.get("total_drift_size_bucket"),
+            "status_breakdown": reconciliation.get("status_breakdown") or [],
+            "reconciled_cost_usd": round(_as_float(quota.get("reconciled_cost_usd")), 8),
+            "reconciled_cost_known": bool(quota.get("reconciled_cost_known")),
+        },
+        "summary_model_hint": {
+            "summary": hint_summary,
+            "canary": hint_canary,
+            "buckets": hint.get("buckets") or [],
+            "estimated_savings_usd": round(_as_float(hint_summary.get("estimated_savings_usd")), 8),
+        },
+        "exact_cache": {
+            "cohorts": cache_cohorts,
+            "decision_breakdown": cache_rows,
+            "estimated_saved_cost_usd": round(_as_float(summary.get("cache_estimated_savings_usd")), 8),
+            "cost_delta_basis": "Codex exact cache impact is estimated from metadata-only local replay decisions and char-derived Codex turn costs.",
+        },
+        "managed_feedback_queue": feedback_queue,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_params_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "raw_commands_included": False,
+            "request_ids_included": False,
+            "thread_ids_included": False,
+            "local_session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "queue_payload_json_included": False,
+            "policy_file_contents_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        },
     }
 
 
@@ -11705,6 +11943,24 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-codex">
 <div class="section">
+  <h2>Codex optimization readiness</h2>
+  <table data-table-id="codex-readiness" data-filter-label="Filter Codex readiness">
+    <thead><tr>
+      <th data-sort-type="text">Check</th><th data-sort-type="text">Status</th><th data-sort-type="text">Evidence</th><th data-sort-type="text">Details</th>
+    </tr></thead>
+    <tbody id="codex-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Codex exact-cache canary impact</h2>
+  <table data-table-id="codex-cache-readiness" data-filter-label="Filter Codex cache readiness">
+    <thead><tr>
+      <th data-sort-type="text">Cohort</th><th data-sort-type="number">Turns</th><th data-sort-type="text">Top status</th><th data-sort-type="text">Top reason</th><th data-sort-type="text">Policy source</th>
+    </tr></thead>
+    <tbody id="codex-cache-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Codex quota and token usage</h2>
   <table data-table-id="codex-quota" data-filter-label="Filter Codex quota">
     <thead><tr>
@@ -12616,6 +12872,99 @@ async function refreshCodexQuota(){
       <td><span class="badge miss">${esc(scope.remaining_bucket||'—')}</span></td>
       <td><span class="badge miss">${esc(scope.reset_bucket||'—')}</span></td>
     </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No Codex rate-limit metadata recorded yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
+
+function topBreakdownValue(rows){
+  const first=(rows||[])[0]||{};
+  if(!first.value)return'—';
+  return `${esc(first.value)} (${(first.count||0).toLocaleString()})`;
+}
+
+function readinessBadge(status){
+  if(status==='ready')return'hit';
+  if(status==='partial'||status==='disabled'||status==='no-data')return'routed';
+  if(status==='blocked')return'err';
+  return'miss';
+}
+
+async function refreshCodexReadiness(){
+  try{
+    const r=await fetch('/agentflow/stats/codex-readiness?limit=500');
+    const d=await r.json();
+    const tb=document.getElementById('codex-readiness-tbody');
+    const cb=document.getElementById('codex-cache-readiness-tbody');
+    const summary=d.summary||{};
+    const policy=d.policy||{};
+    const phase=d.workflow_phase||{};
+    const token=d.token_reconciliation||{};
+    const hint=d.summary_model_hint||{};
+    const hintSummary=hint.summary||{};
+    const queue=(d.managed_feedback_queue||{}).summary||{};
+    const privacy=d.privacy||{};
+    const policyDetails=[
+      policy.optimization_enabled?'<span class="badge hit">optimization on</span>':'<span class="badge miss">optimization off</span>',
+      policy.cache_enabled?'<span class="badge hit">cache on</span>':'<span class="badge miss">cache off</span>',
+      policy.reload_required?'<span class="badge err">reload required</span>':'<span class="badge hit">loaded</span>',
+      `<span class="badge provider">${esc(policy.policy_source||'unknown')}</span>`,
+      `<span class="badge miss" title="${esc(policy.rule_path||'')}">${esc(policy.rule_path?'rule file':'no rule file')}</span>`
+    ].join(' ');
+    const privacyDetails=[
+      privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>',
+      privacy.raw_params_included?'<span class="badge err">raw params</span>':'<span class="badge hit">raw params omitted</span>',
+      privacy.raw_transcripts_included?'<span class="badge err">raw transcripts</span>':'<span class="badge hit">transcripts omitted</span>',
+      privacy.request_ids_included?'<span class="badge err">request IDs</span>':'<span class="badge hit">request IDs omitted</span>',
+      privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'
+    ].join(' ');
+    const checks=(d.readiness_checks||[]).map(row=>{
+      const metrics=row.metrics||{};
+      const evidence=Object.entries(metrics).slice(0,5).map(([k,v])=>`<span class="badge miss">${esc(k)} ${esc(v)}</span>`).join(' ');
+      return `<tr>
+        <td><span class="badge provider">${esc(row.name||'unknown')}</span></td>
+        <td><span class="badge ${readinessBadge(row.status)}">${esc(row.status||'unknown')}</span></td>
+        <td class="flags">${evidence||'—'}</td>
+        <td class="flags">${esc(row.detail||'')}</td>
+      </tr>`;
+    }).join('');
+    tb.innerHTML=`<tr>
+      <td><span class="badge provider">Overall</span></td>
+      <td><span class="badge ${readinessBadge(d.status)}">${esc(d.status||'unknown')}</span></td>
+      <td class="flags"><span class="badge miss">${(summary.turn_start_rows||0).toLocaleString()} turns</span> <span class="badge miss">${fmtPctValue(summary.phase_known_rate||0)} phases known</span> <span class="badge miss">${esc(summary.token_reconciliation_status||'unknown')} tokens</span></td>
+      <td class="flags">${policyDetails}</td>
+    </tr>
+    <tr>
+      <td><span class="badge provider">Canary impact</span></td>
+      <td><span class="badge ${readinessBadge((summary.summary_model_hint_applied||0)&&(summary.summary_model_hint_holdout||0)?'ready':'partial')}">summary hint</span></td>
+      <td class="flags"><span class="badge hit">${(summary.summary_model_hint_applied||0).toLocaleString()} applied</span> <span class="badge miss">${(summary.summary_model_hint_holdout||0).toLocaleString()} holdout</span> <span class="badge routed">${(summary.exact_cache_hits||0).toLocaleString()} cache hits</span> <span class="badge miss">${(summary.exact_cache_invalidations||0).toLocaleString()} invalidated</span></td>
+      <td class="flags"><span class="savings">${fmt(summary.summary_model_hint_estimated_savings_usd||0,6)}</span> summary savings · <span class="savings">${fmt(((d.exact_cache||{}).estimated_saved_cost_usd)||0,6)}</span> exact-cache savings · error ${fmtPctValue(hintSummary.error_rate||0)}</td>
+    </tr>
+    <tr>
+      <td><span class="badge provider">Token reconciliation</span></td>
+      <td><span class="badge ${token.status==='reconciled'?'hit':'routed'}">${esc(token.status||'unknown')}</span></td>
+      <td class="flags"><span class="badge miss">${(token.drift_tokens||0).toLocaleString()} drift</span> <span class="badge provider">${esc(token.drift_size_bucket||'unknown')}</span> <span class="cost">${fmt(token.reconciled_cost_usd||0,6)}</span></td>
+      <td class="flags">${topBreakdownValue(token.status_breakdown)}</td>
+    </tr>
+    <tr>
+      <td><span class="badge provider">Phase unknown reasons</span></td>
+      <td><span class="badge ${phase.unknown?'routed':'hit'}">${(phase.unknown||0).toLocaleString()} unknown</span></td>
+      <td class="flags"><span class="badge miss">${(phase.known||0).toLocaleString()} known</span> <span class="badge provider">${fmtPctValue(phase.known_rate||0)}</span></td>
+      <td class="flags">${topBreakdownValue(phase.unknown_reasons)}</td>
+    </tr>
+    <tr>
+      <td><span class="badge provider">Managed feedback</span></td>
+      <td><span class="badge ${queue.due||queue.retryable_error||queue.dropped_after_limit?'err':'hit'}">${queue.due||queue.retryable_error||queue.dropped_after_limit?'attention':'clear'}</span></td>
+      <td class="flags"><span class="badge provider">${(queue.queued||0).toLocaleString()} queued</span> <span class="badge routed">${(queue.due||0).toLocaleString()} due</span> <span class="badge err">${(queue.retryable_error||0).toLocaleString()} retryable</span> <span class="badge miss">${(queue.sent||0).toLocaleString()} sent</span></td>
+      <td class="flags">${privacyDetails}</td>
+    </tr>${checks}`;
+    const cohorts=((d.exact_cache||{}).cohorts)||[];
+    cb.innerHTML=cohorts.map(row=>`<tr>
+      <td><span class="badge ${row.cohort==='hit'?'hit':row.cohort==='holdout'?'routed':row.cohort==='invalidated'?'err':'miss'}">${esc(row.cohort||'unknown')}</span></td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+      <td class="flags">${topBreakdownValue(row.status_breakdown)}</td>
+      <td class="flags">${topBreakdownValue(row.reason_breakdown)}</td>
+      <td class="flags">${topBreakdownValue(row.policy_source_breakdown)}</td>
+    </tr>`).join('')||'<tr><td colspan="5" style="color:#8b949e">No Codex exact-cache decision metadata recorded yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -13984,6 +14333,7 @@ initDataTables();
 refreshSafety();
 refreshActivity();
 refreshUsage();
+refreshCodexReadiness();
 refreshCodexQuota();
 refresh();
 refreshWeekly();
@@ -14003,6 +14353,7 @@ refreshSessions();
 setInterval(refreshSafety,30000);
 setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
+setInterval(refreshCodexReadiness,30000);
 setInterval(refreshCodexQuota,30000);
 setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
