@@ -803,6 +803,265 @@ exact_cache:
         self.assertEqual(metadata["cache"]["policy_source"], "local-manual")
         self.assertEqual(metadata["cache"]["replayability_level"], "local-exact-response")
 
+    def test_codex_app_rules_apply_summary_actions_without_top_level_toggles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+            db_path = os.path.join(tmp, "codex.sqlite3")
+            with open(rules_path, "w", encoding="utf-8") as f:
+                f.write(
+                    """
+enabled: true
+summary_model_hint:
+  enabled: false
+exact_cache:
+  enabled: false
+rules:
+  - id: managed-summary-rule
+    policy_source: managed-recommended
+    conditions:
+      app_family: codex
+      workflow_phase: summary
+      model_field_state: present
+      input_size_bucket: small
+      cache_eligible: true
+      replayability_level: local-exact-response
+      has_action_like_params: false
+      stale_risk: false
+      supported_action_family: routing
+    action:
+      model_hint: gpt-5-mini
+      cache_eligible: true
+      cache_eligibility_reason: safe rule-level summary cache
+      crunch_profile: codex-repeated-scaffolding
+      reason: managed summary rule
+    canary:
+      fraction: 1.0
+      holdout_fraction: 0.0
+      salt: rule-apply-test
+      unit: source_hash
+"""
+                )
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-rule-summary",
+                "method": "turn/start",
+                "params": {
+                    "threadId": "thread-rule-summary",
+                    "model": "gpt-5.3-codex",
+                    "input": [{"type": "text", "text": "Summarize the completed work for the run log."}],
+                    "temperature": 0,
+                },
+            }
+
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "AGENTFLOW_CODEX_APP_RULES": rules_path,
+                        "AGENTFLOW_DB": db_path,
+                        "HOME": tmp,
+                        "AGENTFLOW_CODEX_APP_SUMMARY_MODEL_HINT": "0",
+                        "AGENTFLOW_CODEX_APP_CACHE": "0",
+                    },
+                    clear=False,
+                ):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+            finally:
+                importlib.reload(codex_app_policy_module)
+                importlib.reload(codex_app_proxy)
+
+        forwarded_obj = json.loads(forwarded)
+        self.assertEqual(forwarded_obj["params"]["model"], "gpt-5-mini")
+        self.assertEqual(metadata["routing"]["status"], "applied")
+        self.assertEqual(metadata["routing"]["reason"], "managed summary rule")
+        self.assertEqual(metadata["routing"]["policy_source"], "managed-recommended")
+        self.assertEqual(metadata["routing"]["codex_app_rule"]["rule_id"], "managed-summary-rule")
+        self.assertTrue(metadata["routing"]["codex_app_rule"]["matched"])
+        self.assertEqual(metadata["routing"]["canary_cohort"], "canary_applied")
+        self.assertEqual(metadata["crunch"]["status"], "hinted")
+        self.assertEqual(metadata["crunch"]["profile_hint"], "codex-repeated-scaffolding")
+        self.assertEqual(metadata["cache"]["status"], "miss")
+        self.assertTrue(metadata["cache"]["eligible"])
+        self.assertEqual(metadata["cache"]["policy_source"], "managed-recommended")
+        self.assertEqual(metadata["cache"]["replayability_level"], "local-exact-response")
+
+    def test_codex_app_rules_holdout_keeps_safe_summary_turn_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+            db_path = os.path.join(tmp, "codex.sqlite3")
+            with open(rules_path, "w", encoding="utf-8") as f:
+                f.write(
+                    """
+enabled: true
+rules:
+  - id: holdout-summary-rule
+    conditions:
+      app_family: codex
+      workflow_phase: summary
+      model_field_state: present
+      cache_eligible: true
+      has_action_like_params: false
+      stale_risk: false
+    action:
+      model_hint: gpt-5-mini
+    canary:
+      fraction: 0.0
+      holdout_fraction: 1.0
+      salt: rule-holdout-test
+      unit: source_hash
+"""
+                )
+            message = {
+                "jsonrpc": "2.0",
+                "id": "turn-rule-holdout",
+                "method": "turn/start",
+                "params": {
+                    "model": "gpt-5.3-codex",
+                    "input": [{"type": "text", "text": "Summarize the completed work."}],
+                    "temperature": 0,
+                },
+            }
+            raw = json.dumps(message)
+
+            try:
+                with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": rules_path, "AGENTFLOW_DB": db_path, "HOME": tmp}, clear=False):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+                    forwarded, metadata = codex_app_proxy._optimize_client_message(raw)
+            finally:
+                importlib.reload(codex_app_policy_module)
+                importlib.reload(codex_app_proxy)
+
+        self.assertEqual(forwarded, raw)
+        self.assertEqual(metadata["routing"]["status"], "skipped")
+        self.assertEqual(metadata["routing"]["reason"], "codex-app-rule-canary-holdout")
+        self.assertEqual(metadata["routing"]["canary_cohort"], "canary_holdout")
+        self.assertEqual(metadata["routing"]["codex_app_rule"]["rule_id"], "holdout-summary-rule")
+        self.assertFalse(metadata["routing"]["applied"])
+
+    def test_codex_app_rules_pass_through_unsafe_or_unsupported_turns_with_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "codex.sqlite3")
+
+            def run_with_rules(rule_text, message):
+                rules_path = os.path.join(tmp, "codex_app_rules.yaml")
+                with open(rules_path, "w", encoding="utf-8") as f:
+                    f.write(rule_text)
+                raw = json.dumps(message)
+                try:
+                    with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": rules_path, "AGENTFLOW_DB": db_path, "HOME": tmp}, clear=False):
+                        importlib.reload(codex_app_policy_module)
+                        importlib.reload(codex_app_proxy)
+                        return raw, codex_app_proxy._optimize_client_message(raw)
+                finally:
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(codex_app_proxy)
+
+            safe_rule = """
+enabled: true
+rules:
+  - id: safe-summary-only
+    conditions:
+      app_family: codex
+      workflow_phase: summary
+      model_field_state: present
+      cache_eligible: true
+      has_action_like_params: false
+      stale_risk: false
+    action:
+      model_hint: gpt-5-mini
+"""
+            cases = [
+                (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "turn-rule-non-summary",
+                        "method": "turn/start",
+                        "params": {
+                            "model": "gpt-5.3-codex",
+                            "input": [{"type": "text", "text": "Answer this question in detail."}],
+                        },
+                    },
+                    safe_rule,
+                    "workflow-phase-not-summary",
+                ),
+                (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "turn-rule-action-like",
+                        "method": "turn/start",
+                        "params": {
+                            "model": "gpt-5.3-codex",
+                            "input": [{"type": "text", "text": "Summarize the command output."}],
+                            "command": "python -m unittest",
+                        },
+                    },
+                    safe_rule,
+                    "action-like-params",
+                ),
+                (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "turn-rule-missing-model",
+                        "method": "turn/start",
+                        "params": {
+                            "input": [{"type": "text", "text": "Summarize the completed work."}],
+                        },
+                    },
+                    safe_rule,
+                    "codex-turn-start-model-field-absent",
+                ),
+                (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "turn-rule-stale-risk",
+                        "method": "turn/start",
+                        "params": {
+                            "model": "gpt-5.3-codex",
+                            "input": [{"type": "text", "text": "Summarize the latest state today."}],
+                        },
+                    },
+                    safe_rule,
+                    "stale-risk-blockers",
+                ),
+                (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "turn-rule-unsupported-action",
+                        "method": "turn/start",
+                        "params": {
+                            "model": "gpt-5.3-codex",
+                            "input": [{"type": "text", "text": "Summarize the completed work."}],
+                        },
+                    },
+                    """
+enabled: true
+rules:
+  - id: unsupported-action-rule
+    conditions:
+      app_family: codex
+      workflow_phase: summary
+      model_field_state: present
+      cache_eligible: true
+      has_action_like_params: false
+      stale_risk: false
+    action:
+      provider_body_rewrite: true
+""",
+                    "unsupported-action:provider_body_rewrite",
+                ),
+            ]
+
+            for message, rule_text, reason in cases:
+                raw, (forwarded, metadata) = run_with_rules(rule_text, message)
+                self.assertEqual(forwarded, raw)
+                self.assertEqual(metadata["routing"]["status"], "skipped")
+                self.assertEqual(metadata["routing"]["reason"], reason)
+                self.assertEqual(metadata["cache"]["reason"], reason)
+                self.assertFalse(metadata["routing"]["applied"])
+
     def test_file_backed_summary_hint_canary_produces_applied_and_holdout_cohorts(self):
         with tempfile.TemporaryDirectory() as tmp:
             rules_path = os.path.join(tmp, "codex_app_rules.yaml")

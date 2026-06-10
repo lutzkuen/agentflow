@@ -25,6 +25,9 @@ CODEX_APP_POLICY_CONDITION_KEYS = (
     "cache_status",
     "replayability_level",
     "has_action_like_params",
+    "stale_risk",
+    "stale_risk_signal",
+    "supported_action_family",
 )
 CODEX_APP_POLICY_ACTION_KEYS = (
     "recommended_model",
@@ -35,6 +38,7 @@ CODEX_APP_POLICY_ACTION_KEYS = (
     "pass_through_reason",
     "reason",
 )
+CODEX_APP_POLICY_ACTION_FAMILIES = ("routing", "crunch", "cache")
 
 CODEX_ACTION_KEY_HINTS = {
     "approval",
@@ -178,6 +182,7 @@ def _default_codex_app_policy() -> dict[str, Any]:
         "crunch": {
             "profiles": ["codex-repeated-scaffolding"],
         },
+        "rules": [],
     }
 
 
@@ -242,6 +247,35 @@ def _apply_codex_app_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -
         profiles = crunch.get("profiles")
         if isinstance(profiles, list):
             policy["crunch"]["profiles"] = [str(profile).strip() for profile in profiles if str(profile).strip()]
+    rules = data.get("rules")
+    if isinstance(rules, list):
+        normalized_rules: list[dict[str, Any]] = []
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, dict):
+                continue
+            conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+            action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+            normalized: dict[str, Any] = {
+                "id": str(rule.get("id") or rule.get("rule_id") or f"codex-app-rule-{index + 1}").strip(),
+                "conditions": dict(conditions),
+                "action": dict(action),
+            }
+            for key in ("candidate_id", "recommendation_id", "policy_id", "policy_source"):
+                value = rule.get(key)
+                if value is not None:
+                    normalized[key] = str(value).strip()
+            canary = rule.get("canary")
+            if isinstance(canary, dict):
+                normalized["canary"] = dict(canary)
+            managed = rule.get("managed_recommendation")
+            if isinstance(managed, dict):
+                normalized["managed_recommendation"] = {
+                    key: value
+                    for key, value in managed.items()
+                    if key in {"candidate_id", "recommendation_id", "policy_id", "reason", "canary"}
+                }
+            normalized_rules.append(normalized)
+        policy["rules"] = normalized_rules
     return policy
 
 

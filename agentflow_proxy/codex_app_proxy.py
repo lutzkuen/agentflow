@@ -24,6 +24,10 @@ from agentflow_proxy.codex_app_policy import (
     CODEX_ACTION_KEY_HINTS,
     CODEX_ACTION_VALUE_HINTS,
     CODEX_MODEL_FIELDS,
+    CODEX_APP_POLICY,
+    CODEX_APP_POLICY_ACTION_FAMILIES,
+    CODEX_APP_POLICY_ACTION_KEYS,
+    CODEX_APP_POLICY_CONDITION_KEYS,
     CODEX_SAFE_TURN_PARAM_KEYS,
     CODEX_TEXT_INPUT_TYPES,
     CODEX_APP_SOURCE_SURFACE,
@@ -70,6 +74,10 @@ CODEX_APP_CACHE_CANARY = codex_app_cache_canary()
 CODEX_APP_SUMMARY_MODEL_HINT = codex_app_summary_model_hint_enabled()
 CODEX_APP_SUMMARY_MODEL_HINT_TARGET = codex_app_summary_model_hint_target()
 CODEX_APP_SUMMARY_MODEL_HINT_CANARY = codex_app_summary_model_hint_canary()
+CODEX_APP_RULES = [
+    rule for rule in (CODEX_APP_POLICY.get("rules") or [])
+    if isinstance(rule, dict)
+]
 CODEX_APP_SESSION_COST_ALERT_USD = float(os.getenv(
     "AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD",
     os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"),
@@ -1215,6 +1223,339 @@ def _codex_cache_eligibility(params: dict[str, Any]) -> tuple[bool, str, dict[st
     }
 
 
+def _codex_input_size_bucket(chars: int) -> str:
+    if chars < 2_000:
+        return "small"
+    if chars < 8_000:
+        return "medium"
+    return "large"
+
+
+def _policy_value_as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _normalized_policy_value(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _condition_value_matches(expected: Any, actual: Any) -> bool:
+    expected_bool = _policy_value_as_bool(expected)
+    if expected_bool is not None:
+        actual_bool = _policy_value_as_bool(actual)
+        return actual_bool is not None and actual_bool == expected_bool
+    if isinstance(actual, (list, tuple, set)):
+        return _normalized_policy_value(expected) in {_normalized_policy_value(item) for item in actual}
+    if isinstance(expected, (list, tuple, set)):
+        return _normalized_policy_value(actual) in {_normalized_policy_value(item) for item in expected}
+    expected_s = _normalized_policy_value(expected)
+    actual_s = _normalized_policy_value(actual)
+    if expected_s in {"present", "derived_present"} and actual_s in {"present", "derived_present"}:
+        return True
+    return expected_s == actual_s
+
+
+def _codex_rule_candidate_id(rule: dict[str, Any], index: int) -> str:
+    for key in ("candidate_id", "recommendation_id", "policy_id", "id", "rule_id"):
+        value = rule.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    managed = rule.get("managed_recommendation")
+    if isinstance(managed, dict):
+        for key in ("candidate_id", "recommendation_id", "policy_id"):
+            value = managed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return f"codex-app-rule-{index + 1}"
+
+
+def _codex_rule_public_meta(
+    rule: dict[str, Any],
+    *,
+    index: int,
+    matched: bool,
+    blockers: list[str] | None = None,
+    cohort: str | None = None,
+    cohort_reason: str | None = None,
+) -> dict[str, Any]:
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    candidate_id = _codex_rule_candidate_id(rule, index)
+    return {
+        "schema": "agentflow.codex_app_rule_execution.v1",
+        "rule_id": str(rule.get("id") or rule.get("rule_id") or candidate_id),
+        "candidate_id": candidate_id,
+        "policy_source": rule.get("policy_source") or CODEX_APP_POLICY_SOURCE,
+        "matched": bool(matched),
+        "condition_keys": sorted(str(key) for key in conditions),
+        "action_keys": sorted(str(key) for key in action),
+        "blockers": list(blockers or []),
+        "canary_cohort": cohort,
+        "cohort_reason": cohort_reason,
+        "raw_conditions_included": False,
+        "raw_actions_included": False,
+        "raw_params_included": False,
+    }
+
+
+def _codex_rule_features(
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]:
+    eligible, eligible_reason, eligibility_meta = _codex_cache_eligibility(params)
+    file_dependency_audit_meta: dict[str, Any] = {}
+    stale_signal: str | None = None
+    if eligible:
+        file_dependency_audit_meta = cache_file_dependency_audit(params)
+        stale_signal = _codex_stale_risk_skip_reason(params, file_dependency_audit_meta)
+    model_field, requested_model = _model_field(params)
+    has_action_like = _contains_action_hint(params)
+    workflow_phase = str(eligibility_meta.get("workflow_phase") or "unknown")
+    replayability_level = "local-exact-response" if eligible and not stale_signal else "features_only"
+    features = {
+        "app_family": "codex",
+        "source_surface": CODEX_APP_SOURCE_SURFACE,
+        "workflow_phase": workflow_phase,
+        "model_field_state": "present" if model_field and requested_model else "absent",
+        "input_size_bucket": _codex_input_size_bucket(_input_text_chars(params.get("input"))),
+        "cache_eligible": bool(eligible and not stale_signal),
+        "cache_status": "eligible" if eligible and not stale_signal else "skipped",
+        "replayability_level": replayability_level,
+        "has_action_like_params": bool(has_action_like),
+        "stale_risk": bool(stale_signal),
+        "stale_risk_signal": stale_signal or "none",
+        "supported_action_family": list(CODEX_APP_POLICY_ACTION_FAMILIES),
+        "requested_model": requested_model,
+        "model_field": model_field,
+    }
+    if eligibility_meta.get("workflow_phase_reason"):
+        features["workflow_phase_reason"] = eligibility_meta.get("workflow_phase_reason")
+    return features, stale_signal or eligible_reason, eligibility_meta, file_dependency_audit_meta
+
+
+def _codex_rule_condition_blockers(rule: dict[str, Any], features: dict[str, Any]) -> list[str]:
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    blockers: list[str] = []
+    supported_conditions = set(CODEX_APP_POLICY_CONDITION_KEYS)
+    for key in sorted(set(conditions) - supported_conditions):
+        blockers.append(f"unsupported-condition:{key}")
+    for key, expected in conditions.items():
+        if key not in supported_conditions:
+            continue
+        actual = features.get(key)
+        if key not in features or actual is None or actual == "":
+            blockers.append(f"insufficient-metadata:{key}")
+            continue
+        if not _condition_value_matches(expected, actual):
+            if key == "stale_risk" and features.get("stale_risk"):
+                blockers.append(str(features.get("stale_risk_signal") or "stale-risk-blockers"))
+            elif key == "cache_eligible" and features.get("stale_risk"):
+                blockers.append(str(features.get("stale_risk_signal") or "stale-risk-blockers"))
+            elif key == "workflow_phase" and _normalized_policy_value(expected) == "summary":
+                blockers.append("workflow-phase-not-summary")
+            elif key == "model_field_state" and _normalized_policy_value(actual) == "absent":
+                blockers.append("codex-turn-start-model-field-absent")
+            elif key == "has_action_like_params" and bool(actual):
+                blockers.append("action-like-params")
+            else:
+                blockers.append(f"condition-mismatch:{key}")
+    return blockers
+
+
+def _codex_rule_action_blockers(rule: dict[str, Any]) -> list[str]:
+    action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    unsupported = sorted(str(key) for key in action if str(key) not in CODEX_APP_POLICY_ACTION_KEYS)
+    return [f"unsupported-action:{key}" for key in unsupported]
+
+
+def _codex_rule_safety_blocker(action: dict[str, Any], features: dict[str, Any], fallback_reason: str) -> str | None:
+    if action.get("pass_through_reason"):
+        return str(action.get("pass_through_reason"))
+    if features.get("model_field_state") != "present":
+        return "codex-turn-start-model-field-absent"
+    if features.get("has_action_like_params"):
+        return "action-like-params"
+    if features.get("workflow_phase") != "summary":
+        return "workflow-phase-not-summary"
+    if not features.get("cache_eligible"):
+        return str(features.get("stale_risk_signal") or fallback_reason or "not-safe-summary-turn")
+    return None
+
+
+def _codex_rule_canary_sample(
+    rule: dict[str, Any],
+    *,
+    candidate_id: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    canary = rule.get("canary")
+    if not isinstance(canary, dict):
+        managed = rule.get("managed_recommendation")
+        canary = managed.get("canary") if isinstance(managed, dict) and isinstance(managed.get("canary"), dict) else {}
+    enabled = _policy_value_as_bool(canary.get("enabled")) if isinstance(canary, dict) else None
+    if enabled is False:
+        return {
+            "enabled": False,
+            "cohort": "applied",
+            "status": "applied",
+            "reason": "no-canary",
+            "raw_basis_included": False,
+        }
+    fraction = float(canary.get("fraction", canary.get("canary_fraction", 1.0)) or 1.0) if isinstance(canary, dict) else 1.0
+    holdout_fraction = float(canary.get("holdout_fraction", 0.0) or 0.0) if isinstance(canary, dict) else 0.0
+    fraction = min(max(fraction, 0.0), 1.0)
+    holdout_fraction = min(max(holdout_fraction, 0.0), 1.0)
+    salt = str(canary.get("salt") or "codex-app-rule-canary") if isinstance(canary, dict) else "codex-app-rule-canary"
+    unit = str(canary.get("unit") or "source_hash").strip().lower().replace("-", "_") if isinstance(canary, dict) else "source_hash"
+    if unit == "thread_id":
+        material = str(_thread_id(params) or "")
+        if not material:
+            unit = "source_hash"
+    if unit == "model_and_size":
+        material = f"{candidate_id}:{_model_field(params)[1] or ''}:{_input_text_chars(params.get('input'))}"
+    elif unit == "thread_id":
+        material = str(_thread_id(params) or "")
+    else:
+        unit = "source_hash"
+        material = stable_json(params)
+    digest = hashlib.sha256(f"{salt}\0{candidate_id}\0{unit}\0{material}".encode("utf-8")).hexdigest()
+    sample = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    applied_cutoff = min(1.0, holdout_fraction + fraction)
+    if sample < holdout_fraction:
+        cohort = "canary_holdout"
+        status = "holdout"
+        reason = "codex-app-rule-canary-holdout"
+    elif sample < applied_cutoff:
+        cohort = "canary_applied"
+        status = "applied"
+        reason = "codex-app-rule-canary-applied"
+    else:
+        cohort = "not_selected"
+        status = "eligible-skipped"
+        reason = "codex-app-rule-canary-not-selected"
+    return {
+        "enabled": True,
+        "cohort": cohort,
+        "status": status,
+        "reason": reason,
+        "fraction": fraction,
+        "holdout_fraction": holdout_fraction,
+        "sample_unit": unit,
+        "sample_bucket": round(sample, 6),
+        "hash_basis": "local-only-salted-policy-sample",
+        "raw_basis_included": False,
+    }
+
+
+def _codex_rule_plan(params: dict[str, Any]) -> dict[str, Any]:
+    features, safety_reason, eligibility_meta, file_dependency_audit_meta = _codex_rule_features(params)
+    mismatch_counts: dict[str, int] = {}
+    first_rule_meta: dict[str, Any] | None = None
+    for index, rule in enumerate(CODEX_APP_RULES):
+        conditions_blockers = _codex_rule_condition_blockers(rule, features)
+        action_blockers = _codex_rule_action_blockers(rule)
+        rule_meta = _codex_rule_public_meta(
+            rule,
+            index=index,
+            matched=not conditions_blockers,
+            blockers=conditions_blockers + action_blockers,
+        )
+        if first_rule_meta is None:
+            first_rule_meta = rule_meta
+        if conditions_blockers:
+            for blocker in conditions_blockers:
+                mismatch_counts[blocker] = int(mismatch_counts.get(blocker) or 0) + 1
+            continue
+        if action_blockers:
+            return {
+                "status": "blocked",
+                "reason": action_blockers[0],
+                "rule": rule,
+                "rule_index": index,
+                "rule_meta": rule_meta,
+                "features": features,
+                "eligibility_meta": eligibility_meta,
+                "file_dependency_audit": file_dependency_audit_meta,
+            }
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        safety_blocker = _codex_rule_safety_blocker(action, features, safety_reason)
+        if safety_blocker:
+            rule_meta["blockers"] = list(rule_meta.get("blockers") or []) + [safety_blocker]
+            return {
+                "status": "blocked",
+                "reason": safety_blocker,
+                "rule": rule,
+                "rule_index": index,
+                "rule_meta": rule_meta,
+                "features": features,
+                "eligibility_meta": eligibility_meta,
+                "file_dependency_audit": file_dependency_audit_meta,
+            }
+        candidate_id = str(rule_meta["candidate_id"])
+        sample = _codex_rule_canary_sample(rule, candidate_id=candidate_id, params=params)
+        rule_meta = _codex_rule_public_meta(
+            rule,
+            index=index,
+            matched=True,
+            blockers=[],
+            cohort=sample.get("cohort"),
+            cohort_reason=sample.get("reason"),
+        )
+        return {
+            "status": str(sample.get("status") or "applied"),
+            "reason": str(sample.get("reason") or "codex-app-rule-applied"),
+            "rule": rule,
+            "rule_index": index,
+            "rule_meta": rule_meta,
+            "features": features,
+            "eligibility_meta": eligibility_meta,
+            "file_dependency_audit": file_dependency_audit_meta,
+            "canary_sample": sample,
+        }
+    blockers = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(mismatch_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    priority = [
+        "action-like-params",
+        "codex-turn-start-model-field-absent",
+        "workflow-phase-not-summary",
+        "stale-risk-blockers",
+        "file-dependency-missing",
+        "dependency-missing",
+        "dependency-cap-exceeded",
+        "file-watch-disabled",
+    ]
+    reason = next((item for item in priority if item in mismatch_counts), None)
+    if reason is None:
+        reason = blockers[0]["reason"] if blockers else "no-matching-codex-app-rule"
+    return {
+        "status": "blocked",
+        "reason": reason,
+        "rule": None,
+        "rule_index": -1,
+        "rule_meta": first_rule_meta or {
+            "schema": "agentflow.codex_app_rule_execution.v1",
+            "matched": False,
+            "blockers": [reason],
+            "raw_params_included": False,
+        },
+        "features": features,
+        "eligibility_meta": eligibility_meta,
+        "file_dependency_audit": file_dependency_audit_meta,
+        "blocker_breakdown": blockers,
+    }
+
+
 def _codex_cache_key_for_message(msg: dict[str, Any]) -> str:
     key_msg = copy.deepcopy(msg)
     key_msg.pop("id", None)
@@ -1681,6 +2022,284 @@ async def _attach_codex_managed_recommendation(
     }
 
 
+def _codex_rule_cache_lookup_or_record(
+    optimized: dict[str, Any],
+    routed_params: dict[str, Any],
+    *,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    features = plan.get("features") if isinstance(plan.get("features"), dict) else {}
+    eligibility_meta = plan.get("eligibility_meta") if isinstance(plan.get("eligibility_meta"), dict) else {}
+    file_dependency_audit_meta = plan.get("file_dependency_audit") if isinstance(plan.get("file_dependency_audit"), dict) else {}
+    workflow_phase = str(features.get("workflow_phase") or eligibility_meta.get("workflow_phase") or "unknown")
+    workflow_phase_reason = eligibility_meta.get("workflow_phase_reason")
+    replayability_level = str(features.get("replayability_level") or "features_only")
+    rule_meta = plan.get("rule_meta") if isinstance(plan.get("rule_meta"), dict) else {}
+    canary_sample = plan.get("canary_sample") if isinstance(plan.get("canary_sample"), dict) else None
+    file_deps = cache_file_dependency_snapshots(routed_params)
+    stale_reason = _codex_stale_risk_skip_reason(routed_params, file_dependency_audit_meta)
+    if stale_reason:
+        cache_meta = _codex_cache_decision(
+            "skipped",
+            stale_reason,
+            enabled=True,
+            eligible=True,
+            replayability_level=replayability_level,
+            file_dependencies=file_deps,
+            file_dependency_audit_meta=file_dependency_audit_meta,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="stale-risk",
+            canary_sample=canary_sample,
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta["codex_app_rule"] = rule_meta
+        return cache_meta
+
+    cache_key = _codex_cache_key_for_message(optimized)
+    cached, invalidation_reason = store.get_cache_with_reason(cache_key)
+    if cached is None:
+        cache_meta = _codex_cache_decision(
+            "miss",
+            invalidation_reason or "exact-miss",
+            enabled=True,
+            eligible=True,
+            cache_key=cache_key,
+            replayability_level="local-exact-response",
+            file_dependencies=file_deps,
+            file_dependency_audit_meta=file_dependency_audit_meta,
+            invalidation_reason=invalidation_reason,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="invalidated" if invalidation_reason else "miss",
+            canary_sample=canary_sample,
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta["codex_app_rule"] = rule_meta
+        cache_meta[_INTERNAL_CACHE_KEY] = cache_key
+        return cache_meta
+
+    replay_frame, cached_skip_reason = _codex_cached_response(cached, optimized.get("id"))
+    if cached_skip_reason in {"unsafe-cached-envelope", "codex-cache-ttl-expired"}:
+        store.delete_cache(cache_key)
+    elif cached_skip_reason:
+        replay_frame = None
+    if replay_frame is not None:
+        cache_meta = _codex_cache_decision(
+            "hit",
+            "exact-match",
+            enabled=True,
+            eligible=True,
+            hit_type="exact",
+            cache_key=cache_key,
+            replayability_level="local-exact-response",
+            file_dependencies=file_deps,
+            file_dependency_audit_meta=file_dependency_audit_meta,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="hit",
+            canary_sample=canary_sample,
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta["codex_app_rule"] = rule_meta
+        cache_meta[_INTERNAL_REPLAY_FRAME_KEY] = replay_frame
+        return cache_meta
+
+    reason = cached_skip_reason or "unsafe-cached-envelope"
+    status = "unsafe-skip" if reason == "unsafe-cached-envelope" else "miss"
+    cache_meta = _codex_cache_decision(
+        status,
+        reason,
+        enabled=True,
+        eligible=True,
+        cache_key=cache_key,
+        replayability_level="local-exact-response",
+        file_dependencies=file_deps,
+        file_dependency_audit_meta=file_dependency_audit_meta,
+        workflow_phase=workflow_phase,
+        workflow_phase_reason=workflow_phase_reason,
+        outcome_bucket=_codex_cache_outcome_bucket(status, reason),
+        canary_sample=canary_sample,
+        ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+    )
+    cache_meta["codex_app_rule"] = rule_meta
+    cache_meta[_INTERNAL_CACHE_KEY] = cache_key
+    return cache_meta
+
+
+def _optimize_client_message_with_rules(
+    raw: str,
+    msg: dict[str, Any],
+    params: dict[str, Any],
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    plan = _codex_rule_plan(params)
+    features = plan.get("features") if isinstance(plan.get("features"), dict) else {}
+    rule = plan.get("rule") if isinstance(plan.get("rule"), dict) else None
+    action = rule.get("action") if isinstance(rule, dict) and isinstance(rule.get("action"), dict) else {}
+    rule_meta = plan.get("rule_meta") if isinstance(plan.get("rule_meta"), dict) else {}
+    workflow_phase = str(features.get("workflow_phase") or "unknown")
+    workflow_phase_reason = (plan.get("eligibility_meta") or {}).get("workflow_phase_reason") if isinstance(plan.get("eligibility_meta"), dict) else None
+    policy_source = str(rule_meta.get("policy_source") or CODEX_APP_POLICY_SOURCE)
+    requested_model = str(features.get("requested_model") or "")
+    model_field = features.get("model_field")
+    target_model = str(action.get("recommended_model") or action.get("model_hint") or "").strip()
+
+    if plan.get("status") in {"blocked", "eligible-skipped"} or not rule:
+        reason = str(plan.get("reason") or "no-matching-codex-app-rule")
+        routing_meta = _policy_decision("routing", "skipped", reason, enabled=True)
+        routing_meta.update({
+            "policy_source": policy_source,
+            "requested_model": requested_model or None,
+            "routed_model": requested_model or None,
+            "model_field": model_field,
+            "workflow_phase": workflow_phase,
+            "workflow_phase_reason": workflow_phase_reason,
+            "codex_app_rule": rule_meta,
+        })
+        crunch_meta = _policy_decision("crunch", "skipped", reason, enabled=True)
+        crunch_meta.update({
+            "policy_source": policy_source,
+            "workflow_phase": workflow_phase,
+            "workflow_phase_reason": workflow_phase_reason,
+            "codex_app_rule": rule_meta,
+        })
+        cache_meta = _codex_cache_decision(
+            "skipped",
+            reason,
+            enabled=True,
+            eligible=bool(features.get("cache_eligible")),
+            replayability_level=str(features.get("replayability_level") or "features_only"),
+            file_dependency_audit_meta=plan.get("file_dependency_audit") if isinstance(plan.get("file_dependency_audit"), dict) else None,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket=_codex_cache_outcome_bucket("skipped", reason),
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta["policy_source"] = policy_source
+        cache_meta["codex_app_rule"] = rule_meta
+        metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+        _attach_codex_local_pattern_features(raw, metadata)
+        return raw, metadata
+
+    if plan.get("status") == "holdout":
+        reason = str(plan.get("reason") or "codex-app-rule-canary-holdout")
+        sample = plan.get("canary_sample") if isinstance(plan.get("canary_sample"), dict) else None
+        routing_meta = _policy_decision("routing", "skipped", reason, enabled=True)
+        routing_meta.update({
+            "policy_source": policy_source,
+            "requested_model": requested_model,
+            "routed_model": requested_model,
+            "target_model": target_model or None,
+            "model_field": model_field,
+            "workflow_phase": workflow_phase,
+            "workflow_phase_reason": workflow_phase_reason,
+            "canary": "codex-app-rule",
+            "canary_cohort": sample.get("cohort") if sample else None,
+            "canary_sample": sample,
+            "codex_app_rule": rule_meta,
+        })
+        crunch_meta = _policy_decision("crunch", "skipped", reason, enabled=True)
+        crunch_meta.update({"policy_source": policy_source, "workflow_phase": workflow_phase, "codex_app_rule": rule_meta})
+        cache_meta = _codex_cache_decision(
+            "holdout" if _policy_value_as_bool(action.get("cache_eligible")) is True else "skipped",
+            reason,
+            enabled=True,
+            eligible=bool(features.get("cache_eligible")),
+            replayability_level=str(features.get("replayability_level") or "features_only"),
+            file_dependency_audit_meta=plan.get("file_dependency_audit") if isinstance(plan.get("file_dependency_audit"), dict) else None,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="holdout",
+            canary_sample=sample,
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta["policy_source"] = policy_source
+        cache_meta["codex_app_rule"] = rule_meta
+        metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+        _attach_codex_local_pattern_features(raw, metadata)
+        return raw, metadata
+
+    routed_params = copy.deepcopy(params)
+    routed_model = requested_model
+    routing_status = "skipped"
+    routing_reason = str(action.get("reason") or "codex-app-rule-no-routing-action")
+    if target_model and model_field and target_model != requested_model:
+        routed_params[str(model_field)] = target_model
+        routed_model = target_model
+        routing_status = "applied"
+        routing_reason = str(action.get("reason") or "codex-app-rule-summary-model-hint")
+    elif target_model:
+        routing_reason = "codex-app-rule-target-matches-requested"
+
+    routing_meta = _policy_decision("routing", routing_status, routing_reason, enabled=True)
+    routing_meta.update({
+        "policy_source": policy_source,
+        "requested_model": requested_model,
+        "routed_model": routed_model,
+        "target_model": target_model or None,
+        "model_field": model_field,
+        "workflow_phase": workflow_phase,
+        "workflow_phase_reason": workflow_phase_reason,
+        "canary": "codex-app-rule",
+        "canary_cohort": (plan.get("canary_sample") or {}).get("cohort") if isinstance(plan.get("canary_sample"), dict) else None,
+        "canary_sample": plan.get("canary_sample"),
+        "codex_app_rule": rule_meta,
+        "safety_gates": {
+            "known_model_field": True,
+            "safe_param_shape": True,
+            "text_only_input": True,
+            "action_like_params": False,
+            "workflow_phase": "summary",
+            "stale_risk": False,
+        },
+    })
+
+    crunch_profile = action.get("crunch_profile")
+    crunch_meta = _policy_decision(
+        "crunch",
+        "hinted" if crunch_profile else "skipped",
+        "codex-app-rule-crunch-profile-hint" if crunch_profile else "codex-app-rule-no-crunch-action",
+        enabled=True,
+    )
+    crunch_meta.update({
+        "policy_source": policy_source,
+        "workflow_phase": workflow_phase,
+        "workflow_phase_reason": workflow_phase_reason,
+        "profile_hint": str(crunch_profile).strip() if crunch_profile else None,
+        "applied": False,
+        "codex_app_rule": rule_meta,
+    })
+
+    optimized = copy.deepcopy(msg)
+    optimized["params"] = routed_params
+    if _policy_value_as_bool(action.get("cache_eligible")) is True:
+        cache_meta = _codex_rule_cache_lookup_or_record(optimized, routed_params, plan=plan)
+    else:
+        cache_meta = _codex_cache_decision(
+            "skipped",
+            str(action.get("cache_eligibility_reason") or "codex-app-rule-no-cache-action"),
+            enabled=True,
+            eligible=bool(features.get("cache_eligible")),
+            replayability_level=str(features.get("replayability_level") or "features_only"),
+            file_dependency_audit_meta=plan.get("file_dependency_audit") if isinstance(plan.get("file_dependency_audit"), dict) else None,
+            workflow_phase=workflow_phase,
+            workflow_phase_reason=workflow_phase_reason,
+            outcome_bucket="disabled",
+            canary_sample=plan.get("canary_sample") if isinstance(plan.get("canary_sample"), dict) else None,
+            ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
+        )
+        cache_meta["codex_app_rule"] = rule_meta
+    cache_meta["policy_source"] = policy_source
+
+    metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+    if optimized == msg:
+        _attach_codex_local_pattern_features(raw, metadata)
+        return raw, metadata
+    forwarded = json.dumps(optimized, separators=(",", ":"), ensure_ascii=False)
+    _attach_codex_local_pattern_features(forwarded, metadata)
+    return forwarded, metadata
+
+
 def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, dict[str, Any]] | None]:
     if isinstance(raw, bytes):
         return raw, _not_applied_metadata("binary-frame")
@@ -1703,6 +2322,9 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
     params = msg.get("params")
     if not isinstance(params, dict):
         return raw, _not_applied_metadata("params-not-object")
+
+    if CODEX_APP_RULES:
+        return _optimize_client_message_with_rules(raw, msg, params)
 
     if _contains_action_hint(params):
         metadata = _not_applied_metadata("action-like-params")
