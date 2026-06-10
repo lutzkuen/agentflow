@@ -2488,6 +2488,117 @@ def optimization_shadow_eval_cli(
     return 0
 
 
+def optimization_promotion_report_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Score local eval, canary, and holdout evidence into optimization promotion verdicts")
+    parser.add_argument(
+        "plan",
+        nargs="?",
+        help="Optional optimization eval plan JSON path, or '-' to read from stdin. If omitted, a fresh plan is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--evidence-report",
+        action="append",
+        default=[],
+        help="Optional sanitized post-apply impact or feedback report JSON to merge by candidate_id. May be repeated.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Maximum candidates to score and recent eval result rows to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=1,
+        help="Minimum samples when building a fresh eval plan, default: 1",
+    )
+    parser.add_argument(
+        "--min-eval-pass-count",
+        type=int,
+        default=1,
+        help="Minimum passing local eval results required before widening, default: 1",
+    )
+    parser.add_argument(
+        "--min-canary-applied-samples",
+        type=int,
+        default=2,
+        help="Minimum applied canary samples required before widening, default: 2",
+    )
+    parser.add_argument(
+        "--min-canary-holdout-samples",
+        type=int,
+        default=1,
+        help="Minimum holdout samples required before widening, default: 1",
+    )
+    parser.add_argument(
+        "--max-evidence-age-hours",
+        type=int,
+        default=168,
+        help="Mark eval evidence stale after this many hours, default: 168",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    try:
+        plan = _read_json_input(str(args.plan), stdin=stdin) if args.plan else None
+        evidence_reports = [_read_json_input(str(path), stdin=stdin) for path in args.evidence_report]
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_promotion_report_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_optimization_promotion_report(
+            store,
+            plan=plan,
+            evidence_reports=evidence_reports,
+            limit=args.limit,
+            min_samples=args.min_samples,
+            min_eval_pass_count=args.min_eval_pass_count,
+            min_canary_applied_samples=args.min_canary_applied_samples,
+            min_canary_holdout_samples=args.min_canary_holdout_samples,
+            max_evidence_age_hours=args.max_evidence_age_hours,
+        )
+    finally:
+        store.conn.close()
+
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _write_validation_result(stream: Any, payload: dict[str, Any], *, pretty: bool) -> None:
     if pretty:
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -3218,6 +3329,10 @@ def optimization_eval_plan_main() -> None:
 
 def optimization_shadow_eval_main() -> None:
     raise SystemExit(optimization_shadow_eval_cli())
+
+
+def optimization_promotion_report_main() -> None:
+    raise SystemExit(optimization_promotion_report_cli())
 
 
 def managed_feedback_status_main() -> None:

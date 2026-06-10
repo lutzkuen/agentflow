@@ -890,6 +890,243 @@ class PolicyReloadCliTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, rendered)
 
+    def _promotion_plan_row(
+        self,
+        candidate_id: str,
+        *,
+        optimization_family: str,
+        action_family: str,
+        applied_count: int,
+        holdout_count: int,
+        applied_error_rate: float = 0.0,
+        holdout_error_rate: float = 0.0,
+        applied_retry_rate: float = 0.0,
+        holdout_retry_rate: float = 0.0,
+        applied_latency_avg_ms: int = 1000,
+        holdout_latency_avg_ms: int = 1000,
+        projected_savings_usd: float = 0.01,
+        extra_evidence: dict | None = None,
+    ) -> dict:
+        evidence = {
+            "canary_evidence": {
+                "applied": {
+                    "count": applied_count,
+                    "error_rate": applied_error_rate,
+                    "retry_rate": applied_retry_rate,
+                    "latency_avg_ms": applied_latency_avg_ms,
+                    "net_savings_usd": projected_savings_usd,
+                },
+                "holdout": {
+                    "count": holdout_count,
+                    "error_rate": holdout_error_rate,
+                    "retry_rate": holdout_retry_rate,
+                    "latency_avg_ms": holdout_latency_avg_ms,
+                },
+            },
+            "prompt": "raw promotion prompt must stay local",
+            "request_id": "req-promotion-secret",
+            "session_id": "promotion-session-secret",
+            "file_path": "/tmp/promotion-secret.py",
+        }
+        if extra_evidence:
+            evidence.update(extra_evidence)
+        return {
+            "schema": "agentflow.optimization_eval_plan_row.v1",
+            "candidate_id": candidate_id,
+            "optimization_family": optimization_family,
+            "action_family": action_family,
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "granularity": "provider_request",
+            "replayability_level": "local-exact-response",
+            "current_canary_count": applied_count,
+            "holdout_count": holdout_count,
+            "sample_count": applied_count + holdout_count,
+            "projected_savings_usd": projected_savings_usd,
+            "evidence": evidence,
+        }
+
+    def _log_promotion_eval_result(self, store, candidate_id: str, status: str, *, created_at: str = "2026-06-10T03:30:00+00:00") -> None:
+        from agentflow_proxy.store import stable_json
+
+        reason = "offline-fixture-passed" if status == "pass" else "output-similarity-below-threshold"
+        store.log_optimization_eval_result(
+            id=f"promotion-eval-{candidate_id}-{status}",
+            run_id="promotion-eval-run",
+            created_at=created_at,
+            candidate_id=candidate_id,
+            source_surface="anthropic_messages",
+            optimization_family="phase_routing",
+            action_family="routing",
+            status_class=status,
+            reason_codes_json=stable_json([reason]),
+            score_json=stable_json({"output_similarity": 0.98 if status == "pass" else 0.2, "quality_score": 0.97 if status == "pass" else 0.1}),
+            cost_json=stable_json({"projected_savings_usd": 0.01}),
+            result_json=stable_json({
+                "candidate_id": candidate_id,
+                "status_class": status,
+                "prompt": "raw eval prompt must stay local",
+                "response": "raw eval response must stay local",
+                "request_id": "req-eval-secret",
+                "session_id": "session-eval-secret",
+            }),
+        )
+
+    def test_optimization_promotion_report_cli_scores_verdict_paths_metadata_only(self):
+        from agentflow_proxy.store import Store
+
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                self._promotion_plan_row(
+                    "routing-widen",
+                    optimization_family="phase_routing",
+                    action_family="routing",
+                    applied_count=2,
+                    holdout_count=2,
+                    projected_savings_usd=0.02,
+                ),
+                self._promotion_plan_row(
+                    "cache-rollback",
+                    optimization_family="cache_replay_confidence",
+                    action_family="cache",
+                    applied_count=2,
+                    holdout_count=2,
+                    applied_error_rate=0.5,
+                    holdout_error_rate=0.0,
+                    projected_savings_usd=0.03,
+                ),
+                self._promotion_plan_row(
+                    "old-context-hold",
+                    optimization_family="old_context_summarization",
+                    action_family="crunch",
+                    applied_count=2,
+                    holdout_count=2,
+                    applied_retry_rate=0.5,
+                    holdout_retry_rate=0.0,
+                    projected_savings_usd=0.04,
+                ),
+                self._promotion_plan_row(
+                    "cache-needs-eval",
+                    optimization_family="cache_replayability",
+                    action_family="cache",
+                    applied_count=0,
+                    holdout_count=0,
+                    projected_savings_usd=0.05,
+                ),
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._log_promotion_eval_result(store, "routing-widen", "pass")
+                self._log_promotion_eval_result(store, "cache-rollback", "pass")
+                self._log_promotion_eval_result(store, "old-context-hold", "pass")
+                plan_path = Path(tmp) / "promotion-plan.json"
+                plan_path.write_text(json.dumps(plan), encoding="utf-8")
+                evidence_path = Path(tmp) / "old-context-impact.json"
+                evidence_path.write_text(
+                    json.dumps({
+                        "schema": "agentflow.old_context_summary_impact.v1",
+                        "policy": {"candidate_id": "old-context-hold"},
+                        "quality_gate": {
+                            "verdict": "hold",
+                            "reason_codes": ["applied-retry-rate-above-threshold"],
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+                stdout = io.StringIO()
+
+                code = cli.optimization_promotion_report_cli(
+                    ["--db", db_path, "--evidence-report", str(evidence_path), str(plan_path)],
+                    stdout=stdout,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_promotion_report.v1")
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["provider_calls_made"])
+        self.assertFalse(payload["managed_server_calls_made"])
+        by_candidate = {row["candidate_id"]: row for row in payload["candidates"]}
+        self.assertEqual(by_candidate["routing-widen"]["verdict"], "widen")
+        self.assertIn("promotion-thresholds-met", by_candidate["routing-widen"]["reason_codes"])
+        self.assertEqual(by_candidate["cache-rollback"]["verdict"], "rollback")
+        self.assertIn("rollback-error-rate", by_candidate["cache-rollback"]["reason_codes"])
+        self.assertEqual(by_candidate["old-context-hold"]["verdict"], "hold")
+        self.assertIn("old-context-quality-gate-hold", by_candidate["old-context-hold"]["reason_codes"])
+        self.assertEqual(by_candidate["cache-needs-eval"]["verdict"], "needs_eval")
+        self.assertIn("eval-results-missing", by_candidate["cache-needs-eval"]["reason_codes"])
+        verdict_counts = {row["value"]: row["count"] for row in payload["summary"]["verdict_counts"]}
+        self.assertEqual(verdict_counts["widen"], 1)
+        self.assertEqual(verdict_counts["hold"], 1)
+        self.assertEqual(verdict_counts["rollback"], 1)
+        self.assertEqual(verdict_counts["needs_eval"], 1)
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw promotion prompt",
+            "raw eval prompt",
+            "raw eval response",
+            "req-promotion-secret",
+            "req-eval-secret",
+            "promotion-session-secret",
+            "session-eval-secret",
+            "/tmp/promotion-secret.py",
+            '"prompt"',
+            '"response"',
+            '"request_id"',
+            '"session_id"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+        self.assertFalse(payload["privacy"]["raw_session_ids_included"])
+
+    def test_optimization_promotion_report_cli_reports_eval_failure_rollback(self):
+        from agentflow_proxy.store import Store
+
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                self._promotion_plan_row(
+                    "routing-eval-fail",
+                    optimization_family="phase_routing",
+                    action_family="routing",
+                    applied_count=2,
+                    holdout_count=2,
+                    projected_savings_usd=0.02,
+                )
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._log_promotion_eval_result(store, "routing-eval-fail", "fail")
+                stdout = io.StringIO()
+
+                code = cli.optimization_promotion_report_cli(
+                    ["--db", db_path, "-"],
+                    stdin=io.StringIO(json.dumps(plan)),
+                    stdout=stdout,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        candidate = payload["candidates"][0]
+        self.assertEqual(candidate["verdict"], "rollback")
+        self.assertIn("eval-failed", candidate["reason_codes"])
+        self.assertEqual(candidate["eval_evidence"]["fail_count"], 1)
+
     def test_optimization_shadow_eval_cli_requires_budget_for_execute(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
