@@ -16,7 +16,7 @@ PROMOTION_CANARY_APPLY_SCHEMA = "agentflow.optimization_promotion_canary_apply.v
 PROMOTION_CANARY_DECISION_SCHEMA = "agentflow.optimization_promotion_canary_decision.v1"
 PROMOTION_CANARY_SAFETY_SCHEMA = "agentflow.optimization_promotion_canary_safety_stop.v1"
 
-_POLICY_SECTION_FILES = {"routing": "routing_rules.yaml"}
+_POLICY_SECTION_FILES = {"routing": "routing_rules.yaml", "crunch": "crunch_rules.yaml"}
 _COHORT_SAFE_KEYS = (
     "request_fingerprint",
     "session_id_hash",
@@ -299,6 +299,47 @@ def _write_policy_file(path: Path, text: str) -> str | None:
     return backup_path
 
 
+def _normalize_pattern_hash(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if text.startswith("sha256:"):
+        digest = text.split(":", 1)[1]
+    else:
+        digest = text
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return f"sha256:{digest}"
+
+
+def _collect_pattern_hashes(value: Any) -> list[str]:
+    hashes: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_l = str(key).lower()
+            if (
+                key_l in {"pattern_hash", "normalized_pattern_hash", "crunch_pattern_hash", "pattern_hashes", "hashes"}
+                or key_l.endswith(("_pattern_hash", "_pattern_sha256"))
+                or ("pattern" in key_l and key_l.endswith(("_hash", "_hashes", "_sha256")))
+            ):
+                if isinstance(item, list):
+                    hashes.extend(hash_value for nested in item if (hash_value := _normalize_pattern_hash(nested)))
+                elif (hash_value := _normalize_pattern_hash(item)) is not None:
+                    hashes.append(hash_value)
+            hashes.extend(_collect_pattern_hashes(item))
+    elif isinstance(value, list):
+        for item in value:
+            hashes.extend(_collect_pattern_hashes(item))
+    return sorted(set(hashes))
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item or "").strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def _routing_phase_canary(action: dict[str, Any]) -> dict[str, Any]:
     local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
     target_model = local_update.get("candidate_target_model") or action.get("candidate_target_model") or "haiku"
@@ -335,6 +376,140 @@ def _routing_phase_canary(action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _managed_enforced(action: dict[str, Any]) -> bool:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    return (
+        bool(action.get("managed_enforced"))
+        or bool(local_update.get("managed_enforced"))
+        or str(local_update.get("policy_source") or "").strip() == "managed-enforced"
+        or str(action.get("policy_source") or "").strip() == "managed-enforced"
+    )
+
+
+def _crunch_pattern_rule(action: dict[str, Any], *, existing: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+    conditions_update = local_update.get("conditions") if isinstance(local_update.get("conditions"), dict) else {}
+    action_update = local_update.get("action") if isinstance(local_update.get("action"), dict) else {}
+    if not action_update and isinstance(local_update.get("crunch_action"), dict):
+        action_update = local_update["crunch_action"]
+
+    disabled = str(action.get("action_type") or "") == "rollback" or _as_float(action.get("canary_fraction")) <= 0
+    pattern_hashes = (
+        _collect_pattern_hashes(conditions_update)
+        or _collect_pattern_hashes(local_update)
+        or _collect_pattern_hashes(action)
+    )
+    if not pattern_hashes and isinstance(existing, dict):
+        pattern_hashes = _collect_pattern_hashes(existing.get("conditions")) or _collect_pattern_hashes(existing)
+    if not pattern_hashes:
+        return None, "missing-pattern-hashes"
+
+    existing_conditions = existing.get("conditions") if isinstance(existing, dict) and isinstance(existing.get("conditions"), dict) else {}
+    conditions: dict[str, Any] = {
+        "pattern_hashes": pattern_hashes,
+        "min_repeated_count": _as_int(
+            conditions_update.get("min_repeated_count", existing_conditions.get("min_repeated_count", 2)),
+            2,
+        ),
+        "keep_recent_matches": _as_int(
+            conditions_update.get("keep_recent_matches", existing_conditions.get("keep_recent_matches", 1)),
+            1,
+        ),
+    }
+    for key in ("model_pattern", "category", "workflow_phase"):
+        value = conditions_update.get(key, existing_conditions.get(key))
+        if value is not None:
+            conditions[key] = str(value)
+    category_not_in = conditions_update.get("category_not_in", existing_conditions.get("category_not_in"))
+    if category_not_in is not None:
+        conditions["category_not_in"] = _safe_string_list(category_not_in)
+    for key in ("min_text_chars", "max_text_chars", "max_applications"):
+        value = conditions_update.get(key, existing_conditions.get(key))
+        if value is not None:
+            conditions[key] = _as_int(value)
+
+    existing_action = existing.get("action") if isinstance(existing, dict) and isinstance(existing.get("action"), dict) else {}
+    action_type = str(action_update.get("type") or action_update.get("kind") or existing_action.get("type") or "shorten").strip().lower()
+    if action_type not in {"shorten", "omit"}:
+        action_type = "shorten"
+    pattern_action: dict[str, Any] = {
+        "type": action_type,
+        "head_chars": _as_int(action_update.get("head_chars", existing_action.get("head_chars", 1200)), 1200),
+        "tail_chars": _as_int(action_update.get("tail_chars", existing_action.get("tail_chars", 800)), 800),
+        "max_replacement_chars": _as_int(
+            action_update.get("max_replacement_chars", existing_action.get("max_replacement_chars", 2400)),
+            2400,
+        ),
+    }
+    marker = action_update.get("marker", existing_action.get("marker"))
+    if marker is not None:
+        pattern_action["marker"] = str(marker)
+
+    safety_update = local_update.get("safety_stop") if isinstance(local_update.get("safety_stop"), dict) else {}
+    existing_rollout = existing.get("rollout") if isinstance(existing, dict) and isinstance(existing.get("rollout"), dict) else {}
+    rollout: dict[str, Any] = {
+        "schema": "agentflow.pattern_policy_rollout.v1",
+        "recommendation_mode": "canary",
+        "canary_enabled": not disabled,
+        "canary_fraction": 0.0 if disabled else _as_float(action.get("canary_fraction")),
+        "holdout_fraction": 0.0 if disabled else _as_float(action.get("holdout_fraction")),
+        "canary_salt": str(action.get("action_id") or action.get("target_candidate_id") or action.get("target_rule_id") or ""),
+        "canary_unit": str(local_update.get("canary_unit") or existing_rollout.get("canary_unit") or "request_fingerprint"),
+        "rollback_threshold": safety_update.get(
+            "rollback_threshold",
+            safety_update.get("max_regression_rate", existing_rollout.get("rollback_threshold", 0.2)),
+        ),
+        "min_outcome_samples": _as_int(
+            safety_update.get("min_outcome_samples", safety_update.get("min_samples", existing_rollout.get("min_outcome_samples", 5))),
+            5,
+        ),
+    }
+    if safety_update.get("window") is not None:
+        rollout["window"] = _as_int(safety_update.get("window"))
+
+    rule: dict[str, Any] = {
+        "id": str(action.get("target_rule_id") or action.get("target_candidate_id") or (existing or {}).get("id") or "promotion-crunch-canary"),
+        "enabled": not disabled,
+        "policy_source": "managed-recommended",
+        "candidate_id": action.get("target_candidate_id") or (existing or {}).get("candidate_id"),
+        "promotion_action_id": action.get("action_id"),
+        "conditions": conditions,
+        "action": pattern_action,
+        "rollout": rollout,
+        "rollout_action": {
+            "schema": ACTION_SCHEMA,
+            "action_type": action.get("action_type"),
+            "target_candidate_id": action.get("target_candidate_id"),
+            "target_rule_id": action.get("target_rule_id"),
+            "canary_fraction": rollout["canary_fraction"],
+            "holdout_fraction": rollout["holdout_fraction"],
+            "managed_enforced": False,
+        },
+    }
+    module_family = local_update.get("module_family") or local_update.get("candidate_profile") or action.get("candidate_profile")
+    if module_family is not None:
+        rule["module_family"] = str(module_family)
+    description = local_update.get("description") or (existing or {}).get("description")
+    if description is not None:
+        rule["description"] = str(description)
+    return rule, None
+
+
+def _find_pattern_rule(rules: list[Any], action: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None]:
+    target_rule_id = str(action.get("target_rule_id") or "").strip()
+    target_candidate_id = str(action.get("target_candidate_id") or "").strip()
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        rule_id = str(rule.get("id") or rule.get("rule_id") or "").strip()
+        candidate_id = str(rule.get("candidate_id") or rule.get("recommendation_id") or rule.get("policy_id") or "").strip()
+        if target_rule_id and rule_id == target_rule_id:
+            return index, rule
+        if target_candidate_id and candidate_id == target_candidate_id:
+            return index, rule
+    return None, None
+
+
 def apply_optimization_promotion_canaries(
     bundle: Any,
     *,
@@ -359,9 +534,18 @@ def apply_optimization_promotion_canaries(
     if isinstance(bundle, dict):
         _scan_raw_like(bundle, "$", errors)
 
+    file_plans: dict[str, dict[str, Any]] = {}
+
+    def _file_plan(section: str) -> dict[str, Any]:
+        if section not in file_plans:
+            path = config_path / _POLICY_SECTION_FILES[section]
+            data, old_text = _load_yaml(path)
+            if section == "crunch" and not isinstance(data.get("pattern_rules"), list):
+                data["pattern_rules"] = []
+            file_plans[section] = {"section": section, "path": path, "data": data, "old_text": old_text}
+        return file_plans[section]
+
     if not errors:
-        routing_path = config_path / _POLICY_SECTION_FILES["routing"]
-        routing_data, old_text = _load_yaml(routing_path)
         for index, action in enumerate(raw_actions):
             if not isinstance(action, dict):
                 errors.append({"path": f"$.actions[{index}]", "message": "expected action object"})
@@ -369,41 +553,117 @@ def apply_optimization_promotion_canaries(
             if action.get("schema") != ACTION_SCHEMA:
                 errors.append({"path": f"$.actions[{index}].schema", "message": f"expected {ACTION_SCHEMA}"})
                 continue
+            if _managed_enforced(action):
+                errors.append({"path": f"$.actions[{index}]", "message": "managed-enforced promotion canaries are not accepted"})
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "rejected",
+                    "reason": "managed-enforced-not-accepted",
+                    "policy_section": action.get("policy_section"),
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                })
+                continue
             section = str(action.get("policy_section") or "")
             if section not in requested_sections:
                 actions.append({"path": f"$.actions[{index}]", "status": "skipped", "reason": "not-requested", "policy_section": section})
                 continue
-            if section != "routing":
+            if section not in _POLICY_SECTION_FILES:
                 actions.append({
                     "path": f"$.actions[{index}]",
                     "status": "skipped",
-                    "reason": "promotion-canary-apply-supports-routing-only",
+                    "reason": "unsupported-policy-section",
                     "policy_section": section,
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": action.get("target_rule_id"),
                 })
                 continue
-            routing_data["phase_canary"] = _routing_phase_canary(action)
+            plan = _file_plan(section)
+            if section == "routing":
+                plan["data"]["phase_canary"] = _routing_phase_canary(action)
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "planned",
+                    "policy_section": "routing",
+                    "action_type": action.get("action_type"),
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                    "action_id": action.get("action_id"),
+                    "canary_fraction": plan["data"]["phase_canary"]["canary_fraction"],
+                    "holdout_fraction": plan["data"]["phase_canary"]["holdout_fraction"],
+                })
+                continue
+
+            pattern_rules = plan["data"]["pattern_rules"]
+            rule_index, existing_rule = _find_pattern_rule(pattern_rules, action)
+            if existing_rule is not None and str(existing_rule.get("policy_source") or "") != "managed-recommended":
+                errors.append({"path": f"$.actions[{index}]", "message": "promotion canary targets a non-managed-recommended crunch rule"})
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "rejected",
+                    "reason": "unsafe-policy-source",
+                    "policy_section": "crunch",
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                })
+                continue
+            if str(action.get("action_type") or "") == "rollback" and existing_rule is None:
+                errors.append({"path": f"$.actions[{index}]", "message": "rollback targets an unknown crunch rule"})
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "rejected",
+                    "reason": "unknown-rule",
+                    "policy_section": "crunch",
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                })
+                continue
+            rule, reason = _crunch_pattern_rule(action, existing=existing_rule)
+            if rule is None:
+                errors.append({"path": f"$.actions[{index}]", "message": reason or "invalid crunch pattern rule"})
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "rejected",
+                    "reason": reason or "invalid-crunch-pattern-rule",
+                    "policy_section": "crunch",
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id"),
+                })
+                continue
+            if rule_index is None:
+                pattern_rules.append(rule)
+            else:
+                pattern_rules[rule_index] = rule
             actions.append({
                 "path": f"$.actions[{index}]",
                 "status": "planned",
-                "policy_section": "routing",
+                "policy_section": "crunch",
                 "action_type": action.get("action_type"),
                 "target_candidate_id": action.get("target_candidate_id"),
                 "target_rule_id": action.get("target_rule_id"),
                 "action_id": action.get("action_id"),
-                "canary_fraction": routing_data["phase_canary"]["canary_fraction"],
-                "holdout_fraction": routing_data["phase_canary"]["holdout_fraction"],
+                "rule_id": rule.get("id"),
+                "rule_index": len(pattern_rules) - 1 if rule_index is None else rule_index,
+                "canary_fraction": rule["rollout"]["canary_fraction"],
+                "holdout_fraction": rule["rollout"]["holdout_fraction"],
             })
-        text = yaml.safe_dump(routing_data, sort_keys=False)
-        changed = old_text != text
-        backup_path = None
-        if changed and not dry_run:
-            backup_path = _write_policy_file(routing_path, text)
-        if any(action.get("status") == "planned" and action.get("policy_section") == "routing" for action in actions):
+
+    if not errors:
+        planned_sections = {
+            str(action.get("policy_section"))
+            for action in actions
+            if action.get("status") == "planned"
+        }
+        for section in sorted(planned_sections):
+            plan = file_plans[section]
+            text = yaml.safe_dump(plan["data"], sort_keys=False)
+            changed = plan["old_text"] != text
+            backup_path = None
+            if changed and not dry_run:
+                backup_path = _write_policy_file(plan["path"], text)
             files.append({
-                "section": "routing",
-                "path": str(routing_path),
+                "section": section,
+                "path": str(plan["path"]),
                 "changed": bool(changed),
                 "backup_path": backup_path,
                 "bytes_after": len(text.encode("utf-8")),
