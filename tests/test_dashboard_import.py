@@ -21,7 +21,7 @@ if HAS_RUNTIME_DEPS:
 
     import agentflow_proxy.dashboard_app as dashboard_app
     from agentflow_proxy.dashboard_app import create_dashboard_app
-    from agentflow_proxy.store import Store
+    from agentflow_proxy.store import Store, stable_json, utc_now
 
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
@@ -78,6 +78,7 @@ class DashboardImportTests(unittest.TestCase):
             codex_effectiveness = client.get("/agentflow/stats/codex-effectiveness")
             openai_scoreboard = client.get("/agentflow/stats/openai-scoreboard")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
+            local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
             phase_routing = client.get("/agentflow/stats/phase-routing")
             safety = client.get("/agentflow/stats/safety")
             admin_reload = client.post("/agentflow/admin/reload-policies")
@@ -101,6 +102,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
+            self.assertEqual(local_pattern_coverage.status_code, 200)
+            self.assertEqual(local_pattern_coverage.json()["schema"], "agentflow.local_pattern_coverage.v1")
+            self.assertFalse(local_pattern_coverage.json()["privacy"]["raw_prompts_included"])
             self.assertEqual(phase_routing.status_code, 200)
             self.assertEqual(phase_routing.json()["schema"], "agentflow.phase_routing_dashboard.v1")
             self.assertFalse(phase_routing.json()["privacy"]["raw_prompts_included"])
@@ -156,6 +160,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/rollout-actions/readiness", dashboard.text)
             self.assertIn("Rollout-action readiness", dashboard.text)
             self.assertIn("rollout-readiness-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/local-pattern-coverage", dashboard.text)
+            self.assertIn("Local pattern coverage", dashboard.text)
+            self.assertIn("local-pattern-coverage-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/phase-routing", dashboard.text)
             self.assertIn("Phase-routing rollout health", dashboard.text)
             self.assertIn("phase-routing-health-tbody", dashboard.text)
@@ -167,6 +174,165 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_local_pattern_coverage_endpoint_summarizes_family_readiness(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        try:
+            families = [
+                "terminal_logs",
+                "tool_results",
+                "diffs",
+                "generated_artifacts",
+                "tabular_data",
+                "cacheability",
+            ]
+            modules = [
+                {
+                    "schema": "agentflow.local_pattern_module_outcome.v1",
+                    "family": family,
+                    "version": "test",
+                    "enabled": True,
+                    "supports_local_crunch": family in {"tool_results", "diffs", "generated_artifacts"},
+                    "local_crunch_enabled": family in {"tool_results", "diffs", "generated_artifacts"},
+                    "status": "applied" if family == "tool_results" else "skipped",
+                    "reason": "fixture-local-crunch-applied" if family == "tool_results" else "feature-only-no-local-crunch",
+                    "detected": True,
+                    "features_emitted": True,
+                    "changed": family == "tool_results",
+                    "saved_chars": 64 if family == "tool_results" else 0,
+                    "tokens_saved_est": 16 if family == "tool_results" else 0,
+                    "privacy_guard": {"safe": True, "violation_count": 0, "blocked_keys": [], "raw_values_logged": False},
+                    "feature_summary": {
+                        "family": family,
+                        "feature_schema": f"agentflow.{family}.fixture_features.v1",
+                        "raw_content_included": False,
+                    },
+                }
+                for family in families
+            ]
+            crunch_json = {
+                "changed": True,
+                "saved_chars": 64,
+                "tokens_saved_est": 16,
+                "pattern_modules": {
+                    "schema": "agentflow.local_pattern_modules.v1",
+                    "registered_count": len(families),
+                    "enabled_count": len(families),
+                    "detected_count": len(families),
+                    "features_emitted_count": len(families),
+                    "applied_count": 1,
+                    "bypass_count": 0,
+                    "modules": modules,
+                    "server_features": {
+                        "schema": "agentflow.local_pattern_module_features.v1",
+                        "module_feature_count": len(families),
+                        "features": [
+                            {
+                                "family": family,
+                                "version": "test",
+                                "feature_schema": f"agentflow.{family}.fixture_features.v1",
+                                "features": {
+                                    "schema": f"agentflow.{family}.fixture_features.v1",
+                                    "module_family": family,
+                                    "detected": True,
+                                    "privacy": {"metadata_only": True, "raw_content_included": False},
+                                },
+                            }
+                            for family in families
+                        ],
+                        "privacy": {
+                            "metadata_only": True,
+                            "raw_content_included": False,
+                            "raw_provider_body_included": False,
+                            "raw_tool_payload_included": False,
+                        },
+                    },
+                    "raw_content_included": False,
+                },
+            }
+            routing_json = {
+                "category": "tool-result",
+                "managed_pattern_features": {
+                    "schema": "agentflow.managed_pattern_feature_diagnostics.v1",
+                    "present": True,
+                    "pattern_hash_count": 3,
+                    "pattern_hashes": [
+                        "sha256:" + "1" * 64,
+                        "sha256:" + "2" * 64,
+                        "sha256:" + "3" * 64,
+                    ],
+                    "pattern_hash": "sha256:" + "1" * 64,
+                    "crunch_pattern_hash": "sha256:" + "2" * 64,
+                    "cache_pattern_hash": "sha256:" + "3" * 64,
+                    "hash_basis": "normalized-structure-and-size-buckets",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-result",
+                    "local_pattern_module_families": families,
+                    "local_pattern_module_count": len(families),
+                    "pattern_types": families,
+                    "raw_pattern_strings_included": False,
+                },
+            }
+            store.log_call(
+                id="pattern-coverage-fixture",
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.001,
+                crunch_json=stable_json(crunch_json),
+                routing_json=stable_json(routing_json),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="session-pattern-coverage",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+            app = create_dashboard_app(
+                store_obj=store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+            )
+            client = TestClient(app)
+
+            response = client.get("/agentflow/stats/local-pattern-coverage?limit=50")
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["schema"], "agentflow.local_pattern_coverage.v1")
+            self.assertFalse(data["privacy"]["raw_prompts_included"])
+            self.assertFalse(data["privacy"]["raw_tool_payloads_included"])
+            by_family = {row["family"]: row for row in data["families"]}
+            for family in families:
+                self.assertIn(family, by_family)
+                self.assertEqual(by_family[family]["detected_call_count"], 1)
+                self.assertEqual(by_family[family]["fingerprint_count"], 3)
+                self.assertFalse(by_family[family]["raw_content_included"])
+                self.assertIn("recommendation-fetch-disabled", by_family[family]["managed_eligibility"]["reasons"])
+            self.assertEqual(by_family["tool_results"]["applied_count"], 1)
+            self.assertIn("local_crunch", by_family["tool_results"]["action_families_seen"])
+        finally:
+            store.conn.close()
+            tmp.close()
 
     def test_rollout_action_readiness_endpoint_summarizes_metadata_only(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

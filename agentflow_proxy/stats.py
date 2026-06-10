@@ -2604,6 +2604,298 @@ def _pattern_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool 
     return result
 
 
+LOCAL_PATTERN_COVERAGE_FAMILIES = (
+    "terminal_logs",
+    "tool_results",
+    "diffs",
+    "generated_artifacts",
+    "tabular_data",
+    "cacheability",
+)
+MANAGED_PATTERN_SUPPORTED_FAMILIES = set(LOCAL_PATTERN_COVERAGE_FAMILIES)
+
+
+def _empty_local_pattern_family_bucket(family: str, *, registered: bool, supports_local_crunch: bool) -> dict[str, Any]:
+    return {
+        "family": family,
+        "registered": bool(registered),
+        "managed_supported": family in MANAGED_PATTERN_SUPPORTED_FAMILIES,
+        "supports_local_crunch": bool(supports_local_crunch),
+        "detected_call_count": 0,
+        "feature_call_count": 0,
+        "fingerprint_row_count": 0,
+        "fingerprint_count": 0,
+        "action_families_seen": set(),
+        "applied_count": 0,
+        "holdout_count": 0,
+        "skipped_count": 0,
+        "bypassed_count": 0,
+        "safety_stop_count": 0,
+        "disabled_count": 0,
+        "status_counts": {},
+        "skip_reasons": {},
+        "raw_content_included": False,
+        "latest_seen_at": None,
+    }
+
+
+def _count_dict_increment(values: dict[str, int], key: Any, amount: int = 1) -> None:
+    label = str(key or "unknown")
+    values[label] = values.get(label, 0) + max(0, int(amount))
+
+
+def _local_pattern_family_eligibility(
+    row: dict[str, Any],
+    *,
+    recommendations_configured: bool,
+    min_samples: int,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    if row["disabled_count"] and not row["detected_call_count"]:
+        reasons.append("local-module-disabled")
+    if row["detected_call_count"] <= 0:
+        reasons.append("no-detected-samples")
+    if row["fingerprint_count"] <= 0:
+        reasons.append("no-fingerprints")
+    if not row["managed_supported"]:
+        reasons.append("unsupported-family")
+    if row["detected_call_count"] < min_samples:
+        reasons.append("insufficient-samples")
+    if not recommendations_configured:
+        reasons.append("recommendation-fetch-disabled")
+
+    if not reasons:
+        status = "ready"
+        reasons = ["clean-ready"]
+    elif "local-module-disabled" in reasons:
+        status = "disabled"
+    elif "unsupported-family" in reasons:
+        status = "unsupported-family"
+    elif "recommendation-fetch-disabled" in reasons:
+        status = "recommendation-fetch-disabled"
+    elif "no-detected-samples" in reasons:
+        status = "no-samples"
+    elif "no-fingerprints" in reasons:
+        status = "no-fingerprints"
+    else:
+        status = "insufficient-samples"
+    return {
+        "status": status,
+        "reasons": reasons,
+        "min_samples": min_samples,
+        "recommendation_fetch_enabled": bool(recommendations_configured),
+    }
+
+
+async def stats_local_pattern_coverage(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    """Aggregate local pattern-module coverage without exposing raw request content."""
+    from agentflow_proxy.pattern_modules import registered_pattern_modules
+    from agentflow_proxy.recommendations import recommendations_enabled, recommendation_server_configured
+
+    conn = store_obj.conn
+    row_limit = max(1, min(int(limit or 1000), 10000))
+    min_samples = max(1, _as_int(os.getenv("AGENTFLOW_PATTERN_COVERAGE_MIN_SAMPLES")) or 10)
+    recommendations_configured = bool(recommendations_enabled() and recommendation_server_configured())
+    registered = {item["family"]: item for item in registered_pattern_modules() if isinstance(item, dict)}
+    families = sorted(set(LOCAL_PATTERN_COVERAGE_FAMILIES) | set(registered))
+    grouped: dict[str, dict[str, Any]] = {
+        family: _empty_local_pattern_family_bucket(
+            family,
+            registered=family in registered,
+            supports_local_crunch=bool((registered.get(family) or {}).get("supports_local_crunch")),
+        )
+        for family in families
+    }
+
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            """
+            select created_at, path, coalesce(provider, 'anthropic') as provider,
+                   requested_model, routed_model, status_code, latency_ms,
+                   retry_count, cost_est_usd, cost_baseline_usd,
+                   crunch_json, routing_json, cache_json, category
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (row_limit,),
+        ).fetchall()
+    ]
+
+    for db_row in rows:
+        crunch_meta = _json_obj(db_row.get("crunch_json"))
+        routing_meta = _json_obj(db_row.get("routing_json"))
+        cache_meta = _json_obj(db_row.get("cache_json"))
+        pattern_meta = (
+            crunch_meta.get("pattern_modules")
+            if isinstance(crunch_meta.get("pattern_modules"), dict)
+            else {}
+        )
+        modules = pattern_meta.get("modules") if isinstance(pattern_meta, dict) else []
+        if not isinstance(modules, list):
+            modules = []
+        emitted_families: set[str] = set()
+        server_features = pattern_meta.get("server_features") if isinstance(pattern_meta, dict) else {}
+        for feature in (server_features.get("features") if isinstance(server_features, dict) else []) or []:
+            if isinstance(feature, dict) and feature.get("family"):
+                emitted_families.add(str(feature["family"]))
+
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            family = str(module.get("family") or "unknown")
+            if family not in grouped:
+                grouped[family] = _empty_local_pattern_family_bucket(
+                    family,
+                    registered=family in registered,
+                    supports_local_crunch=bool((registered.get(family) or {}).get("supports_local_crunch")),
+                )
+            bucket = grouped[family]
+            if module.get("detected"):
+                bucket["detected_call_count"] += 1
+                bucket["latest_seen_at"] = max(
+                    [item for item in (bucket["latest_seen_at"], db_row.get("created_at")) if item],
+                    default=None,
+                )
+            if family in emitted_families or module.get("features_emitted"):
+                bucket["feature_call_count"] += 1
+                bucket["action_families_seen"].add("feature")
+            status = str(module.get("status") or "unknown")
+            reason = str(module.get("reason") or "unknown")
+            _count_dict_increment(bucket["status_counts"], status)
+            if status == "applied":
+                bucket["applied_count"] += 1
+                bucket["action_families_seen"].add("local_crunch")
+            elif status == "skipped":
+                bucket["skipped_count"] += 1
+                _count_dict_increment(bucket["skip_reasons"], reason)
+            elif status in {"bypass", "bypassed"}:
+                bucket["bypassed_count"] += 1
+                _count_dict_increment(bucket["skip_reasons"], reason)
+            if module.get("enabled") is False:
+                bucket["disabled_count"] += 1
+            privacy = module.get("privacy_guard") if isinstance(module.get("privacy_guard"), dict) else {}
+            summary = module.get("feature_summary") if isinstance(module.get("feature_summary"), dict) else {}
+            bucket["raw_content_included"] = bool(
+                bucket["raw_content_included"]
+                or module.get("raw_content_included")
+                or summary.get("raw_content_included")
+                or not privacy.get("safe", True)
+            )
+
+        diagnostics = (
+            routing_meta.get("managed_pattern_features")
+            if isinstance(routing_meta.get("managed_pattern_features"), dict)
+            else {}
+        )
+        diagnostic_families = diagnostics.get("local_pattern_module_families") if isinstance(diagnostics, dict) else []
+        if not isinstance(diagnostic_families, list):
+            diagnostic_families = []
+        if diagnostics.get("present"):
+            hash_count = _as_int(diagnostics.get("pattern_hash_count"))
+            for family in {str(item) for item in diagnostic_families if item}:
+                if family not in grouped:
+                    grouped[family] = _empty_local_pattern_family_bucket(
+                        family,
+                        registered=family in registered,
+                        supports_local_crunch=bool((registered.get(family) or {}).get("supports_local_crunch")),
+                    )
+                grouped[family]["fingerprint_row_count"] += 1
+                grouped[family]["fingerprint_count"] += hash_count
+                grouped[family]["action_families_seen"].add("fingerprint")
+
+        for summary in pattern_decision_summaries(
+            provider=str(db_row.get("provider") or "anthropic"),
+            path=str(db_row.get("path") or ""),
+            requested_model=db_row.get("requested_model"),
+            routed_model=db_row.get("routed_model"),
+            status_code=_as_int(db_row.get("status_code")) if db_row.get("status_code") is not None else None,
+            cost_est_usd=_as_float(db_row.get("cost_est_usd")) if db_row.get("cost_est_usd") is not None else None,
+            cost_baseline_usd=_as_float(db_row.get("cost_baseline_usd")) if db_row.get("cost_baseline_usd") is not None else None,
+            cache_meta=cache_meta,
+            crunch_meta=crunch_meta,
+            routing_meta=routing_meta,
+            category=db_row.get("category") or routing_meta.get("category"),
+        ):
+            summary_families = summary.get("local_pattern_module_families") if isinstance(summary, dict) else []
+            if not isinstance(summary_families, list):
+                summary_families = []
+            action = str(summary.get("decision_type") or summary.get("pattern_family") or "unknown")
+            status = str(summary.get("status") or "")
+            outcome = str(summary.get("outcome") or "")
+            reason = str(summary.get("reason") or "")
+            for family in {str(item) for item in summary_families if item}:
+                if family not in grouped:
+                    continue
+                bucket = grouped[family]
+                if action in {"routing", "crunch", "cache", "local_pattern_fingerprint"}:
+                    bucket["action_families_seen"].add("fingerprint" if action == "local_pattern_fingerprint" else action)
+                if status == "holdout" or outcome == "holdout":
+                    bucket["holdout_count"] += 1
+                if status in {"bypass", "bypassed"} or outcome == "bypassed":
+                    bucket["bypassed_count"] += 1
+                    if reason:
+                        _count_dict_increment(bucket["skip_reasons"], reason)
+                if reason == "local-canary-safety-stop" or summary.get("safety_stop"):
+                    bucket["safety_stop_count"] += 1
+
+    output_rows: list[dict[str, Any]] = []
+    for family, bucket in grouped.items():
+        public_row = {
+            "family": family,
+            "registered": bucket["registered"],
+            "managed_supported": bucket["managed_supported"],
+            "supports_local_crunch": bucket["supports_local_crunch"],
+            "detected_call_count": bucket["detected_call_count"],
+            "feature_call_count": bucket["feature_call_count"],
+            "fingerprint_row_count": bucket["fingerprint_row_count"],
+            "fingerprint_count": bucket["fingerprint_count"],
+            "action_families_seen": sorted(bucket["action_families_seen"]),
+            "applied_count": bucket["applied_count"],
+            "holdout_count": bucket["holdout_count"],
+            "skipped_count": bucket["skipped_count"],
+            "bypassed_count": bucket["bypassed_count"],
+            "safety_stop_count": bucket["safety_stop_count"],
+            "disabled_count": bucket["disabled_count"],
+            "status_counts": _breakdown_from_counts(bucket["status_counts"]),
+            "top_skip_reasons": _breakdown_from_counts(bucket["skip_reasons"])[:5],
+            "raw_content_included": bool(bucket["raw_content_included"]),
+            "latest_seen_at": bucket["latest_seen_at"],
+        }
+        public_row["managed_eligibility"] = _local_pattern_family_eligibility(
+            public_row,
+            recommendations_configured=recommendations_configured,
+            min_samples=min_samples,
+        )
+        output_rows.append(public_row)
+
+    output_rows.sort(key=lambda item: (item["family"] not in LOCAL_PATTERN_COVERAGE_FAMILIES, item["family"]))
+    return {
+        "schema": "agentflow.local_pattern_coverage.v1",
+        "generated_at": utc_now(),
+        "sampled_call_limit": row_limit,
+        "sampled_call_count": len(rows),
+        "summary": {
+            "family_count": len(output_rows),
+            "families_with_detections": sum(1 for row in output_rows if row["detected_call_count"] > 0),
+            "families_with_fingerprints": sum(1 for row in output_rows if row["fingerprint_count"] > 0),
+            "ready_family_count": sum(1 for row in output_rows if row["managed_eligibility"]["status"] == "ready"),
+            "recommendation_fetch_enabled": recommendations_configured,
+            "min_samples_for_managed_eligibility": min_samples,
+        },
+        "families": output_rows,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "pattern_hashes_included": False,
+        },
+    }
+
+
 def _status_code_bucket(status_code: Any) -> str:
     if status_code is None:
         return "unknown"
@@ -9038,6 +9330,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Local pattern coverage</h2>
+  <table class="activity-table" data-table-id="local-pattern-coverage" data-filter-label="Filter local pattern coverage">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Eligibility</th><th data-sort-type="number">Detected calls</th><th data-sort-type="number">Fingerprints</th><th data-sort-type="text">Actions</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Skipped</th><th data-sort-type="number">Bypassed</th><th data-sort-type="number">Safety stops</th><th data-sort-type="text">Top reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="local-pattern-coverage-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Rollout-action readiness</h2>
   <table data-table-id="rollout-readiness" data-filter-label="Filter rollout readiness">
     <thead><tr>
@@ -10079,6 +10380,12 @@ function compactBreakdown(rows,emptyLabel){
   if(!rows.length)return`<span class="badge miss">${esc(emptyLabel||'none')}</span>`;
   return rows.slice(0,5).map(row=>`<span class="badge provider">${esc(row.value)} ${(row.count||0).toLocaleString()}</span>`).join(' ');
 }
+function eligibilityBadge(status){
+  if(status==='ready')return'hit';
+  if(status==='recommendation-fetch-disabled'||status==='insufficient-samples'||status==='no-fingerprints')return'routed';
+  if(status==='unsupported-family'||status==='disabled'||status==='no-samples')return'miss';
+  return'provider';
+}
 function recBadge(status){
   if(status==='received'||status==='sent')return'hit';
   if(status==='error'||status==='invalid')return'err';
@@ -10240,14 +10547,16 @@ async function refreshOpenAIScoreboard(){
 }
 async function refreshManaged(){
   try{
-    const [managedResponse,safetyResponse,rolloutResponse]=await Promise.all([
+    const [managedResponse,safetyResponse,rolloutResponse,coverageResponse]=await Promise.all([
       fetch('/agentflow/stats/managed-recommendations?limit=500'),
       fetch('/agentflow/stats/safety'),
-      fetch('/agentflow/stats/rollout-actions/readiness?limit=500')
+      fetch('/agentflow/stats/rollout-actions/readiness?limit=500'),
+      fetch('/agentflow/stats/local-pattern-coverage?limit=1000')
     ]);
     const d=await managedResponse.json();
     const safety=await safetyResponse.json();
     const rollout=await rolloutResponse.json();
+    const coverage=await coverageResponse.json();
     const s=d.summary||{};
     const cfg=d.current_config||{};
     const queue=((((safety||{}).checks||{}).managed||{}).feedback_queue)||{};
@@ -10285,6 +10594,26 @@ async function refreshManaged(){
       <td class="ts">${lastSent.sent_at?ago(lastSent.sent_at):'—'}</td>
       <td class="flags">${compactBreakdown(queue.source_surface_breakdown,'none')} <span class="badge hit">payload omitted</span></td>
     </tr>`;
+    const coverageRows=coverage.families||[];
+    document.getElementById('local-pattern-coverage-tbody').innerHTML=coverageRows.map(row=>{
+      const eligibility=row.managed_eligibility||{};
+      const reasons=(eligibility.reasons||[]).slice(0,4).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
+      const actions=(row.action_families_seen||[]).map(action=>`<span class="badge provider">${esc(action)}</span>`).join(' ')||'<span class="badge miss">none</span>';
+      return `<tr>
+        <td><span class="badge provider">${esc(row.family||'unknown')}</span></td>
+        <td class="flags"><span class="badge ${eligibilityBadge(eligibility.status)}">${esc(eligibility.status||'unknown')}</span> ${reasons}</td>
+        <td class="tokens">${(row.detected_call_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.fingerprint_count||0).toLocaleString()}</td>
+        <td class="flags">${actions}</td>
+        <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.skipped_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.bypassed_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="flags">${compactBreakdown(row.top_skip_reasons,'none')}</td>
+        <td>${row.raw_content_included?'<span class="badge err">raw flag</span>':'<span class="badge hit">metadata only</span>'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="12" style="color:#8b949e">No local pattern coverage rows yet</td></tr>';
     const rolloutSummary=rollout.summary||{};
     const review=rollout.latest_review||{};
     const dryRun=rollout.latest_dry_run||{};

@@ -145,6 +145,10 @@ def create_dashboard_router(
     async def stats_rollout_actions_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_rollout_actions_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/local-pattern-coverage")
+    async def stats_local_pattern_coverage(limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_local_pattern_coverage(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/safety")
     async def stats_safety() -> dict[str, Any]:
         return await stats_views.stats_safety(
