@@ -10,6 +10,7 @@ import ipaddress
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
 from agentflow_proxy.codex_app_policy import (
     CODEX_APP_SOURCE_SURFACE,
     canonical_source_surface,
@@ -3100,6 +3101,10 @@ async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> di
             "basis": "stored cache decision metadata, canary cohorts, safety-stop summaries, status codes, retries, and cost estimates only",
         },
     }
+
+
+async def stats_cache_effectiveness(store_obj: Any, *, limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
+    return build_cache_smoke_diagnostic(store_obj, limit=limit, scan_limit=scan_limit)
 
 
 LOCAL_PATTERN_COVERAGE_FAMILIES = (
@@ -10184,6 +10189,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
     cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
+    cache_effectiveness = await stats_cache_effectiveness(store_obj, limit=5, scan_limit=5000)
     pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows)
     today_pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows, today_only=True)
 
@@ -10329,6 +10335,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
+        "cache_effectiveness": cache_effectiveness,
         "cache_replayability": cache_replayability,
         "cache_replay_confidence": cache_replay_confidence,
         "old_context_summary_opportunity": old_context_summary_opportunity,
@@ -11298,6 +11305,33 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-cache">
 <div class="section">
+  <h2>Local AgentFlow cache replay</h2>
+  <table data-table-id="local-cache-effectiveness" data-filter-label="Filter local cache effectiveness">
+    <thead><tr>
+      <th data-sort-type="number">Exact rows</th><th data-sort-type="number">Semantic rows</th><th data-sort-type="number">Eligible lookups</th><th data-sort-type="number">Exact hits</th><th data-sort-type="number">Semantic hits</th><th data-sort-type="number">Exact misses</th><th data-sort-type="number">Streaming skips</th><th data-sort-type="number">Tools disabled</th><th data-sort-type="number">Invalidated</th><th data-sort-type="number">File blocked</th><th data-sort-type="number">Duplicate opportunity</th><th data-sort-type="text">Status</th>
+    </tr></thead>
+    <tbody id="local-cache-effectiveness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Provider prompt-cache discount</h2>
+  <table data-table-id="provider-prompt-cache" data-filter-label="Filter provider prompt cache">
+    <thead><tr>
+      <th data-sort-type="number">Creation tokens</th><th data-sort-type="number">Read tokens</th><th data-sort-type="percent">Read hit rate</th><th data-sort-type="money">Discount today</th><th data-sort-type="money">Discount all time</th><th data-sort-type="text">Boundary</th>
+    </tr></thead>
+    <tbody id="provider-prompt-cache-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Local cache reason codes</h2>
+  <table data-table-id="local-cache-reasons" data-filter-label="Filter local cache reason codes">
+    <thead><tr>
+      <th data-sort-type="text">Type</th><th data-sort-type="text">Reason</th><th data-sort-type="number">Count</th>
+    </tr></thead>
+    <tbody id="local-cache-reasons-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Cache replay confidence</h2>
   <table data-table-id="cache-replay-confidence" data-filter-label="Filter cache replay confidence">
     <thead><tr>
@@ -12250,6 +12284,42 @@ async function refreshCategories(){
 async function refreshCache(){
   try{
     const d=await loadFullStats();
+    const summary=d.summary||{};
+    const local=d.cache_effectiveness||{};
+    const localSummary=local.summary||{};
+    const noHitReasons=(localSummary.no_hit_reasons||[]).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
+    document.getElementById('local-cache-effectiveness-tbody').innerHTML=`<tr>
+      <td class="tokens">${(localSummary.exact_cache_rows||localSummary.cache_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.semantic_cache_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.exact_lookup_count||localSummary.eligible_lookup_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.exact_hit_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.semantic_hit_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.exact_miss_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.skip_streaming_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.tools_disabled_skip_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.invalidated_lookup_count||0).toLocaleString()} lookups · ${(localSummary.invalidated_cache_row_count||0).toLocaleString()} rows</td>
+      <td class="tokens">${(localSummary.file_dependency_blocked_count||0).toLocaleString()}</td>
+      <td class="tokens">${(localSummary.duplicate_key_opportunity_count||localSummary.duplicate_shape_candidate_rows||0).toLocaleString()}</td>
+      <td class="flags">${localSummary.explains_zero_hits?'<span class="badge routed">zero hits explained</span>':'<span class="badge hit">hits observed</span>'} ${noHitReasons}</td>
+    </tr>`;
+    document.getElementById('provider-prompt-cache-tbody').innerHTML=`<tr>
+      <td class="tokens">${(summary.prompt_cache_creation_tokens||0).toLocaleString()}</td>
+      <td class="tokens">${(summary.prompt_cache_read_tokens||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(summary.prompt_cache_hit_rate||0)}</td>
+      <td class="savings">${fmt(summary.today_prompt_cache_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(summary.prompt_cache_savings_usd||0,6)}</td>
+      <td class="flags"><span class="badge provider">provider-side Anthropic/OpenAI prompt-cache accounting</span> <span class="badge miss">separate from local exact replay</span></td>
+    </tr>`;
+    const reasonRows=[
+      ...((local.lookup_breakdown||[]).map(row=>({...row,type:'lookup'}))),
+      ...((local.skip_reason_breakdown||[]).map(row=>({...row,type:'skip'}))),
+      ...((local.invalidation_breakdown||[]).map(row=>({...row,type:'invalidation'})))
+    ];
+    document.getElementById('local-cache-reasons-tbody').innerHTML=reasonRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.type)}</span></td>
+      <td class="model">${esc(row.value||'unknown')}</td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No local cache reason codes recorded yet</td></tr>';
     const confidence=d.cache_replay_confidence||{};
     const confidenceRows=confidence.rules||[];
     document.getElementById('cache-replay-confidence-tbody').innerHTML=confidenceRows.map(row=>{

@@ -246,8 +246,13 @@ def build_cache_smoke_diagnostic(
     skip_reason_counts: Counter[str] = Counter()
     exact_misses = 0
     exact_hits = 0
+    semantic_hits = 0
+    semantic_misses = 0
     exact_eligible = 0
     invalidated_lookups = 0
+    streaming_skip_count = 0
+    tools_disabled_skip_count = 0
+    file_dependency_blocked_count = 0
     shape_counts: Counter[str] = Counter()
     missing_cache_json = 0
 
@@ -260,15 +265,27 @@ def build_cache_smoke_diagnostic(
         status_reason_counts[f"{status}:{reason}"] += 1
         if status == "skipped":
             skip_reason_counts[reason] += 1
+            if "streaming" in reason or _as_int(row.get("stream")):
+                streaming_skip_count += 1
+            if "tools-disabled" in reason or "tool-cache-disabled" in reason:
+                tools_disabled_skip_count += 1
         if _exact_lookup_attempted(cache_meta):
             exact_eligible += 1
             shape_counts[_call_shape(row, cache_meta)] += 1
-        if status == "hit" or _as_int(row.get("cache_hit")):
+        if status == "hit" and str(cache_meta.get("hit_type") or "") == "semantic":
+            semantic_hits += 1
+        elif status == "hit" or _as_int(row.get("cache_hit")):
             exact_hits += 1
         if status == "miss" and "exact" in reason:
             exact_misses += 1
+        if status == "miss" and "semantic" in reason:
+            semantic_misses += 1
+        file_dependency_blocked = bool("file-dependency" in reason or "dependency-" in reason)
         if cache_meta.get("invalidated") or cache_meta.get("invalidation_reason"):
             invalidated_lookups += 1
+            file_dependency_blocked = True
+        if file_dependency_blocked:
+            file_dependency_blocked_count += 1
 
     duplicate_shapes = {shape: count for shape, count in shape_counts.items() if count > 1}
     duplicate_candidate_rows = sum(duplicate_shapes.values())
@@ -292,17 +309,26 @@ def build_cache_smoke_diagnostic(
         "generated_at": utc_now(),
         "summary": {
             "cache_rows": cache_count,
+            "exact_cache_rows": cache_count,
             "semantic_cache_rows": semantic_count,
             "cache_file_dependency_rows": dependency_count,
             "calls_scanned": len(call_rows),
             "calls_missing_cache_json": missing_cache_json,
             "eligible_lookup_count": exact_eligible,
+            "exact_lookup_count": exact_eligible,
             "exact_miss_count": exact_misses,
+            "semantic_miss_count": semantic_misses,
             "cache_hit_count": exact_hits,
+            "exact_hit_count": exact_hits,
+            "semantic_hit_count": semantic_hits,
+            "skip_streaming_count": streaming_skip_count,
+            "tools_disabled_skip_count": tools_disabled_skip_count,
             "invalidated_lookup_count": invalidated_lookups,
             "invalidated_cache_row_count": sum(all_invalidations.values()),
+            "file_dependency_blocked_count": file_dependency_blocked_count,
             "duplicate_shape_group_count": len(duplicate_shapes),
             "duplicate_shape_candidate_rows": duplicate_candidate_rows,
+            "duplicate_key_opportunity_count": duplicate_candidate_rows,
             "explains_zero_hits": exact_hits == 0,
             "no_hit_reasons": no_hit_reasons,
         },

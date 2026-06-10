@@ -2862,6 +2862,106 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_cache_effectiveness_endpoint_reports_local_cache_without_raw_leakage(self):
+        secret_cache_key = "secret-cache-key-should-not-render"
+        secret_prompt = "raw local cache prompt must not leak"
+        secret_response = "raw local cache response must not leak"
+        server.store.set_cache(secret_cache_key, "claude-sonnet-4-6", 100, {"content": secret_response})
+        server.store.set_semantic_cache(
+            "secret-semantic-key-should-not-render",
+            "claude-sonnet-4-6",
+            [0.1, 0.2, 0.3],
+            {"content": "raw semantic response must not leak"},
+            100,
+        )
+        rows = [
+            {"cache": {"status": "miss", "reason": "exact-miss", "exact_enabled": True}, "stream": 0, "hit": 0},
+            {"cache": {"status": "hit", "reason": "exact-match", "hit_type": "exact", "exact_enabled": True}, "stream": 0, "hit": 1},
+            {"cache": {"status": "hit", "reason": "semantic-match", "hit_type": "semantic"}, "stream": 0, "hit": 0},
+            {"cache": {"status": "skipped", "reason": "streaming", "exact_enabled": False}, "stream": 1, "hit": 0},
+            {"cache": {"status": "skipped", "reason": "tools-disabled", "exact_enabled": False}, "stream": 0, "hit": 0},
+            {"cache": {"status": "miss", "reason": "file-dependency-changed", "invalidation_reason": "dependency-changed"}, "stream": 0, "hit": 0},
+        ]
+        for index, row in enumerate(rows):
+            server.store.log_call(
+                id=f"cache-effectiveness-{index}",
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=row["stream"],
+                cache_hit=row["hit"],
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.002,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"category": "chat", "has_tools": False, "text_chars": 400}),
+                cache_json=stable_json(row["cache"]),
+                error=None,
+                request_json=stable_json({"messages": [{"content": secret_prompt}], "cache_key": secret_cache_key}),
+                response_json=stable_json({"content": secret_response}),
+                session_id="secret-cache-session",
+                category="chat",
+                cache_creation_input_tokens=20,
+                cache_read_input_tokens=80,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(stats_views.stats_cache_effectiveness(server.store, scan_limit=20))
+        summary = result["summary"]
+
+        self.assertEqual(result["schema"], "agentflow.cache_smoke_diagnostic.v1")
+        self.assertEqual(summary["exact_cache_rows"], 1)
+        self.assertEqual(summary["semantic_cache_rows"], 1)
+        self.assertEqual(summary["exact_lookup_count"], 2)
+        self.assertEqual(summary["exact_hit_count"], 1)
+        self.assertEqual(summary["semantic_hit_count"], 1)
+        self.assertEqual(summary["exact_miss_count"], 1)
+        self.assertEqual(summary["skip_streaming_count"], 1)
+        self.assertEqual(summary["tools_disabled_skip_count"], 1)
+        self.assertEqual(summary["file_dependency_blocked_count"], 1)
+        self.assertIn("cache_keys_included", result["privacy"])
+
+        client = TestClient(
+            create_dashboard_app(
+                store_obj=server.store,
+                default_db=self.tmp.name,
+                upstream="https://api.anthropic.com",
+                limiter_status=lambda: [],
+                limiter_config={},
+            )
+        )
+        endpoint = client.get("/agentflow/stats/cache-effectiveness?scan_limit=20")
+        full = client.get("/agentflow/stats/full")
+        html = client.get("/agentflow/dashboard").text
+
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(endpoint.json()["summary"]["exact_hit_count"], 1)
+        self.assertEqual(full.status_code, 200)
+        self.assertEqual(full.json()["cache_effectiveness"]["summary"]["semantic_hit_count"], 1)
+        self.assertIn("Local AgentFlow cache replay", html)
+        self.assertIn("Provider prompt-cache discount", html)
+        self.assertIn("local-cache-effectiveness-tbody", html)
+        self.assertIn("provider-prompt-cache-tbody", html)
+        rendered = json.dumps(endpoint.json(), sort_keys=True) + json.dumps(full.json(), sort_keys=True) + html
+        for forbidden in (
+            secret_cache_key,
+            "secret-semantic-key-should-not-render",
+            secret_prompt,
+            secret_response,
+            "raw semantic response must not leak",
+            "secret-cache-session",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(endpoint.json()["privacy"]["cache_keys_included"])
+        self.assertFalse(endpoint.json()["privacy"]["raw_request_bodies_included"])
+
     def test_pattern_decision_breakdown_reports_outcome_error_and_savings_by_rule(self):
         applied_hash = "sha256:" + "a" * 64
         rows = [
