@@ -19,6 +19,10 @@ from agentflow_proxy.optimization_promotion_canary import (
 )
 from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+from agentflow_proxy.optimization_rollout_review import (
+    attach_optimization_rollout_provenance,
+    review_optimization_rollout_actions,
+)
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
 from agentflow_proxy.store import Store, stable_json
 
@@ -539,6 +543,167 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(stopped["status"], "safety_stopped")
         self.assertEqual(stopped["cohort"], "bypassed_or_disabled")
         self.assertEqual(stopped["reason"], "local-canary-safety-stop")
+
+    def _optimization_rollout_bundle(self):
+        return {
+            "schema": "agentflow.optimization_rollout_actions.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "expires_at": "2026-06-11T05:00:00+00:00",
+            "tenant_scope": "current-authenticated-tenant",
+            "summary": {
+                "candidate_count": 1,
+                "action_count": 1,
+                "omitted_count": 0,
+                "managed_enforced": False,
+                "required_local_review": True,
+                "provider_forwarding": False,
+                "server_content_processing": False,
+            },
+            "recommendation": {
+                "policy_source": "managed-recommended",
+                "required_local_review": True,
+                "managed_enforced": False,
+                "provider_forwarding": False,
+            },
+            "local_executor_compatibility": {
+                "minimum_local_client_version": "0.1.0",
+                "compatible": True,
+                "supported_local_action_families": ["routing", "crunch", "cache", "old_context_summarization"],
+                "local_review_required": True,
+            },
+            "actions": [
+                {
+                    "schema": "agentflow.optimization_rollout_action.v1",
+                    "action_id": "optimization-rollout-action:routing",
+                    "action_type": "widen",
+                    "target_candidate_id": "routing-policy-candidate",
+                    "action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "policy_section": "routing",
+                    "source_surface": "openai_responses",
+                    "provider_endpoint": "responses",
+                    "confidence": 0.91,
+                    "generated_at": "2026-06-10T05:00:00+00:00",
+                    "expires_at": "2026-06-11T05:00:00+00:00",
+                    "required_local_review": True,
+                    "managed_enforced": False,
+                    "local_executor_compatibility": {
+                        "minimum_local_client_version": "0.1.0",
+                        "compatible": True,
+                        "supported_local_action_families": ["routing", "crunch", "cache", "old_context_summarization"],
+                        "local_review_required": True,
+                    },
+                    "evidence_summary": {
+                        "local_eval_verdict": {
+                            "verdict": "widen",
+                            "latest_eval_at": "2026-06-10T04:30:00+00:00",
+                            "pass_count": 3,
+                            "fail_count": 0,
+                            "reason_codes": ["local-eval-widen"],
+                        },
+                        "provider_capability": {"capabilities": {"rollout_actions": "supported"}},
+                        "sample_count": 3,
+                    },
+                    "action": {
+                        "schema": "agentflow.openai_rollout_action.v1",
+                        "target_rule_id": "openai-routing-rule",
+                        "proposed_edit": {
+                            "rule_id": "openai-routing-rule",
+                            "changed": True,
+                            "action": {"route_to": "gpt-5-mini"},
+                        },
+                    },
+                    "privacy_summary": {
+                        "metadata_only": True,
+                        "feature_only": True,
+                        "raw_payloads_returned": False,
+                        "raw_prompts_returned": False,
+                        "raw_responses_returned": False,
+                        "provider_bodies_returned": False,
+                        "request_ids_returned": False,
+                        "tenant_ids_returned": False,
+                        "cache_keys_returned": False,
+                        "file_paths_returned": False,
+                        "locally_executed": False,
+                        "provider_forwarding": False,
+                        "managed_enforced": False,
+                    },
+                }
+            ],
+            "omitted_actions": [],
+            "privacy_summary": {
+                "metadata_only": True,
+                "feature_only": True,
+                "raw_payloads_returned": False,
+                "raw_prompts_returned": False,
+                "raw_responses_returned": False,
+                "provider_bodies_returned": False,
+                "request_ids_returned": False,
+                "tenant_ids_returned": False,
+                "cache_keys_returned": False,
+                "file_paths_returned": False,
+                "provider_forwarding": False,
+                "managed_enforced": False,
+            },
+        }
+
+    def test_optimization_rollout_review_accepts_signed_fixture_read_only(self):
+        bundle = self._optimization_rollout_bundle()
+        signed = attach_optimization_rollout_provenance(
+            bundle,
+            secret="review-secret",
+            issuer="agentflow-server",
+            server_id="managed-test",
+            key_id="review-key",
+            generated_at="2026-06-10T05:00:00+00:00",
+        )
+
+        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            result = review_optimization_rollout_actions(
+                signed,
+                now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["schema"], "agentflow.optimization_rollout_actions_review.v1")
+        self.assertEqual(result["provenance"]["status"], "verified")
+        self.assertEqual(result["summary"]["accepted_action_count"], 1)
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertFalse(result["provider_calls_made"])
+        action = result["actions"][0]
+        self.assertEqual(action["target_candidate_id"], "routing-policy-candidate")
+        self.assertEqual(action["target_rule_id"], "openai-routing-rule")
+        self.assertTrue(action["local_apply_hint"]["review_only"])
+
+    def test_optimization_rollout_review_fails_closed_for_unsigned_expired_incompatible_and_raw_like(self):
+        unsigned = self._optimization_rollout_bundle()
+        unsigned["expires_at"] = "2026-06-09T05:00:00+00:00"
+        unsigned["thresholds"] = {"max_evidence_age_seconds": 60}
+        unsigned["local_executor_compatibility"]["compatible"] = False
+        unsigned["actions"][0]["evidence_summary"]["local_eval_verdict"]["verdict"] = "rollback"
+        unsigned["actions"][0]["privacy_summary"]["raw_prompts_returned"] = True
+        unsigned["actions"][0]["raw_request"] = {"prompt": "raw managed prompt must not be accepted"}
+
+        with patch.dict("os.environ", {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "review-secret"}):
+            result = review_optimization_rollout_actions(
+                unsigned,
+                now=datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"]["accepted_action_count"], 0)
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertFalse(result["provider_calls_made"])
+        messages = {error["message"] for error in result["errors"]}
+        self.assertIn("managed optimization rollout bundle is missing provenance required by configured verification", messages)
+        self.assertIn("optimization rollout bundle is expired", messages)
+        self.assertIn("managed bundle reports local executor incompatibility", messages)
+        self.assertIn("local eval verdict must be widen", messages)
+        self.assertIn("local eval evidence is stale", messages)
+        self.assertIn("privacy summary reports raw payloads or local identifiers", messages)
+        self.assertIn("raw or local-identifier rollout payloads are not accepted", messages)
+        self.assertEqual(result["provenance"]["status"], "missing")
 
     def test_feedback_status_result_is_metadata_only(self):
         result = feedback.managed_feedback_status_result(

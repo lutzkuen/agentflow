@@ -1333,6 +1333,126 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertEqual(data["phase_canary"]["canary_fraction"], 0.1)
             self.assertEqual(data["phase_canary"]["holdout_fraction"], 0.1)
 
+    def test_optimization_rollout_actions_review_cli_accepts_signed_bundle_and_logs_event(self):
+        from agentflow_proxy.optimization_rollout_review import attach_optimization_rollout_provenance
+
+        bundle = {
+            "schema": "agentflow.optimization_rollout_actions.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "expires_at": "2026-06-11T05:00:00+00:00",
+            "summary": {
+                "candidate_count": 1,
+                "action_count": 1,
+                "omitted_count": 0,
+                "managed_enforced": False,
+                "required_local_review": True,
+                "provider_forwarding": False,
+                "server_content_processing": False,
+            },
+            "local_executor_compatibility": {
+                "minimum_local_client_version": "0.1.0",
+                "compatible": True,
+                "supported_local_action_families": ["routing", "crunch", "cache", "old_context_summarization"],
+                "local_review_required": True,
+            },
+            "actions": [
+                {
+                    "schema": "agentflow.optimization_rollout_action.v1",
+                    "action_id": "optimization-rollout-action:cli-routing",
+                    "action_type": "widen",
+                    "target_candidate_id": "cli-routing-candidate",
+                    "action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "policy_section": "routing",
+                    "source_surface": "openai_responses",
+                    "provider_endpoint": "responses",
+                    "confidence": 0.93,
+                    "generated_at": "2026-06-10T05:00:00+00:00",
+                    "expires_at": "2026-06-11T05:00:00+00:00",
+                    "required_local_review": True,
+                    "managed_enforced": False,
+                    "local_executor_compatibility": {
+                        "minimum_local_client_version": "0.1.0",
+                        "compatible": True,
+                        "supported_local_action_families": ["routing", "crunch", "cache", "old_context_summarization"],
+                    },
+                    "evidence_summary": {
+                        "local_eval_verdict": {"verdict": "widen", "latest_eval_at": "2026-06-10T04:30:00+00:00"}
+                    },
+                    "action": {
+                        "schema": "agentflow.openai_rollout_action.v1",
+                        "target_rule_id": "cli-openai-routing-rule",
+                        "proposed_edit": {
+                            "rule_id": "cli-openai-routing-rule",
+                            "changed": True,
+                            "action": {"route_to": "gpt-5-mini"},
+                        },
+                    },
+                    "privacy_summary": {
+                        "metadata_only": True,
+                        "feature_only": True,
+                        "raw_payloads_returned": False,
+                        "raw_prompts_returned": False,
+                        "raw_responses_returned": False,
+                        "provider_bodies_returned": False,
+                        "request_ids_returned": False,
+                        "tenant_ids_returned": False,
+                        "cache_keys_returned": False,
+                        "file_paths_returned": False,
+                        "provider_forwarding": False,
+                        "managed_enforced": False,
+                    },
+                }
+            ],
+            "omitted_actions": [],
+            "privacy_summary": {
+                "metadata_only": True,
+                "feature_only": True,
+                "raw_payloads_returned": False,
+                "raw_prompts_returned": False,
+                "raw_responses_returned": False,
+                "provider_bodies_returned": False,
+                "request_ids_returned": False,
+                "tenant_ids_returned": False,
+                "cache_keys_returned": False,
+                "file_paths_returned": False,
+                "provider_forwarding": False,
+                "managed_enforced": False,
+            },
+        }
+        signed = attach_optimization_rollout_provenance(
+            bundle,
+            secret="cli-review-secret",
+            issuer="agentflow-server",
+            server_id="managed-test",
+            key_id="cli-review",
+            generated_at="2026-06-10T05:00:00+00:00",
+        )
+        stdout = io.StringIO()
+
+        with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "cli-review-secret"}):
+            code = cli.optimization_rollout_actions_review_cli(
+                ["--pretty", "-"],
+                stdin=io.StringIO(json.dumps(signed)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.optimization_rollout_actions_review.v1")
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["wrote_local_policy_files"])
+        self.assertEqual(payload["provenance"]["status"], "verified")
+        self.assertEqual(payload["actions"][0]["target_rule_id"], "cli-openai-routing-rule")
+
+        events_path = Path(os.environ["AGENTFLOW_POLICY_EVENTS_LOG"])
+        event = json.loads(events_path.read_text(encoding="utf-8").strip().splitlines()[-1])
+        self.assertEqual(event["action"], "optimization-rollout-actions-review")
+        self.assertTrue(event["ok"])
+        self.assertEqual(event["details"]["accepted_action_count"], 1)
+        self.assertFalse(event["details"]["wrote_local_policy_files"])
+
     def test_optimization_shadow_eval_cli_requires_budget_for_execute(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

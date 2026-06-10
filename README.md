@@ -213,6 +213,7 @@ Common policy commands:
 | `agentflow-optimization-eval-next --db ~/.agentflow/agentflow.sqlite3 --limit 10 --pretty` | Select a bounded highest-value eval queue batch and record local eval evidence without provider calls by default |
 | `agentflow-optimization-promotion-report eval-plan.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Score local eval, canary, and holdout evidence into widen/hold/rollback/needs_eval promotion verdicts |
 | `agentflow-optimization-promotion-actions promotion-report.json --pretty` | Convert passing promotion verdicts into privacy-safe local rollout-action bundles with explicit omissions |
+| `agentflow-optimization-rollout-actions-review --url http://127.0.0.1:4100/v1/optimization-rollout-actions --allow-unauthenticated --pretty` | Review managed eval-gated optimization rollout actions before any local apply step |
 | `agentflow-optimization-promotion-canaries-apply promotion-actions.json --config-dir ~/.agentflow --dry-run --pretty` | Preview promotion canary routing edits before writing local YAML files |
 | `agentflow-old-context-summary-dry-run proposed.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Dry-run old-context summarization settings against recent local traffic without calling the summary model |
 | `agentflow-old-context-summary-impact dry-run.json --db ~/.agentflow/agentflow.sqlite3 --pretty` | Compare post-apply old-context summarization metadata against a prior dry-run projection |
@@ -241,7 +242,10 @@ writing. Apply only updates matching local `pattern_rules` metadata in `crunch_r
 If `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET` or
 `AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRETS` is configured, managed policy bundles must
 include matching HMAC provenance before `agentflow-policy-apply` writes local YAML files.
-Managed rollout action bundles use the same verification secrets when configured.
+Managed optimization rollout action review fails closed for missing provenance, expired
+bundles, incompatible local executors, stale/missing local eval evidence, managed-enforced
+actions, or raw prompt-like payloads. Managed rollout action bundles use the same
+verification secrets when configured.
 Unsigned local-default/local-manual bundles remain valid for offline use.
 Managed outcome and rollout-action lifecycle feedback retries are disabled unless
 `AGENTFLOW_RECOMMENDATION_ENABLED=1`. Status and flush output is metadata-only; queued
