@@ -3978,6 +3978,173 @@ def claude_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     return 0
 
 
+def claude_canary_actions_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Emit reviewable local Claude routing canary widen, hold, rollback, and more-samples actions")
+    parser.add_argument(
+        "impact_report",
+        nargs="?",
+        help="Optional Claude canary impact report JSON path, or '-' to read from stdin. If omitted, a fresh report is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh impact report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Maximum recent Claude calls to scan when building a fresh report, default: 500.")
+    parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp when building a fresh report.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied canary samples before widening, default: 2.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout canary samples before widening, default: 1.")
+    parser.add_argument("--max-evidence-age-hours", type=float, default=72.0, help="Mark evidence stale after this many hours, default: 72.")
+    parser.add_argument("--widen-step", type=float, default=0.25, help="Fraction added when widening an existing Claude canary, default: 0.25.")
+    parser.add_argument("--max-canary-fraction", type=float, default=1.0, help="Maximum Claude canary fraction, default: 1.0.")
+    parser.add_argument("--preserved-holdout-fraction", type=float, default=0.10, help="Minimum holdout fraction preserved while widening, default: 0.10.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    try:
+        if args.impact_report:
+            report = _read_json_input(str(args.impact_report), stdin=stdin)
+        else:
+            from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+
+            store = _open_store_for_db(str(args.db))
+            try:
+                report = build_claude_canary_impact_report(
+                    store,
+                    limit=args.limit,
+                    since=args.since,
+                    min_applied_samples=args.min_applied_samples,
+                    min_holdout_samples=args.min_holdout_samples,
+                    max_evidence_age_hours=args.max_evidence_age_hours,
+                )
+            finally:
+                store.conn.close()
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.claude_canary_rollout_actions_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.claude_canary_actions import build_claude_canary_actions
+
+    result = build_claude_canary_actions(
+        report,
+        widen_step=args.widen_step,
+        max_canary_fraction=args.max_canary_fraction,
+        preserved_holdout_fraction=args.preserved_holdout_fraction,
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
+def claude_canary_actions_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Apply reviewed Claude routing canary actions to the local routing policy file")
+    parser.add_argument(
+        "actions",
+        nargs="?",
+        default="-",
+        help="Claude canary rollout action bundle JSON path, or '-' for stdin.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory containing local AgentFlow YAML policy files, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow",
+    )
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Preview changes without writing local YAML files.")
+    parser.add_argument("--write", dest="dry_run", action="store_false", help="Write reviewed Claude canary edits to the local routing YAML file.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    try:
+        bundle = _read_json_input(str(args.actions), stdin=stdin)
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.claude_canary_rollout_actions_apply_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.claude_canary_actions import apply_claude_canary_actions
+    from agentflow_proxy.policy_events import log_policy_event
+
+    result = apply_claude_canary_actions(
+        bundle,
+        config_dir=args.config_dir,
+        dry_run=args.dry_run,
+    )
+    event = log_policy_event(
+        "claude-canary-actions-apply",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "config_dir": args.config_dir,
+            "dry_run": args.dry_run,
+            "action_count": (result.get("summary") or {}).get("action_count") if isinstance(result.get("summary"), dict) else None,
+            "planned_action_count": (result.get("summary") or {}).get("planned_action_count") if isinstance(result.get("summary"), dict) else None,
+            "changed_files": [
+                file.get("path")
+                for file in result.get("files", [])
+                if isinstance(file, dict) and file.get("changed")
+            ],
+            "wrote_policy_files": bool(result.get("wrote_policy_files")),
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if event is not None:
+        result["policy_event"] = {
+            "id": event.get("id"),
+            "action": event.get("action"),
+            "created_at": event.get("created_at"),
+            "ok": event.get("ok"),
+        }
+    stream = stdout if result.get("ok") else stderr
+    if args.pretty:
+        stream.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stream, result)
+    return 0 if result.get("ok") else 1
+
+
 def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report local budgeted routing A/B experiment results from metadata")
     parser.add_argument(
@@ -6248,6 +6415,14 @@ def openai_canary_impact_main() -> None:
 
 def claude_canary_impact_main() -> None:
     raise SystemExit(claude_canary_impact_cli())
+
+
+def claude_canary_actions_main() -> None:
+    raise SystemExit(claude_canary_actions_cli())
+
+
+def claude_canary_actions_apply_main() -> None:
+    raise SystemExit(claude_canary_actions_apply_cli())
 
 
 def routing_experiment_report_main() -> None:

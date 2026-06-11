@@ -3,11 +3,15 @@ from datetime import datetime, timezone
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 
+import yaml
+
 from agentflow_proxy import cli
+from agentflow_proxy.claude_canary_actions import apply_claude_canary_actions, build_claude_canary_actions
 from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
 from agentflow_proxy.store import Store, stable_json
 
@@ -264,6 +268,186 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
                     self.assertEqual(candidate["cohort_metrics"]["canary_applied"]["rate_limit_fallback_count"], 1)
                     self.assertGreater(candidate["requested_model_fallback_cost_usd"], 0)
                 _assert_privacy_clean(self, report)
+
+
+class ClaudeCanaryActionTests(unittest.TestCase):
+    def _candidate(self, *, verdict: str, candidate_id: str = "claude-action-candidate", canary_fraction: float = 0.5, holdout_fraction: float = 0.25, reason_codes: list[str] | None = None) -> dict:
+        return {
+            "schema": "agentflow.claude_canary_promotion_verdict.v1",
+            "candidate_id": candidate_id,
+            "rule_id": "test-claude-phase-canary",
+            "policy_id": "test-claude-phase-canary",
+            "promotion_action_id": "prior-action",
+            "target_candidate_id": candidate_id,
+            "policy_source": "local-manual",
+            "optimization_family": "claude_phase_routing",
+            "action_family": "routing",
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "original_model": "claude-sonnet-4-6",
+            "candidate_target_model": "claude-haiku-4-5-20251001",
+            "category": "tool-result",
+            "workflow_phase": "tool-execution",
+            "workflow_phase_confidence": "high",
+            "stream": True,
+            "canary_fraction": canary_fraction,
+            "holdout_fraction": holdout_fraction,
+            "sample_count": 12,
+            "cohort_counts": {"canary_applied": 8, "canary_holdout": 4},
+            "applied_vs_holdout_deltas": {
+                "applied_minus_holdout_error_rate": 0.0,
+                "applied_minus_holdout_retry_rate": 0.0,
+                "applied_minus_holdout_fallback_rate": 0.0,
+                "applied_minus_holdout_latency_avg_ms": -200,
+            },
+            "observed_savings_usd": 0.125,
+            "requested_model_fallback_cost_usd": 0.0,
+            "stale_evidence": {"stale": False, "age_hours": 1.0, "max_age_hours": 72.0},
+            "verdict": verdict,
+            "reason_codes": reason_codes or ["target-savings-met"],
+            "warning_codes": [],
+        }
+
+    def _impact(self, candidates: list[dict]) -> dict:
+        return {
+            "schema": "agentflow.claude_canary_impact.v1",
+            "generated_at": "2026-06-10T05:00:00+00:00",
+            "read_only": True,
+            "wrote_local_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "summary": {"candidate_group_count": len(candidates)},
+            "candidates": candidates,
+            "privacy": {"metadata_only": True, "content_free": True},
+        }
+
+    def test_claude_canary_actions_emit_widen_hold_rollback_and_more_samples(self) -> None:
+        impact = self._impact([
+            self._candidate(verdict="widen", candidate_id="candidate-widen", canary_fraction=0.7, holdout_fraction=0.1),
+            self._candidate(verdict="hold", candidate_id="candidate-hold", canary_fraction=0.35, holdout_fraction=0.12, reason_codes=["latency-regression"]),
+            self._candidate(verdict="rollback", candidate_id="candidate-rollback", reason_codes=["rollback-error-rate", "retry-rate-regression", "rate-limit-fallback-regression", "latency-regression", "negative-observed-savings", "safety-stop-observed"]),
+            self._candidate(verdict="needs_more_samples", candidate_id="candidate-samples", reason_codes=["insufficient-holdout-samples"]),
+        ])
+
+        actions = build_claude_canary_actions(
+            impact,
+            widen_step=0.25,
+            max_canary_fraction=0.95,
+            preserved_holdout_fraction=0.20,
+        )
+
+        self.assertEqual(actions["schema"], "agentflow.claude_canary_rollout_actions.v1")
+        by_id = {action["target_candidate_id"]: action for action in actions["actions"]}
+        self.assertEqual(by_id["candidate-widen"]["action_type"], "widen")
+        self.assertEqual(by_id["candidate-widen"]["canary_fraction"], 0.8)
+        self.assertEqual(by_id["candidate-widen"]["holdout_fraction"], 0.2)
+        self.assertEqual(by_id["candidate-hold"]["action_type"], "hold")
+        self.assertEqual(by_id["candidate-hold"]["canary_fraction"], 0.35)
+        self.assertEqual(by_id["candidate-hold"]["holdout_fraction"], 0.2)
+        self.assertEqual(by_id["candidate-rollback"]["action_type"], "rollback")
+        self.assertEqual(by_id["candidate-rollback"]["canary_fraction"], 0.0)
+        self.assertEqual(by_id["candidate-rollback"]["holdout_fraction"], 0.0)
+        self.assertIn("rollback-error", by_id["candidate-rollback"]["rollback_metadata"]["rollback_reason_codes"])
+        self.assertIn("rollback-retry", by_id["candidate-rollback"]["rollback_metadata"]["rollback_reason_codes"])
+        self.assertIn("rollback-fallback", by_id["candidate-rollback"]["rollback_metadata"]["rollback_reason_codes"])
+        self.assertIn("rollback-latency", by_id["candidate-rollback"]["rollback_metadata"]["rollback_reason_codes"])
+        self.assertIn("rollback-cost", by_id["candidate-rollback"]["rollback_metadata"]["rollback_reason_codes"])
+        self.assertIn("rollback-safety-stop", by_id["candidate-rollback"]["rollback_metadata"]["rollback_reason_codes"])
+        self.assertEqual(by_id["candidate-samples"]["action_type"], "more-samples")
+        self.assertEqual(by_id["candidate-samples"]["local_policy_update"]["target_local_policy"], "phase_canary")
+        _assert_privacy_clean(self, actions)
+
+    def test_claude_canary_actions_dry_run_and_write_only_routing_policy_with_event(self) -> None:
+        action_bundle = build_claude_canary_actions(
+            self._impact([self._candidate(verdict="widen", canary_fraction=0.1, holdout_fraction=0.1)]),
+            widen_step=0.2,
+            max_canary_fraction=0.5,
+            preserved_holdout_fraction=0.1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            event_log = tmp_path / "policy_events.jsonl"
+            routing_file = tmp_path / "routing_rules.yaml"
+            routing_file.write_text(
+                yaml.safe_dump({
+                    "phase_canary": {
+                        "enabled": True,
+                        "policy_id": "test-claude-phase-canary",
+                        "policy_source": "local-manual",
+                        "canary_fraction": 0.1,
+                        "holdout_fraction": 0.1,
+                    },
+                    "openai_canary": {"enabled": False, "policy_id": "openai-untouched"},
+                    "rules": [{"conditions": {"model_pattern": "sonnet"}, "action": {"route_to": "haiku", "reason": "fixture"}}],
+                }, sort_keys=False),
+                encoding="utf-8",
+            )
+            before = routing_file.read_text(encoding="utf-8")
+            dry_run = apply_claude_canary_actions(action_bundle, config_dir=tmp_path, dry_run=True)
+
+            self.assertTrue(dry_run["ok"])
+            self.assertTrue(dry_run["dry_run"])
+            self.assertFalse(dry_run["wrote_policy_files"])
+            self.assertEqual(routing_file.read_text(encoding="utf-8"), before)
+            self.assertEqual(dry_run["files"][0]["path"], str(routing_file))
+            self.assertTrue(dry_run["files"][0]["changed"])
+
+            old_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(event_log)
+            try:
+                output = io.StringIO()
+                code = cli.claude_canary_actions_apply_cli(
+                    ["-", "--config-dir", str(tmp_path), "--write"],
+                    stdin=io.StringIO(json.dumps(action_bundle)),
+                    stdout=output,
+                )
+            finally:
+                if old_log is None:
+                    os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                else:
+                    os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_log
+
+            self.assertEqual(code, 0)
+            result = json.loads(output.getvalue())
+            self.assertTrue(result["wrote_policy_files"])
+            written = yaml.safe_load(routing_file.read_text(encoding="utf-8"))
+            self.assertEqual(written["phase_canary"]["policy_id"], "test-claude-phase-canary")
+            self.assertEqual(written["phase_canary"]["target_model"], "claude-haiku-4-5-20251001")
+            self.assertEqual(written["phase_canary"]["canary_fraction"], 0.3)
+            self.assertEqual(written["phase_canary"]["holdout_fraction"], 0.1)
+            self.assertEqual(written["openai_canary"]["policy_id"], "openai-untouched")
+            self.assertEqual(written["rules"][0]["action"]["reason"], "fixture")
+            event = json.loads(event_log.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(event["action"], "claude-canary-actions-apply")
+            self.assertTrue(event["ok"])
+            self.assertFalse(event["details"]["dry_run"])
+            _assert_privacy_clean(self, result)
+
+    def test_claude_canary_actions_reject_raw_payloads_and_do_not_leak_from_impact(self) -> None:
+        candidate = self._candidate(verdict="widen")
+        candidate.update({
+            "prompt": "raw claude prompt secret",
+            "raw_response": "raw claude response secret",
+            "provider_body": "raw fixture provider body",
+            "session_id": "claude-session-id-secret",
+            "file_path": "/tmp/fixture-secret.py",
+            "api_key": "sk-ant-secret",
+        })
+        actions = build_claude_canary_actions(self._impact([candidate]))
+        _assert_privacy_clean(self, actions)
+        rendered = json.dumps(actions, sort_keys=True)
+        self.assertNotIn("/tmp/fixture-secret.py", rendered)
+        self.assertNotIn("raw fixture provider body", rendered)
+
+        unsafe = json.loads(json.dumps(actions))
+        unsafe["actions"][0]["local_policy_update"]["raw_prompt"] = "raw claude prompt secret"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = apply_claude_canary_actions(unsafe, config_dir=tmp, dry_run=True)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["wrote_policy_files"])
+        self.assertEqual(result["errors"][0]["path"], "$.actions[0].local_policy_update.raw_prompt")
+        _assert_privacy_clean(self, result)
 
 
 if __name__ == "__main__":
