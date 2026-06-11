@@ -48,6 +48,10 @@ from agentflow_proxy.openai_old_context_summary import (
     input_tokens_after_summary,
     maybe_apply_openai_old_context_summary,
 )
+from agentflow_proxy.openai_optimization_governor import (
+    attach_openai_optimization_governor,
+    selected_openai_governor_family,
+)
 from agentflow_proxy.optimization.openai_features import (
     openai_call_store_fields,
 )
@@ -609,24 +613,65 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         resolved_requested_model = local_policy.resolved_requested_model
         managed_cache_profile = local_policy.managed_cache_profile
         headers = build_forward_headers(context, request)
-        crunched, summary_meta = await maybe_apply_openai_old_context_summary(
-            body=crunched,
+        attach_openai_optimization_governor(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
             path=path,
             requested_model=requested_model,
             category=category,
             stream=stream,
-            fetch_summary=lambda summary_request: _fetch_openai_old_context_summary(context, summary_request, headers),
-            get_cached_summary=context.store.get_cache,
-            set_cached_summary=lambda key, value: context.store.set_cache(
-                key,
-                str(value.get("summary_model") or summary_meta.get("summary_model") or "openai-summary"),
-                0,
-                value,
-            ),
+            session_id=session_id,
         )
+        if selected_openai_governor_family(routing_meta) == "routing":
+            summary_meta = {
+                "schema": "agentflow.openai_old_context_summary.v1",
+                "enabled": False,
+                "status": "suppressed",
+                "applied": False,
+                "changed": False,
+                "reason_codes": ["conflicts-with-selected-family"],
+                "policy_source": "local-default",
+                "privacy": {
+                    "raw_source_included": False,
+                    "raw_summary_included": False,
+                    "raw_request_body_included": False,
+                    "summary_text_included": False,
+                    "file_paths_included": False,
+                    "cache_key_included": False,
+                    "session_id_included": False,
+                },
+            }
+        else:
+            crunched, summary_meta = await maybe_apply_openai_old_context_summary(
+                body=crunched,
+                path=path,
+                requested_model=requested_model,
+                category=category,
+                stream=stream,
+                fetch_summary=lambda summary_request: _fetch_openai_old_context_summary(context, summary_request, headers),
+                get_cached_summary=context.store.get_cache,
+                set_cached_summary=lambda key, value: context.store.set_cache(
+                    key,
+                    str(value.get("summary_model") or summary_meta.get("summary_model") or "openai-summary"),
+                    0,
+                    value,
+                ),
+            )
+            if summary_meta.get("applied"):
+                input_tokens = input_tokens_after_summary(crunched)
         crunch_meta["old_context_summarization"] = summary_meta
-        if summary_meta.get("applied"):
-            input_tokens = input_tokens_after_summary(crunched)
+        attach_openai_optimization_governor(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            summary_meta=summary_meta,
+            path=path,
+            requested_model=requested_model,
+            category=category,
+            stream=stream,
+            session_id=session_id,
+        )
         call_fields = openai_call_store_fields(path, requested_model, str(crunched.get("model")))
         experiment_meta = routing_experiment_decision(
             crunched,
@@ -760,6 +805,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                                 stream=True,
                             ),
                         )
+                    attach_openai_optimization_governor(
+                        routing_meta=routing_meta,
+                        crunch_meta=crunch_meta,
+                        cache_meta=stream_cache_meta,
+                        summary_meta=summary_meta,
+                        path=path,
+                        requested_model=requested_model,
+                        category=category,
+                        stream=True,
+                        session_id=session_id,
+                    )
                     attach_openai_outcome_summary(
                         path=path,
                         requested_model=requested_model,
@@ -833,14 +889,24 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             )
 
         has_tool_blocks = has_tools(crunched)
-        can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(
-            has_tool_blocks,
-            pattern_features=routing_meta.get("managed_pattern_features"),
-            store_obj=context.store,
-            managed_profile=managed_cache_profile,
+        selected_before_cache = selected_openai_governor_family(routing_meta)
+        if selected_before_cache in {"routing", "old_context_summary"}:
+            can_cache = False
+            can_semantic_cache = False
+            cache_meta = cache_decision_meta("skipped", "conflicts-with-selected-family")
+            cache_meta["conflicting_selected_family"] = selected_before_cache
+        else:
+            can_cache, can_semantic_cache, cache_meta = cache_lookup_meta(
+                has_tool_blocks,
+                pattern_features=routing_meta.get("managed_pattern_features"),
+                store_obj=context.store,
+                managed_profile=managed_cache_profile,
+            )
+        inspect_cache_dependencies = can_cache or (
+            has_tool_blocks and selected_before_cache not in {"routing", "old_context_summary"}
         )
-        file_deps = cache_file_dependency_snapshots(crunched) if (can_cache or has_tool_blocks) else []
-        if can_cache or has_tool_blocks:
+        file_deps = cache_file_dependency_snapshots(crunched) if inspect_cache_dependencies else []
+        if inspect_cache_dependencies:
             attach_file_dependency_cache_meta(
                 cache_meta,
                 snapshots=file_deps,
@@ -851,6 +917,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     stream=False,
                 ),
             )
+        attach_openai_optimization_governor(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            summary_meta=summary_meta,
+            path=path,
+            requested_model=requested_model,
+            category=category,
+            stream=False,
+            session_id=session_id,
+        )
         replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
         if replay_pattern_rule is not None:
             cache_meta["replay_scope"] = replay_scope
@@ -918,6 +995,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     estimated_saved_cost_usd=cost_baseline,
                 )
                 cost = add_summary_cost(0.0, summary_meta)
+                attach_openai_optimization_governor(
+                    routing_meta=routing_meta,
+                    crunch_meta=crunch_meta,
+                    cache_meta=hit_cache_meta,
+                    summary_meta=summary_meta,
+                    path=path,
+                    requested_model=requested_model,
+                    category=category,
+                    stream=False,
+                    session_id=session_id,
+                )
                 attach_openai_outcome_summary(
                     path=path,
                     requested_model=requested_model,
@@ -996,6 +1084,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     estimated_saved_cost_usd=cost_baseline,
                 )
                 cost = add_summary_cost(0.0, summary_meta)
+                attach_openai_optimization_governor(
+                    routing_meta=routing_meta,
+                    crunch_meta=crunch_meta,
+                    cache_meta=hit_cache_meta,
+                    summary_meta=summary_meta,
+                    path=path,
+                    requested_model=requested_model,
+                    category=category,
+                    stream=False,
+                    session_id=session_id,
+                )
                 attach_openai_outcome_summary(
                     path=path,
                     requested_model=requested_model,
@@ -1102,6 +1201,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             )
             cost_baseline = estimate_cost(requested_model, input_tokens, 0, provider="openai")
             error = upstream_error_text(r.text, status_code)
+            attach_openai_optimization_governor(
+                routing_meta=routing_meta,
+                crunch_meta=crunch_meta,
+                cache_meta=cache_meta,
+                summary_meta=summary_meta,
+                path=path,
+                requested_model=requested_model,
+                category=category,
+                stream=False,
+                session_id=session_id,
+            )
             attach_openai_outcome_summary(
                 path=path,
                 requested_model=requested_model,
@@ -1228,6 +1338,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 primary_cost_est_usd=cost,
                 input_tokens_est=input_tokens,
             )
+        attach_openai_optimization_governor(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            summary_meta=summary_meta,
+            path=path,
+            requested_model=requested_model,
+            category=category,
+            stream=False,
+            session_id=session_id,
+        )
         attach_openai_outcome_summary(
             path=path,
             requested_model=requested_model,
@@ -1310,6 +1431,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         status_code = 429
         response_body = tier_backoff_payload(exc)
         latency_ms = int((time.time() - started) * 1000)
+        attach_openai_optimization_governor(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            summary_meta=summary_meta,
+            path=path,
+            requested_model=requested_model,
+            category=category,
+            stream=stream,
+            session_id=session_id,
+        )
         attach_openai_outcome_summary(
             path=path,
             requested_model=requested_model,
@@ -1379,6 +1511,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         logging.exception("agentflow openai proxy error")
         error = repr(exc)
         latency_ms = int((time.time() - started) * 1000)
+        attach_openai_optimization_governor(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            summary_meta=summary_meta,
+            path=path,
+            requested_model=requested_model,
+            category=category,
+            stream=stream,
+            session_id=session_id,
+        )
         attach_openai_outcome_summary(
             path=path,
             requested_model=requested_model,
