@@ -81,6 +81,7 @@ class DashboardImportTests(unittest.TestCase):
             codex_canary_impact = client.get("/agentflow/stats/codex-canary-impact")
             openai_scoreboard = client.get("/agentflow/stats/openai-scoreboard")
             openai_canary_readiness = client.get("/agentflow/stats/openai-canary-readiness")
+            openai_old_context_summary = client.get("/agentflow/stats/openai-old-context-summary")
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
@@ -122,6 +123,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(openai_canary_readiness.json()["schema"], "agentflow.openai_canary_readiness.v1")
             self.assertEqual(openai_canary_readiness.json()["state"], "disabled")
             self.assertFalse(openai_canary_readiness.json()["privacy"]["provider_calls_made"])
+            self.assertEqual(openai_old_context_summary.status_code, 200)
+            self.assertEqual(openai_old_context_summary.json()["schema"], "agentflow.openai_old_context_summary_opportunity.v1")
+            self.assertFalse(openai_old_context_summary.json()["local_policy"]["enabled"])
+            self.assertFalse(openai_old_context_summary.json()["local_policy"]["rule_file"]["rule_path_included"])
+            self.assertFalse(openai_old_context_summary.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(openai_old_context_summary.json()["privacy"]["raw_request_bodies_included"])
             self.assertEqual(optimization_eval_queue.status_code, 200)
             self.assertEqual(optimization_eval_queue.json()["schema"], "agentflow.optimization_eval_queue.v1")
             self.assertFalse(optimization_eval_queue.json()["privacy"]["provider_calls_made"])
@@ -221,6 +228,13 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("OpenAI local canary readiness", dashboard.text)
             self.assertIn("openai-canary-readiness-summary-tbody", dashboard.text)
             self.assertIn("openai-canary-readiness-candidates-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/openai-old-context-summary", dashboard.text)
+            self.assertIn("OpenAI old-context summary readiness", dashboard.text)
+            self.assertIn("openai-old-context-summary-readiness-tbody", dashboard.text)
+            self.assertIn("OpenAI old-context summary endpoint impact", dashboard.text)
+            self.assertIn("openai-old-context-summary-groups-tbody", dashboard.text)
+            self.assertIn("OpenAI old-context summary quality gates", dashboard.text)
+            self.assertIn("openai-old-context-summary-quality-tbody", dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
@@ -229,6 +243,158 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_openai_old_context_summary_dashboard_api_reports_impact_without_raw_content(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        try:
+            def feature(endpoint="responses", source_surface="openai_responses"):
+                return {
+                    "schema": "agentflow.openai_feature_summary.v1",
+                    "provider": "openai",
+                    "source_surface": source_surface,
+                    "endpoint": endpoint,
+                    "requested_model_family": "gpt-5",
+                    "routed_model_family": "gpt-5",
+                    "stream": False,
+                    "category": "chat",
+                    "workflow_phase": "summary",
+                    "text_bucket": "32k_128k_chars",
+                    "input_token_bucket": "16k_64k_tokens",
+                    "has_tools": False,
+                    "old_context": {
+                        "shape": "responses_input_items",
+                        "conversation_item_count": 12,
+                        "older_context_item_count": 8,
+                        "older_context_text_bucket": "32k_128k_chars",
+                        "older_context_token_bucket": "16k_64k_tokens",
+                        "raw_payload_included": False,
+                    },
+                    "raw_payload_included": False,
+                }
+
+            def summary_meta(cohort, status, candidate_id):
+                return {
+                    "schema": "agentflow.openai_old_context_summary.v1",
+                    "enabled": True,
+                    "status": status,
+                    "applied": status == "applied",
+                    "changed": status == "applied",
+                    "rule_id": "local-openai-old-context-summary",
+                    "candidate_id": candidate_id,
+                    "summary_model": "gpt-5-mini",
+                    "endpoint": "responses",
+                    "workflow_phase": "summary",
+                    "canary": {"cohort": cohort, "canary_fraction": 0.5, "holdout_fraction": 0.5},
+                    "estimated_tokens_saved": 1000 if status == "applied" else 0,
+                    "estimated_gross_savings_usd": 0.005 if status == "applied" else 0.0,
+                    "summary_cost_est_usd": 0.001 if status == "applied" else 0.0,
+                    "estimated_net_savings_usd": 0.004 if status == "applied" else 0.0,
+                    "summary_status_code": 200,
+                    "reason_codes": [status],
+                    "privacy": {
+                        "raw_source_included": False,
+                        "raw_summary_included": False,
+                        "raw_request_body_included": False,
+                        "summary_text_included": False,
+                        "session_id_included": False,
+                    },
+                }
+
+            for idx, (cohort, status) in enumerate((
+                ("canary_applied", "applied"),
+                ("canary_applied", "applied"),
+                ("canary_holdout", "holdout"),
+            )):
+                routing = {
+                    "provider": "openai",
+                    "requested_model": "gpt-5.4",
+                    "routed_model": "gpt-5.4",
+                    "text_chars": 64000,
+                    "has_tools": False,
+                    "category": "chat",
+                    "workflow_phase": "summary",
+                    "openai_feature_unit": feature(),
+                }
+                meta = summary_meta(cohort, status, f"secret-content-derived-candidate-{idx}")
+                store.log_call(
+                    id=f"openai-summary-dashboard-{idx}",
+                    created_at=utc_now(),
+                    path="/v1/responses",
+                    requested_model="gpt-5.4",
+                    routed_model="gpt-5.4",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=120,
+                    input_tokens_est=16000,
+                    output_tokens_est=80,
+                    actual_input_tokens=16000,
+                    actual_output_tokens=80,
+                    cost_est_usd=0.01,
+                    cost_baseline_usd=0.02,
+                    crunch_json=stable_json({"openai_old_context_summarization": meta}),
+                    routing_json=stable_json(routing),
+                    cache_json=stable_json({"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+                    error=None,
+                    request_json='{"input":"secret raw openai prompt","request_id":"req_secret","file_path":"/tmp/secret.py"}',
+                    response_json='{"output_text":"secret generated response"}',
+                    session_id="secret-openai-session",
+                    category="chat",
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    retry_count=0,
+                    thinking_output_tokens=0,
+                    provider="openai",
+                    source_surface="openai_responses",
+                    endpoint="responses",
+                    requested_model_family="gpt-5",
+                    routed_model_family="gpt-5",
+                )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://openai.test",
+                limiter_status=lambda: [],
+                limiter_config={
+                    "min_request_interval_ms": 0,
+                    "max_tier_backoff_wait_s": 30,
+                    "max_concurrent_per_tier": 2,
+                },
+            )
+            client = TestClient(app)
+
+            with patch.dict(os.environ, {"AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_PROVIDER_CONFIGURED": "1"}):
+                payload = client.get("/agentflow/stats/openai-old-context-summary?limit=10")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(payload.status_code, 200)
+            data = payload.json()
+            self.assertEqual(data["summary"]["openai_call_count"], 3)
+            self.assertEqual(data["summary"]["eligible_count"], 3)
+            self.assertEqual(data["quality_gate_summary"]["canary_applied_count"], 2)
+            self.assertEqual(data["quality_gate_summary"]["canary_holdout_count"], 1)
+            self.assertGreater(data["quality_gate_summary"]["estimated_net_savings_usd"], 0)
+            self.assertEqual(data["quality_gates"][0]["verdict"], "promote")
+            self.assertTrue(data["measurement_policy"]["summary_provider_configured"])
+            self.assertFalse(data["local_policy"]["rule_file"]["rule_path_included"])
+            self.assertFalse(data["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(data["privacy"]["request_ids_included"])
+            rendered = json.dumps(data, sort_keys=True)
+            for forbidden in (
+                "secret-openai-session",
+                "secret raw openai prompt",
+                "secret generated response",
+                "req_secret",
+                "/tmp/secret.py",
+                "secret-content-derived-candidate",
+            ):
+                self.assertNotIn(forbidden, rendered)
+                self.assertNotIn(forbidden, dashboard.text)
+        finally:
+            store.conn.close()
+            tmp.close()
 
     def test_policy_workbench_readiness_reports_staged_drafts_events_and_privacy(self):
         from agentflow_proxy import stats as stats_views

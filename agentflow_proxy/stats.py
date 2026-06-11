@@ -7158,8 +7158,71 @@ async def stats_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict
 
 async def stats_openai_old_context_summary_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_old_context_summary_report import build_openai_old_context_summary_report
+    from agentflow_proxy.openai_old_context_summary import load_openai_old_context_summary_policy
 
-    return build_openai_old_context_summary_report(store_obj, limit=limit)
+    report = build_openai_old_context_summary_report(store_obj, limit=limit)
+    try:
+        policy = load_openai_old_context_summary_policy()
+    except Exception as exc:
+        policy = {
+            "enabled": False,
+            "policy_source": "unavailable",
+            "summary_provider": None,
+            "summary_model": None,
+            "rule_id": None,
+            "rule_path": None,
+            "load_error_class": type(exc).__name__,
+        }
+    try:
+        policy_state = await stats_policies()
+    except Exception:
+        policy_state = {}
+    crunch_state = policy_state.get("crunch") if isinstance(policy_state.get("crunch"), dict) else {}
+    crunch_file = crunch_state.get("file") if isinstance(crunch_state.get("file"), dict) else {}
+    canary = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
+    local_policy = {
+        "schema": "agentflow.openai_old_context_summary_dashboard_policy.v1",
+        "enabled": bool(policy.get("enabled")),
+        "policy_source": policy.get("policy_source") or "unknown",
+        "summary_provider": policy.get("summary_provider"),
+        "summary_model": policy.get("summary_model"),
+        "rule_id": policy.get("rule_id"),
+        "supported_endpoints": policy.get("supported_endpoints") if isinstance(policy.get("supported_endpoints"), list) else [],
+        "blocked_categories": policy.get("blocked_categories") if isinstance(policy.get("blocked_categories"), list) else [],
+        "canary": {
+            "enabled": bool(canary.get("enabled")),
+            "canary_fraction": _as_float(canary.get("canary_fraction")),
+            "holdout_fraction": _as_float(canary.get("holdout_fraction")),
+            "cohort_basis": canary.get("cohort_basis") or "deterministic-candidate-id-hash",
+        },
+        "rule_file": {
+            "configured": bool(policy.get("rule_path")),
+            "path_class": _local_path_class(policy.get("rule_path")),
+            "rule_path_included": False,
+            "reload_required": bool(crunch_file.get("reload_required")),
+            "loaded": bool(((crunch_file.get("loaded") or {}) if isinstance(crunch_file.get("loaded"), dict) else {}).get("exists")),
+        },
+        "read_only": True,
+        "dashboard_mutations_available": False,
+        "provider_calls_made": False,
+        "load_error_class": policy.get("load_error_class"),
+    }
+    report["local_policy"] = local_policy
+    measurement = report.get("measurement_policy") if isinstance(report.get("measurement_policy"), dict) else {}
+    measurement.update({
+        "policy_enabled": local_policy["enabled"],
+        "policy_source": local_policy["policy_source"],
+        "policy_reload_required": local_policy["rule_file"]["reload_required"],
+        "dashboard_mutations_available": False,
+    })
+    report["measurement_policy"] = measurement
+    privacy = report.get("privacy") if isinstance(report.get("privacy"), dict) else {}
+    privacy.setdefault("raw_request_bodies_included", False)
+    privacy.setdefault("file_paths_included", False)
+    privacy.setdefault("provider_calls_made", False)
+    privacy.setdefault("managed_server_calls_made", False)
+    report["privacy"] = privacy
+    return report
 
 
 def _optimization_eval_reason_codes(values: Any) -> list[str]:
@@ -13702,6 +13765,33 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>OpenAI old-context summary readiness</h2>
+  <table class="activity-table" data-table-id="openai-old-context-summary-readiness" data-filter-label="Filter OpenAI old-context summary readiness">
+    <thead><tr>
+      <th data-sort-type="text">Policy</th><th data-sort-type="text">Provider</th><th data-sort-type="text">Summary model</th><th data-sort-type="number">OpenAI rows</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Failures</th><th data-sort-type="money">Net savings</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-old-context-summary-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI old-context summary endpoint impact</h2>
+  <table data-table-id="openai-old-context-summary-groups" data-filter-label="Filter OpenAI old-context summary groups">
+    <thead><tr>
+      <th data-sort-type="text">Endpoint</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Blocker</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Projected net</th>
+    </tr></thead>
+    <tbody id="openai-old-context-summary-groups-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI old-context summary quality gates</h2>
+  <table class="activity-table" data-table-id="openai-old-context-summary-quality" data-filter-label="Filter OpenAI old-context quality gates">
+    <thead><tr>
+      <th data-sort-type="text">Verdict</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Model family</th><th data-sort-type="text">Category</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Summary failures</th><th data-sort-type="money">Net savings</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Freshness</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-old-context-summary-quality-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>OpenAI optimization scoreboard</h2>
   <table data-table-id="openai-scoreboard-summary" data-filter-label="Filter OpenAI scoreboard summary">
     <thead><tr>
@@ -15360,6 +15450,90 @@ function openaiCanaryReasonBadges(reasons){
   if(!reasons.length)return'<span class="badge hit">none</span>';
   return reasons.slice(0,5).map(reason=>`<span class="badge ${String(reason).includes('rollback')?'err':'miss'}">${esc(reason)}</span>`).join(' ');
 }
+function openaiSummaryGateBadge(verdict){
+  if(verdict==='promote')return'hit';
+  if(verdict==='rollback')return'err';
+  if(verdict==='hold')return'routed';
+  if(verdict==='needs_more_samples'||verdict==='disabled')return'miss';
+  return'provider';
+}
+function openaiSummaryPrivacyBadges(privacy){
+  privacy=privacy||{};
+  return `${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} ${privacy.provider_calls_made?'<span class="badge err">provider call</span>':'<span class="badge hit">offline report</span>'} <span class="badge hit">raw bodies omitted</span> <span class="badge hit">IDs omitted</span>`;
+}
+function openaiSummaryReasonBadges(rows){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge hit">none</span>';
+  return rows.slice(0,5).map(row=>`<span class="badge miss">${esc(row.value||row)}${row.count!=null?' '+Number(row.count||0).toLocaleString():''}</span>`).join(' ');
+}
+function openaiSummaryReasonList(reasons,verdict){
+  reasons=reasons||[];
+  if(!reasons.length)return'<span class="badge hit">none</span>';
+  return reasons.slice(0,5).map(reason=>`<span class="badge ${verdict==='rollback'?'err':'miss'}">${esc(reason)}</span>`).join(' ');
+}
+async function refreshOpenAIOldContextSummary(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-old-context-summary?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const q=d.quality_gate_summary||{};
+    const p=d.local_policy||{};
+    const file=p.rule_file||{};
+    const mp=d.measurement_policy||{};
+    const privacy=d.privacy||{};
+    const providerReady=mp.summary_provider_configured;
+    document.getElementById('openai-old-context-summary-readiness-tbody').innerHTML=`<tr>
+      <td class="flags">${p.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">disabled</span>'} <span class="badge provider">${esc(p.policy_source||'unknown')}</span> ${file.reload_required?'<span class="badge err">reload required</span>':'<span class="badge hit">loaded</span>'}<div class="sub">${file.rule_path_included?'<span class="badge err">path shown</span>':'path omitted'} · ${esc(file.path_class||'unknown')}</div></td>
+      <td class="flags">${providerReady?'<span class="badge hit">configured</span>':'<span class="badge miss">not configured</span>'} <span class="badge provider">${esc(p.summary_provider||'openai')}</span></td>
+      <td class="model">${esc(shortModel(p.summary_model||mp.summary_model||'—'))}</td>
+      <td class="tokens">${(s.openai_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.eligible_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.blocked_count||0).toLocaleString()}</td>
+      <td class="tokens">${(q.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(q.canary_holdout_count||0).toLocaleString()}</td>
+      <td>${q.summary_failure_count?`<span class="badge err">${Number(q.summary_failure_count||0).toLocaleString()}</span>`:'<span class="badge hit">0</span>'}</td>
+      <td class="${(q.estimated_net_savings_usd||s.projected_net_savings_usd||0)>=0?'savings':'cost'}">${fmt(q.estimated_net_savings_usd||s.projected_net_savings_usd||0,6)}</td>
+      <td class="flags">${openaiSummaryReasonBadges(d.blocker_reason_breakdown)}</td>
+      <td class="flags">${openaiSummaryPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const groups=d.groups||[];
+    document.getElementById('openai-old-context-summary-groups-tbody').innerHTML=groups.slice(0,12).map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.endpoint||'unknown')}</span></td>
+      <td><span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.workflow_phase||'unknown')}</span></td>
+      <td><span class="badge ${row.blocker==='eligible'?'hit':'miss'}">${esc(row.blocker||'unknown')}</span></td>
+      <td class="tokens">${(row.call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.eligible_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.blocked_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.projected_saved_tokens||0)}</td>
+      <td class="${(row.projected_net_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.projected_net_savings_usd||0,6)}</td>
+    </tr>`).join('')||'<tr><td colspan="10" style="color:#8b949e">No OpenAI old-context summary readiness rows in this local window</td></tr>';
+    const gates=d.quality_gates||[];
+    document.getElementById('openai-old-context-summary-quality-tbody').innerHTML=gates.map(row=>{
+      const cohorts=row.cohort_metrics||{};
+      const applied=cohorts.canary_applied||{};
+      const holdout=cohorts.canary_holdout||{};
+      const totals=row.totals||{};
+      const freshness=row.freshness||{};
+      return `<tr>
+        <td><span class="badge ${openaiSummaryGateBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.rule_id||'unknown')}</td>
+        <td><span class="badge provider">${esc(row.endpoint||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(row.requested_model_family||'unknown')}</span></td>
+        <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+        <td class="tokens">${(applied.count||0).toLocaleString()}</td>
+        <td class="tokens">${(holdout.count||0).toLocaleString()}</td>
+        <td class="${(applied.summary_failure_rate||0)>0?'cost':'tokens'}">${fmtPctValue(applied.summary_failure_rate||0)}</td>
+        <td class="${(totals.estimated_net_savings_usd||0)>=0?'savings':'cost'}">${fmt(totals.estimated_net_savings_usd||0,6)}</td>
+        <td class="flags">${openaiSummaryReasonList(row.reason_codes,row.verdict)}</td>
+        <td class="flags">${freshness.stale?'<span class="badge routed">stale</span>':'<span class="badge hit">fresh</span>'} <span class="badge miss">${freshness.age_hours==null?'age unknown':Number(freshness.age_hours||0).toFixed(1)+'h'}</span></td>
+        <td class="flags">${openaiSummaryPrivacyBadges(row.privacy||{})}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="12" style="color:#8b949e">No OpenAI old-context summary quality-gate metadata observed yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshOpenAICanaryReadiness(){
   try{
     const r=await fetch('/agentflow/stats/openai-canary-readiness?limit=1000');
@@ -16234,6 +16408,7 @@ refreshLimiter();
 refreshSafety();
 refreshPolicies();
 refreshOpenAICanaryReadiness();
+refreshOpenAIOldContextSummary();
 refreshOpenAIScoreboard();
 refreshShadowRoutingPromotionReadiness();
 refreshOptimizationPromotionFunnel();
