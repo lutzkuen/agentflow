@@ -617,6 +617,37 @@ pattern_rules:
         self.assertFalse(audit["paths_included"])
         self.assertNotIn("a.txt", json.dumps(audit))
 
+    def test_file_dependency_fingerprint_metadata_omits_raw_paths_and_records_blockers(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('hello')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            body = {"messages": [{"role": "user", "content": "Read ./src/example.py"}]}
+            snapshots = cache_module.cache_file_dependency_snapshots(body)
+            audit = cache_module.cache_file_dependency_audit(body)
+
+        meta = cache_module.attach_file_dependency_cache_meta(
+            {"status": "skipped", "reason": "tools-disabled"},
+            snapshots=snapshots,
+            audit=audit,
+            blocker_reasons=["tool-call-cache-disabled"],
+        )
+        rendered = json.dumps(meta, sort_keys=True)
+
+        self.assertEqual(meta["file_dependency_count"], 1)
+        self.assertEqual(meta["file_dependency_count_bucket"], "1")
+        self.assertTrue(meta["file_dependency_fingerprint_available"])
+        self.assertTrue(meta["file_dependency_fingerprint_sha256"].startswith("sha256:"))
+        self.assertTrue(meta["safe_invalidation_evidence"])
+        self.assertIn("tool-call-cache-disabled", meta["cache_replay_blocker_reasons"])
+        self.assertFalse(meta["file_dependency_audit"]["paths_included"])
+        self.assertFalse(meta["file_dependency_fingerprint"]["paths_included"])
+        self.assertFalse(meta["file_dependency_fingerprint"]["path_hashes_included"])
+        self.assertNotIn("src/example.py", rendered)
+        self.assertNotIn(str(watched), rendered)
+
     def test_exact_cache_entry_is_invalidated_when_watched_file_changes(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

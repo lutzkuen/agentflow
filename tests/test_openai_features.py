@@ -668,6 +668,83 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertNotIn("raw openai prompt", row["routing_json"])
         self.assertNotIn("raw tool output", row["routing_json"])
 
+    def test_openai_tool_light_cache_metadata_captures_dependency_fingerprint_without_raw_paths(self):
+        watched = os.path.join(self.cwd_tmp.name, "src", "example.py")
+        os.makedirs(os.path.dirname(watched), exist_ok=True)
+        with open(watched, "w", encoding="utf-8") as f:
+            f.write("print('dependency evidence')\n")
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "Inspect ./src/example.py and decide whether a lookup tool is needed.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup_file",
+                    "description": "raw tool payload must not leak",
+                }
+            ],
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post(
+                "/v1/responses",
+                json=request_body,
+                headers={"x-session-id": "raw-session-id-must-not-leak"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        [row] = server.store.conn.execute("select cache_json, routing_json, request_json from calls").fetchall()
+        cache = json.loads(row["cache_json"])
+        routing = json.loads(row["routing_json"])
+        rendered_cache = json.dumps(cache, sort_keys=True)
+        rendered_public = json.dumps({"cache": cache, "routing": routing}, sort_keys=True)
+
+        self.assertEqual(cache["status"], "skipped")
+        self.assertEqual(cache["reason"], "tools-disabled")
+        self.assertEqual(routing["category"], "tool-light")
+        self.assertIn("tool-call-cache-disabled", cache["cache_replay_blocker_reasons"])
+        self.assertTrue(cache["file_dependency_evidence_available"])
+        self.assertTrue(cache["safe_invalidation_evidence"])
+        self.assertEqual(cache["file_dependency_count"], 1)
+        self.assertEqual(cache["file_dependency_count_bucket"], "1")
+        self.assertTrue(cache["file_dependency_fingerprint_available"])
+        self.assertTrue(cache["file_dependency_fingerprint_sha256"].startswith("sha256:"))
+        self.assertEqual(cache["file_dependency_fingerprint"]["schema"], "agentflow.cache_file_dependency_fingerprint.v1")
+        self.assertFalse(cache["file_dependency_fingerprint"]["paths_included"])
+        self.assertFalse(cache["file_dependency_fingerprint"]["path_hashes_included"])
+        self.assertFalse(cache["file_dependency_audit"]["paths_included"])
+        self.assertFalse(cache["file_dependency_audit"]["root_path_included"])
+        self.assertIsNone(row["request_json"])
+        self.assertNotIn("src/example.py", rendered_cache)
+        self.assertNotIn(watched, rendered_cache)
+        self.assertNotIn("raw tool payload must not leak", rendered_public)
+        self.assertNotIn("raw-session-id-must-not-leak", rendered_public)
+
+    def test_openai_static_cache_metadata_records_missing_dependency_blocker_without_raw_request_body(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "Summarize ./missing-dependency.txt without tools.",
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        [row] = server.store.conn.execute("select cache_json, request_json, response_json from calls").fetchall()
+        cache = json.loads(row["cache_json"])
+        rendered_cache = json.dumps(cache, sort_keys=True)
+
+        self.assertEqual(cache["status"], "miss")
+        self.assertEqual(cache["reason"], "exact-miss")
+        self.assertEqual(cache["file_dependency_count"], 1)
+        self.assertFalse(cache["file_dependency_evidence_available"])
+        self.assertFalse(cache["safe_invalidation_evidence"])
+        self.assertFalse(cache["file_dependency_fingerprint"]["paths_included"])
+        self.assertIn("dependency-missing", cache["cache_replay_blocker_reasons"])
+        self.assertIsNone(row["request_json"])
+        self.assertIsNone(row["response_json"])
+        self.assertNotIn("missing-dependency.txt", rendered_cache)
+
     def test_openai_managed_fetch_uses_preflight_unit_before_crunching(self):
         request_body = {
             "model": "gpt-5-codex",

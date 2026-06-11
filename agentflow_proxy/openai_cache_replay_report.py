@@ -186,6 +186,13 @@ def _fingerprint_value(cache: dict[str, Any], routing: dict[str, Any], feature: 
     return None
 
 
+def _dependency_fingerprint_available(cache: dict[str, Any]) -> bool:
+    fingerprint = cache.get("file_dependency_fingerprint")
+    if isinstance(fingerprint, dict):
+        return bool(fingerprint.get("fingerprint_available") or fingerprint.get("fingerprint_sha256"))
+    return bool(cache.get("file_dependency_fingerprint_available") or cache.get("file_dependency_fingerprint_sha256"))
+
+
 def _sanitized_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
     audit = cache.get("file_dependency_audit")
     if isinstance(audit, dict):
@@ -296,6 +303,7 @@ def _new_group(basis: dict[str, Any], candidate_id: str) -> dict[str, Any]:
         "cache_reason": basis["cache_reason"],
         "replayability_level": basis["replayability_level"],
         "request_fingerprint_available": basis["request_fingerprint_available"],
+        "file_dependency_fingerprint_available": basis["file_dependency_fingerprint_available"],
         "file_dependency_status": basis["file_dependency_status"],
         "text_bucket": basis["text_bucket"],
         "cost_bucket": basis["cost_bucket"],
@@ -387,6 +395,7 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     group["privacy"] = {
         "metadata_only": True,
         "request_fingerprint_included": False,
+        "file_dependency_fingerprint_included": False,
         "raw_session_ids_included": False,
         "file_paths_included": False,
         "cache_keys_included": False,
@@ -422,9 +431,11 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
     cache_outcome_counts: dict[str, int] = {}
     replayability_counts: dict[str, int] = {}
     fingerprint_availability_counts: dict[str, int] = {}
+    dependency_fingerprint_availability_counts: dict[str, int] = {}
     dependency_status_counts: dict[str, int] = {}
     openai_count = 0
     fingerprint_rows = 0
+    dependency_fingerprint_rows = 0
     body_rows_present = 0
 
     for row in rows:
@@ -459,6 +470,10 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         fingerprint_state = "available" if fingerprint else "missing"
         if fingerprint:
             fingerprint_rows += 1
+        dep_fingerprint_available = _dependency_fingerprint_available(cache)
+        dep_fingerprint_state = "available" if dep_fingerprint_available else "missing"
+        if dep_fingerprint_available:
+            dependency_fingerprint_rows += 1
         audit = _sanitized_dependency_audit(cache)
         dep_status = _dependency_status(audit)
         blockers = _row_blockers(
@@ -478,6 +493,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         _increment(cache_outcome_counts, f"{cache_status}:{cache_reason}")
         _increment(replayability_counts, replayability)
         _increment(fingerprint_availability_counts, fingerprint_state)
+        _increment(dependency_fingerprint_availability_counts, dep_fingerprint_state)
         _increment(dependency_status_counts, dep_status)
         for blocker in blockers:
             _increment(blocker_totals, blocker)
@@ -494,6 +510,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
             "cache_reason": cache_reason,
             "replayability_level": replayability,
             "request_fingerprint_available": bool(fingerprint),
+            "file_dependency_fingerprint_available": dep_fingerprint_available,
             "file_dependency_status": dep_status,
             "text_bucket": _text_bucket(text_chars),
             "cost_bucket": _cost_bucket(cost),
@@ -547,6 +564,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
             "safety_eligible_count": safety_eligible_count,
             "already_cache_hit_count": blocker_totals.get("already-cache-hit", 0),
             "request_fingerprint_rows": fingerprint_rows,
+            "file_dependency_fingerprint_rows": dependency_fingerprint_rows,
             "request_body_rows_present_but_not_read": body_rows_present,
             "estimated_cost_usd": round(estimated_cost, 6),
             "projected_savings_usd": round(projected_savings, 6),
@@ -564,6 +582,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         "cache_outcome_breakdown": _breakdown(cache_outcome_counts),
         "replayability_breakdown": _breakdown(replayability_counts),
         "request_fingerprint_availability_breakdown": _breakdown(fingerprint_availability_counts),
+        "file_dependency_fingerprint_availability_breakdown": _breakdown(dependency_fingerprint_availability_counts),
         "file_dependency_status_breakdown": _breakdown(dependency_status_counts),
         "blocker_reason_breakdown": _breakdown(blocker_totals),
         "candidates": candidates,
@@ -581,6 +600,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
             "raw_session_ids_included": False,
             "cache_keys_included": False,
             "request_fingerprints_included": False,
+            "file_dependency_fingerprints_included": False,
             "secrets_included": False,
             "provider_calls_made": False,
             "basis": "local calls table metadata plus sanitized routing/cache decision summaries only",

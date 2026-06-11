@@ -1152,6 +1152,73 @@ def cache_file_dependency_snapshots(
     return snapshots
 
 
+def cache_file_dependency_fingerprint(
+    snapshots: list[dict[str, Any]] | None,
+    audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build path-free dependency state metadata for cache replay decisions."""
+    audit = audit if isinstance(audit, dict) else {}
+    normalized: list[dict[str, Any]] = []
+    for dep in snapshots or []:
+        path = dep.get("path")
+        if not path:
+            continue
+        normalized.append({
+            "path_sha256": sha256_text(str(path)),
+            "exists": bool(dep.get("exists")),
+            "mtime_ns": dep.get("mtime_ns"),
+            "size": dep.get("size"),
+        })
+    normalized.sort(key=lambda item: str(item["path_sha256"]))
+    fingerprint = f"sha256:{sha256_text(stable_json(normalized))}" if normalized else None
+    return {
+        "schema": "agentflow.cache_file_dependency_fingerprint.v1",
+        "fingerprint_sha256": fingerprint,
+        "fingerprint_available": bool(fingerprint),
+        "snapshot_count": int(audit.get("snapshot_count") or len(normalized)),
+        "snapshot_count_bucket": str(audit.get("snapshot_count_bucket") or _dependency_count_bucket(len(normalized))),
+        "candidate_path_count_bucket": str(audit.get("candidate_path_count_bucket") or "unknown"),
+        "safe_invalidation_evidence": bool(audit.get("safe_invalidation_evidence")),
+        "file_dependency_evidence_available": bool(audit.get("file_dependency_evidence_available")),
+        "invalidation_reason": audit.get("invalidation_reason"),
+        "paths_included": False,
+        "path_hashes_included": False,
+        "raw_stat_values_included": False,
+    }
+
+
+def attach_file_dependency_cache_meta(
+    meta: dict[str, Any],
+    *,
+    snapshots: list[dict[str, Any]] | None,
+    audit: dict[str, Any] | None,
+    blocker_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    """Attach path-free dependency audit/fingerprint fields to cache metadata."""
+    audit = audit if isinstance(audit, dict) else cache_file_dependency_audit(snapshots=snapshots or [])
+    fingerprint = cache_file_dependency_fingerprint(snapshots or [], audit)
+    meta["file_dependency_audit"] = audit
+    meta["file_dependency_fingerprint"] = fingerprint
+    meta["file_dependency_count"] = int(audit.get("snapshot_count") or 0)
+    meta["file_dependency_count_bucket"] = str(audit.get("snapshot_count_bucket") or "unknown")
+    meta["file_dependency_fingerprint_available"] = bool(fingerprint.get("fingerprint_available"))
+    if fingerprint.get("fingerprint_sha256"):
+        meta["file_dependency_fingerprint_sha256"] = fingerprint["fingerprint_sha256"]
+    meta["file_dependency_evidence_available"] = bool(audit.get("file_dependency_evidence_available"))
+    meta["safe_invalidation_evidence"] = bool(audit.get("safe_invalidation_evidence"))
+    blockers = {
+        str(reason)
+        for reason in (blocker_reasons or [])
+        if reason
+    }
+    if not audit.get("safe_invalidation_evidence"):
+        blockers.add(str(audit.get("invalidation_reason") or "file-dependency-missing"))
+    if blockers:
+        meta["cache_replay_blocker_reasons"] = sorted(blockers)
+    meta["paths_included"] = False
+    return meta
+
+
 def cache_file_dependency_audit(
     body: dict[str, Any] | None = None,
     *,

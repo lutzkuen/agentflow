@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentflow_proxy.cache import (
     SEMANTIC_CACHE_THRESHOLD,
+    attach_file_dependency_cache_meta,
     cache_decision_meta,
     cache_file_dependency_audit,
     cache_file_dependency_snapshots,
@@ -74,6 +75,22 @@ from agentflow_proxy.store import stable_json, utc_now
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
+
+
+def _openai_cache_replay_blockers(
+    *,
+    cache_meta: dict[str, Any],
+    has_tool_blocks: bool,
+    stream: bool,
+) -> list[str]:
+    blockers: list[str] = []
+    if stream:
+        blockers.append("unsupported-streaming-shape")
+    if has_tool_blocks and not bool(cache_meta.get("tool_cache_enabled")):
+        blockers.append("tool-call-cache-disabled")
+    if cache_meta.get("status") != "hit":
+        blockers.append("replay-rule-required")
+    return blockers
 
 
 def provider_disabled_response(context: ProviderContext, expected: str) -> JSONResponse:
@@ -686,6 +703,19 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     if status_code >= 400 and error is None:
                         error = upstream_error_text(b"".join(upstream_error_chunks), status_code)
                     stream_cache_meta = cache_decision_meta("skipped", "streaming")
+                    stream_has_tool_blocks = has_tools(crunched)
+                    if stream_has_tool_blocks or category in {"tool-light", "tool-result", "tool-heavy"}:
+                        stream_file_deps = cache_file_dependency_snapshots(crunched)
+                        attach_file_dependency_cache_meta(
+                            stream_cache_meta,
+                            snapshots=stream_file_deps,
+                            audit=cache_file_dependency_audit(crunched),
+                            blocker_reasons=_openai_cache_replay_blockers(
+                                cache_meta=stream_cache_meta,
+                                has_tool_blocks=stream_has_tool_blocks,
+                                stream=True,
+                            ),
+                        )
                     attach_openai_outcome_summary(
                         path=path,
                         requested_model=requested_model,
@@ -767,13 +797,15 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         )
         file_deps = cache_file_dependency_snapshots(crunched) if (can_cache or has_tool_blocks) else []
         if can_cache or has_tool_blocks:
-            cache_meta["file_dependency_audit"] = cache_file_dependency_audit(crunched)
-            cache_meta["file_dependency_count"] = cache_meta["file_dependency_audit"]["snapshot_count"]
-            cache_meta["file_dependency_evidence_available"] = bool(
-                cache_meta["file_dependency_audit"]["file_dependency_evidence_available"]
-            )
-            cache_meta["safe_invalidation_evidence"] = bool(
-                cache_meta["file_dependency_audit"]["safe_invalidation_evidence"]
+            attach_file_dependency_cache_meta(
+                cache_meta,
+                snapshots=file_deps,
+                audit=cache_file_dependency_audit(crunched),
+                blocker_reasons=_openai_cache_replay_blockers(
+                    cache_meta=cache_meta,
+                    has_tool_blocks=has_tool_blocks,
+                    stream=False,
+                ),
             )
         key = cache_key_for(
             crunched,
