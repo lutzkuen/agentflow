@@ -49,6 +49,7 @@ def _default_cache_policy() -> dict[str, Any]:
             "enabled": True,
             "root": ".",
             "max_paths": 128,
+            "capture_candidates": False,
         },
         "pattern_rules": [],
         "session_memory_hints": {
@@ -105,6 +106,11 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
             policy["file_watch"]["root"] = str(file_watch["root"])
         if file_watch.get("max_paths") is not None:
             policy["file_watch"]["max_paths"] = int(file_watch["max_paths"])
+        if file_watch.get("capture_candidates") is not None:
+            policy["file_watch"]["capture_candidates"] = _as_bool(
+                file_watch.get("capture_candidates"),
+                policy["file_watch"]["capture_candidates"],
+            )
     policy["pattern_rules"] = _load_cache_pattern_rules(data.get("pattern_rules"))
     hints = data.get("session_memory_hints") or {}
     if isinstance(hints, dict):
@@ -285,6 +291,10 @@ def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
     policy["file_watch"]["max_paths"] = int(
         os.getenv("AGENTFLOW_CACHE_WATCH_MAX_PATHS", str(policy["file_watch"]["max_paths"]))
     )
+    policy["file_watch"]["capture_candidates"] = _as_bool(
+        os.getenv("AGENTFLOW_CACHE_CAPTURE_CANDIDATES"),
+        policy["file_watch"]["capture_candidates"],
+    )
     return policy, "local-default", str(defaults_path)
 
 
@@ -298,6 +308,7 @@ SEMANTIC_CACHE_THRESHOLD = float(CACHE_POLICY["semantic_cache"]["threshold"])
 CACHE_FILE_WATCH_ENABLED = bool(CACHE_POLICY["file_watch"]["enabled"])
 CACHE_FILE_WATCH_ROOT = str(CACHE_POLICY["file_watch"]["root"])
 CACHE_FILE_WATCH_MAX_PATHS = int(CACHE_POLICY["file_watch"]["max_paths"])
+CACHE_FILE_WATCH_CAPTURE_CANDIDATES = bool(CACHE_POLICY["file_watch"]["capture_candidates"])
 CACHE_PATTERN_RULES = tuple(CACHE_POLICY.get("pattern_rules") or [])
 
 
@@ -771,6 +782,52 @@ def _cache_file_dependency_scan(
     return snapshots, audit
 
 
+def _cache_workspace_scan(
+    *,
+    root: str | Path | None = None,
+    max_paths: int | None = None,
+) -> list[dict[str, Any]]:
+    """Scan watch root for a bounded set of files as workspace dependency evidence.
+
+    Produces file snapshots from the local workspace even when the request body
+    contains no explicit path references.  Only called when capture_candidates is
+    enabled in the file_watch policy — the default is off (conservative).
+    """
+    expanded_root = _expand_path_or_none(root if root is not None else CACHE_FILE_WATCH_ROOT)
+    watch_root = (expanded_root or Path.cwd()).resolve(strict=False)
+    limit = max(0, CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else int(max_paths))
+    if limit <= 0:
+        return []
+    snapshots: list[dict[str, Any]] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(str(watch_root)):
+            dirnames.sort()
+            for filename in sorted(filenames):
+                if len(snapshots) >= limit:
+                    return snapshots
+                file_path = Path(dirpath) / filename
+                try:
+                    resolved = file_path.resolve(strict=False)
+                    resolved.relative_to(watch_root)
+                except ValueError:
+                    continue
+                try:
+                    stat = file_path.stat()
+                    exists = file_path.is_file()
+                except OSError:
+                    stat = None
+                    exists = False
+                snapshots.append({
+                    "path": str(file_path),
+                    "exists": bool(exists),
+                    "mtime_ns": int(stat.st_mtime_ns) if stat and exists else None,
+                    "size": int(stat.st_size) if stat and exists else None,
+                })
+    except OSError:
+        pass
+    return snapshots
+
+
 def cache_file_dependency_snapshots(
     body: dict[str, Any],
     *,
@@ -780,6 +837,8 @@ def cache_file_dependency_snapshots(
     if not CACHE_FILE_WATCH_ENABLED:
         return []
     snapshots, _audit = _cache_file_dependency_scan(body, root=root, max_paths=max_paths)
+    if not snapshots and CACHE_FILE_WATCH_CAPTURE_CANDIDATES:
+        snapshots = _cache_workspace_scan(root=root, max_paths=max_paths)
     return snapshots
 
 
@@ -800,8 +859,11 @@ def cache_file_dependency_audit(
         if not watch_enabled or body is None:
             snapshots = []
         else:
-            snapshots, scanned = _cache_file_dependency_scan(body, root=watch_root, max_paths=limit)
-            return scanned
+            body_snapshots, body_audit = _cache_file_dependency_scan(body, root=watch_root, max_paths=limit)
+            if body_snapshots or not CACHE_FILE_WATCH_CAPTURE_CANDIDATES:
+                return body_audit
+            # Body scan found no paths; fall back to workspace snapshot when capture_candidates is on
+            snapshots = _cache_workspace_scan(root=watch_root, max_paths=limit)
     snapshot_count = len(snapshots or [])
     candidate_total = snapshot_count if candidate_count is None else max(0, int(candidate_count))
     cap_exceeded = candidate_total > limit

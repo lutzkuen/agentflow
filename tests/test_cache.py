@@ -30,6 +30,7 @@ class CacheDecisionMetaTest(unittest.TestCase):
         "AGENTFLOW_CACHE_FILE_WATCH",
         "AGENTFLOW_CACHE_WATCH_ROOT",
         "AGENTFLOW_CACHE_WATCH_MAX_PATHS",
+        "AGENTFLOW_CACHE_CAPTURE_CANDIDATES",
         "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
         "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
         "AGENTFLOW_POLICY_EVENTS",
@@ -887,6 +888,84 @@ pattern_rules:
                 self.assertEqual(meta["reason"], expected_reason)
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_capture_candidates_is_off_by_default_for_tool_result_body_without_paths(self):
+        """Body with no file paths and capture_candidates disabled → file-dependency-missing."""
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            body = {
+                "messages": [
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "exit code 0"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "Done"}]},
+                ]
+            }
+            snapshots = cache_module.cache_file_dependency_snapshots(body)
+            self.assertEqual(snapshots, [])
+
+            audit = cache_module.cache_file_dependency_audit(body)
+            self.assertEqual(audit["snapshot_count"], 0)
+            self.assertEqual(audit["invalidation_reason"], "file-dependency-missing")
+            self.assertFalse(audit["safe_invalidation_evidence"])
+            self.assertFalse(audit["paths_included"])
+            self.assertNotIn(tmp, json.dumps(audit))
+
+    def test_capture_candidates_provides_workspace_evidence_when_body_has_no_paths(self):
+        """With capture_candidates enabled, workspace files become dependency evidence."""
+        os.environ["AGENTFLOW_CACHE_CAPTURE_CANDIDATES"] = "1"
+        enabled = importlib.reload(cache_module)
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+            (tmp_path / "lib.py").write_text("y = 2\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            body = {
+                "messages": [
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "exit code 0"}]},
+                ]
+            }
+            snapshots = enabled.cache_file_dependency_snapshots(body)
+            self.assertGreater(len(snapshots), 0)
+
+            audit = enabled.cache_file_dependency_audit(body)
+            self.assertGreater(audit["snapshot_count"], 0)
+            self.assertIsNone(audit["invalidation_reason"])
+            self.assertTrue(audit["safe_invalidation_evidence"])
+            self.assertTrue(audit["file_dependency_evidence_available"])
+            self.assertFalse(audit["paths_included"])
+            self.assertNotIn(tmp, json.dumps(audit))
+
+    def test_capture_candidates_dry_run_fixture_shows_transition_to_evidence_present(self):
+        """Dry-run fixture: tool-result candidate moves from file-dependency-missing to evidence present."""
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src.py").write_text("# source\n", encoding="utf-8")
+            os.chdir(tmp_path)
+
+            body = {"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ran test"}]}]}
+
+            # State before: capture_candidates off, no dependency evidence
+            audit_before = cache_module.cache_file_dependency_audit(body)
+            self.assertEqual(audit_before["invalidation_reason"], "file-dependency-missing")
+            self.assertFalse(audit_before["safe_invalidation_evidence"])
+            self.assertFalse(audit_before["paths_included"])
+
+            # State after: capture_candidates on, workspace evidence present
+            os.environ["AGENTFLOW_CACHE_CAPTURE_CANDIDATES"] = "1"
+            enabled = importlib.reload(cache_module)
+            audit_after = enabled.cache_file_dependency_audit(body)
+            self.assertIsNone(audit_after["invalidation_reason"])
+            self.assertTrue(audit_after["safe_invalidation_evidence"])
+            self.assertTrue(audit_after["file_dependency_evidence_available"])
+
+            # Privacy: no raw paths in public audit output
+            self.assertFalse(audit_after["paths_included"])
+            self.assertNotIn(str(tmp_path), json.dumps(audit_after))
+            self.assertNotIn("src.py", json.dumps(audit_after))
 
     def test_stream_cache_payload_round_trips_sse_frames(self):
         frames = [
