@@ -84,6 +84,7 @@ class DashboardImportTests(unittest.TestCase):
             openai_optimization_readiness = client.get("/agentflow/stats/openai-optimization-readiness")
             openai_canary_readiness = client.get("/agentflow/stats/openai-canary-readiness")
             claude_canary_impact = client.get("/agentflow/stats/claude-canary-impact")
+            claude_routing_funnel = client.get("/agentflow/stats/claude-routing-promotion-funnel")
             openai_old_context_summary = client.get("/agentflow/stats/openai-old-context-summary")
             openai_cache_replay_readiness = client.get("/agentflow/stats/openai-cache-replay-readiness")
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
@@ -142,6 +143,11 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(claude_canary_impact.json()["schema"], "agentflow.claude_canary_impact.v1")
             self.assertFalse(claude_canary_impact.json()["privacy"]["provider_calls_made"])
             self.assertFalse(claude_canary_impact.json()["privacy"]["request_ids_included"])
+            self.assertEqual(claude_routing_funnel.status_code, 200)
+            self.assertEqual(claude_routing_funnel.json()["schema"], "agentflow.claude_routing_promotion_funnel.v1")
+            self.assertTrue(claude_routing_funnel.json()["read_only"])
+            self.assertFalse(claude_routing_funnel.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(claude_routing_funnel.json()["privacy"]["request_ids_included"])
             self.assertEqual(openai_old_context_summary.status_code, 200)
             self.assertEqual(openai_old_context_summary.json()["schema"], "agentflow.openai_old_context_summary_opportunity.v1")
             self.assertFalse(openai_old_context_summary.json()["local_policy"]["enabled"])
@@ -249,6 +255,9 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/optimization-promotion-funnel", dashboard.text)
             self.assertIn("Optimization promotion canary impact", dashboard.text)
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
+            self.assertIn("Claude routing promotion funnel", dashboard.text)
+            self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/openai-optimization-readiness", dashboard.text)
             self.assertIn("/agentflow/stats/managed-openai-activation", dashboard.text)
             self.assertIn("Managed OpenAI activation", dashboard.text)
@@ -1298,6 +1307,217 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_claude_routing_promotion_funnel_endpoint_and_dashboard_are_metadata_only(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+
+        def log_call(call_id, *, suffix, status="applied", cohort="canary_applied", cost=0.01, baseline=0.03):
+            store.log_call(
+                id=call_id,
+                created_at=f"2026-06-11T05:00:0{suffix}+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001" if status == "applied" else "claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=100,
+                input_tokens_est=1200,
+                output_tokens_est=100,
+                actual_input_tokens=1200,
+                actual_output_tokens=100,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                routing_json=stable_json({
+                    "workflow_phase": "tool-execution",
+                    "phase_canary": {
+                        "target_candidate_id": "claude-public-routing-candidate",
+                        "target_model": "claude-haiku-4-5-20251001",
+                        "original_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "stream": True,
+                        "status": status,
+                        "cohort": cohort,
+                        "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                        "canary_fraction": 0.2,
+                        "holdout_fraction": 0.1,
+                    },
+                    "raw_prompt": "raw claude canary prompt must stay local",
+                    "request_id": "claude-canary-request-secret",
+                    "session_id": "claude-canary-session-secret",
+                    "file_path": "/tmp/claude-canary-secret.py",
+                    "tool_payload": {"secret": "claude-canary-tool-secret"},
+                }),
+                crunch_json=stable_json({"changed": False}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw claude request body must stay local"}]}),
+                response_json=stable_json({"content": "raw claude response body must stay local"}),
+                session_id="claude-routing-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+            )
+
+        try:
+            store.log_call(
+                id="claude-eligible-unsampled",
+                created_at="2026-06-11T04:59:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=90,
+                input_tokens_est=900,
+                output_tokens_est=80,
+                actual_input_tokens=900,
+                actual_output_tokens=80,
+                cost_est_usd=0.02,
+                cost_baseline_usd=0.02,
+                routing_json=stable_json({
+                    "workflow_phase": "tool-execution",
+                    "category": "tool-result",
+                    "candidate_target_model": "claude-haiku-4-5-20251001",
+                    "claude_routing_promotion": {
+                        "eligible": True,
+                        "stage": "eligible",
+                        "reason": "eligible-not-sampled",
+                    },
+                    "raw_response": "raw eligible response must stay local",
+                    "authorization": "Bearer claude-eligible-secret",
+                }),
+                crunch_json=stable_json({"changed": False}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw eligible request must stay local"}]}),
+                response_json=stable_json({"content": "raw eligible response body must stay local"}),
+                session_id="claude-eligible-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+            )
+            for idx in range(3):
+                store.log_routing_experiment(
+                    id=f"claude-shadow-{idx}",
+                    call_id=f"claude-shadow-call-secret-{idx}",
+                    created_at=f"2026-06-11T05:01:0{idx}+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    stream=1,
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    primary_model="claude-sonnet-4-6",
+                    shadow_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    routing_reason="sampled-claude-shadow-routing",
+                    input_tokens_est=1000,
+                    primary_status_code=200,
+                    shadow_status_code=200,
+                    primary_latency_ms=140,
+                    shadow_latency_ms=90,
+                    primary_output_chars=80,
+                    shadow_output_chars=78,
+                    primary_output_sha256=f"primary-claude-{idx}",
+                    shadow_output_sha256=f"shadow-claude-{idx}",
+                    output_similarity=0.97,
+                    passed_threshold=1,
+                    primary_cost_est_usd=0.03,
+                    shadow_cost_est_usd=0.01,
+                    budget_limit_usd=1.0,
+                    budget_spent_before_usd=0.10,
+                    budget_remaining_before_usd=0.90,
+                    budget_spent_after_usd=0.11,
+                    error=None,
+                    routing_json=stable_json({"workflow_phase": "tool-execution", "request_id": "claude-shadow-request-secret"}),
+                    experiment_json=stable_json({
+                        "workflow_phase": "tool-execution",
+                        "raw_prompt": "raw claude shadow prompt must stay local",
+                        "provider_body": {"messages": [{"content": "raw claude provider body must stay local"}]},
+                        "tool_payload": {"secret": "claude-shadow-tool-secret"},
+                    }),
+                    primary_response_json=stable_json({"content": "raw claude primary response must stay local"}),
+                    shadow_response_json=stable_json({"content": "raw claude shadow response must stay local"}),
+                )
+            log_call("claude-canary-applied-1", suffix=1)
+            log_call("claude-canary-applied-2", suffix=2)
+            log_call("claude-canary-holdout-1", suffix=3, status="holdout", cohort="canary_holdout", cost=0.03, baseline=0.03)
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            response = client.get("/agentflow/stats/claude-routing-promotion-funnel?limit=50")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.claude_routing_promotion_funnel.v1")
+            self.assertTrue(payload["read_only"])
+            self.assertFalse(payload["provider_calls_made"])
+            self.assertFalse(payload["managed_server_calls_made"])
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["raw_provider_bodies_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertGreaterEqual(payload["summary"]["eligible_unsampled_count"], 1)
+            self.assertGreaterEqual(payload["summary"]["compared_count"], 3)
+            self.assertGreaterEqual(payload["summary"]["canary_applied_count"], 2)
+            self.assertGreaterEqual(payload["summary"]["holdout_count"], 1)
+            self.assertGreaterEqual(payload["summary"]["widened_count"], 1)
+            self.assertGreaterEqual(payload["summary"]["promoted_count"], 1)
+            self.assertTrue(any(row["eligible_unsampled_count"] >= 1 for row in payload["candidates"]))
+            self.assertTrue(any(row["compared_count"] >= 3 for row in payload["candidates"]))
+            self.assertTrue(any(row["canary_widened_count"] >= 1 for row in payload["candidates"]))
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Claude routing promotion funnel", dashboard.text)
+            self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
+            self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            for forbidden in (
+                "raw claude canary prompt must stay local",
+                "claude-canary-request-secret",
+                "claude-canary-session-secret",
+                "/tmp/claude-canary-secret.py",
+                "claude-canary-tool-secret",
+                "raw claude request body must stay local",
+                "raw claude response body must stay local",
+                "claude-routing-session-secret",
+                "raw eligible request must stay local",
+                "raw eligible response must stay local",
+                "Bearer claude-eligible-secret",
+                "claude-shadow-call-secret",
+                "claude-shadow-request-secret",
+                "raw claude shadow prompt must stay local",
+                "raw claude provider body must stay local",
+                "claude-shadow-tool-secret",
+                "raw claude primary response must stay local",
+                "raw claude shadow response must stay local",
+                '"request_id"',
+                '"session_id"',
+                '"file_path"',
+                '"tool_payload"',
+                '"provider_body"',
+                '"raw_prompt"',
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            store.conn.close()
+            tmp.close()
 
     def test_local_pattern_coverage_endpoint_summarizes_family_readiness(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

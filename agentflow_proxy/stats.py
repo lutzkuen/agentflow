@@ -7596,6 +7596,477 @@ async def stats_claude_canary_impact(store_obj: Any, limit: int = 1000) -> dict[
     return build_claude_canary_impact_report(store_obj, limit=capped_limit)
 
 
+def _claude_routing_funnel_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "content_free": True,
+        "raw_prompts_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "raw_transcripts_included": False,
+        "tool_payloads_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "raw_request_ids_included": False,
+        "raw_session_ids_included": False,
+        "filesystem_paths_included": False,
+        "api_keys_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "dashboard_mutations_available": False,
+        "basis": "local Anthropic routing decision, shadow comparison, and Claude canary aggregate metadata only",
+    }
+
+
+def _claude_route_public_label(*parts: Any) -> str:
+    payload = json.dumps([str(part or "unknown") for part in parts], sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"claude-route-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:14]}"
+
+
+def _claude_public_metadata_label(value: Any, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    lowered = text.lower()
+    unsafe_markers = (
+        "api_key",
+        "authorization",
+        "bearer ",
+        "cache_key",
+        "content",
+        "file_path",
+        "message",
+        "password",
+        "prompt",
+        "provider_body",
+        "raw_",
+        "request_id",
+        "response",
+        "secret",
+        "session_id",
+        "sk-",
+        "tool_payload",
+        "tool_result",
+        "transcript",
+    )
+    if any(marker in lowered for marker in unsafe_markers) or "/" in text or "\\" in text:
+        return fallback
+    cleaned = text.replace(" ", "-").replace("_", "-").lower()
+    cleaned = "".join(ch for ch in cleaned if ch.isalnum() or ch in ".:-")
+    return cleaned[:80] if cleaned else fallback
+
+
+def _claude_route_group_key(
+    *,
+    requested_model: Any,
+    routed_model: Any,
+    category: Any,
+    workflow_phase: Any,
+    stream: Any,
+    source_surface: Any = "anthropic_messages",
+) -> tuple[str, str, str, str, str]:
+    return (
+        _claude_public_metadata_label(source_surface, "anthropic_messages"),
+        _claude_public_metadata_label(requested_model, "unknown-requested"),
+        _claude_public_metadata_label(routed_model, "unknown-target"),
+        _claude_public_metadata_label(category, "unknown-category"),
+        _claude_public_metadata_label(workflow_phase, "unknown-phase"),
+        "stream" if bool(stream) else "nonstream",
+    )
+
+
+def _new_claude_route_funnel_candidate(key: tuple[str, str, str, str, str]) -> dict[str, Any]:
+    source_surface, requested_model, routed_model, category, workflow_phase, stream_label = key
+    return {
+        "candidate_id": _claude_route_public_label(*key),
+        "provider": "anthropic",
+        "source_surface": source_surface,
+        "requested_model": requested_model,
+        "routed_model": routed_model,
+        "model_pair": f"{requested_model} -> {routed_model}",
+        "category": category,
+        "workflow_phase": workflow_phase,
+        "stream": stream_label == "stream",
+        "observed_count": 0,
+        "eligible_count": 0,
+        "eligible_unsampled_count": 0,
+        "sampled_count": 0,
+        "compared_count": 0,
+        "passed_comparison_count": 0,
+        "promoted_count": 0,
+        "canary_applied_count": 0,
+        "canary_holdout_count": 0,
+        "canary_held_count": 0,
+        "canary_widened_count": 0,
+        "canary_rollback_count": 0,
+        "safety_stop_count": 0,
+        "fallback_count": 0,
+        "retry_count": 0,
+        "error_count": 0,
+        "cost_est_usd": 0.0,
+        "cost_baseline_usd": 0.0,
+        "observed_savings_usd": 0.0,
+        "comparison_cost_delta_usd": 0.0,
+        "avg_similarity_total": 0.0,
+        "avg_similarity_count": 0,
+        "latency_delta_ms_total": 0.0,
+        "latency_delta_count": 0,
+        "budget_exhausted": False,
+        "latest_evidence_at": None,
+        "oldest_evidence_at": None,
+        "blocker_counts": {},
+        "stage_counts": {},
+        "verdict_counts": {},
+        "privacy": _claude_routing_funnel_privacy(),
+    }
+
+
+def _claude_route_touch(candidate: dict[str, Any], created_at: Any) -> None:
+    if not created_at:
+        return
+    text = str(created_at)
+    if candidate.get("latest_evidence_at") is None or text > str(candidate.get("latest_evidence_at")):
+        candidate["latest_evidence_at"] = text
+    if candidate.get("oldest_evidence_at") is None or text < str(candidate.get("oldest_evidence_at")):
+        candidate["oldest_evidence_at"] = text
+
+
+def _claude_route_count(candidate: dict[str, Any], field: str, amount: int = 1) -> None:
+    candidate[field] = _as_int(candidate.get(field)) + amount
+
+
+def _claude_route_increment_breakdown(candidate: dict[str, Any], field: str, key: Any, amount: int = 1) -> None:
+    value = _claude_public_metadata_label(key, "redacted-reason") if field == "blocker_counts" else str(key or "unknown")
+    bucket = candidate.setdefault(field, {})
+    bucket[value] = _as_int(bucket.get(value)) + amount
+
+
+def _claude_route_is_eligible(row: dict[str, Any], routing: dict[str, Any], canary: dict[str, Any]) -> bool:
+    if canary:
+        return True
+    explicit = routing.get("claude_routing_promotion")
+    if isinstance(explicit, dict) and explicit.get("eligible") is not None:
+        return bool(explicit.get("eligible"))
+    status = str((routing.get("routing_experiment") or {}).get("status") if isinstance(routing.get("routing_experiment"), dict) else "")
+    if status in {"eligible", "sampled", "compared"}:
+        return True
+    requested = str(row.get("requested_model") or "").lower()
+    routed = str(row.get("routed_model") or routing.get("candidate_target_model") or "").lower()
+    category = str(row.get("category") or routing.get("category") or "").lower()
+    phase = str(routing.get("workflow_phase") or "").lower()
+    if "claude" in requested and "sonnet" in requested and ("haiku" in routed or category in {"tool-result", "tool-light"}):
+        return True
+    return phase in {"tool-execution", "summary"} and "sonnet" in requested
+
+
+def _claude_route_blocker_reason(routing: dict[str, Any], canary: dict[str, Any]) -> str | None:
+    if canary:
+        reason = canary.get("reason")
+        return _claude_public_metadata_label(reason, "redacted-reason") if reason else None
+    explicit = routing.get("claude_routing_promotion")
+    if isinstance(explicit, dict):
+        for key in ("blocker", "reason", "status"):
+            if explicit.get(key):
+                return _claude_public_metadata_label(explicit.get(key), "redacted-reason")
+    reason = routing.get("reason") or routing.get("routing_reason")
+    if reason:
+        text = str(reason)
+        if "eligible" not in text.lower() and "routed" not in text.lower():
+            return _claude_public_metadata_label(text, "redacted-reason")
+    return None
+
+
+def _claude_route_stage_from_canary(canary: dict[str, Any]) -> str:
+    status = str(canary.get("status") or "")
+    cohort = str(canary.get("cohort") or "")
+    if status == "applied" or cohort == "canary_applied":
+        return "canary-applied"
+    if status == "holdout" or cohort == "canary_holdout":
+        return "holdout"
+    if status == "safety_stopped" or (isinstance(canary.get("safety_stop"), dict) and canary["safety_stop"].get("tripped")):
+        return "safety-stopped"
+    if status in {"disabled", "ineligible", "noop"}:
+        return "held"
+    return status or cohort or "unknown"
+
+
+def _claude_route_finalize_candidate(candidate: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    sampled = _as_int(candidate.get("sampled_count"))
+    compared = _as_int(candidate.get("compared_count"))
+    eligible = _as_int(candidate.get("eligible_count"))
+    candidate["eligible_unsampled_count"] = max(0, eligible - sampled - _as_int(candidate.get("canary_applied_count")) - _as_int(candidate.get("canary_holdout_count")))
+    candidate["observed_savings_usd"] = round(_as_float(candidate.get("cost_baseline_usd")) - _as_float(candidate.get("cost_est_usd")), 8)
+    candidate["cost_est_usd"] = round(_as_float(candidate.get("cost_est_usd")), 8)
+    candidate["cost_baseline_usd"] = round(_as_float(candidate.get("cost_baseline_usd")), 8)
+    candidate["comparison_cost_delta_usd"] = round(_as_float(candidate.get("comparison_cost_delta_usd")), 8)
+    candidate["avg_similarity"] = (
+        round(_as_float(candidate.get("avg_similarity_total")) / _as_int(candidate.get("avg_similarity_count")), 6)
+        if _as_int(candidate.get("avg_similarity_count"))
+        else None
+    )
+    candidate["pass_rate"] = round(_as_int(candidate.get("passed_comparison_count")) / compared, 6) if compared else None
+    candidate["avg_latency_delta_ms"] = (
+        round(_as_float(candidate.get("latency_delta_ms_total")) / _as_int(candidate.get("latency_delta_count")), 2)
+        if _as_int(candidate.get("latency_delta_count"))
+        else None
+    )
+    candidate["error_rate"] = round(_as_int(candidate.get("error_count")) / max(1, _as_int(candidate.get("observed_count"))), 6)
+    candidate["fallback_rate"] = round(_as_int(candidate.get("fallback_count")) / max(1, _as_int(candidate.get("observed_count"))), 6)
+    candidate["retry_rate"] = round(_as_int(candidate.get("retry_count")) / max(1, _as_int(candidate.get("observed_count"))), 6)
+    age = _seconds_since_iso(candidate.get("latest_evidence_at"), now)
+    candidate["stale_evidence"] = {
+        "stale": age is not None and age > 72 * 3600,
+        "age_seconds": age,
+        "max_age_seconds": 72 * 3600,
+    }
+    candidate["blocker_counts"] = _count_breakdown(candidate.get("blocker_counts") or {})
+    candidate["stage_counts"] = _count_breakdown(candidate.get("stage_counts") or {})
+    candidate["verdict_counts"] = _count_breakdown(candidate.get("verdict_counts") or {})
+    candidate.pop("avg_similarity_total", None)
+    candidate.pop("avg_similarity_count", None)
+    candidate.pop("latency_delta_ms_total", None)
+    candidate.pop("latency_delta_count", None)
+    return candidate
+
+
+async def stats_claude_routing_promotion_funnel(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    now = datetime.now(timezone.utc)
+    observed_rows = 0
+
+    call_rows = store_obj.conn.execute(
+        """
+        select created_at, requested_model, routed_model, stream, status_code, latency_ms,
+               retry_count, cost_est_usd, cost_baseline_usd, routing_json, category,
+               provider, source_surface
+        from calls
+        where coalesce(provider, 'anthropic') = 'anthropic'
+          and coalesce(source_surface, 'anthropic_messages') = 'anthropic_messages'
+        order by created_at desc
+        limit ?
+        """,
+        (capped_limit,),
+    ).fetchall()
+    for raw_row in call_rows:
+        row = dict(raw_row)
+        observed_rows += 1
+        routing = _json_obj(row.get("routing_json"))
+        canary = routing.get("phase_canary") if isinstance(routing.get("phase_canary"), dict) else {}
+        target_model = (
+            canary.get("target_model")
+            or canary.get("candidate_target_model")
+            or row.get("routed_model")
+            or routing.get("candidate_target_model")
+            or "unknown-target"
+        )
+        key = _claude_route_group_key(
+            requested_model=canary.get("original_model") or canary.get("requested_model") or row.get("requested_model"),
+            routed_model=target_model,
+            category=canary.get("category") or row.get("category") or routing.get("category"),
+            workflow_phase=canary.get("workflow_phase") or routing.get("workflow_phase"),
+            stream=row.get("stream"),
+            source_surface=row.get("source_surface") or "anthropic_messages",
+        )
+        candidate = candidates.setdefault(key, _new_claude_route_funnel_candidate(key))
+        _claude_route_count(candidate, "observed_count")
+        _claude_route_touch(candidate, row.get("created_at"))
+        candidate["cost_est_usd"] += _as_float(row.get("cost_est_usd"))
+        candidate["cost_baseline_usd"] += _as_float(row.get("cost_baseline_usd"))
+        if _as_int(row.get("status_code")) >= 400:
+            _claude_route_count(candidate, "error_count")
+        if _as_int(row.get("retry_count")) > 0:
+            _claude_route_count(candidate, "retry_count")
+        if routing.get("fallback_reason") or canary.get("fallback_reason"):
+            _claude_route_count(candidate, "fallback_count")
+
+        if _claude_route_is_eligible(row, routing, canary):
+            _claude_route_count(candidate, "eligible_count")
+            _claude_route_increment_breakdown(candidate, "stage_counts", "eligible")
+        else:
+            _claude_route_increment_breakdown(candidate, "stage_counts", "observed-not-eligible")
+        blocker = _claude_route_blocker_reason(routing, canary)
+        if blocker:
+            _claude_route_increment_breakdown(candidate, "blocker_counts", blocker)
+
+        if canary:
+            stage = _claude_route_stage_from_canary(canary)
+            _claude_route_increment_breakdown(candidate, "stage_counts", stage)
+            if stage == "canary-applied":
+                _claude_route_count(candidate, "canary_applied_count")
+            elif stage == "holdout":
+                _claude_route_count(candidate, "canary_holdout_count")
+            elif stage == "safety-stopped":
+                _claude_route_count(candidate, "safety_stop_count")
+            elif stage == "held":
+                _claude_route_count(candidate, "canary_held_count")
+            safety = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
+            for reason in safety.get("reason_codes") or []:
+                _claude_route_increment_breakdown(candidate, "blocker_counts", reason)
+
+    experiment_rows = store_obj.conn.execute(
+        """
+        select created_at, requested_model, routed_model, stream, category, source_surface,
+               primary_status_code, shadow_status_code, primary_latency_ms, shadow_latency_ms,
+               output_similarity, passed_threshold, primary_cost_est_usd, shadow_cost_est_usd,
+               budget_limit_usd, budget_remaining_before_usd, budget_spent_after_usd,
+               routing_json, experiment_json, error
+        from routing_experiments
+        where coalesce(provider, 'anthropic') = 'anthropic'
+          and coalesce(source_surface, 'anthropic_messages') = 'anthropic_messages'
+        order by created_at desc
+        limit ?
+        """,
+        (capped_limit,),
+    ).fetchall()
+    for raw_row in experiment_rows:
+        row = dict(raw_row)
+        routing = _json_obj(row.get("routing_json"))
+        experiment = _json_obj(row.get("experiment_json"))
+        key = _claude_route_group_key(
+            requested_model=row.get("requested_model"),
+            routed_model=row.get("routed_model"),
+            category=row.get("category"),
+            workflow_phase=routing.get("workflow_phase") or experiment.get("workflow_phase"),
+            stream=row.get("stream"),
+            source_surface=row.get("source_surface") or "anthropic_messages",
+        )
+        candidate = candidates.setdefault(key, _new_claude_route_funnel_candidate(key))
+        _claude_route_touch(candidate, row.get("created_at"))
+        _claude_route_count(candidate, "sampled_count")
+        _claude_route_increment_breakdown(candidate, "stage_counts", "sampled")
+        if row.get("output_similarity") is not None or row.get("passed_threshold") is not None:
+            _claude_route_count(candidate, "compared_count")
+            _claude_route_increment_breakdown(candidate, "stage_counts", "compared")
+        if _as_int(row.get("passed_threshold")):
+            _claude_route_count(candidate, "passed_comparison_count")
+        if row.get("output_similarity") is not None:
+            candidate["avg_similarity_total"] += _as_float(row.get("output_similarity"))
+            candidate["avg_similarity_count"] += 1
+        if row.get("primary_latency_ms") is not None and row.get("shadow_latency_ms") is not None:
+            candidate["latency_delta_ms_total"] += _as_float(row.get("shadow_latency_ms")) - _as_float(row.get("primary_latency_ms"))
+            candidate["latency_delta_count"] += 1
+        candidate["comparison_cost_delta_usd"] += _as_float(row.get("shadow_cost_est_usd")) - _as_float(row.get("primary_cost_est_usd"))
+        if _as_int(row.get("shadow_status_code")) >= 400:
+            _claude_route_increment_breakdown(candidate, "blocker_counts", "shadow-error")
+        if _as_int(row.get("primary_status_code")) >= 400:
+            _claude_route_increment_breakdown(candidate, "blocker_counts", "primary-error")
+        if row.get("error"):
+            _claude_route_increment_breakdown(candidate, "blocker_counts", "comparison-error")
+        if row.get("budget_remaining_before_usd") is not None and _as_float(row.get("budget_remaining_before_usd")) <= 0:
+            candidate["budget_exhausted"] = True
+            _claude_route_increment_breakdown(candidate, "blocker_counts", "shadow-budget-exhausted")
+
+    try:
+        canary_impact = build_claude_canary_impact_report(store_obj, limit=capped_limit)
+    except Exception:
+        canary_impact = {"candidates": [], "summary": {}}
+    for verdict_row in canary_impact.get("candidates") or []:
+        if not isinstance(verdict_row, dict):
+            continue
+        key = _claude_route_group_key(
+            requested_model=verdict_row.get("original_model"),
+            routed_model=verdict_row.get("candidate_target_model"),
+            category=verdict_row.get("category"),
+            workflow_phase=verdict_row.get("workflow_phase"),
+            stream=verdict_row.get("stream"),
+            source_surface=verdict_row.get("source_surface") or "anthropic_messages",
+        )
+        candidate = candidates.setdefault(key, _new_claude_route_funnel_candidate(key))
+        verdict = str(verdict_row.get("verdict") or "unknown")
+        _claude_route_increment_breakdown(candidate, "verdict_counts", verdict)
+        if verdict == "widen":
+            _claude_route_count(candidate, "canary_widened_count")
+            _claude_route_increment_breakdown(candidate, "stage_counts", "widened")
+        elif verdict == "hold":
+            _claude_route_count(candidate, "canary_held_count")
+            _claude_route_increment_breakdown(candidate, "stage_counts", "held")
+        elif verdict == "rollback":
+            _claude_route_count(candidate, "canary_rollback_count")
+            _claude_route_increment_breakdown(candidate, "stage_counts", "rolled-back")
+        elif verdict == "needs_more_samples":
+            _claude_route_increment_breakdown(candidate, "stage_counts", "needs-more-samples")
+        for reason in verdict_row.get("reason_codes") or []:
+            _claude_route_increment_breakdown(candidate, "blocker_counts", reason)
+        _claude_route_touch(candidate, verdict_row.get("latest_observed_at"))
+
+    for candidate in candidates.values():
+        compared = _as_int(candidate.get("compared_count"))
+        if compared and (_as_int(candidate.get("passed_comparison_count")) / compared) >= 0.9:
+            candidate["promoted_count"] = max(_as_int(candidate.get("promoted_count")), 1)
+            _claude_route_increment_breakdown(candidate, "stage_counts", "promoted")
+
+    rows = [_claude_route_finalize_candidate(candidate, now=now) for candidate in candidates.values()]
+    rows.sort(
+        key=lambda row: (
+            -_as_int(row.get("canary_widened_count")),
+            -_as_int(row.get("canary_applied_count")),
+            -_as_int(row.get("compared_count")),
+            -_as_int(row.get("eligible_unsampled_count")),
+            str(row.get("candidate_id")),
+        )
+    )
+
+    summary_counts = {
+        "observed_count": observed_rows,
+        "candidate_count": len(rows),
+        "eligible_count": sum(_as_int(row.get("eligible_count")) for row in rows),
+        "eligible_unsampled_count": sum(_as_int(row.get("eligible_unsampled_count")) for row in rows),
+        "sampled_count": sum(_as_int(row.get("sampled_count")) for row in rows),
+        "compared_count": sum(_as_int(row.get("compared_count")) for row in rows),
+        "promoted_count": sum(_as_int(row.get("promoted_count")) for row in rows),
+        "canary_applied_count": sum(_as_int(row.get("canary_applied_count")) for row in rows),
+        "holdout_count": sum(_as_int(row.get("canary_holdout_count")) for row in rows),
+        "widened_count": sum(_as_int(row.get("canary_widened_count")) for row in rows),
+        "held_count": sum(_as_int(row.get("canary_held_count")) for row in rows),
+        "rolled_back_count": sum(_as_int(row.get("canary_rollback_count")) for row in rows),
+        "safety_stop_count": sum(_as_int(row.get("safety_stop_count")) for row in rows),
+        "fallback_count": sum(_as_int(row.get("fallback_count")) for row in rows),
+        "error_count": sum(_as_int(row.get("error_count")) for row in rows),
+        "budget_exhausted_count": sum(1 for row in rows if row.get("budget_exhausted")),
+    }
+    blocker_counts: dict[str, int] = {}
+    stage_counts: dict[str, int] = {}
+    verdict_counts: dict[str, int] = {}
+    for row in rows:
+        for item in row.get("blocker_counts") or []:
+            blocker_counts[str(item.get("value") or "unknown")] = blocker_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
+        for item in row.get("stage_counts") or []:
+            stage_counts[str(item.get("value") or "unknown")] = stage_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
+        for item in row.get("verdict_counts") or []:
+            verdict_counts[str(item.get("value") or "unknown")] = verdict_counts.get(str(item.get("value") or "unknown"), 0) + _as_int(item.get("count"))
+
+    return {
+        "schema": "agentflow.claude_routing_promotion_funnel.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "summary": {
+            **summary_counts,
+            "cost_est_usd": round(sum(_as_float(row.get("cost_est_usd")) for row in rows), 8),
+            "cost_baseline_usd": round(sum(_as_float(row.get("cost_baseline_usd")) for row in rows), 8),
+            "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in rows), 8),
+            "comparison_cost_delta_usd": round(sum(_as_float(row.get("comparison_cost_delta_usd")) for row in rows), 8),
+            "last_evidence_at": max((str(row.get("latest_evidence_at")) for row in rows if row.get("latest_evidence_at")), default=None),
+        },
+        "stage_counts": _count_breakdown(stage_counts),
+        "verdict_counts": _count_breakdown(verdict_counts),
+        "blocker_counts": _count_breakdown(blocker_counts),
+        "candidates": rows,
+        "source_reports": {
+            "claude_canary_impact_schema": canary_impact.get("schema") if isinstance(canary_impact, dict) else None,
+        },
+        "privacy": _claude_routing_funnel_privacy(),
+    }
+
+
 def _shadow_routing_candidate_id(row: dict[str, Any]) -> str:
     parts = [
         row.get("provider"),
@@ -14757,6 +15228,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Claude routing promotion funnel</h2>
+  <table class="activity-table" data-table-id="claude-routing-funnel-summary" data-filter-label="Filter Claude routing funnel summary">
+    <thead><tr>
+      <th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Eligible unsampled</th><th data-sort-type="number">Sampled</th><th data-sort-type="number">Compared</th><th data-sort-type="number">Promoted</th><th data-sort-type="number">Canary applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Widened</th><th data-sort-type="number">Held</th><th data-sort-type="number">Rolled back</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="claude-routing-funnel-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Claude routing candidate funnel</h2>
+  <table class="activity-table" data-table-id="claude-routing-funnel-candidates" data-filter-label="Filter Claude routing funnel candidates">
+    <thead><tr>
+      <th data-sort-type="text">Candidate</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Phase / category</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Unsampled</th><th data-sort-type="number">Sampled</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="number">Canary</th><th data-sort-type="number">Holdout</th><th data-sort-type="text">Verdicts</th><th data-sort-type="money">Savings</th><th data-sort-type="money">Shadow delta</th><th data-sort-type="percent">Errors</th><th data-sort-type="percent">Fallbacks</th><th data-sort-type="text">Evidence</th><th data-sort-type="text">Blockers</th><th data-sort-type="time">Latest</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="claude-routing-funnel-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Shadow-routing promotion readiness</h2>
   <table data-table-id="shadow-routing-promotion-summary" data-filter-label="Filter shadow-routing promotion summary">
     <thead><tr>
@@ -16621,6 +17110,68 @@ function shadowPromotionReasonBadges(reasons){
   if(!reasons.length)return'<span class="badge hit">promotion-thresholds-met</span>';
   return reasons.slice(0,5).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
 }
+function claudeRoutingFunnelBadges(items,emptyLabel){
+  items=items||[];
+  if(!items.length)return`<span class="badge hit">${esc(emptyLabel||'none')}</span>`;
+  return items.slice(0,5).map(item=>`<span class="badge miss">${esc(item.value||item)} ${item.count!=null?Number(item.count||0).toLocaleString():''}</span>`).join(' ');
+}
+async function refreshClaudeRoutingPromotionFunnel(){
+  try{
+    const r=await fetch('/agentflow/stats/claude-routing-promotion-funnel?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('claude-routing-funnel-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.observed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.eligible_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.eligible_unsampled_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.sampled_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.compared_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.promoted_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.widened_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.held_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.rolled_back_count||0).toLocaleString()}</td>
+      <td class="${(s.observed_savings_usd||0)>=0?'savings':'cost'}">${fmt(s.observed_savings_usd||0,6)}</td>
+      <td class="flags">${claudeRoutingFunnelBadges(d.blocker_counts,'none')}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">raw prompts omitted</span> <span class="badge hit">request IDs omitted</span> <span class="badge hit">tool payloads omitted</span></td>
+    </tr>`;
+    const rows=d.candidates||[];
+    document.getElementById('claude-routing-funnel-candidates-tbody').innerHTML=rows.map(row=>{
+      const phase=[row.workflow_phase,row.category].filter(Boolean).join(' / ');
+      const verdicts=claudeRoutingFunnelBadges(row.verdict_counts,'no verdict');
+      const evidence=[
+        row.stale_evidence&&row.stale_evidence.stale?'<span class="badge routed">stale</span>':'<span class="badge hit">fresh</span>',
+        row.budget_exhausted?'<span class="badge err">budget exhausted</span>':'<span class="badge hit">budget ok</span>',
+        `<span class="badge provider">safety ${(row.safety_stop_count||0).toLocaleString()}</span>`
+      ].join(' ');
+      return `<tr>
+        <td class="model">${esc(row.candidate_id||'unknown')}</td>
+        <td class="model">${esc(shortModel(row.requested_model))} → ${esc(shortModel(row.routed_model))}</td>
+        <td class="model">${esc(phase||'unknown')}</td>
+        <td class="tokens">${(row.observed_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.eligible_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.eligible_unsampled_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.sampled_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.compared_count||0).toLocaleString()}</td>
+        <td class="tokens">${row.pass_rate==null?'—':fmtPctValue(row.pass_rate)}</td>
+        <td class="tokens">${(row.canary_applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.canary_holdout_count||0).toLocaleString()}</td>
+        <td class="flags">${verdicts}</td>
+        <td class="${(row.observed_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.observed_savings_usd||0,6)}</td>
+        <td class="${(row.comparison_cost_delta_usd||0)<=0?'savings':'cost'}">${fmt(row.comparison_cost_delta_usd||0,6)}</td>
+        <td class="${(row.error_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.error_rate||0)}</td>
+        <td class="${(row.fallback_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.fallback_rate||0)}</td>
+        <td class="flags">${evidence}</td>
+        <td class="flags">${claudeRoutingFunnelBadges(row.blocker_counts,'none')}</td>
+        <td class="ts">${row.latest_evidence_at?ago(row.latest_evidence_at):'—'}</td>
+        <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">content omitted</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="20" style="color:#8b949e">No Claude routing promotion funnel metadata found</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshShadowRoutingPromotionReadiness(){
   try{
     const r=await fetch('/agentflow/stats/shadow-routing-promotion-readiness?limit=500');
@@ -17362,6 +17913,7 @@ refreshOpenAIOptimizationReadiness();
 refreshOpenAICanaryReadiness();
 refreshOpenAIOldContextSummary();
 refreshOpenAIScoreboard();
+refreshClaudeRoutingPromotionFunnel();
 refreshShadowRoutingPromotionReadiness();
 refreshOptimizationPromotionFunnel();
 refreshOptimizationEvalQueue();
@@ -17387,6 +17939,7 @@ setInterval(refreshManagedOpenAIActivation,30000);
 setInterval(refreshOpenAIOptimizationReadiness,30000);
 setInterval(refreshOpenAICanaryReadiness,30000);
 setInterval(refreshOpenAIScoreboard,30000);
+setInterval(refreshClaudeRoutingPromotionFunnel,30000);
 setInterval(refreshShadowRoutingPromotionReadiness,30000);
 setInterval(refreshOptimizationPromotionFunnel,30000);
 setInterval(refreshOptimizationEvalQueue,30000);
