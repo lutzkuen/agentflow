@@ -91,6 +91,7 @@ def _default_experiment_policy() -> dict[str, Any]:
         "similarity_threshold": 0.86,
         "min_samples_for_confidence": 20,
         "store_response_bodies": False,
+        "eligibility_overrides": [],
     }
 
 
@@ -102,6 +103,28 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     candidates.append(Path.cwd() / "config" / filename)
     candidates.append(Path.home() / ".agentflow" / filename)
     return candidates
+
+
+def _override_scope(override: dict[str, Any]) -> str:
+    requested = str(override.get("scope") or "").strip().replace("_", "-")
+    if requested in {"global", "provider", "source-surface", "category"}:
+        return requested
+    if override.get("category") not in (None, ""):
+        return "category"
+    if override.get("source_surface") not in (None, ""):
+        return "source-surface"
+    if override.get("provider") not in (None, ""):
+        return "provider"
+    return "global"
+
+
+def _scope_rank(scope: str) -> int:
+    return {
+        "global": 0,
+        "provider": 1,
+        "source-surface": 2,
+        "category": 3,
+    }.get(scope, 0)
 
 
 def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
@@ -154,6 +177,30 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
         data.get("store_response_bodies"),
         policy["store_response_bodies"],
     )
+    overrides = data.get("eligibility_overrides")
+    if isinstance(overrides, list):
+        clean_overrides: list[dict[str, Any]] = []
+        for raw in overrides:
+            if not isinstance(raw, dict):
+                continue
+            item: dict[str, Any] = {}
+            for key in ("scope", "provider", "source_surface", "category", "workflow_phase", "label"):
+                if raw.get(key) not in (None, ""):
+                    item[key] = str(raw[key])
+            if raw.get("stream") is not None:
+                item["stream"] = _as_bool(raw.get("stream"), False)
+            if raw.get("min_text_chars") is not None:
+                item["min_text_chars"] = max(0, int(raw["min_text_chars"]))
+            if raw.get("max_text_chars") is not None:
+                item["max_text_chars"] = max(0, int(raw["max_text_chars"]))
+            if raw.get("sample_rate") is not None:
+                item["sample_rate"] = max(0.0, min(1.0, float(raw["sample_rate"])))
+            if raw.get("daily_budget_usd") is not None:
+                item["daily_budget_usd"] = max(0.0, float(raw["daily_budget_usd"]))
+            if any(key in item for key in ("min_text_chars", "max_text_chars", "sample_rate", "daily_budget_usd")):
+                item["scope"] = _override_scope(item)
+                clean_overrides.append(item)
+        policy["eligibility_overrides"] = clean_overrides
     return policy
 
 
@@ -213,7 +260,106 @@ ROUTING_PROMOTION_MAX_PRIMARY_ERROR_RATE = 0.05
 ROUTING_PROMOTION_SCHEMA = "agentflow.routing_experiment_promotion_verdict.v1"
 
 
-def _today_shadow_spend_usd(store_obj: Any | None, *, provider: str | None = None, source_surface: str | None = None) -> float:
+def _override_matches(
+    override: dict[str, Any],
+    *,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+) -> bool:
+    checks = {
+        "provider": provider,
+        "source_surface": source_surface,
+        "category": category,
+        "workflow_phase": workflow_phase,
+    }
+    for key, actual in checks.items():
+        expected = override.get(key)
+        if expected not in (None, "") and str(expected) != str(actual):
+            return False
+    if "stream" in override and bool(override.get("stream")) != bool(stream):
+        return False
+    return True
+
+
+def _effective_experiment_controls(
+    *,
+    provider: str,
+    source_surface: str,
+    category: str,
+    workflow_phase: str,
+    stream: bool,
+) -> dict[str, Any]:
+    controls: dict[str, Any] = {
+        "min_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("min_text_chars") or 0),
+        "min_text_chars_scope": "global",
+        "max_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0),
+        "max_text_chars_scope": "global",
+        "sample_rate": ROUTING_EXPERIMENT_SAMPLE_RATE,
+        "sample_rate_scope": "global",
+        "daily_budget_usd": ROUTING_EXPERIMENT_DAILY_BUDGET_USD,
+        "daily_budget_scope": "global",
+        "budget_filter": {},
+        "applied_overrides": [],
+    }
+    overrides = [
+        dict(item)
+        for item in ROUTING_EXPERIMENT_POLICY.get("eligibility_overrides") or []
+        if isinstance(item, dict)
+        and _override_matches(
+            item,
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+        )
+    ]
+    overrides.sort(key=lambda item: (_scope_rank(_override_scope(item)), str(item.get("label") or "")))
+    for override in overrides:
+        scope = _override_scope(override)
+        clean_override = {
+            "scope": scope,
+            "provider": override.get("provider"),
+            "source_surface": override.get("source_surface"),
+            "category": override.get("category"),
+            "workflow_phase": override.get("workflow_phase"),
+            "stream": override.get("stream") if "stream" in override else None,
+            "label": _public_label(override.get("label"), fallback=f"{scope}-override"),
+        }
+        for key in ("min_text_chars", "max_text_chars", "sample_rate", "daily_budget_usd"):
+            if key in override:
+                clean_override[key] = override[key]
+        controls["applied_overrides"].append(clean_override)
+        if "min_text_chars" in override:
+            controls["min_text_chars"] = int(override["min_text_chars"])
+            controls["min_text_chars_scope"] = scope
+        if "max_text_chars" in override:
+            controls["max_text_chars"] = int(override["max_text_chars"])
+            controls["max_text_chars_scope"] = scope
+        if "sample_rate" in override:
+            controls["sample_rate"] = float(override["sample_rate"])
+            controls["sample_rate_scope"] = scope
+        if "daily_budget_usd" in override:
+            controls["daily_budget_usd"] = float(override["daily_budget_usd"])
+            controls["daily_budget_scope"] = scope
+            controls["budget_filter"] = {
+                key: override.get(key)
+                for key in ("provider", "source_surface", "category")
+                if override.get(key) not in (None, "")
+            }
+    return controls
+
+
+def _today_shadow_spend_usd(
+    store_obj: Any | None,
+    *,
+    provider: str | None = None,
+    source_surface: str | None = None,
+    category: str | None = None,
+) -> float:
     if store_obj is None or not hasattr(store_obj, "conn"):
         return 0.0
     clauses = ["date(created_at) = date('now')"]
@@ -224,6 +370,9 @@ def _today_shadow_spend_usd(store_obj: Any | None, *, provider: str | None = Non
     if source_surface:
         clauses.append("coalesce(source_surface, 'anthropic_messages') = ?")
         params.append(source_surface)
+    if category:
+        clauses.append("coalesce(category, 'unknown') = ?")
+        params.append(category)
     try:
         row = store_obj.conn.execute(
             f"""
@@ -284,8 +433,21 @@ def routing_experiment_decision(
     workflow_phase = str(routing_meta.get("workflow_phase") or "")
     text_chars = int(routing_meta.get("text_chars") or 0)
     categories = set(str(c) for c in ROUTING_EXPERIMENT_POLICY.get("categories") or [])
-    budget_limit = ROUTING_EXPERIMENT_DAILY_BUDGET_USD
-    budget_spent = _today_shadow_spend_usd(store_obj, provider=provider, source_surface=source_surface)
+    controls = _effective_experiment_controls(
+        provider=provider,
+        source_surface=source_surface,
+        category=category,
+        workflow_phase=workflow_phase,
+        stream=stream,
+    )
+    budget_limit = float(controls["daily_budget_usd"])
+    budget_filter = controls.get("budget_filter") or {"provider": provider, "source_surface": source_surface}
+    budget_spent = _today_shadow_spend_usd(
+        store_obj,
+        provider=budget_filter.get("provider"),
+        source_surface=budget_filter.get("source_surface"),
+        category=budget_filter.get("category"),
+    )
     budget_remaining = max(0.0, budget_limit - budget_spent)
 
     meta = {
@@ -300,12 +462,15 @@ def routing_experiment_decision(
         "shadow_only": False,
         "policy_source": ROUTING_EXPERIMENT_POLICY_SOURCE,
         "rule_path": ROUTING_EXPERIMENT_RULES_PATH,
-        "sample_rate": ROUTING_EXPERIMENT_SAMPLE_RATE,
+        "sample_rate": round(float(controls["sample_rate"]), 6),
+        "sample_rate_scope": controls["sample_rate_scope"],
         "daily_budget_usd": round(budget_limit, 6),
+        "daily_budget_scope": controls["daily_budget_scope"],
         "profile_id": str(ROUTING_EXPERIMENT_POLICY.get("profile_id") or ""),
         "budget_spent_usd": round(budget_spent, 6),
         "budget_remaining_usd": round(budget_remaining, 6),
         "budget_exhausted": budget_limit <= 0 or budget_spent >= budget_limit,
+        "budget_cap_scope": controls["daily_budget_scope"],
         "similarity_threshold": ROUTING_EXPERIMENT_SIMILARITY_THRESHOLD,
         "min_samples_for_confidence": ROUTING_EXPERIMENT_MIN_SAMPLES,
         "provider": provider,
@@ -324,6 +489,11 @@ def routing_experiment_decision(
         "category": category,
         "workflow_phase": workflow_phase,
         "text_chars": text_chars,
+        "min_text_chars": int(controls["min_text_chars"]),
+        "min_text_chars_scope": controls["min_text_chars_scope"],
+        "max_text_chars": int(controls["max_text_chars"]),
+        "max_text_chars_scope": controls["max_text_chars_scope"],
+        "eligibility_overrides_applied": controls["applied_overrides"],
         "privacy": {
             "metadata_only": True,
             "raw_prompts_included": False,
@@ -377,13 +547,17 @@ def routing_experiment_decision(
     if routing_meta.get("fallback_reason"):
         meta["reason"] = "fallback-used"
         return meta
-    min_chars = int(ROUTING_EXPERIMENT_POLICY.get("min_text_chars") or 0)
-    max_chars = int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0)
+    min_chars = int(controls["min_text_chars"])
+    max_chars = int(controls["max_text_chars"])
     if text_chars < min_chars:
-        meta["reason"] = "request-too-small"
+        scope = str(controls["min_text_chars_scope"])
+        meta["skip_diagnostic"] = f"{scope}-min-text-chars-not-met"
+        meta["reason"] = "request-too-small" if scope == "global" else meta["skip_diagnostic"]
         return meta
     if max_chars > 0 and text_chars > max_chars:
-        meta["reason"] = "request-too-large"
+        scope = str(controls["max_text_chars_scope"])
+        meta["skip_diagnostic"] = f"{scope}-max-text-chars-exceeded"
+        meta["reason"] = "request-too-large" if scope == "global" else meta["skip_diagnostic"]
         return meta
     if categories and category not in categories:
         meta["reason"] = "category-not-enabled"
@@ -398,10 +572,11 @@ def routing_experiment_decision(
     if budget_spent >= budget_limit:
         meta["reason"] = "daily-budget-exhausted"
         return meta
-    if ROUTING_EXPERIMENT_SAMPLE_RATE <= 0:
+    sample_rate = float(controls["sample_rate"])
+    if sample_rate <= 0:
         meta["reason"] = "sample-rate-zero"
         return meta
-    if random_value() >= ROUTING_EXPERIMENT_SAMPLE_RATE:
+    if random_value() >= sample_rate:
         meta["reason"] = "streaming-shadow-not-sampled" if stream else "sample-rate-not-selected"
         return meta
 
@@ -869,6 +1044,132 @@ def _score_routing_promotion_candidate(
     }
 
 
+def _text_chars_from_routing(routing: dict[str, Any]) -> int:
+    for source in (routing.get("routing_experiment"), routing):
+        if not isinstance(source, dict):
+            continue
+        value = source.get("text_chars")
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _build_shadow_eligibility_projection(conn: Any) -> dict[str, Any]:
+    global_min = int(ROUTING_EXPERIMENT_POLICY.get("min_text_chars") or 0)
+    global_max = int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0)
+    try:
+        rows = conn.execute(
+            """
+            select coalesce(provider, 'anthropic') as provider,
+                   coalesce(source_surface, 'anthropic_messages') as source_surface,
+                   coalesce(category, 'unknown') as category,
+                   coalesce(stream, 0) as stream,
+                   requested_model,
+                   routed_model,
+                   routing_json
+            from calls
+            where routing_json is not null
+            order by created_at desc
+            limit 5000
+            """
+        ).fetchall()
+    except Exception:
+        rows = []
+
+    grouped: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
+    for row in rows:
+        try:
+            routing = yaml.safe_load(row["routing_json"]) or {}
+        except Exception:
+            continue
+        if not isinstance(routing, dict):
+            continue
+        provider = str(row["provider"] or "unknown")
+        source_surface = str(row["source_surface"] or "unknown")
+        category = str(row["category"] or routing.get("category") or "unknown")
+        stream = bool(row["stream"])
+        text_chars = _text_chars_from_routing(routing)
+        workflow_phase = str(routing.get("workflow_phase") or "")
+        controls = _effective_experiment_controls(
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+        )
+        effective_min = int(controls["min_text_chars"])
+        effective_max = int(controls["max_text_chars"])
+        globally_cap_eligible = text_chars >= global_min and (global_max <= 0 or text_chars <= global_max)
+        effectively_cap_eligible = text_chars >= effective_min and (effective_max <= 0 or text_chars <= effective_max)
+        key = (provider, source_surface, category, stream)
+        item = grouped.setdefault(
+            key,
+            {
+                "provider": _public_label(provider),
+                "source_surface": _public_label(source_surface),
+                "category": _public_label(category),
+                "stream": stream,
+                "observed_call_count": 0,
+                "global_cap_eligible_count": 0,
+                "effective_cap_eligible_count": 0,
+                "newly_eligible_call_count": 0,
+                "blocked_by_global_cap_count": 0,
+                "global_min_text_chars": global_min,
+                "global_max_text_chars": global_max,
+                "effective_min_text_chars": effective_min,
+                "effective_max_text_chars": effective_max,
+                "effective_max_text_chars_scope": controls["max_text_chars_scope"],
+                "effective_sample_rate": round(float(controls["sample_rate"]), 6),
+                "effective_sample_rate_scope": controls["sample_rate_scope"],
+                "effective_daily_budget_usd": round(float(controls["daily_budget_usd"]), 6),
+                "effective_daily_budget_scope": controls["daily_budget_scope"],
+                "applied_overrides": controls["applied_overrides"],
+            },
+        )
+        item["observed_call_count"] += 1
+        if globally_cap_eligible:
+            item["global_cap_eligible_count"] += 1
+        elif text_chars >= global_min and global_max > 0 and text_chars > global_max:
+            item["blocked_by_global_cap_count"] += 1
+        if effectively_cap_eligible:
+            item["effective_cap_eligible_count"] += 1
+        if not globally_cap_eligible and effectively_cap_eligible:
+            item["newly_eligible_call_count"] += 1
+
+    rows_out = sorted(
+        grouped.values(),
+        key=lambda item: (
+            item["provider"] != "anthropic",
+            not bool(item["stream"]),
+            -int(item["newly_eligible_call_count"]),
+            -int(item["observed_call_count"]),
+            str(item["category"]),
+        ),
+    )
+    claude_streaming = [
+        item for item in rows_out
+        if item["provider"] == "anthropic" and item["source_surface"] == "anthropic_messages" and item["stream"]
+    ]
+    return {
+        "schema": "agentflow.routing_experiment_eligibility_projection.v1",
+        "observed_window_limit": 5000,
+        "global_min_text_chars": global_min,
+        "global_max_text_chars": global_max,
+        "claude_streaming": claude_streaming,
+        "rows": rows_out,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+        },
+    }
+
+
 def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[str, Any]:
     capped = max(1, min(int(limit or 1), 1000))
     conn = store_obj.conn
@@ -1144,6 +1445,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     compared_total = int((summary_row or {}).get("compared_samples") or 0)
     avg_similarity_total = (summary_row or {}).get("avg_similarity")
     pass_rate_total = (summary_row or {}).get("pass_rate")
+    eligibility_projection = _build_shadow_eligibility_projection(conn)
     return {
         "schema": "agentflow.routing_experiment_report.v1",
         "generated_at": utc_now(),
@@ -1167,6 +1469,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "workflow_phases": list(ROUTING_EXPERIMENT_POLICY.get("workflow_phases") or []),
             "min_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("min_text_chars") or 0),
             "max_text_chars": int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0),
+            "eligibility_overrides": list(ROUTING_EXPERIMENT_POLICY.get("eligibility_overrides") or []),
         },
         "summary": {
             "sample_count": int((summary_row or {}).get("samples") or 0),
@@ -1189,6 +1492,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         },
         "decision_reasons": decision_reasons,
         "decision_surfaces": decision_surfaces,
+        "eligibility_projection": eligibility_projection,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,

@@ -14781,6 +14781,12 @@ def dashboard_html() -> str:
     </tr></thead>
     <tbody id="routing-experiment-decisions-tbody"></tbody>
   </table>
+  <table class="activity-table" data-table-id="routing-experiment-eligibility" data-filter-label="Filter routing A/B eligibility projection">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Global cap eligible</th><th data-sort-type="number">Scoped cap eligible</th><th data-sort-type="number">Newly eligible</th><th data-sort-type="number">Global cap</th><th data-sort-type="number">Scoped cap</th><th data-sort-type="text">Scoped controls</th>
+    </tr></thead>
+    <tbody id="routing-experiment-eligibility-tbody"></tbody>
+  </table>
 </div>
 <div class="section">
   <h2>Phase-routing feedback and dry-run lifecycle</h2>
@@ -17042,6 +17048,18 @@ async function refreshPhaseRouting(){
       <td class="flags">${esc(row.reason||'unknown')}</td>
       <td class="tokens">${(row.count||0).toLocaleString()}</td>
     </tr>`).join('')||'<tr><td colspan="4" style="color:#8b949e">No routing A/B decisions observed yet</td></tr>';
+    const experimentEligibility=((experimentReport.eligibility_projection||{}).claude_streaming)||[];
+    document.getElementById('routing-experiment-eligibility-tbody').innerHTML=experimentEligibility.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span> ${row.stream?'<span class="badge stream">stream</span>':''}</td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td class="tokens">${(row.observed_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.global_cap_eligible_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.effective_cap_eligible_count||0).toLocaleString()}</td>
+      <td class="${(row.newly_eligible_call_count||0)>0?'savings':'tokens'}">${(row.newly_eligible_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.global_max_text_chars||0)}</td>
+      <td class="tokens">${fmtTok(row.effective_max_text_chars||0)} <span class="badge provider">${esc(row.effective_max_text_chars_scope||'global')}</span></td>
+      <td class="flags"><span class="badge provider">sample ${fmtPctValue(row.effective_sample_rate||0)}</span> <span class="badge miss">budget ${fmt(row.effective_daily_budget_usd||0,4)}</span> <span class="badge provider">${esc(row.effective_daily_budget_scope||'global')}</span></td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No Claude streaming cap projection rows observed yet</td></tr>';
     const latestLifecycle=lifecycle.latest||{};
     document.getElementById('phase-routing-feedback-tbody').innerHTML=`<tr>
       <td class="tokens">${(queueSummary.queued||0).toLocaleString()}</td>

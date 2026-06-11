@@ -180,6 +180,283 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(meta["reason"], "daily-budget-exhausted")
         self.assertTrue(meta["budget_exhausted"])
 
+    def test_scoped_caps_allow_large_anthropic_streaming_tool_result_without_widening_openai(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+min_text_chars: 0
+max_text_chars: 8000
+providers:
+  - anthropic
+  - openai
+source_surfaces:
+  - anthropic_messages
+  - openai_responses
+streaming_shadow_source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+  - requested_model: gpt-5.4
+    routed_model: gpt-5.4-mini
+categories:
+  - chat
+  - tool-result
+eligibility_overrides:
+  - scope: provider
+    provider: anthropic
+    stream: true
+    max_text_chars: 32000
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    sample_rate: 1.0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            claude = manual.routing_experiment_decision(
+                {"model": "claude-sonnet-4-6", "stream": True},
+                {
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "category": "tool-result",
+                    "text_chars": 90000,
+                },
+                stream=True,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                random_value=lambda: 0.0,
+            )
+            openai = manual.routing_experiment_decision(
+                {"model": "gpt-5.4"},
+                {
+                    "requested_model": "gpt-5.4",
+                    "routed_model": "gpt-5.4",
+                    "category": "chat",
+                    "text_chars": 9000,
+                },
+                stream=False,
+                provider="openai",
+                source_surface="openai_responses",
+                random_value=lambda: 0.0,
+            )
+
+        self.assertTrue(claude["sampled"])
+        self.assertEqual(claude["reason"], "streaming-shadow-sampled")
+        self.assertEqual(claude["max_text_chars"], 128000)
+        self.assertEqual(claude["max_text_chars_scope"], "category")
+        self.assertEqual(claude["sample_rate_scope"], "category")
+        self.assertFalse(openai["sampled"])
+        self.assertEqual(openai["reason"], "request-too-large")
+        self.assertEqual(openai["skip_diagnostic"], "global-max-text-chars-exceeded")
+        self.assertEqual(openai["max_text_chars_scope"], "global")
+
+    def test_scoped_cap_diagnostics_distinguish_provider_and_source_surface_caps(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+max_text_chars: 8000
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+streaming_shadow_source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+categories:
+  - chat
+eligibility_overrides:
+  - scope: provider
+    provider: anthropic
+    stream: true
+    max_text_chars: 48000
+  - scope: source-surface
+    provider: anthropic
+    source_surface: anthropic_messages
+    stream: true
+    max_text_chars: 24000
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+
+            source_surface_capped = manual.routing_experiment_decision(
+                {"model": "claude-sonnet-4-6", "stream": True},
+                {
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "category": "chat",
+                    "text_chars": 30000,
+                },
+                stream=True,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                random_value=lambda: 0.0,
+            )
+
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+max_text_chars: 8000
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+streaming_shadow_source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+categories:
+  - chat
+eligibility_overrides:
+  - scope: provider
+    provider: anthropic
+    stream: true
+    max_text_chars: 24000
+""",
+                encoding="utf-8",
+            )
+            manual = importlib.reload(experiments)
+            provider_capped = manual.routing_experiment_decision(
+                {"model": "claude-sonnet-4-6", "stream": True},
+                {
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "category": "chat",
+                    "text_chars": 30000,
+                },
+                stream=True,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                random_value=lambda: 0.0,
+            )
+
+        self.assertFalse(source_surface_capped["sampled"])
+        self.assertEqual(source_surface_capped["reason"], "source-surface-max-text-chars-exceeded")
+        self.assertEqual(source_surface_capped["max_text_chars_scope"], "source-surface")
+        self.assertFalse(provider_capped["sampled"])
+        self.assertEqual(provider_capped["reason"], "provider-max-text-chars-exceeded")
+        self.assertEqual(provider_capped["max_text_chars_scope"], "provider")
+
+    def test_scoped_category_budget_exhaustion_is_reported_without_raw_payloads(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+max_text_chars: 8000
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+streaming_shadow_source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+categories:
+  - tool-result
+eligibility_overrides:
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    daily_budget_usd: 0.01
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            try:
+                store.log_routing_experiment(
+                    id="spent-category-budget",
+                    call_id="call-1",
+                    created_at=utc_now(),
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    primary_model="claude-sonnet-4-6",
+                    shadow_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    routing_reason="streaming-shadow-sampled",
+                    input_tokens_est=100,
+                    primary_status_code=200,
+                    shadow_status_code=200,
+                    primary_latency_ms=10,
+                    shadow_latency_ms=20,
+                    primary_output_chars=1,
+                    shadow_output_chars=1,
+                    primary_output_sha256="a",
+                    shadow_output_sha256="b",
+                    output_similarity=1.0,
+                    passed_threshold=1,
+                    primary_cost_est_usd=0.001,
+                    shadow_cost_est_usd=0.01,
+                    routing_json=stable_json({}),
+                    experiment_json=stable_json({"sampled": True, "stream": True}),
+                )
+                meta = manual.routing_experiment_decision(
+                    {"model": "claude-sonnet-4-6", "stream": True},
+                    {
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "text_chars": 90000,
+                    },
+                    stream=True,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    store_obj=store,
+                    random_value=lambda: 0.0,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "daily-budget-exhausted")
+        self.assertEqual(meta["budget_cap_scope"], "category")
+        self.assertTrue(meta["budget_exhausted"])
+        rendered = stable_json(meta)
+        self.assertNotIn("raw prompt", rendered)
+        self.assertNotIn("req-secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+
     def test_default_policy_samples_codex_turn_shadow_pass_through(self):
         self.assertIn("codex-turn", experiments.ROUTING_EXPERIMENT_POLICY["categories"])
 
@@ -604,6 +881,135 @@ categories:
         self.assertEqual(report["decision_reasons"][0]["source_surface"], "openai_responses")
         self.assertEqual(report["decision_reasons"][0]["reason"], "streaming")
         self.assertEqual(report["decision_reasons"][0]["count"], 1)
+
+    def test_report_projects_claude_streaming_requests_newly_eligible_under_scoped_caps(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+min_text_chars: 0
+max_text_chars: 8000
+providers:
+  - anthropic
+  - openai
+source_surfaces:
+  - anthropic_messages
+  - openai_responses
+streaming_shadow_source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+  - requested_model: gpt-5.4
+    routed_model: gpt-5.4-mini
+categories:
+  - chat
+  - tool-result
+eligibility_overrides:
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    sample_rate: 0.25
+    daily_budget_usd: 2.0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            try:
+                store.log_call(
+                    id="claude-large-stream-secret",
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=10,
+                    input_tokens_est=100,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    routing_json=stable_json({
+                        "category": "tool-result",
+                        "text_chars": 90000,
+                        "routing_experiment": {
+                            "status": "skipped",
+                            "reason": "request-too-large",
+                            "provider": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "category": "tool-result",
+                            "text_chars": 90000,
+                        },
+                        "raw_prompt": "raw projection secret",
+                        "file_path": "/tmp/projection-secret.py",
+                    }),
+                    category="tool-result",
+                )
+                store.log_call(
+                    id="openai-large-secret",
+                    created_at=utc_now(),
+                    path="/v1/responses",
+                    provider="openai",
+                    source_surface="openai_responses",
+                    requested_model="gpt-5.4",
+                    routed_model="gpt-5.4",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=10,
+                    input_tokens_est=100,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    routing_json=stable_json({
+                        "category": "chat",
+                        "text_chars": 9000,
+                        "routing_experiment": {
+                            "status": "skipped",
+                            "reason": "request-too-large",
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                            "category": "chat",
+                            "text_chars": 9000,
+                        },
+                    }),
+                    category="chat",
+                )
+                report = manual.build_routing_experiment_report(store, limit=5)
+            finally:
+                store.conn.close()
+
+        projection = report["eligibility_projection"]
+        [claude_row] = projection["claude_streaming"]
+        self.assertEqual(claude_row["category"], "tool-result")
+        self.assertEqual(claude_row["observed_call_count"], 1)
+        self.assertEqual(claude_row["global_cap_eligible_count"], 0)
+        self.assertEqual(claude_row["effective_cap_eligible_count"], 1)
+        self.assertEqual(claude_row["newly_eligible_call_count"], 1)
+        self.assertEqual(claude_row["effective_max_text_chars_scope"], "category")
+        self.assertEqual(claude_row["effective_sample_rate"], 0.25)
+        openai_row = next(row for row in projection["rows"] if row["provider"] == "openai")
+        self.assertEqual(openai_row["effective_max_text_chars_scope"], "global")
+        self.assertEqual(openai_row["newly_eligible_call_count"], 0)
+        rendered = stable_json(report)
+        self.assertNotIn("raw projection secret", rendered)
+        self.assertNotIn("/tmp/projection-secret.py", rendered)
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(projection["privacy"]["file_paths_included"])
 
     def test_report_counts_codex_app_event_decision_reasons_without_sample_rows(self):
         with TemporaryDirectory() as tmp:

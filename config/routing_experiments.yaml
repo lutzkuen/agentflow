@@ -5,7 +5,7 @@ kill_switch: false
 sample_rate: 0.10
 daily_budget_usd: 10.0
 min_text_chars: 0
-max_text_chars: 32000
+max_text_chars: 8000
 providers:
   - anthropic
   - openai
@@ -33,6 +33,27 @@ categories:
   - tool-result
   - tool-heavy
   - codex-turn
+eligibility_overrides:
+  - scope: provider
+    provider: anthropic
+    stream: true
+    max_text_chars: 32000
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    sample_rate: 0.10
+    daily_budget_usd: 10.0
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-heavy
+    stream: true
+    max_text_chars: 64000
+    sample_rate: 0.05
+    daily_budget_usd: 10.0
 similarity_threshold: 0.86
 min_samples_for_confidence: 20
 store_response_bodies: false

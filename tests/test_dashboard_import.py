@@ -213,6 +213,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("policy-workbench-tbody", dashboard.text)
             self.assertIn("Policy workbench events", dashboard.text)
             self.assertIn("policy-workbench-events-tbody", dashboard.text)
+            self.assertIn("routing-experiment-eligibility-tbody", dashboard.text)
             self.assertIn("Policy reload summary", dashboard.text)
             self.assertIn("policy-summary-tbody", dashboard.text)
             self.assertIn("Codex rules", dashboard.text)
