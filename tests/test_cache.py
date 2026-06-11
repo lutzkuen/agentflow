@@ -1,4 +1,5 @@
 import unittest
+import base64
 import importlib
 import io
 import json
@@ -1167,6 +1168,25 @@ pattern_rules:
         self.assertEqual(cache_module.stream_cache_frames(payload), frames)
         self.assertEqual(payload["usage"]["input_tokens"], 12)
         self.assertEqual(payload["output_text"], "hello")
+        self.assertEqual(payload["sse"]["media_type"], "text/event-stream")
+        self.assertEqual(payload["sse"]["frame_count"], 2)
+        self.assertTrue(payload["sse"]["complete"])
+
+    def test_stream_cache_validation_rejects_malformed_sse_payload_without_raw_data(self):
+        malformed = {
+            "agentflow_cache_type": "sse-stream",
+            "version": 1,
+            "provider": "anthropic",
+            "frames_b64": [base64.b64encode(b"not an sse frame\n\n").decode("ascii")],
+        }
+
+        frames, validation = cache_module.validate_stream_cache_payload(malformed, provider="anthropic")
+
+        self.assertEqual(frames, [])
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["reason"], "sse-data-missing")
+        self.assertFalse(validation["raw_payload_included"])
+        self.assertNotIn("not an sse frame", json.dumps(validation))
 
 
 if __name__ == "__main__":

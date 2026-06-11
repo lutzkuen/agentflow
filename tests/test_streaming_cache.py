@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import os
@@ -259,6 +260,73 @@ class StreamingCacheTest(unittest.TestCase):
             self.assertEqual(second_cache["pattern_rule"]["candidate_id"], "streaming-static-candidate")
             self.assertEqual(second_cache["pattern_rule"]["canary"]["status"], "applied")
             self.assertGreater(second_cache["estimated_saved_cost_usd"], 0)
+            self.assertEqual(second_cache["stream_replay"]["media_type"], "text/event-stream")
+            self.assertEqual(second_cache["stream_replay"]["frame_count"], len(STREAM_FRAMES))
+            self.assertTrue(second_cache["stream_replay"]["complete"])
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_malformed_stream_cache_entry_bypasses_and_refreshes_from_upstream(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        session_id = "streaming-cache-test"
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_cache_rule_for_request(request_body),)
+            crunched, _crunch_meta = crunch_body(json.loads(json.dumps(request_body)))
+            routed_model, _routing_meta = route_model(crunched, session_id=session_id)
+            crunched["model"] = routed_model
+            key = cache_module.cache_key_for(
+                crunched,
+                "/v1/messages",
+                provider="anthropic",
+                upstream=server.ANTHROPIC_UPSTREAM,
+                replay_scope="session",
+                replay_scope_id=session_id,
+            )
+            server.store.set_cache(
+                key,
+                str(crunched.get("model")),
+                len(json.dumps(crunched)),
+                {
+                    "agentflow_cache_type": "sse-stream",
+                    "version": 1,
+                    "provider": "anthropic",
+                    "frames_b64": [base64.b64encode(b"cached garbage\n\n").decode("ascii")],
+                    "usage": {"input_tokens": 5, "output_tokens": 2},
+                    "output_text": "cached garbage",
+                },
+            )
+
+            with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                client = TestClient(server.app)
+                with client.stream(
+                    "POST",
+                    "/v1/messages",
+                    json=request_body,
+                    headers={"x-session-id": session_id},
+                ) as response:
+                    body = b"".join(response.iter_bytes())
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["x-agentflow-cache"], "miss")
+            self.assertEqual(body, b"".join(STREAM_FRAMES))
+            self.assertEqual(FakeAsyncClient.calls, 1)
+
+            [row] = server.store.conn.execute(
+                "select stream, cache_hit, cache_json from calls"
+            ).fetchall()
+            self.assertEqual(row["stream"], 1)
+            self.assertEqual(row["cache_hit"], 0)
+            cache_meta = json.loads(row["cache_json"])
+            self.assertEqual(cache_meta["status"], "bypassed")
+            self.assertEqual(cache_meta["reason"], "malformed-stream-cache")
+            self.assertEqual(cache_meta["malformed_stream_cache"]["reason"], "sse-data-missing")
+            self.assertFalse(cache_meta["malformed_stream_cache"]["raw_payload_included"])
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
 

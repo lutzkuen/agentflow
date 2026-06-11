@@ -42,7 +42,7 @@ from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD, CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH,
     cache_decision_meta, cache_file_dependency_audit, cache_hit_decision_meta, cache_key_for, cache_lookup_meta,
     cache_replay_canary_decision, cache_replay_scope_for_meta, response_output_text,
-    is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
+    stream_cache_payload, validate_stream_cache_payload,
     streaming_cache_lookup_meta, cache_file_dependency_snapshots,
 )
 from agentflow_proxy.errors import (
@@ -796,11 +796,17 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 cache_meta=cache_meta,
                 current_thinking=_has_top_level_thinking(crunched),
             )
+            replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
+            if replay_pattern_rule is not None:
+                cache_meta["replay_scope"] = replay_scope
+                cache_meta["replay_scope_id_available"] = bool(replay_scope_id)
             key = cache_key_for(
                 crunched,
                 path,
                 provider="anthropic",
                 upstream=context.anthropic_upstream,
+                replay_scope=replay_scope,
+                replay_scope_id=replay_scope_id,
             )
             if can_stream_cache:
                 cached, invalidated_reason = context.store.get_cache_with_reason(key)
@@ -808,8 +814,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     cache_meta["reason"] = invalidated_reason
                     cache_meta["invalidated"] = True
                     cache_meta["invalidation_reason"] = invalidated_reason
-                if is_stream_cache_payload(cached, provider="anthropic"):
-                    cached_frames = stream_cache_frames(cached)
+                cached_frames, stream_validation = validate_stream_cache_payload(cached, provider="anthropic")
+                if cached_frames:
                     cached_usage = cached.get("usage") or {}
                     cached_output_text = str(cached.get("output_text") or "")
 
@@ -834,6 +840,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 lookup_meta=cache_meta,
                                 estimated_saved_cost_usd=cost_baseline,
                             )
+                            hit_cache_meta["stream_replay"] = {
+                                key: value
+                                for key, value in stream_validation.items()
+                                if key not in {"event_names"}
+                            }
                             context.store.log_call(
                                 id=call_id, created_at=utc_now(), path=path,
                                 requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -880,6 +891,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                         media_type="text/event-stream",
                         headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))},
                     )
+                if cached is not None:
+                    cache_meta["status"] = "bypassed"
+                    cache_meta["reason"] = "malformed-stream-cache"
+                    cache_meta["malformed_stream_cache"] = stream_validation
+                    context.store.delete_cache(key)
 
             async def gen() -> AsyncIterator[bytes]:
                 nonlocal status_code, error

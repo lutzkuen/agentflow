@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import os
 import re
 import yaml
@@ -1098,6 +1099,7 @@ def stream_cache_payload(
         "version": 1,
         "provider": provider,
         "frames_b64": [base64.b64encode(frame).decode("ascii") for frame in frames],
+        "sse": stream_cache_sse_metadata(frames, provider=provider),
         "usage": usage or {},
         "output_text": output_text or "",
     }
@@ -1119,6 +1121,101 @@ def stream_cache_frames(payload: dict[str, Any]) -> list[bytes]:
         if isinstance(item, str):
             frames.append(base64.b64decode(item.encode("ascii")))
     return frames
+
+
+def _sse_event_name(frame_text: str) -> str | None:
+    for line in frame_text.splitlines():
+        if line.startswith("event:"):
+            return line[6:].strip() or None
+    return None
+
+
+def stream_cache_sse_metadata(frames: list[bytes], *, provider: str | None = None) -> dict[str, Any]:
+    event_counts: dict[str, int] = {}
+    for frame in frames:
+        try:
+            text = frame.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        event_name = _sse_event_name(text)
+        if event_name:
+            event_counts[event_name] = event_counts.get(event_name, 0) + 1
+    metadata = {
+        "schema": "agentflow.stream_cache_sse.v1",
+        "media_type": "text/event-stream",
+        "frame_count": len(frames),
+        "event_counts": event_counts,
+    }
+    if provider:
+        metadata["provider"] = provider
+    if provider == "anthropic":
+        metadata["anthropic_message_start"] = event_counts.get("message_start", 0) > 0
+        metadata["anthropic_message_stop"] = event_counts.get("message_stop", 0) > 0
+        metadata["complete"] = bool(metadata["anthropic_message_start"] and metadata["anthropic_message_stop"])
+    return metadata
+
+
+def validate_stream_cache_payload(payload: Any, *, provider: str | None = None) -> tuple[list[bytes], dict[str, Any]]:
+    validation = {
+        "schema": "agentflow.stream_cache_validation.v1",
+        "valid": False,
+        "reason": "invalid-envelope",
+        "provider": provider,
+        "raw_payload_included": False,
+    }
+    if not is_stream_cache_payload(payload, provider=provider):
+        return [], validation
+
+    raw_frames = payload.get("frames_b64") or []
+    if not raw_frames:
+        validation["reason"] = "frames-missing"
+        return [], validation
+
+    frames: list[bytes] = []
+    event_names: list[str] = []
+    for index, item in enumerate(raw_frames):
+        if not isinstance(item, str):
+            validation.update({"reason": "frame-not-string", "frame_index": index})
+            return [], validation
+        try:
+            frame = base64.b64decode(item.encode("ascii"), validate=True)
+        except (binascii.Error, UnicodeEncodeError):
+            validation.update({"reason": "invalid-base64", "frame_index": index})
+            return [], validation
+        if not frame:
+            validation.update({"reason": "frame-empty", "frame_index": index})
+            return [], validation
+        try:
+            text = frame.decode("utf-8")
+        except UnicodeDecodeError:
+            validation.update({"reason": "invalid-utf8", "frame_index": index})
+            return [], validation
+        if not frame.endswith(b"\n\n"):
+            validation.update({"reason": "unterminated-sse-frame", "frame_index": index})
+            return [], validation
+        if not any(line.startswith("data:") for line in text.splitlines()):
+            validation.update({"reason": "sse-data-missing", "frame_index": index})
+            return [], validation
+        event_name = _sse_event_name(text)
+        if event_name:
+            event_names.append(event_name)
+        frames.append(frame)
+
+    if provider == "anthropic":
+        if not event_names or event_names[0] != "message_start":
+            validation["reason"] = "anthropic-message-start-missing"
+            return [], validation
+        if "message_stop" not in event_names:
+            validation["reason"] = "anthropic-message-stop-missing"
+            return [], validation
+
+    validation.update(stream_cache_sse_metadata(frames, provider=provider))
+    validation.update({
+        "valid": True,
+        "reason": "ok",
+        "event_names": event_names[:20],
+    })
+    return frames, validation
 
 
 def _default_cache_provider() -> str:
