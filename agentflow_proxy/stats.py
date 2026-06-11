@@ -8309,6 +8309,12 @@ async def stats_repeated_scaffold_opportunity(
     )
 
 
+async def stats_repeated_scaffold_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
+
+    return build_repeated_scaffold_impact_report(store_obj, limit=limit)
+
+
 async def stats_openai_cache_replay_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 

@@ -58,6 +58,7 @@ agentflow-openai-routing-report = "agentflow_proxy.cli:openai_routing_report_mai
 agentflow-openai-old-context-summary-report = "agentflow_proxy.cli:openai_old_context_summary_report_main"
 agentflow-openai-cache-replay-report = "agentflow_proxy.cli:openai_cache_replay_report_main"
 agentflow-repeated-scaffold-opportunity = "agentflow_proxy.cli:repeated_scaffold_opportunity_main"
+agentflow-repeated-scaffold-impact = "agentflow_proxy.cli:repeated_scaffold_impact_main"
 agentflow-openai-cache-replay-impact = "agentflow_proxy.cli:openai_cache_replay_impact_main"
 agentflow-openai-cache-replay-readiness = "agentflow_proxy.cli:openai_cache_replay_readiness_main"
 agentflow-openai-cache-replay-dry-run = "agentflow_proxy.cli:openai_cache_replay_dry_run_main"

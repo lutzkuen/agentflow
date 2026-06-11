@@ -3656,6 +3656,67 @@ def repeated_scaffold_opportunity_cli(argv: Sequence[str] | None = None, *, stdo
     return 0
 
 
+def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report repeated-scaffold crunch canary impact and rollback gates")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider calls to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument("--since", help="Only inspect calls at or after this ISO timestamp.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied rows per candidate, default: 2.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout rows per candidate, default: 1.")
+    parser.add_argument("--max-evidence-age-hours", type=float, default=72.0, help="Evidence staleness threshold, default: 72.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Applied error rate hold threshold, default: 0.05.")
+    parser.add_argument("--max-error-rate-delta", type=float, default=0.05, help="Applied-minus-holdout error regression rollback threshold, default: 0.05.")
+    parser.add_argument("--max-retry-rate-delta", type=float, default=0.10, help="Applied-minus-holdout retry regression rollback threshold, default: 0.10.")
+    parser.add_argument("--max-latency-regression-ms", type=int, default=2000, help="Applied-minus-holdout latency hold threshold, default: 2000.")
+    parser.add_argument(
+        "--max-non-positive-savings-rate",
+        type=float,
+        default=0.0,
+        help="Applied non-positive savings rate hold threshold, default: 0.0.",
+    )
+    parser.add_argument("--rollback-error-rate", type=float, default=0.20, help="Absolute applied error rate rollback threshold, default: 0.20.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+    from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_repeated_scaffold_impact_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+            max_evidence_age_hours=args.max_evidence_age_hours,
+            max_error_rate=args.max_error_rate,
+            max_error_rate_delta=args.max_error_rate_delta,
+            max_retry_rate_delta=args.max_retry_rate_delta,
+            max_latency_regression_ms=args.max_latency_regression_ms,
+            max_non_positive_savings_rate=args.max_non_positive_savings_rate,
+            rollback_error_rate=args.rollback_error_rate,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def _attach_openai_cache_replay_lifecycle_feedback(result: dict[str, Any], *, db_path: str) -> None:
     from agentflow_proxy import recommendations
     from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_lifecycle_feedback
@@ -6442,6 +6503,10 @@ def openai_cache_replay_report_main() -> None:
 
 def repeated_scaffold_opportunity_main() -> None:
     raise SystemExit(repeated_scaffold_opportunity_cli())
+
+
+def repeated_scaffold_impact_main() -> None:
+    raise SystemExit(repeated_scaffold_impact_cli())
 
 
 def openai_cache_replay_impact_main() -> None:
