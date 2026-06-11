@@ -2163,6 +2163,9 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
                    status_code,
                    latency_ms,
                    retry_count,
+                   session_id,
+                   coalesce(category, 'unknown') as category,
+                   routing_json,
                    crunch_json
             from calls
             where crunch_json is not null
@@ -2194,6 +2197,17 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
     summary_cost_usd = 0.0
     today_summary_cost_usd = 0.0
     quality_gate_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    readiness_state_counts: dict[str, int] = {
+        "disabled": 0,
+        "eligible": 0,
+        "applied": 0,
+        "holdout": 0,
+        "safety_stop": 0,
+        "rollback": 0,
+    }
+    affected_sessions: set[str] = set()
+    plateau_text_chars: list[int] = []
+    category_rows: dict[str, dict[str, Any]] = {}
 
     for row in rows:
         crunch = _json_obj(row.get("crunch_json"))
@@ -2238,6 +2252,20 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         if _as_int(meta.get("summary_status_code")) >= 400 or meta.get("summary_error"):
             error_count += 1
 
+        canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+        cohort = _old_context_summary_quality_cohort(meta)
+        safety_stopped = _old_context_summary_safety_stopped(meta)
+        disabled_state = (
+            status == "disabled"
+            or reason == "disabled"
+            or (status == "skipped" and not bool(meta.get("enabled")) and reason in {"disabled", "unknown"})
+        )
+        readiness_state_counts["disabled"] += int(disabled_state)
+        readiness_state_counts["eligible"] += int(is_eligible)
+        readiness_state_counts["applied"] += int(is_applied)
+        readiness_state_counts["holdout"] += int(cohort == "canary_holdout")
+        readiness_state_counts["safety_stop"] += int(safety_stopped)
+
         tokens_saved = _old_context_summary_tokens_saved(meta, planned=is_planned)
         input_tokens, output_tokens, summary_cost = _old_context_summary_call_cost(meta, planned=is_planned)
         provider = str(row.get("provider") or "anthropic")
@@ -2259,7 +2287,65 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
             today_gross_savings_usd += gross_savings
             today_summary_cost_usd += summary_cost
 
-        canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+        session_id = str(row.get("session_id") or "")
+        if session_id:
+            affected_sessions.add(session_id)
+        routing = _json_obj(row.get("routing_json"))
+        text_chars = _as_int(
+            meta.get("eligible_chars")
+            or routing.get("text_chars")
+            or (_as_int(row.get("input_tokens")) * TOKEN_CHARS)
+        )
+        if text_chars > 0:
+            plateau_text_chars.append(text_chars)
+        category = str(meta.get("category") or row.get("category") or "unknown")
+        category_bucket = category_rows.setdefault(
+            category,
+            {
+                "category": category,
+                "observed_rows": 0,
+                "eligible_rows": 0,
+                "applied_rows": 0,
+                "holdout_rows": 0,
+                "disabled_rows": 0,
+                "safety_stop_rows": 0,
+                "projected_saved_tokens_est": 0,
+                "projected_gross_savings_usd": 0.0,
+                "projected_summary_cost_usd": 0.0,
+                "projected_net_savings_usd": 0.0,
+                "applied_saved_tokens_est": 0,
+                "applied_gross_savings_usd": 0.0,
+                "applied_summary_cost_usd": 0.0,
+                "applied_net_savings_usd": 0.0,
+            },
+        )
+        category_bucket["observed_rows"] += 1
+        category_bucket["eligible_rows"] += int(is_eligible)
+        category_bucket["applied_rows"] += int(is_applied)
+        category_bucket["holdout_rows"] += int(cohort == "canary_holdout")
+        category_bucket["disabled_rows"] += int(disabled_state)
+        category_bucket["safety_stop_rows"] += int(safety_stopped)
+        projected = is_eligible or cohort == "canary_holdout"
+        if projected:
+            projected_tokens = _old_context_summary_tokens_saved(meta, planned=not is_applied)
+            projected_input, projected_output, projected_cost = _old_context_summary_call_cost(meta, planned=not is_applied)
+            projected_gross = estimate_blended_input_savings(
+                model,
+                tokens_saved=projected_tokens,
+                input_tokens=_as_int(row.get("input_tokens")),
+                cache_read_tokens=_as_int(row.get("cache_read_tokens")),
+                provider=provider,
+            ) or 0.0
+            category_bucket["projected_saved_tokens_est"] += projected_tokens
+            category_bucket["projected_gross_savings_usd"] += projected_gross
+            category_bucket["projected_summary_cost_usd"] += projected_cost
+            category_bucket["projected_net_savings_usd"] += projected_gross - projected_cost
+        if is_applied:
+            category_bucket["applied_saved_tokens_est"] += tokens_saved
+            category_bucket["applied_gross_savings_usd"] += gross_savings
+            category_bucket["applied_summary_cost_usd"] += summary_cost
+            category_bucket["applied_net_savings_usd"] += gross_savings - summary_cost
+
         quality_key = (
             str(meta.get("candidate_id") or "local-old-context-summary"),
             str(meta.get("rule_id") or "unknown"),
@@ -2283,7 +2369,6 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         quality_bucket["canary_enabled"] = bool(quality_bucket.get("canary_enabled") or canary.get("enabled"))
         quality_bucket["enabled_rows"] += int(bool(meta.get("enabled")))
         quality_bucket["disabled_rows"] += int(not bool(meta.get("enabled")))
-        cohort = _old_context_summary_quality_cohort(meta)
         if bool(meta.get("enabled")):
             quality_bucket["matched_metadata_row_count"] += 1
         if cohort == "canary_applied":
@@ -2295,7 +2380,6 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         else:
             quality_bucket["unknown_cohort_count"] += 1
         failed = _old_context_summary_failed(meta)
-        safety_stopped = _old_context_summary_safety_stopped(meta)
         errored = _as_int(row.get("status_code")) >= 400
         retried = _as_int(row.get("retry_count")) > 0
         quality_bucket["summary_failure_count"] += int(failed)
@@ -2370,6 +2454,51 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         "verdict_breakdown": _count_breakdown(verdict_counts),
         "reason_code_breakdown": _count_breakdown(reason_code_counts),
         "warning_code_breakdown": _count_breakdown(warning_code_counts),
+    }
+    readiness_state_counts["rollback"] = quality_gate_summary["rollback_count"]
+    readiness = {
+        "schema": "agentflow.old_context_summary_dashboard_readiness.v1",
+        "status": "observed" if observed_rows else "no-observed-rows",
+        "latest_quality_gate_verdict": quality_gates[0].get("verdict") if quality_gates else None,
+        "state_breakdown": _count_breakdown(readiness_state_counts),
+        "blocker_breakdown": quality_gate_summary["reason_code_breakdown"],
+        "read_only": True,
+        "wrote_policy_files": False,
+        "provider_calls_made": False,
+    }
+    category_breakdown = []
+    for bucket in category_rows.values():
+        for money_field in (
+            "projected_gross_savings_usd",
+            "projected_summary_cost_usd",
+            "projected_net_savings_usd",
+            "applied_gross_savings_usd",
+            "applied_summary_cost_usd",
+            "applied_net_savings_usd",
+        ):
+            bucket[money_field] = round(float(bucket[money_field]), 6)
+        category_breakdown.append(bucket)
+    category_breakdown.sort(
+        key=lambda item: (
+            item["applied_net_savings_usd"] + item["projected_net_savings_usd"],
+            item["observed_rows"],
+        ),
+        reverse=True,
+    )
+    plateau_session_context = {
+        "schema": "agentflow.old_context_summary_plateau_session_context.v1",
+        "affected_session_count": len(affected_sessions),
+        "observed_large_context_rows": len(plateau_text_chars),
+        "median_text_chars": _median_int(plateau_text_chars),
+        "p90_text_chars": _percentile_int(plateau_text_chars, 0.9),
+        "category_breakdown": category_breakdown,
+        "privacy": {
+            "metadata_only": True,
+            "raw_old_context_included": False,
+            "generated_summaries_included": False,
+            "raw_prompts_included": False,
+            "local_session_ids_included": False,
+        },
     }
     summary = {
         "observed_rows": observed_rows,
@@ -2492,6 +2621,8 @@ async def stats_old_context_summary(store_obj: Any) -> dict[str, Any]:
         "generated_at": utc_now(),
         "summary": summary,
         "rollout_health": rollout_health,
+        "readiness": readiness,
+        "plateau_session_context": plateau_session_context,
         "status_breakdown": _count_breakdown(status_counts),
         "skip_reason_breakdown": skip_breakdown,
         "model_breakdown": model_breakdown,
@@ -13866,6 +13997,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Old-context summary readiness states</h2>
+  <table data-table-id="old-context-summary-readiness" data-filter-label="Filter old-context summary readiness states">
+    <thead><tr>
+      <th data-sort-type="text">States</th><th data-sort-type="text">Latest quality gate</th><th data-sort-type="number">Affected sessions</th><th data-sort-type="number">Median chars</th><th data-sort-type="number">P90 chars</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="old-context-summary-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Old-context plateau impact by category</h2>
+  <table data-table-id="old-context-summary-plateau-categories" data-filter-label="Filter old-context plateau categories">
+    <thead><tr>
+      <th data-sort-type="text">Category</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Disabled</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Projected saved tokens</th><th data-sort-type="money">Projected net</th><th data-sort-type="number">Applied saved tokens</th><th data-sort-type="money">Applied net</th>
+    </tr></thead>
+    <tbody id="old-context-summary-plateau-categories-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Old-context summary quality gates</h2>
   <table class="activity-table" data-table-id="old-context-summary-quality" data-filter-label="Filter old-context summary quality gates">
     <thead><tr>
@@ -15865,6 +16014,8 @@ async function refreshSessions(){
     const tb=document.getElementById('sess-tbody');
     const pb=document.getElementById('plateau-tbody');
     const ob=document.getElementById('old-context-summary-tbody');
+    const orb2=document.getElementById('old-context-summary-readiness-tbody');
+    const opcb=document.getElementById('old-context-summary-plateau-categories-tbody');
     const oqb=document.getElementById('old-context-summary-quality-tbody');
     const omb=document.getElementById('old-context-summary-models-tbody');
     const orb=document.getElementById('old-context-summary-rollout-tbody');
@@ -15975,6 +16126,34 @@ async function refreshSessions(){
       <td class="flags">${skipBadges}</td>
       <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">raw context omitted</span> <span class="badge hit">summaries omitted</span></td>
     </tr>`;
+    const readiness=oldContext.readiness||{};
+    const plateauContext=oldContext.plateau_session_context||{};
+    const readinessBadges=compactBreakdown(readiness.state_breakdown,'none');
+    const blockerBadges=compactBreakdown(readiness.blocker_breakdown,'none');
+    const plateauPrivacy=plateauContext.privacy||{};
+    orb2.innerHTML=`<tr>
+      <td class="flags">${readinessBadges}</td>
+      <td><span class="badge ${gateBadge(readiness.latest_quality_gate_verdict)}">${esc(readiness.latest_quality_gate_verdict||'unknown')}</span></td>
+      <td class="tokens">${(plateauContext.affected_session_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(plateauContext.median_text_chars||0)}</td>
+      <td class="tokens">${fmtTok(plateauContext.p90_text_chars||0)}</td>
+      <td class="flags">${blockerBadges}</td>
+      <td class="flags">${plateauPrivacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">session ids omitted</span> <span class="badge hit">raw context omitted</span></td>
+    </tr>`;
+    const plateauCategories=plateauContext.category_breakdown||[];
+    opcb.innerHTML=plateauCategories.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.category||'unknown')}</span></td>
+      <td class="tokens">${(row.observed_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.eligible_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.applied_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.disabled_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.safety_stop_rows||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.projected_saved_tokens_est||0)}</td>
+      <td class="${(row.projected_net_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.projected_net_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtTok(row.applied_saved_tokens_est||0)}</td>
+      <td class="${(row.applied_net_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.applied_net_savings_usd||0,6)}</td>
+    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No old-context plateau category metadata observed yet</td></tr>';
     const qualityRows=oldContext.quality_gates||[];
     oqb.innerHTML=qualityRows.map(row=>{
       const m=row.metrics||{};

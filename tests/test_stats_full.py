@@ -3009,6 +3009,177 @@ class StatsFullTest(unittest.TestCase):
         rendered = json.dumps(payload) + html
         self.assertNotIn(secret, rendered)
 
+    def test_old_context_summary_readiness_and_plateau_category_impact_are_served_metadata(self):
+        secret = "raw old-context readiness context must stay out"
+
+        def log_summary_row(
+            suffix: str,
+            meta: dict[str, object],
+            *,
+            session_id: str,
+            category: str,
+            status_code: int = 200,
+            retry_count: int = 0,
+            text_chars: int = 32_000,
+        ) -> None:
+            server.store.log_call(
+                id=f"old-context-readiness-{suffix}",
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=1000,
+                input_tokens_est=8_000,
+                output_tokens_est=100,
+                actual_input_tokens=8_000,
+                actual_output_tokens=100,
+                cost_est_usd=0.02,
+                cost_baseline_usd=0.03,
+                crunch_json=stable_json({
+                    "changed": meta.get("status") == "applied",
+                    "old_context_summarization": {
+                        **meta,
+                        "debug_context": secret,
+                    },
+                }),
+                routing_json=stable_json({"category": category, "text_chars": text_chars}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                error="raw old-context readiness error must stay out" if status_code >= 400 else None,
+                request_json=stable_json({"messages": [{"content": "raw old-context readiness request"}]}),
+                response_json=stable_json({"content": "generated old-context readiness summary"}),
+                session_id=session_id,
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                provider="anthropic",
+            )
+
+        base = {
+            "enabled": True,
+            "rule_id": "old-context-dashboard-rule",
+            "candidate_id": "old-context-dashboard-candidate",
+            "policy_source": "managed-recommended",
+            "model": "claude-haiku-4-5-20251001",
+            "category": "tool-result",
+            "eligible_chars": 36_000,
+            "eligible_turns": 4,
+            "canary": {
+                "enabled": True,
+                "fraction": 0.5,
+                "unit": "source_hash",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 2,
+                "min_canary_applied_samples": 1,
+                "min_canary_holdout_samples": 1,
+                "rollback_error_rate": 0.4,
+            },
+        }
+        log_summary_row(
+            "disabled",
+            {"enabled": False, "status": "skipped", "reason": "disabled", "category": "chat"},
+            session_id="old-context-readiness-session-secret-a",
+            category="chat",
+            text_chars=12_000,
+        )
+        log_summary_row(
+            "eligible",
+            {**base, "status": "planned", "reason": "eligible", "eligible_chars": 24_000},
+            session_id="old-context-readiness-session-secret-a",
+            category="tool-result",
+            text_chars=24_000,
+        )
+        log_summary_row(
+            "applied-rollback",
+            {
+                **base,
+                "status": "applied",
+                "reason": "summary-created",
+                "tokens_saved_est": 1_500,
+                "summary_cost_est_usd": 0.001,
+                "estimated_net_savings_usd": 0.0035,
+                "summary_status_code": 500,
+                "canary": {**base["canary"], "cohort": "canary_applied", "selected": True},
+            },
+            session_id="old-context-readiness-session-secret-b",
+            category="tool-result",
+            status_code=500,
+            retry_count=1,
+            text_chars=40_000,
+        )
+        log_summary_row(
+            "holdout",
+            {
+                **base,
+                "status": "skipped",
+                "reason": "canary_holdout",
+                "eligible_chars": 34_000,
+                "canary": {**base["canary"], "cohort": "canary_holdout", "selected": False},
+            },
+            session_id="old-context-readiness-session-secret-b",
+            category="tool-result",
+            text_chars=34_000,
+        )
+        log_summary_row(
+            "safety-stop",
+            {
+                **base,
+                "status": "skipped",
+                "reason": "safety-stop",
+                "safety_stop_state": "stopped",
+            },
+            session_id="old-context-readiness-session-secret-b",
+            category="tool-result",
+            text_chars=36_000,
+        )
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=server.store.path,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        with TestClient(app) as client:
+            payload = client.get("/agentflow/stats/old-context-summary").json()
+            html = client.get("/agentflow/dashboard").text
+
+        readiness_counts = {row["value"]: row["count"] for row in payload["readiness"]["state_breakdown"]}
+        self.assertEqual(readiness_counts["disabled"], 1)
+        self.assertEqual(readiness_counts["eligible"], 2)
+        self.assertEqual(readiness_counts["applied"], 1)
+        self.assertEqual(readiness_counts["holdout"], 1)
+        self.assertEqual(readiness_counts["safety_stop"], 1)
+        self.assertEqual(readiness_counts["rollback"], 1)
+        self.assertEqual(payload["readiness"]["latest_quality_gate_verdict"], "rollback")
+
+        plateau = payload["plateau_session_context"]
+        self.assertEqual(plateau["affected_session_count"], 2)
+        self.assertGreater(plateau["median_text_chars"], 0)
+        self.assertGreater(plateau["p90_text_chars"], 0)
+        by_category = {row["category"]: row for row in plateau["category_breakdown"]}
+        self.assertEqual(by_category["tool-result"]["observed_rows"], 4)
+        self.assertEqual(by_category["tool-result"]["holdout_rows"], 1)
+        self.assertEqual(by_category["tool-result"]["safety_stop_rows"], 1)
+        self.assertGreater(by_category["tool-result"]["projected_saved_tokens_est"], 0)
+        self.assertGreater(by_category["tool-result"]["applied_saved_tokens_est"], 0)
+
+        self.assertIn("Old-context summary readiness states", html)
+        self.assertIn("old-context-summary-readiness-tbody", html)
+        self.assertIn("Old-context plateau impact by category", html)
+        self.assertIn("old-context-summary-plateau-categories-tbody", html)
+        rendered = json.dumps(payload, sort_keys=True) + html
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("old-context-readiness-session-secret", rendered)
+        self.assertNotIn("raw old-context readiness request", rendered)
+        self.assertNotIn("generated old-context readiness summary", rendered)
+        self.assertNotIn("raw old-context readiness error", rendered)
+
     def _log_old_context_summary_quality_row(
         self,
         *,
