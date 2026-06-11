@@ -2746,6 +2746,177 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "disabled")
         self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
 
+    def _write_tool_protocol_aware_old_context_rows(self, db_path: str) -> None:
+        from agentflow_proxy.store import Store, stable_json
+
+        mixed_body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "RAW_TOOL_AWARE_SECRET old durable constraint " * 1200},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_raw_should_not_leak",
+                            "name": "Read",
+                            "input": {"file_path": "/private/project/secret.txt"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_raw_should_not_leak",
+                            "content": "RAW_TOOL_RESULT_SECRET",
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "old visible conclusion remains true " * 1200}]},
+                {"role": "user", "content": "recent plain follow-up stays in request"},
+                {"role": "assistant", "content": "recent answer stays in request"},
+                {"role": "user", "content": "another recent turn stays in request"},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_recent_should_not_leak",
+                            "content": "recent result stays in forwarded request",
+                        }
+                    ],
+                },
+            ],
+        }
+        thinking_body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "RAW_THINKING_SECRET " * 1200},
+                        {"type": "text", "text": "older visible answer " * 500},
+                    ],
+                },
+                {"role": "user", "content": "old text that would otherwise qualify " * 1200},
+                {"role": "assistant", "content": "older visible answer without thinking " * 400},
+                {"role": "user", "content": "recent turn one"},
+                {"role": "assistant", "content": "recent turn two"},
+                {"role": "user", "content": "recent turn three"},
+                {"role": "user", "content": "recent request"},
+            ],
+        }
+        store = Store(db_path)
+        try:
+            for idx, body in enumerate((mixed_body, mixed_body)):
+                store.log_call(
+                    id=f"tool-aware-eligible-{idx}",
+                    created_at=f"2026-06-08T10:0{idx}:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=len(stable_json(body)) // 4,
+                    output_tokens_est=100,
+                    actual_input_tokens=len(stable_json(body)) // 4,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.05,
+                    routing_json=stable_json({"category": "tool-result", "text_chars": len(stable_json(body)), "has_tools": True}),
+                    crunch_json=stable_json({}),
+                    cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                    request_json=stable_json(body),
+                    session_id="tool-aware-session-secret",
+                    category="tool-result",
+                    retry_count=0,
+                    provider="anthropic",
+                )
+            store.log_call(
+                id="tool-aware-thinking-blocked",
+                created_at="2026-06-08T10:02:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1000,
+                input_tokens_est=len(stable_json(thinking_body)) // 4,
+                output_tokens_est=100,
+                actual_input_tokens=len(stable_json(thinking_body)) // 4,
+                actual_output_tokens=100,
+                cost_est_usd=0.05,
+                routing_json=stable_json({"category": "chat", "text_chars": len(stable_json(thinking_body)), "has_tools": False}),
+                crunch_json=stable_json({}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+                request_json=stable_json(thinking_body),
+                session_id="thinking-session-secret",
+                category="chat",
+                retry_count=0,
+                provider="anthropic",
+            )
+        finally:
+            store.conn.close()
+
+    def test_old_context_summary_dry_run_tool_protocol_aware_profile_reports_plateau_eligibility(self):
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_tool_protocol_aware_old_context_rows(db_path)
+            stdout = io.StringIO()
+
+            code = cli.old_context_summary_dry_run_cli(
+                ["--db", db_path, "--limit", "10", "--profile", "tool-protocol-aware"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["policy"]["dry_run_profile"], "tool-protocol-aware")
+        self.assertTrue(payload["policy"]["enabled"])
+        self.assertFalse(payload["policy"]["block_tool_protocol"])
+        self.assertEqual(
+            payload["policy"]["tool_protocol_handling"]["summary_source"],
+            "non-tool-text-turns-only",
+        )
+        self.assertEqual(payload["summary"]["eligible_call_count"], 2)
+        self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
+        self.assertGreater(payload["summary"]["projected_net_savings_usd"], 0)
+        self.assertEqual(payload["summary"]["plateau_policy"]["min_text_chars"], 8000)
+
+        eligible_groups = [
+            group for group in payload["groups"]
+            if group["blocker"] == "eligible" and group["category"] == "tool-result"
+        ]
+        self.assertEqual(len(eligible_groups), 1)
+        self.assertEqual(eligible_groups[0]["plateau_status"], "plateau-adjacent")
+        self.assertEqual(eligible_groups[0]["tool_protocol_blocker"], "preserved")
+        self.assertEqual(eligible_groups[0]["thinking_blocker"], "clear")
+        self.assertEqual(eligible_groups[0]["eligible_call_count"], 2)
+
+        thinking_groups = [group for group in payload["groups"] if group["blocker"] == "thinking-context-blocked"]
+        self.assertEqual(len(thinking_groups), 1)
+        self.assertEqual(thinking_groups[0]["thinking_blocker"], "blocked")
+        skip_reasons = {row["reason"] for row in payload["summary"]["skip_reasons"]}
+        self.assertIn("thinking-context-blocked", skip_reasons)
+
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "RAW_TOOL_AWARE_SECRET",
+            "RAW_TOOL_RESULT_SECRET",
+            "RAW_THINKING_SECRET",
+            "toolu_raw_should_not_leak",
+            "/private/project/secret.txt",
+            "tool-aware-session-secret",
+            "thinking-session-secret",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+
     def test_old_context_summary_dry_run_sends_metadata_only_lifecycle_feedback(self):
         proposed = self._old_context_summary_bundle()
         ManagedFeedbackFlushClient.calls = []

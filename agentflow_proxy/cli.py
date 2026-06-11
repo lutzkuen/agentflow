@@ -2181,6 +2181,15 @@ def old_context_summary_dry_run_cli(
         help="Local AgentFlow SQLite DB path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
     )
     parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
+    parser.add_argument(
+        "--profile",
+        choices=("current-policy", "tool-protocol-aware"),
+        default="current-policy",
+        help=(
+            "Dry-run profile to simulate. tool-protocol-aware enables a read-only overlay that "
+            "summarizes only old non-tool text turns while preserving tool protocol messages."
+        ),
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print dry-run JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
 
@@ -2213,6 +2222,7 @@ def old_context_summary_dry_run_cli(
             bundle_or_policy,
             db_path=str(args.db),
             limit=max(0, args.limit),
+            profile=args.profile,
         )
 
     from agentflow_proxy.policy_events import log_policy_event
@@ -2223,6 +2233,7 @@ def old_context_summary_dry_run_cli(
         details={
             "source": "cli",
             "path": args.path or "current-policy",
+            "profile": args.profile,
             "db_path": args.db,
             "dry_run": True,
             "eligible_call_count": (result.get("summary") or {}).get("eligible_call_count"),

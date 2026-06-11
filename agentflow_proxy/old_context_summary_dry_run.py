@@ -14,6 +14,10 @@ from agentflow_proxy.store import stable_json, utc_now
 
 OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA = "agentflow.old_context_summary_dry_run.v1"
 TOKEN_CHARS = 4
+CURRENT_POLICY_PROFILE = "current-policy"
+TOOL_PROTOCOL_AWARE_PROFILE = "tool-protocol-aware"
+PLATEAU_MIN_TEXT_CHARS = 8_000
+PLATEAU_MAX_DELTA_RATIO = 0.03
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -130,6 +134,32 @@ def _summary_policy_from_bundle_or_current(bundle_or_policy: Any) -> tuple[dict[
     return copy.deepcopy(crunch.OLD_CONTEXT_SUMMARY_POLICY), str(crunch.CRUNCH_POLICY_SOURCE), str(crunch.CRUNCH_RULES_PATH)
 
 
+def _apply_dry_run_profile(policy: dict[str, Any], profile: str | None) -> dict[str, Any]:
+    profile_name = profile or CURRENT_POLICY_PROFILE
+    if profile_name == CURRENT_POLICY_PROFILE:
+        out = copy.deepcopy(policy)
+        out["dry_run_profile"] = CURRENT_POLICY_PROFILE
+        return out
+    if profile_name != TOOL_PROTOCOL_AWARE_PROFILE:
+        raise ValueError(f"unsupported old-context summary dry-run profile: {profile_name}")
+
+    out = copy.deepcopy(policy)
+    out["enabled"] = True
+    out["dry_run_profile"] = TOOL_PROTOCOL_AWARE_PROFILE
+    out["rule_id"] = str(out.get("rule_id") or "local-old-context-summarization")
+    excluded = {str(item) for item in out.get("excluded_categories") or []}
+    excluded.difference_update({"tool-heavy", "tool-result"})
+    out["excluded_categories"] = sorted(excluded)
+    out["block_tool_protocol"] = False
+    out["block_thinking"] = True
+    out["tool_protocol_handling"] = {
+        "summary_source": "non-tool-text-turns-only",
+        "forwarded_request": "preserve-tool-use-and-tool-result-messages",
+        "runtime_enabled": False,
+    }
+    return out
+
+
 @contextmanager
 def _patched_summary_policy(policy: dict[str, Any], policy_source: str, rule_path: str | None) -> Iterator[None]:
     from agentflow_proxy import crunch
@@ -218,6 +248,96 @@ def _load_recent_rows(db_path: str, limit: int) -> tuple[list[dict[str, Any]], d
             pass
 
 
+def _row_text_chars(row: dict[str, Any]) -> int:
+    routing = _json_obj(row.get("routing_json"))
+    text_chars = _as_int(routing.get("text_chars"))
+    if text_chars > 0:
+        return text_chars
+    raw = row.get("request_json")
+    if raw:
+        return len(str(raw))
+    tokens = _as_int(row.get("actual_input_tokens")) or _as_int(row.get("input_tokens_est"))
+    return max(0, tokens * TOKEN_CHARS)
+
+
+def _plateau_row_ids(rows: list[dict[str, Any]]) -> set[str]:
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        session = row.get("session_id")
+        row_id = row.get("id")
+        if session in (None, "") or row_id in (None, ""):
+            continue
+        by_session.setdefault(str(session), []).append(row)
+
+    plateau_ids: set[str] = set()
+    for session_rows in by_session.values():
+        previous: dict[str, Any] | None = None
+        for row in sorted(session_rows, key=lambda item: str(item.get("created_at") or "")):
+            text_chars = _row_text_chars(row)
+            if previous is not None:
+                previous_text = _row_text_chars(previous)
+                if (
+                    previous_text >= PLATEAU_MIN_TEXT_CHARS
+                    and text_chars >= PLATEAU_MIN_TEXT_CHARS
+                    and abs(text_chars - previous_text) / max(previous_text, 1) <= PLATEAU_MAX_DELTA_RATIO
+                ):
+                    plateau_ids.add(str(previous.get("id")))
+                    plateau_ids.add(str(row.get("id")))
+            previous = row
+    return plateau_ids
+
+
+def _plateau_status(row: dict[str, Any], plateau_ids: set[str]) -> str:
+    if row.get("session_id") in (None, ""):
+        return "no-session"
+    if str(row.get("id") or "") in plateau_ids:
+        return "plateau-adjacent"
+    if _row_text_chars(row) >= PLATEAU_MIN_TEXT_CHARS:
+        return "large-not-plateaued"
+    return "below-plateau-threshold"
+
+
+def _old_messages(body: dict[str, Any], keep_recent_turns: int) -> list[dict[str, Any]]:
+    messages = body.get("messages") or []
+    if not isinstance(messages, list):
+        return []
+    old_limit = max(0, len(messages) - max(0, keep_recent_turns))
+    return [msg for msg in messages[:old_limit] if isinstance(msg, dict)]
+
+
+def _message_has_tool_protocol(msg: dict[str, Any]) -> bool:
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"} for block in content)
+
+
+def _message_has_thinking(msg: dict[str, Any]) -> bool:
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") == "thinking" for block in content)
+
+
+def _context_blocker_states(body: dict[str, Any], policy: dict[str, Any], reason: str) -> tuple[str, str]:
+    old_messages = _old_messages(body, _as_int(policy.get("keep_recent_turns"), 4))
+    has_tool_protocol = any(_message_has_tool_protocol(msg) for msg in old_messages)
+    has_thinking = any(_message_has_thinking(msg) for msg in old_messages)
+    if reason == "tool-protocol-context-blocked":
+        tool_protocol = "blocked"
+    elif has_tool_protocol:
+        tool_protocol = "preserved"
+    else:
+        tool_protocol = "none"
+    if reason == "thinking-context-blocked":
+        thinking = "blocked"
+    elif has_thinking:
+        thinking = "present"
+    else:
+        thinking = "clear"
+    return thinking, tool_protocol
+
+
 def _cache_key_exists(db_path: str, cache_key: str) -> bool:
     path = _sqlite_db_path(db_path)
     if path is None or not path.exists():
@@ -235,23 +355,52 @@ def _cache_key_exists(db_path: str, cache_key: str) -> bool:
             pass
 
 
-def _group_key(row: dict[str, Any], category: str, blocker: str) -> tuple[Any, ...]:
+def _group_key(
+    row: dict[str, Any],
+    category: str,
+    blocker: str,
+    plateau_status: str,
+    thinking_blocker: str,
+    tool_protocol_blocker: str,
+) -> tuple[Any, ...]:
     return (
         _source_surface(row.get("provider"), row.get("path")),
         category or "unknown",
         _model_tier(row.get("requested_model")),
         bool(row.get("stream")),
+        plateau_status,
+        thinking_blocker,
+        tool_protocol_blocker,
         blocker,
     )
 
 
-def _empty_group(row: dict[str, Any], category: str, blocker: str) -> dict[str, Any]:
-    source_surface, group_category, model_tier, stream, blocker_reason = _group_key(row, category, blocker)
+def _empty_group(
+    row: dict[str, Any],
+    category: str,
+    blocker: str,
+    plateau_status: str,
+    thinking_blocker: str,
+    tool_protocol_blocker: str,
+) -> dict[str, Any]:
+    (
+        source_surface,
+        group_category,
+        model_tier,
+        stream,
+        plateau,
+        thinking,
+        tool_protocol,
+        blocker_reason,
+    ) = _group_key(row, category, blocker, plateau_status, thinking_blocker, tool_protocol_blocker)
     return {
         "source_surface": source_surface,
         "category": group_category,
         "model_tier": model_tier,
         "stream": stream,
+        "plateau_status": plateau,
+        "thinking_blocker": thinking,
+        "tool_protocol_blocker": tool_protocol,
         "blocker": blocker_reason,
         "call_count": 0,
         "session_count": 0,
@@ -277,6 +426,7 @@ def _input_savings_usd(model: str, tokens_saved: int) -> float:
 def _summary_settings(policy: dict[str, Any], policy_source: str, rule_path: str | None) -> dict[str, Any]:
     return {
         "enabled": bool(policy.get("enabled")),
+        "dry_run_profile": str(policy.get("dry_run_profile") or CURRENT_POLICY_PROFILE),
         "policy_source": policy_source,
         "rule_path": rule_path,
         "rule_id": policy.get("rule_id"),
@@ -293,6 +443,7 @@ def _summary_settings(policy: dict[str, Any], policy_source: str, rule_path: str
         "excluded_categories": [str(item) for item in policy.get("excluded_categories") or []],
         "block_tool_protocol": _enabled(policy.get("block_tool_protocol"), True),
         "block_thinking": _enabled(policy.get("block_thinking"), True),
+        "tool_protocol_handling": copy.deepcopy(policy.get("tool_protocol_handling") or {}),
         "canary": copy.deepcopy(policy.get("canary") or {}),
         "safety_stop": copy.deepcopy(policy.get("safety_stop") or {}),
     }
@@ -303,10 +454,39 @@ def dry_run_old_context_summary(
     *,
     db_path: str,
     limit: int = 500,
+    profile: str = CURRENT_POLICY_PROFILE,
 ) -> dict[str, Any]:
     from agentflow_proxy import crunch
 
     policy, policy_source, rule_path = _summary_policy_from_bundle_or_current(bundle_or_policy)
+    try:
+        policy = _apply_dry_run_profile(policy, profile)
+    except ValueError as exc:
+        policy = _apply_dry_run_profile(policy, CURRENT_POLICY_PROFILE)
+        settings = _summary_settings(policy, policy_source, rule_path)
+        return {
+            "schema": OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA,
+            "ok": False,
+            "dry_run": True,
+            "read_only": True,
+            "generated_at": utc_now(),
+            "status": "invalid-profile",
+            "reason": "unsupported-profile",
+            "message": str(exc),
+            "db_path": db_path,
+            "lookback_call_limit": limit,
+            "policy": settings,
+            "groups": [],
+            "summary": {},
+            "privacy": {
+                "metadata_only_output": True,
+                "raw_bodies_read_locally": False,
+                "raw_prompts_included": False,
+                "raw_request_bodies_included": False,
+                "raw_session_ids_included": False,
+                "cache_keys_included": False,
+            },
+        }
     rows, unavailable = _load_recent_rows(db_path, limit)
     settings = _summary_settings(policy, policy_source, rule_path)
     reload_status = None
@@ -342,17 +522,24 @@ def dry_run_old_context_summary(
         }
 
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    plateau_ids = _plateau_row_ids(rows)
     sampled = len(rows)
     raw_available = 0
     raw_used = 0
     provider_rows = 0
     with _patched_summary_policy(policy, policy_source, rule_path):
         for row in rows:
+            plateau = _plateau_status(row, plateau_ids)
+            thinking_blocker = "unknown"
+            tool_protocol_blocker = "unknown"
             provider = row.get("provider") or "anthropic"
             if provider != "anthropic" or not str(row.get("path") or "").endswith("/v1/messages"):
                 category = row.get("category") or _json_obj(row.get("routing_json")).get("category") or "unknown"
                 blocker = "unsupported-source-surface"
-                group = groups.setdefault(_group_key(row, category, blocker), _empty_group(row, category, blocker))
+                group = groups.setdefault(
+                    _group_key(row, category, blocker, plateau, thinking_blocker, tool_protocol_blocker),
+                    _empty_group(row, category, blocker, plateau, thinking_blocker, tool_protocol_blocker),
+                )
                 group["call_count"] += 1
                 session = _session_key(row.get("session_id"))
                 if session:
@@ -367,7 +554,10 @@ def dry_run_old_context_summary(
             body = _json_obj(raw)
             if not body:
                 blocker = "request-body-unavailable"
-                group = groups.setdefault(_group_key(row, category, blocker), _empty_group(row, category, blocker))
+                group = groups.setdefault(
+                    _group_key(row, category, blocker, plateau, thinking_blocker, tool_protocol_blocker),
+                    _empty_group(row, category, blocker, plateau, thinking_blocker, tool_protocol_blocker),
+                )
                 group["call_count"] += 1
                 session = _session_key(row.get("session_id"))
                 if session:
@@ -377,7 +567,11 @@ def dry_run_old_context_summary(
             plan, meta = crunch.old_context_summary_plan(body, exact_cache_enabled=None)
             blocker = "eligible" if plan is not None else str(meta.get("reason") or "not-eligible")
             category = str(meta.get("category") or category or "unknown")
-            group = groups.setdefault(_group_key(row, category, blocker), _empty_group(row, category, blocker))
+            thinking_blocker, tool_protocol_blocker = _context_blocker_states(body, policy, blocker)
+            group = groups.setdefault(
+                _group_key(row, category, blocker, plateau, thinking_blocker, tool_protocol_blocker),
+                _empty_group(row, category, blocker, plateau, thinking_blocker, tool_protocol_blocker),
+            )
             group["call_count"] += 1
             session = _session_key(row.get("session_id"))
             if session:
@@ -422,6 +616,9 @@ def dry_run_old_context_summary(
         str(item["category"]),
         str(item["model_tier"]),
         str(item["stream"]),
+        str(item["plateau_status"]),
+        str(item["thinking_blocker"]),
+        str(item["tool_protocol_blocker"]),
         str(item["blocker"]),
     ))
     eligible_groups = [group for group in output_groups if group["blocker"] == "eligible"]
@@ -459,6 +656,10 @@ def dry_run_old_context_summary(
                 {"reason": reason, "count": count}
                 for reason, count in sorted(skip_reasons.items())
             ],
+            "plateau_policy": {
+                "min_text_chars": PLATEAU_MIN_TEXT_CHARS,
+                "max_delta_ratio": PLATEAU_MAX_DELTA_RATIO,
+            },
         },
         "groups": output_groups,
         "privacy": {
