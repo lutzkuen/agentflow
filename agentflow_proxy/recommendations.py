@@ -41,6 +41,7 @@ PHASE_ROUTING_LIFECYCLE_SOURCE_SURFACE = "phase_routing_lifecycle"
 PHASE_ROUTING_OUTCOME_SOURCE_SURFACE = "phase_routing_outcome"
 OPTIMIZATION_PROMOTION_LIFECYCLE_SOURCE_SURFACE = "optimization_promotion_lifecycle"
 CODEX_APP_CANARY_LIFECYCLE_SOURCE_SURFACE = "codex_app_canary_lifecycle"
+CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE = "cache_replay_lifecycle"
 
 TOKEN_CHARS = 4
 CHAR_BUCKETS = (

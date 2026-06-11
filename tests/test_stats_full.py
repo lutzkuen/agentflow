@@ -4628,6 +4628,7 @@ class StatsFullTest(unittest.TestCase):
             cache_json,
             status_code=200,
             retry_count=0,
+            latency_ms=3,
             stream=0,
             category="chat",
             has_tools=False,
@@ -4643,7 +4644,7 @@ class StatsFullTest(unittest.TestCase):
                 stream=stream,
                 cache_hit=1 if cache_json.get("status") == "hit" else 0,
                 status_code=status_code,
-                latency_ms=3,
+                latency_ms=latency_ms,
                 input_tokens_est=100,
                 output_tokens_est=10,
                 actual_input_tokens=100,
@@ -4675,6 +4676,7 @@ class StatsFullTest(unittest.TestCase):
             },
             cost=0.001,
             baseline=0.013,
+            latency_ms=4,
         )
         log_cache_row(
             cache_json={
@@ -4704,6 +4706,7 @@ class StatsFullTest(unittest.TestCase):
             },
             status_code=429,
             retry_count=2,
+            latency_ms=44,
         )
         safety_rule = {
             **base_rule,
@@ -4776,6 +4779,12 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(static["safety_stop_count"], 1)
         self.assertEqual(static["holdout_error_count"], 1)
         self.assertEqual(static["holdout_retry_count"], 2)
+        self.assertEqual(static["replayed_avg_latency_ms"], 4)
+        self.assertEqual(static["holdout_avg_latency_ms"], 44)
+        self.assertAlmostEqual(static["replayed_estimated_saved_cost_usd"], 0.012)
+        self.assertAlmostEqual(static["holdout_estimated_saved_cost_usd"], 0.01)
+        self.assertAlmostEqual(static["replayed_savings_rate_usd"], 0.012)
+        self.assertAlmostEqual(static["holdout_savings_rate_usd"], 0.01)
         self.assertTrue(static["safety_stop_active"])
         self.assertEqual(static["canary"]["fraction"], 0.5)
         tool = next(row for row in result["rules"] if row["rule_id"] == "tool-result-cache")

@@ -727,6 +727,215 @@ def cache_replay_canary_decision(
     return True, decision
 
 
+def _cache_replay_rule_from_meta(cache_meta: dict[str, Any]) -> dict[str, Any] | None:
+    rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else None
+    if isinstance(rule, dict):
+        return rule
+    pattern_rules = cache_meta.get("pattern_rules") if isinstance(cache_meta.get("pattern_rules"), dict) else {}
+    for skip in reversed(pattern_rules.get("skip_reasons") or []):
+        if isinstance(skip, dict) and (
+            skip.get("rule_id")
+            or skip.get("candidate_id")
+            or skip.get("canary")
+            or skip.get("safety_stop")
+        ):
+            return skip
+    return None
+
+
+def _cache_replay_public_canary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    public = {
+        key: value.get(key)
+        for key in ("enabled", "selected", "cohort", "fraction", "threshold", "unit", "reason", "status")
+        if value.get(key) is not None
+    }
+    public["pattern_hashes_included"] = False
+    return public
+
+
+def _cache_replay_invalidation_reasons(
+    *,
+    cache_meta: dict[str, Any],
+    replay_canary: dict[str, Any],
+) -> list[str]:
+    reasons: set[str] = set()
+    for value in (
+        cache_meta.get("invalidation_reason"),
+        replay_canary.get("reason") if replay_canary.get("status") == "invalidated" else None,
+    ):
+        if value:
+            reasons.add(str(value))
+    audit = replay_canary.get("dependency_audit")
+    if not isinstance(audit, dict):
+        audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else {}
+    if audit.get("invalidation_reason"):
+        reasons.add(str(audit.get("invalidation_reason")))
+    if _as_bool(audit.get("cap_exceeded"), False):
+        reasons.add("dependency-cap-exceeded")
+    if int(audit.get("changed_path_count") or 0):
+        reasons.add("dependency-changed")
+    if int(audit.get("deleted_path_count") or 0):
+        reasons.add("dependency-deleted")
+    if int(audit.get("created_path_count") or 0):
+        reasons.add("dependency-created")
+    if int(audit.get("missing_path_count") or 0):
+        reasons.add("dependency-missing")
+    return sorted(reasons)
+
+
+def _cache_replay_cohort(
+    *,
+    cache_meta: dict[str, Any],
+    rule: dict[str, Any],
+    replay_canary: dict[str, Any],
+) -> tuple[str | None, str]:
+    reason = str(rule.get("reason") or cache_meta.get("reason") or replay_canary.get("reason") or "")
+    canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else cache_meta.get("canary")
+    if not isinstance(canary, dict):
+        canary = replay_canary.get("canary") if isinstance(replay_canary.get("canary"), dict) else {}
+    safety_stop = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else cache_meta.get("safety_stop")
+    if isinstance(safety_stop, dict) or reason == LOCAL_CANARY_SAFETY_STOP_REASON:
+        return "safety_stopped", "safety-stop"
+    if replay_canary.get("status") == "invalidated" or cache_meta.get("invalidated"):
+        return "invalidated", "invalidation"
+    if reason == "canary_holdout" or canary.get("cohort") == "canary_holdout" or canary.get("selected") is False:
+        return "holdout", "holdout"
+    if cache_meta.get("status") == "hit" and replay_canary.get("status") == "applied":
+        return "replayed", "cache-hit"
+    return None, "not-cache-replay-lifecycle"
+
+
+def build_cache_replay_lifecycle_feedback(
+    *,
+    cache_meta: dict[str, Any],
+    provider: str,
+    source_surface: str,
+    requested_model: str | None,
+    routed_model: str | None,
+    status_code: int | None,
+    latency_ms: int | None,
+    retry_count: int | None,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    category: str | None,
+    stream: bool,
+) -> dict[str, Any] | None:
+    """Build metadata-only cache replay lifecycle feedback for managed/local stats."""
+    if not isinstance(cache_meta, dict):
+        return None
+    rule = _cache_replay_rule_from_meta(cache_meta)
+    if not isinstance(rule, dict):
+        return None
+    replay_canary = (
+        cache_meta.get("cache_replay_canary")
+        if isinstance(cache_meta.get("cache_replay_canary"), dict)
+        else {}
+    )
+    cohort, event_reason = _cache_replay_cohort(cache_meta=cache_meta, rule=rule, replay_canary=replay_canary)
+    if cohort is None:
+        return None
+    canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else cache_meta.get("canary")
+    if not isinstance(canary, dict):
+        canary = replay_canary.get("canary") if isinstance(replay_canary.get("canary"), dict) else {}
+    safety_stop = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else cache_meta.get("safety_stop")
+    saved_cost = cache_meta.get("estimated_saved_cost_usd")
+    if saved_cost is None and cost_baseline_usd is not None and cost_est_usd is not None:
+        saved_cost = max(0.0, float(cost_baseline_usd) - float(cost_est_usd))
+    status_class = "unknown"
+    if isinstance(status_code, int):
+        if status_code < 400:
+            status_class = "success"
+        elif status_code < 500:
+            status_class = "client_error"
+        else:
+            status_class = "server_error"
+    event: dict[str, Any] = {
+        "schema": "agentflow.cache_replay_lifecycle_feedback.v1",
+        "provider": provider,
+        "source_surface": source_surface,
+        "policy_id": rule.get("policy_id") or rule.get("candidate_id") or rule.get("rule_id"),
+        "rule_id": rule.get("rule_id"),
+        "candidate_id": rule.get("candidate_id"),
+        "policy_source": rule.get("policy_source") or cache_meta.get("policy_source") or "unknown",
+        "cohort": cohort,
+        "event_reason": event_reason,
+        "cache_decision_status": cache_meta.get("status"),
+        "cache_decision_reason": cache_meta.get("reason"),
+        "cache_hit": cache_meta.get("status") == "hit",
+        "hit_type": cache_meta.get("hit_type"),
+        "status_class": status_class,
+        "status_code": status_code,
+        "retry_count": int(retry_count or 0),
+        "latency_ms": int(latency_ms) if latency_ms is not None else None,
+        "cost_est_usd": round(float(cost_est_usd), 9) if cost_est_usd is not None else None,
+        "cost_baseline_usd": round(float(cost_baseline_usd), 9) if cost_baseline_usd is not None else None,
+        "estimated_saved_cost_usd": round(float(saved_cost), 9) if saved_cost is not None else None,
+        "requested_model_family": _model_family(requested_model),
+        "routed_model_family": _model_family(routed_model),
+        "category": category,
+        "stream": bool(stream),
+        "canary": _cache_replay_public_canary(canary),
+        "invalidation_reason_codes": _cache_replay_invalidation_reasons(
+            cache_meta=cache_meta,
+            replay_canary=replay_canary,
+        ),
+        "safety_stop": {
+            key: safety_stop.get(key)
+            for key in ("reason", "decision", "sample_count", "error_rate", "retry_rate")
+            if isinstance(safety_stop, dict) and safety_stop.get(key) is not None
+        } if isinstance(safety_stop, dict) else None,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
+            "pattern_hashes_included": False,
+        },
+    }
+    if replay_canary:
+        event["dependency_evidence"] = {
+            "status": replay_canary.get("status"),
+            "reason": replay_canary.get("reason"),
+            "safe_invalidation_evidence": bool(
+                (replay_canary.get("dependency_audit") or {}).get("safe_invalidation_evidence")
+            ) if isinstance(replay_canary.get("dependency_audit"), dict) else None,
+        }
+    return {
+        key: value
+        for key, value in event.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def cache_replay_lifecycle_feedback_public_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(meta.get("enabled")),
+        "status": meta.get("status"),
+        "reason": meta.get("reason"),
+        "endpoint": meta.get("endpoint"),
+        "queue_id": meta.get("queue_id"),
+        "attempts": meta.get("attempts"),
+        "status_code": meta.get("status_code"),
+        "latency_ms": meta.get("latency_ms"),
+        "payload_included": False,
+    }
+
+
+def _model_family(model: str | None) -> str | None:
+    if not model:
+        return None
+    model_l = str(model).lower()
+    for family in ("haiku", "sonnet", "opus", "codex", "gpt-5", "gpt-4", "gpt-3"):
+        if family in model_l:
+            return family
+    return "other"
+
+
 _PATH_TRAILING_JUNK = ".,;:)\\]}>\"'"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 

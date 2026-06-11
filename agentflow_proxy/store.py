@@ -582,6 +582,14 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def update_call_cache_json(self, call_id: str, cache_json: str) -> None:
+        with self._lock:
+            self.conn.execute(
+                "update calls set cache_json = ? where id = ?",
+                (cache_json, call_id),
+            )
+            self.conn.commit()
+
     def update_routing_experiment_json(self, experiment_id: str, experiment_json: str) -> None:
         with self._lock:
             self.conn.execute(

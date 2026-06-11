@@ -12,6 +12,7 @@ import yaml
 
 import agentflow_proxy.cache as cache_module
 from agentflow_proxy import cli
+from agentflow_proxy.managed_egress import ManagedEgressBlocked, RAW_FEATURE_KEYS, assert_managed_egress_safe
 from agentflow_proxy.policy_bundle import apply_policy_bundle, validate_policy_bundle
 from agentflow_proxy.policy_events import recent_policy_events
 from agentflow_proxy.store import Store, stable_json
@@ -742,6 +743,17 @@ pattern_rules:
             "raw_pattern_strings_included": False,
         }
 
+    def _keys_in(self, value):
+        keys = set()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                keys.add(str(key).lower())
+                keys.update(self._keys_in(item))
+        elif isinstance(value, list):
+            for item in value:
+                keys.update(self._keys_in(item))
+        return keys
+
     def test_session_cache_replay_canary_allows_stable_dependency_hit(self):
         pattern_hash = "sha256:" + "1" * 64
         with TemporaryDirectory() as tmp:
@@ -798,6 +810,29 @@ pattern_rules:
                 self.assertEqual(hit_meta["cache_replay_canary"]["reason"], "dependency-stable")
                 self.assertEqual(hit_meta["cache_replay_canary"]["canary_cohort"], "canary_applied")
                 self.assertFalse(hit_meta["cache_replay_canary"]["dependency_audit"]["paths_included"])
+                event = manual.build_cache_replay_lifecycle_feedback(
+                    cache_meta=hit_meta,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    status_code=200,
+                    latency_ms=7,
+                    retry_count=0,
+                    cost_est_usd=0.0,
+                    cost_baseline_usd=0.001,
+                    category="tool-result",
+                    stream=False,
+                )
+                self.assertIsNotNone(event)
+                assert_managed_egress_safe(event)
+                self.assertEqual(event["schema"], "agentflow.cache_replay_lifecycle_feedback.v1")
+                self.assertEqual(event["cohort"], "replayed")
+                self.assertEqual(event["cache_decision_status"], "hit")
+                self.assertEqual(event["estimated_saved_cost_usd"], 0.001)
+                self.assertFalse(event["privacy"]["cache_keys_included"])
+                self.assertFalse(event["privacy"]["file_paths_included"])
+                self.assertTrue(RAW_FEATURE_KEYS.isdisjoint(self._keys_in(event)))
             finally:
                 store.conn.close()
 
@@ -847,6 +882,30 @@ pattern_rules:
                 self.assertEqual(replay_meta["reason"], "dependency-changed")
                 self.assertEqual(replay_meta["dependency_audit"]["changed_path_count"], 1)
                 self.assertFalse(replay_meta["dependency_audit"]["paths_included"])
+                event = manual.build_cache_replay_lifecycle_feedback(
+                    cache_meta={
+                        **meta,
+                        "status": replay_meta["status"],
+                        "reason": replay_meta["reason"],
+                        "invalidated": True,
+                        "invalidation_reason": replay_meta["reason"],
+                        "cache_replay_canary": replay_meta,
+                    },
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    status_code=200,
+                    latency_ms=11,
+                    retry_count=0,
+                    cost_est_usd=0.002,
+                    cost_baseline_usd=0.003,
+                    category="tool-result",
+                    stream=False,
+                )
+                self.assertEqual(event["cohort"], "invalidated")
+                self.assertIn("dependency-changed", event["invalidation_reason_codes"])
+                assert_managed_egress_safe(event)
             finally:
                 store.conn.close()
 
@@ -875,6 +934,82 @@ pattern_rules:
             self.assertEqual(meta["canary_cohort"], "canary_holdout")
             self.assertEqual(meta["canary"]["status"], "holdout")
             self.assertEqual(meta["pattern_rules"]["skip_reasons"][-1]["reason"], "canary_holdout")
+            holdout_event = manual.build_cache_replay_lifecycle_feedback(
+                cache_meta=meta,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                status_code=429,
+                latency_ms=42,
+                retry_count=2,
+                cost_est_usd=0.02,
+                cost_baseline_usd=0.02,
+                category="tool-result",
+                stream=False,
+            )
+            self.assertEqual(holdout_event["cohort"], "holdout")
+            self.assertEqual(holdout_event["retry_count"], 2)
+            self.assertEqual(holdout_event["status_class"], "client_error")
+            assert_managed_egress_safe(holdout_event)
+
+    def test_cache_replay_lifecycle_feedback_covers_safety_stop_metadata_only(self):
+        rule = {
+            "rule_id": "reviewed-session-cache-replay",
+            "candidate_id": "session-cache-replay-candidate",
+            "policy_source": "managed-recommended",
+            "reason": "local-canary-safety-stop",
+            "safety_stop": {
+                "reason": "local-canary-safety-stop",
+                "decision": "stop",
+                "sample_count": 8,
+                "error_rate": 0.25,
+                "retry_rate": 0.5,
+                "pattern_hash": "sha256:" + "4" * 64,
+                "path": "/tmp/private.py",
+            },
+            "canary": {"enabled": True, "selected": False, "cohort": "safety_stopped"},
+        }
+        event = cache_module.build_cache_replay_lifecycle_feedback(
+            cache_meta={
+                "status": "skipped",
+                "reason": "local-canary-safety-stop",
+                "policy_source": "managed-recommended",
+                "pattern_rules": {"skip_reasons": [rule]},
+            },
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=500,
+            latency_ms=25,
+            retry_count=3,
+            cost_est_usd=0.03,
+            cost_baseline_usd=0.04,
+            category="tool-result",
+            stream=False,
+        )
+        self.assertEqual(event["cohort"], "safety_stopped")
+        self.assertEqual(event["safety_stop"]["decision"], "stop")
+        self.assertNotIn("sha256:" + "4" * 64, json.dumps(event))
+        self.assertNotIn("/tmp/private.py", json.dumps(event))
+        assert_managed_egress_safe(event)
+
+    def test_cache_replay_lifecycle_feedback_rejects_raw_egress_fields(self):
+        event = {
+            "schema": "agentflow.cache_replay_lifecycle_feedback.v1",
+            "source_surface": "anthropic_messages",
+            "cohort": "replayed",
+            "prompt": "raw prompt must not leave local machine",
+            "body": {"messages": ["raw body"]},
+            "file_path": "/tmp/private.py",
+        }
+        with self.assertRaises(ManagedEgressBlocked) as raised:
+            assert_managed_egress_safe(event)
+        blocked = {item["key"] for item in raised.exception.violations}
+        self.assertIn("prompt", blocked)
+        self.assertIn("body", blocked)
+        self.assertIn("file_path", blocked)
 
     def _streaming_static_features(self, pattern_hash):
         return {

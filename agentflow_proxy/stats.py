@@ -3261,8 +3261,14 @@ async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> di
                     "replayed_count": 0,
                     "replayed_error_count": 0,
                     "replayed_retry_count": 0,
+                    "replayed_latency_ms_total": 0,
+                    "replayed_latency_sample_count": 0,
+                    "replayed_estimated_saved_cost_usd": 0.0,
                     "holdout_error_count": 0,
                     "holdout_retry_count": 0,
+                    "holdout_latency_ms_total": 0,
+                    "holdout_latency_sample_count": 0,
+                    "holdout_estimated_saved_cost_usd": 0.0,
                     "estimated_saved_cost_usd": 0.0,
                     "estimated_cost_usd": 0.0,
                     "baseline_cost_usd": 0.0,
@@ -3303,6 +3309,18 @@ async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> di
             saved = _as_float(cache.get("estimated_saved_cost_usd"))
             if not saved and outcome == "hit":
                 saved = max(_as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")), 0.0)
+            latency_value = _as_int(row.get("latency_ms")) if row.get("latency_ms") is not None else None
+            if outcome == "hit":
+                bucket["replayed_estimated_saved_cost_usd"] += saved
+                if latency_value is not None:
+                    bucket["replayed_latency_ms_total"] += latency_value
+                    bucket["replayed_latency_sample_count"] += 1
+            elif outcome == "holdout":
+                holdout_saved = max(_as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")), 0.0)
+                bucket["holdout_estimated_saved_cost_usd"] += holdout_saved
+                if latency_value is not None:
+                    bucket["holdout_latency_ms_total"] += latency_value
+                    bucket["holdout_latency_sample_count"] += 1
             bucket["estimated_saved_cost_usd"] += saved
             bucket["estimated_cost_usd"] += _as_float(row.get("cost_est_usd"))
             bucket["baseline_cost_usd"] += _as_float(row.get("cost_baseline_usd"))
@@ -3354,6 +3372,22 @@ async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> di
         bucket["holdout_error_rate"] = round(_as_int(bucket.get("holdout_error_count")) / holdout, 4) if holdout else 0.0
         bucket["replayed_retry_rate"] = round(_as_int(bucket.get("replayed_retry_count")) / replayed, 4) if replayed else 0.0
         bucket["holdout_retry_rate"] = round(_as_int(bucket.get("holdout_retry_count")) / holdout, 4) if holdout else 0.0
+        replayed_latency_samples = _as_int(bucket.pop("replayed_latency_sample_count"))
+        holdout_latency_samples = _as_int(bucket.pop("holdout_latency_sample_count"))
+        replayed_latency_total = _as_int(bucket.pop("replayed_latency_ms_total"))
+        holdout_latency_total = _as_int(bucket.pop("holdout_latency_ms_total"))
+        bucket["replayed_avg_latency_ms"] = round(replayed_latency_total / replayed_latency_samples) if replayed_latency_samples else None
+        bucket["holdout_avg_latency_ms"] = round(holdout_latency_total / holdout_latency_samples) if holdout_latency_samples else None
+        bucket["replayed_estimated_saved_cost_usd"] = round(_as_float(bucket.get("replayed_estimated_saved_cost_usd")), 8)
+        bucket["holdout_estimated_saved_cost_usd"] = round(_as_float(bucket.get("holdout_estimated_saved_cost_usd")), 8)
+        bucket["replayed_savings_rate_usd"] = round(
+            _as_float(bucket.get("replayed_estimated_saved_cost_usd")) / replayed,
+            8,
+        ) if replayed else 0.0
+        bucket["holdout_savings_rate_usd"] = round(
+            _as_float(bucket.get("holdout_estimated_saved_cost_usd")) / holdout,
+            8,
+        ) if holdout else 0.0
         bucket["estimated_saved_cost_usd"] = round(_as_float(bucket.get("estimated_saved_cost_usd")), 8)
         bucket["estimated_cost_usd"] = round(_as_float(bucket.get("estimated_cost_usd")), 8)
         bucket["baseline_cost_usd"] = round(_as_float(bucket.get("baseline_cost_usd")), 8)

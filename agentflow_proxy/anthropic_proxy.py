@@ -40,6 +40,7 @@ from agentflow_proxy.crunch import (
 )
 from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD, CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH,
+    build_cache_replay_lifecycle_feedback, cache_replay_lifecycle_feedback_public_meta,
     cache_decision_meta, cache_file_dependency_audit, cache_hit_decision_meta, cache_key_for, cache_lookup_meta,
     cache_replay_canary_decision, cache_replay_scope_for_meta, response_output_text,
     stream_cache_payload, validate_stream_cache_payload,
@@ -68,6 +69,7 @@ from agentflow_proxy.recommendations import (
     build_phase_routing_outcome_feedback,
     build_optimization_unit,
     fetch_recommendation,
+    CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE,
     OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
     PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
     pattern_feature_diagnostics,
@@ -161,10 +163,34 @@ async def _record_managed_outcome_feedback(
     crunch_meta: dict[str, Any],
     routing_meta: dict[str, Any],
     category: str | None,
+    stream: bool,
     session_id: str | None,
     error: str | None = None,
 ) -> None:
     dirty_routing_meta = False
+    dirty_cache_meta = False
+    cache_replay_feedback = build_cache_replay_lifecycle_feedback(
+        cache_meta=cache_meta,
+        provider="anthropic",
+        source_surface="anthropic_messages",
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        category=category,
+        stream=stream,
+    )
+    if cache_replay_feedback is not None:
+        meta = await queue_policy_event_feedback(
+            context.store,
+            cache_replay_feedback,
+            source_surface=CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE,
+        )
+        cache_meta["cache_replay_lifecycle_feedback"] = cache_replay_lifecycle_feedback_public_meta(meta)
+        dirty_cache_meta = True
     summary_feedback = build_old_context_summary_outcome_feedback(
         provider="anthropic",
         path=path,
@@ -254,6 +280,8 @@ async def _record_managed_outcome_feedback(
     if not isinstance(managed, dict) or not managed.get("enabled"):
         if dirty_routing_meta:
             context.store.update_call_routing_json(call_id, stable_json(routing_meta))
+        if dirty_cache_meta:
+            context.store.update_call_cache_json(call_id, stable_json(cache_meta))
         return
     experiment_meta = routing_meta.get("routing_experiment")
     if isinstance(experiment_meta, dict) and experiment_meta.get("sampled"):
@@ -307,6 +335,8 @@ async def _record_managed_outcome_feedback(
         if isinstance(experiment_id, str) and experiment_id:
             context.store.update_routing_experiment_json(experiment_id, stable_json(experiment_meta))
     context.store.update_call_routing_json(call_id, stable_json(routing_meta))
+    if dirty_cache_meta:
+        context.store.update_call_cache_json(call_id, stable_json(cache_meta))
 
 
 async def _check_session_cost_alert(context: ProviderContext, sid: str) -> None:
@@ -882,6 +912,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 crunch_meta=crunch_meta,
                                 routing_meta=routing_meta,
                                 category=category,
+                                stream=True,
                                 session_id=session_id,
                             )
                             await _check_session_cost_alert(context, session_id)
@@ -1073,6 +1104,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                         crunch_meta=crunch_meta,
                         routing_meta=routing_meta,
                         category=category,
+                        stream=True,
                         session_id=session_id,
                         error=error,
                     )
@@ -1201,6 +1233,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     crunch_meta=crunch_meta,
                     routing_meta=routing_meta,
                     category=category,
+                    stream=False,
                     session_id=session_id,
                 )
                 return JSONResponse(response_body, headers={"x-agentflow-cache": "hit", "x-agentflow-routed-model": str(crunched.get("model"))})
@@ -1258,6 +1291,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     crunch_meta=crunch_meta,
                     routing_meta=routing_meta,
                     category=category,
+                    stream=False,
                     session_id=session_id,
                 )
                 return JSONResponse(sem_resp, headers={"x-agentflow-cache": "semantic-hit", "x-agentflow-routed-model": str(crunched.get("model"))})
@@ -1340,6 +1374,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 crunch_meta=crunch_meta,
                 routing_meta=routing_meta,
                 category=category,
+                stream=False,
                 session_id=session_id,
                 error=error,
             )
@@ -1439,6 +1474,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunch_meta=crunch_meta,
             routing_meta=routing_meta,
             category=category,
+            stream=False,
             session_id=session_id,
             error=error,
         )
@@ -1488,6 +1524,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunch_meta=crunch_meta,
             routing_meta=routing_meta,
             category=category,
+            stream=stream,
             session_id=session_id,
             error=error,
         )
@@ -1532,6 +1569,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             crunch_meta=crunch_meta,
             routing_meta=routing_meta,
             category=category,
+            stream=stream,
             session_id=session_id,
             error=error,
         )
