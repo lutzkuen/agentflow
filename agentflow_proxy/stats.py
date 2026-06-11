@@ -932,6 +932,350 @@ async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
     return recent_policy_events(limit=limit)
 
 
+MANAGED_OPENAI_ACTIVATION_ACTIONS = {
+    "fetch-review",
+    "draft-stage",
+    "openai-optimization-draft-dry-run",
+    "draft-apply",
+    "rollback",
+}
+MANAGED_OPENAI_SUPPORTED_ACTION_FAMILIES = ("routing", "old_context_summarization", "cache")
+
+
+def _openai_activation_counts_by_family(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for family, counts in raw.items():
+        if not isinstance(counts, dict):
+            continue
+        rows.append({
+            "family": str(family or "unknown"),
+            "selected": _as_int(counts.get("selected")),
+            "suppressed": _as_int(counts.get("suppressed")),
+            "omitted": _as_int(counts.get("omitted")),
+        })
+    rows.sort(key=lambda row: (-row["selected"], row["family"]))
+    return rows
+
+
+def _openai_activation_conflict_summary(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: _as_int(raw.get(key))
+        for key in (
+            "conflict_count",
+            "selected_action_count",
+            "suppressed_action_count",
+            "omitted_action_count",
+            "local_capability_gap_count",
+        )
+        if _as_int(raw.get(key)) > 0
+    }
+
+
+def _openai_activation_review_metadata(manifest: dict[str, Any]) -> dict[str, Any]:
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    review = metadata.get("openai_optimization_review") if isinstance(metadata.get("openai_optimization_review"), dict) else {}
+    selected_actions = review.get("selected_actions") if isinstance(review.get("selected_actions"), list) else []
+    suppressed_actions = review.get("suppressed_actions") if isinstance(review.get("suppressed_actions"), list) else []
+    omitted_actions = review.get("omitted_actions") if isinstance(review.get("omitted_actions"), list) else []
+    selected_families = sorted({
+        str(action.get("action_family") or "unknown")
+        for action in selected_actions
+        if isinstance(action, dict)
+    })
+    return {
+        "schema": review.get("schema"),
+        "source": review.get("source"),
+        "review_bundle_schema": review.get("review_bundle_schema"),
+        "selected_action_count": _as_int(review.get("selected_action_count")) or len(selected_actions),
+        "suppressed_action_count": _as_int(review.get("suppressed_action_count")) or len(suppressed_actions),
+        "omitted_action_count": _as_int(review.get("omitted_action_count")) or len(omitted_actions),
+        "staged_action_count": _as_int(review.get("staged_action_count")) or len(selected_actions),
+        "staged_policy_sections": review.get("staged_policy_sections") if isinstance(review.get("staged_policy_sections"), list) else [],
+        "selected_action_families": selected_families,
+        "counts_by_family": _openai_activation_counts_by_family(review.get("counts_by_family")),
+        "conflict_summary": _openai_activation_conflict_summary(review.get("conflict_summary")),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "payload_json_included": False,
+        },
+    }
+
+
+def _managed_openai_activation_staged_drafts(limit: int = 10) -> tuple[list[dict[str, Any]], int]:
+    from agentflow_proxy.policy_files import _draft_workspace_root
+
+    raw_workspace = os.getenv("AGENTFLOW_POLICY_DRAFT_DIR")
+    workspace = _draft_workspace_root(raw_workspace)
+    if not workspace.exists() or not workspace.is_dir():
+        return [], 0
+
+    rows: list[tuple[str, float, dict[str, Any]]] = []
+    unreadable = 0
+    try:
+        children = list(workspace.iterdir())
+    except OSError:
+        return [], 1
+    for child in children:
+        manifest_path = child / "draft.json" if child.is_dir() else child
+        if not manifest_path.exists() or manifest_path.name != "draft.json":
+            continue
+        manifest = _read_workbench_draft_manifest(manifest_path)
+        if manifest is None:
+            unreadable += 1
+            continue
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        if not isinstance(metadata.get("openai_optimization_review"), dict):
+            continue
+        try:
+            mtime = manifest_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        review = _openai_activation_review_metadata(manifest)
+        rows.append((
+            str(manifest.get("created_at") or ""),
+            mtime,
+            {
+                "draft_id": manifest.get("draft_id"),
+                "created_at": manifest.get("created_at"),
+                "changed": bool(manifest.get("changed")),
+                "changed_sections": manifest.get("changed_sections") if isinstance(manifest.get("changed_sections"), list) else [],
+                "change_count": _as_int(manifest.get("change_count")),
+                "openai_optimization_review": review,
+                "workspace_path_class": _local_path_class(raw_workspace or "~/.agentflow/policy_drafts"),
+                "workspace_path_included": False,
+                "manifest_path_included": False,
+                "bundle_path_included": False,
+                "raw_payload_included": False,
+            },
+        ))
+    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [row for _created, _mtime, row in rows[: max(1, min(int(limit), 50))]], unreadable
+
+
+def _public_managed_openai_activation_event(event: dict[str, Any] | None, *, now: datetime) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    review = details.get("openai_optimization_review") if isinstance(details.get("openai_optimization_review"), dict) else {}
+    counts = {
+        "selected_action_count": _as_int(review.get("selected_action_count")),
+        "suppressed_action_count": _as_int(review.get("suppressed_action_count")),
+        "omitted_action_count": _as_int(review.get("omitted_action_count")),
+        "local_capability_gap_count": _as_int(review.get("local_capability_gap_count")),
+        "candidate_count": _as_int(details.get("candidate_count")),
+        "change_count": _as_int(details.get("change_count")),
+        "safety_warning_count": _as_int(details.get("safety_warning_count")),
+        "openai_rows_considered": _as_int(details.get("openai_rows_considered")),
+        "applied_if_enabled_total": _as_int(details.get("applied_if_enabled_total")),
+        "suppressed_total": _as_int(details.get("suppressed_total")),
+        "planned_action_count": _as_int(details.get("planned_action_count")),
+    }
+    return {
+        "created_at": event.get("created_at"),
+        "age_seconds": _seconds_since_iso(event.get("created_at"), now),
+        "action": event.get("action"),
+        "ok": bool(event.get("ok")),
+        "source": details.get("source"),
+        "status": details.get("status") or review.get("status"),
+        "draft_id": details.get("draft_id") or details.get("draft"),
+        "dry_run": bool(details.get("dry_run")),
+        "provenance_status": details.get("provenance_status"),
+        "provenance_managed_bundle": details.get("provenance_managed_bundle"),
+        "status_code": details.get("status_code"),
+        "error_type": details.get("error_type"),
+        "exit_code": details.get("exit_code"),
+        "changed_sections": details.get("changed_sections") if isinstance(details.get("changed_sections"), list) else [],
+        "applied_sections": details.get("applied_sections") if isinstance(details.get("applied_sections"), list) else [],
+        "counts": {key: value for key, value in counts.items() if value not in (None, 0)},
+        "payload_included": False,
+        "raw_payload_included": False,
+        "file_paths_included": False,
+        "provider_calls_made": bool(details.get("provider_calls_made")),
+        "managed_server_calls_made": bool(details.get("managed_server_calls_made")),
+        "active_policy_files_written": bool(details.get("active_policy_files_written")),
+    }
+
+
+def _managed_openai_activation_status(
+    *,
+    latest_fetch: dict[str, Any] | None,
+    latest_dry_run: dict[str, Any] | None,
+    latest_apply: dict[str, Any] | None,
+    staged_draft_count: int,
+    feedback_summary: dict[str, Any],
+) -> tuple[str, str]:
+    if latest_fetch and latest_fetch.get("ok") is False:
+        return "fetch-blocked", "latest managed fetch/review failed"
+    if latest_dry_run and latest_dry_run.get("ok") is False:
+        return "dry-run-blocked", "latest OpenAI draft dry-run failed"
+    if latest_apply and latest_apply.get("ok") is False:
+        return "apply-blocked", "latest OpenAI draft apply was blocked or failed"
+    if _as_int(feedback_summary.get("dropped_after_limit")) > 0:
+        return "feedback-blocked", "OpenAI optimization lifecycle feedback has dropped rows"
+    if _as_int(feedback_summary.get("due")) > 0 or _as_int(feedback_summary.get("retryable_error")) > 0:
+        return "feedback-due", "OpenAI optimization lifecycle feedback has due or retryable queue rows"
+    if latest_apply and latest_apply.get("status") == "applied":
+        return "canary-active", "latest apply activated local canaries"
+    if latest_dry_run and latest_dry_run.get("ok"):
+        return "draft-ready", "latest staged draft has a passing local dry-run"
+    if staged_draft_count:
+        return "draft-staged", "managed OpenAI draft is staged and waiting for dry-run"
+    if latest_fetch and latest_fetch.get("ok"):
+        return "bundle-reviewed", "managed OpenAI bundle was fetched and reviewed"
+    return "local-only", "no managed OpenAI activation metadata found"
+
+
+async def stats_managed_openai_activation(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
+    from agentflow_proxy.policy_events import recent_policy_events
+
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    now = datetime.now(timezone.utc)
+    events = [
+        event
+        for event in recent_policy_events(limit=500).get("events", [])
+        if isinstance(event, dict) and str(event.get("action") or "") in MANAGED_OPENAI_ACTIVATION_ACTIONS
+    ]
+    latest_fetch = _public_managed_openai_activation_event(_latest_policy_event(events, "fetch-review"), now=now)
+    latest_stage = _public_managed_openai_activation_event(_latest_policy_event(events, "draft-stage"), now=now)
+    latest_dry_run = _public_managed_openai_activation_event(_latest_policy_event(events, "openai-optimization-draft-dry-run"), now=now)
+    latest_apply = _public_managed_openai_activation_event(_latest_policy_event(events, "draft-apply"), now=now)
+    latest_rollback = _public_managed_openai_activation_event(_latest_policy_event(events, "rollback"), now=now)
+    public_events = [
+        item
+        for item in (_public_managed_openai_activation_event(event, now=now) for event in events)
+        if item is not None
+    ]
+    staged_drafts, unreadable_draft_count = _managed_openai_activation_staged_drafts(limit=10)
+    latest_draft = staged_drafts[0] if staged_drafts else None
+    latest_review = (latest_draft or {}).get("openai_optimization_review") if isinstance(latest_draft, dict) else {}
+    if not isinstance(latest_review, dict):
+        latest_review = {}
+
+    feedback_queue = _managed_feedback_queue_health(
+        store_obj,
+        sample_limit=5,
+        source_surface=LIFECYCLE_SOURCE_SURFACE,
+    )
+    feedback_summary = feedback_queue.get("summary") if isinstance(feedback_queue.get("summary"), dict) else {}
+    readiness: dict[str, Any] = {}
+    try:
+        readiness = await stats_openai_optimization_readiness(store_obj, limit=min(capped_limit, 1000))
+    except Exception:
+        readiness = {}
+    readiness_summary = readiness.get("summary") if isinstance(readiness.get("summary"), dict) else {}
+
+    status, status_reason = _managed_openai_activation_status(
+        latest_fetch=latest_fetch,
+        latest_dry_run=latest_dry_run,
+        latest_apply=latest_apply,
+        staged_draft_count=len(staged_drafts),
+        feedback_summary=feedback_summary,
+    )
+    selected_count = _as_int(latest_review.get("selected_action_count")) or _as_int(((latest_fetch or {}).get("counts") or {}).get("selected_action_count"))
+    suppressed_count = _as_int(latest_review.get("suppressed_action_count")) or _as_int(((latest_fetch or {}).get("counts") or {}).get("suppressed_action_count"))
+    omitted_count = _as_int(latest_review.get("omitted_action_count")) or _as_int(((latest_fetch or {}).get("counts") or {}).get("omitted_action_count"))
+    family_counts = latest_review.get("counts_by_family") if isinstance(latest_review.get("counts_by_family"), list) else []
+
+    return {
+        "schema": "agentflow.managed_openai_activation.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "read_only": True,
+        "limit": capped_limit,
+        "summary": {
+            "policy_event_count": len(public_events),
+            "staged_draft_count": len(staged_drafts),
+            "unreadable_staged_draft_count": unreadable_draft_count,
+            "selected_action_count": selected_count,
+            "suppressed_action_count": suppressed_count,
+            "omitted_action_count": omitted_count,
+            "staged_action_count": _as_int(latest_review.get("staged_action_count")),
+            "conflict_count": _as_int((latest_review.get("conflict_summary") or {}).get("conflict_count")) if isinstance(latest_review.get("conflict_summary"), dict) else 0,
+            "openai_lifecycle_feedback_total": _as_int(feedback_summary.get("total")),
+            "openai_lifecycle_feedback_queued": _as_int(feedback_summary.get("queued")),
+            "openai_lifecycle_feedback_due": _as_int(feedback_summary.get("due")),
+            "openai_lifecycle_feedback_retryable_error": _as_int(feedback_summary.get("retryable_error")),
+            "openai_lifecycle_feedback_dropped_after_limit": _as_int(feedback_summary.get("dropped_after_limit")),
+            "oldest_pending_age_seconds": feedback_summary.get("oldest_pending_age_seconds"),
+            "selected_call_count": _as_int(readiness_summary.get("selected_call_count")),
+            "conflicting_call_count": _as_int(readiness_summary.get("conflicting_call_count")),
+            "holdout_family_count": _as_int(readiness_summary.get("holdout_family_count")),
+            "safety_stop_family_count": _as_int(readiness_summary.get("safety_stop_family_count")),
+        },
+        "bundle_health": {
+            "latest_fetch_review": latest_fetch,
+            "provenance_status": (latest_fetch or {}).get("provenance_status"),
+            "provenance_managed_bundle": (latest_fetch or {}).get("provenance_managed_bundle"),
+            "selected_action_count": selected_count,
+            "suppressed_action_count": suppressed_count,
+            "omitted_action_count": omitted_count,
+            "supported_local_action_families": list(MANAGED_OPENAI_SUPPORTED_ACTION_FAMILIES),
+            "selected_action_families": latest_review.get("selected_action_families") if isinstance(latest_review.get("selected_action_families"), list) else [],
+            "counts_by_family": family_counts,
+            "conflict_summary": _openai_activation_conflict_summary(latest_review.get("conflict_summary")),
+        },
+        "drafts": {
+            "count": len(staged_drafts),
+            "unreadable_count": unreadable_draft_count,
+            "latest": latest_draft,
+            "recent": staged_drafts,
+        },
+        "dry_run": latest_dry_run,
+        "apply_or_rollback": latest_apply or latest_rollback,
+        "active_canary_health": {
+            "state": readiness.get("state"),
+            "state_reason": readiness.get("state_reason"),
+            "selected_call_count": _as_int(readiness_summary.get("selected_call_count")),
+            "conflicting_call_count": _as_int(readiness_summary.get("conflicting_call_count")),
+            "holdout_family_count": _as_int(readiness_summary.get("holdout_family_count")),
+            "safety_stop_family_count": _as_int(readiness_summary.get("safety_stop_family_count")),
+            "selected_family_breakdown": readiness.get("selected_family_breakdown") if isinstance(readiness.get("selected_family_breakdown"), list) else [],
+            "suppression_reason_breakdown": readiness.get("suppression_reason_breakdown") if isinstance(readiness.get("suppression_reason_breakdown"), list) else [],
+        },
+        "feedback_queue": feedback_queue,
+        "recent_events": public_events[:25],
+        "next_read_only_command": (
+            "agentflow-openai-optimization-draft-dry-run <draft-id> --pretty"
+            if staged_drafts and not (latest_dry_run and latest_dry_run.get("ok"))
+            else "agentflow-openai-optimization-draft-apply <draft-id> --dry-run --pretty"
+            if latest_dry_run and latest_dry_run.get("ok") and not (latest_apply and latest_apply.get("status") == "applied")
+            else None
+        ),
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "dashboard_read_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "local_session_ids_included": False,
+            "payload_json_included": False,
+            "policy_file_contents_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "local policy-event metadata, staged draft manifests, OpenAI governor aggregates, and queue row status/age counts only",
+        },
+    }
+
+
 ROLLOUT_ACTION_STAGES = {
     "rollout-actions-review": "review",
     "rollout-actions-dry-run": "dry_run",
@@ -14100,6 +14444,24 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-openai">
 <div class="section">
+  <h2>Managed OpenAI activation</h2>
+  <table data-table-id="managed-openai-activation" data-filter-label="Filter managed OpenAI activation">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="time">Latest fetch</th><th data-sort-type="number">Selected</th><th data-sort-type="number">Suppressed</th><th data-sort-type="number">Omitted</th><th data-sort-type="text">Families</th><th data-sort-type="number">Drafts</th><th data-sort-type="time">Oldest queue</th><th data-sort-type="number">Due / retry</th><th data-sort-type="number">Active / holdout / stop</th><th data-sort-type="text">Next read-only command</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="managed-openai-activation-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Managed OpenAI draft family health</h2>
+  <table data-table-id="managed-openai-activation-families" data-filter-label="Filter managed OpenAI draft family health">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Selected</th><th data-sort-type="number">Suppressed</th><th data-sort-type="number">Omitted</th>
+    </tr></thead>
+    <tbody id="managed-openai-activation-families-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>OpenAI optimization readiness</h2>
   <table data-table-id="openai-optimization-readiness-summary" data-filter-label="Filter OpenAI optimization readiness">
     <thead><tr>
@@ -15948,6 +16310,43 @@ function openaiSuppressedConflictBadges(items){
     return `<span class="badge routed">${esc(item.family||'unknown')}: ${esc(reasons)}</span>`;
   }).join(' ');
 }
+async function refreshManagedOpenAIActivation(){
+  try{
+    const r=await fetch('/agentflow/stats/managed-openai-activation?limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const bundle=d.bundle_health||{};
+    const fetchEvent=bundle.latest_fetch_review||{};
+    const queue=d.feedback_queue||{};
+    const queueSummary=queue.summary||{};
+    const active=d.active_canary_health||{};
+    const privacy=d.privacy||{};
+    const families=(bundle.selected_action_families||[]).map(family=>`<span class="badge provider">${esc(family)}</span>`).join(' ')||compactBreakdown(bundle.counts_by_family,'none');
+    const statusCls=d.status==='canary-active'||d.status==='draft-ready'||d.status==='bundle-reviewed'?'hit':d.status==='local-only'?'miss':'routed';
+    document.getElementById('managed-openai-activation-tbody').innerHTML=`<tr>
+      <td><span class="badge ${statusCls}">${esc(d.status||'unknown')}</span><div class="sub">${esc(d.status_reason||'')}</div></td>
+      <td class="ts">${fetchEvent.created_at?ago(fetchEvent.created_at):'—'} ${fetchEvent.ok===false?'<span class="badge err">failed</span>':fetchEvent.created_at?'<span class="badge hit">reviewed</span>':''} ${bundle.provenance_status?`<span class="badge provider">${esc(bundle.provenance_status)}</span>`:''}</td>
+      <td class="tokens">${(s.selected_action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.suppressed_action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.omitted_action_count||0).toLocaleString()}</td>
+      <td class="flags">${families}</td>
+      <td class="tokens">${(s.staged_draft_count||0).toLocaleString()} staged · ${(s.unreadable_staged_draft_count||0).toLocaleString()} unreadable</td>
+      <td class="latency">${fmtSec(s.oldest_pending_age_seconds??queueSummary.oldest_pending_age_seconds)}</td>
+      <td class="tokens">${(s.openai_lifecycle_feedback_due||0).toLocaleString()} due · ${(s.openai_lifecycle_feedback_retryable_error||0).toLocaleString()} retry · ${(s.openai_lifecycle_feedback_dropped_after_limit||0).toLocaleString()} dropped</td>
+      <td class="tokens">${(s.selected_call_count||0).toLocaleString()} / ${(s.holdout_family_count||0).toLocaleString()} / ${(s.safety_stop_family_count||0).toLocaleString()}</td>
+      <td class="model">${esc(d.next_read_only_command||'—')}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${privacy.payload_json_included?'<span class="badge err">payload</span>':'<span class="badge hit">payload omitted</span>'} ${privacy.request_ids_included?'<span class="badge err">IDs</span>':'<span class="badge hit">IDs omitted</span>'} ${privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'}</td>
+    </tr>`;
+    const familyRows=bundle.counts_by_family||[];
+    document.getElementById('managed-openai-activation-families-tbody').innerHTML=familyRows.map(row=>`<tr>
+      <td><span class="badge ${openaiFamilyBadge(row.family)}">${esc(row.family||'unknown')}</span></td>
+      <td class="tokens">${(row.selected||0).toLocaleString()}</td>
+      <td class="tokens">${(row.suppressed||0).toLocaleString()}</td>
+      <td class="tokens">${(row.omitted||0).toLocaleString()}</td>
+    </tr>`).join('')||`<tr><td colspan="4" style="color:#8b949e">No managed OpenAI draft family metadata yet; active state is ${esc(active.state||'unknown')}</td></tr>`;
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshOpenAIOptimizationReadiness(){
   try{
     const r=await fetch('/agentflow/stats/openai-optimization-readiness?limit=1000');
@@ -16933,6 +17332,7 @@ refreshErrors();
 refreshLimiter();
 refreshSafety();
 refreshPolicies();
+refreshManagedOpenAIActivation();
 refreshOpenAIOptimizationReadiness();
 refreshOpenAICanaryReadiness();
 refreshOpenAIOldContextSummary();
@@ -16958,6 +17358,7 @@ setInterval(refreshOpenAICacheReplayReadiness,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
+setInterval(refreshManagedOpenAIActivation,30000);
 setInterval(refreshOpenAIOptimizationReadiness,30000);
 setInterval(refreshOpenAICanaryReadiness,30000);
 setInterval(refreshOpenAIScoreboard,30000);

@@ -80,6 +80,7 @@ class DashboardImportTests(unittest.TestCase):
             codex_readiness = client.get("/agentflow/stats/codex-readiness")
             codex_canary_impact = client.get("/agentflow/stats/codex-canary-impact")
             openai_scoreboard = client.get("/agentflow/stats/openai-scoreboard")
+            managed_openai_activation = client.get("/agentflow/stats/managed-openai-activation")
             openai_optimization_readiness = client.get("/agentflow/stats/openai-optimization-readiness")
             openai_canary_readiness = client.get("/agentflow/stats/openai-canary-readiness")
             openai_old_context_summary = client.get("/agentflow/stats/openai-old-context-summary")
@@ -121,6 +122,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(openai_scoreboard.status_code, 200)
             self.assertEqual(openai_scoreboard.json()["schema"], "agentflow.openai_optimization_scoreboard.v1")
             self.assertFalse(openai_scoreboard.json()["privacy"]["provider_calls_made"])
+            self.assertEqual(managed_openai_activation.status_code, 200)
+            self.assertEqual(managed_openai_activation.json()["schema"], "agentflow.managed_openai_activation.v1")
+            self.assertTrue(managed_openai_activation.json()["read_only"])
+            self.assertFalse(managed_openai_activation.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(managed_openai_activation.json()["privacy"]["request_ids_included"])
+            self.assertFalse(managed_openai_activation.json()["privacy"]["cache_keys_included"])
             self.assertEqual(openai_optimization_readiness.status_code, 200)
             self.assertEqual(openai_optimization_readiness.json()["schema"], "agentflow.openai_optimization_readiness.v1")
             self.assertTrue(openai_optimization_readiness.json()["read_only"])
@@ -237,6 +244,10 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Optimization promotion canary impact", dashboard.text)
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/openai-optimization-readiness", dashboard.text)
+            self.assertIn("/agentflow/stats/managed-openai-activation", dashboard.text)
+            self.assertIn("Managed OpenAI activation", dashboard.text)
+            self.assertIn("managed-openai-activation-tbody", dashboard.text)
+            self.assertIn("managed-openai-activation-families-tbody", dashboard.text)
             self.assertIn("OpenAI optimization readiness", dashboard.text)
             self.assertIn("openai-optimization-readiness-summary-tbody", dashboard.text)
             self.assertIn("openai-optimization-readiness-families-tbody", dashboard.text)
@@ -265,6 +276,191 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_managed_openai_activation_dashboard_uses_metadata_only_sources(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        draft_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        old_draft_dir = os.environ.get("AGENTFLOW_POLICY_DRAFT_DIR")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["AGENTFLOW_POLICY_DRAFT_DIR"] = draft_tmp.name
+        store = Store(tmp.name)
+        try:
+            from agentflow_proxy.policy_events import log_policy_event
+
+            log_policy_event(
+                "fetch-review",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "status_code": 200,
+                    "provenance_status": "verified",
+                    "provenance_managed_bundle": True,
+                    "openai_optimization_review": {
+                        "status": "present",
+                        "selected_action_count": 2,
+                        "suppressed_action_count": 1,
+                        "omitted_action_count": 1,
+                        "local_capability_gap_count": 0,
+                    },
+                    "request_id": "raw fetch request id must stay hidden",
+                    "raw_prompt": "raw fetch prompt must stay hidden",
+                },
+            )
+            log_policy_event(
+                "openai-optimization-draft-dry-run",
+                ok=True,
+                details={
+                    "source": "cli",
+                    "draft": "openai-activation-fixture",
+                    "openai_rows_considered": 12,
+                    "applied_if_enabled_total": 3,
+                    "suppressed_total": 1,
+                    "raw_response": "raw dry-run response must stay hidden",
+                },
+            )
+            draft_dir = Path(draft_tmp.name) / "openai-activation-fixture"
+            draft_dir.mkdir()
+            (draft_dir / "draft.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "agentflow.policy_draft.v1",
+                        "draft_id": "openai-activation-fixture",
+                        "created_at": "2026-06-11T20:10:00+00:00",
+                        "changed": True,
+                        "changed_sections": ["routing", "cache"],
+                        "change_count": 2,
+                        "metadata": {
+                            "openai_optimization_review": {
+                                "schema": "agentflow.openai_optimization_review_draft_metadata.v1",
+                                "source": "openai_optimization_review_bundle",
+                                "selected_action_count": 2,
+                                "suppressed_action_count": 1,
+                                "omitted_action_count": 1,
+                                "staged_action_count": 2,
+                                "staged_policy_sections": ["routing", "cache"],
+                                "counts_by_family": {
+                                    "routing": {"selected": 1, "suppressed": 1, "omitted": 0},
+                                    "cache": {"selected": 1, "suppressed": 0, "omitted": 1},
+                                },
+                                "conflict_summary": {
+                                    "conflict_count": 1,
+                                    "raw_prompt": "raw conflict prompt must stay hidden",
+                                },
+                                "selected_actions": [
+                                    {
+                                        "action_family": "routing",
+                                        "target_candidate_id": "candidate-routing",
+                                        "raw_request": "raw selected action request must stay hidden",
+                                    },
+                                    {
+                                        "action_family": "cache",
+                                        "target_candidate_id": "candidate-cache",
+                                        "cache_key": "cache key must stay hidden",
+                                    },
+                                ],
+                                "suppressed_actions": [
+                                    {
+                                        "action_family": "old_context_summarization",
+                                        "prompt": "raw suppressed prompt must stay hidden",
+                                    }
+                                ],
+                                "omitted_actions": [
+                                    {
+                                        "action_family": "cache",
+                                        "request_id": "raw omitted request id must stay hidden",
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            store.enqueue_managed_outcome_feedback(
+                id="openai-activation-queued",
+                created_at="2026-06-11T20:15:00+00:00",
+                updated_at="2026-06-11T20:15:00+00:00",
+                source_surface="openai_optimization_lifecycle",
+                endpoint="/v1/policy-events",
+                optimization_unit_id=44,
+                payload_json=json.dumps({
+                    "schema": "agentflow.openai_optimization_draft_dry_run_lifecycle_feedback.v1",
+                    "raw_prompt": "raw queued feedback prompt must stay hidden",
+                    "provider_body": "raw provider body must stay hidden",
+                }),
+                status="queued",
+                attempts=0,
+                next_attempt_at="2000-01-01T00:00:00+00:00",
+            )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://api.openai.com",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            response = client.get("/agentflow/stats/managed-openai-activation")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.managed_openai_activation.v1")
+            self.assertEqual(payload["status"], "feedback-due")
+            self.assertEqual(payload["summary"]["selected_action_count"], 2)
+            self.assertEqual(payload["summary"]["suppressed_action_count"], 1)
+            self.assertEqual(payload["summary"]["omitted_action_count"], 1)
+            self.assertEqual(payload["summary"]["staged_draft_count"], 1)
+            self.assertEqual(payload["summary"]["openai_lifecycle_feedback_due"], 1)
+            self.assertEqual(payload["bundle_health"]["provenance_status"], "verified")
+            self.assertEqual(payload["bundle_health"]["supported_local_action_families"], ["routing", "old_context_summarization", "cache"])
+            families = {row["family"]: row for row in payload["bundle_health"]["counts_by_family"]}
+            self.assertEqual(families["routing"]["selected"], 1)
+            self.assertEqual(families["cache"]["omitted"], 1)
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertFalse(payload["privacy"]["payload_json_included"])
+            self.assertIn("Managed OpenAI activation", dashboard.text)
+            self.assertIn("managed-openai-activation-tbody", dashboard.text)
+
+            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            for forbidden in (
+                "raw fetch request id must stay hidden",
+                "raw fetch prompt must stay hidden",
+                "raw dry-run response must stay hidden",
+                "raw conflict prompt must stay hidden",
+                "raw selected action request must stay hidden",
+                "cache key must stay hidden",
+                "raw suppressed prompt must stay hidden",
+                "raw omitted request id must stay hidden",
+                "raw queued feedback prompt must stay hidden",
+                "raw provider body must stay hidden",
+                '"raw_prompt"',
+                '"request_id"',
+                '"cache_key"',
+                '"provider_body"',
+                '"raw_request"',
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            if old_event_log is None:
+                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+            if old_draft_dir is None:
+                os.environ.pop("AGENTFLOW_POLICY_DRAFT_DIR", None)
+            else:
+                os.environ["AGENTFLOW_POLICY_DRAFT_DIR"] = old_draft_dir
+            store.conn.close()
+            tmp.close()
+            event_tmp.cleanup()
+            draft_tmp.cleanup()
 
     def test_openai_old_context_summary_dashboard_api_reports_impact_without_raw_content(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

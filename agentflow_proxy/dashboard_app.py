@@ -173,6 +173,10 @@ def create_dashboard_router(
     async def stats_openai_optimization_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_optimization_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/managed-openai-activation")
+    async def stats_managed_openai_activation(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_managed_openai_activation(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/openai-canary-readiness")
     async def stats_openai_canary_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_canary_readiness(_store(store_obj), limit=limit)
