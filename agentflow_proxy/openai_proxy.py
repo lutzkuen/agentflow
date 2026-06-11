@@ -26,6 +26,8 @@ from agentflow_proxy.cache import (
     cache_hit_decision_meta,
     cache_key_for,
     cache_lookup_meta,
+    cache_replay_canary_decision,
+    cache_replay_scope_for_meta,
 )
 from agentflow_proxy.crunch import build_embedding, crunch_body, estimate_tokens_from_text
 from agentflow_proxy.errors import (
@@ -175,6 +177,48 @@ def response_output_text(resp: dict[str, Any]) -> str:
         if isinstance(delta.get("content"), str):
             parts.append(delta["content"])
     return "\n".join(parts)
+
+
+def _openai_endpoint_for_path(path: str) -> str:
+    return "chat_completions" if "chat/completions" in (path or "").lower() else "responses"
+
+
+def _openai_cache_replay_response_compatible(response_body: Any, path: str) -> tuple[bool, str]:
+    if not isinstance(response_body, dict):
+        return False, "non-json-response"
+    if response_body.get("error") is not None:
+        return False, "error-response"
+    endpoint = _openai_endpoint_for_path(path)
+    if endpoint == "chat_completions":
+        choices = response_body.get("choices")
+        if isinstance(choices, list) and all(isinstance(choice, dict) for choice in choices):
+            return True, "chat-compatible"
+        return False, "chat-choices-missing"
+    if (
+        response_body.get("object") == "response"
+        or isinstance(response_body.get("output"), list)
+        or isinstance(response_body.get("output_text"), str)
+    ):
+        return True, "responses-compatible"
+    return False, "responses-output-missing"
+
+
+def _record_openai_cache_replay_bypass(cache_meta: dict[str, Any], replay_canary: dict[str, Any]) -> None:
+    cache_meta["cache_replay_canary"] = replay_canary
+    status = str(replay_canary.get("status") or "bypassed")
+    reason = str(replay_canary.get("reason") or "cache-replay-canary-bypassed")
+    cache_meta["status"] = status
+    cache_meta["reason"] = reason
+    if status == "invalidated":
+        cache_meta["invalidated"] = True
+        cache_meta["invalidation_reason"] = reason
+
+
+def _openai_cache_replay_store_allowed(cache_meta: dict[str, Any], *, has_tool_blocks: bool) -> tuple[bool, str]:
+    if has_tool_blocks and not bool(cache_meta.get("safe_invalidation_evidence")):
+        audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else {}
+        return False, str(audit.get("invalidation_reason") or "file-dependency-missing")
+    return True, "store-compatible"
 
 
 async def _fetch_openai_old_context_summary(
@@ -807,19 +851,60 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     stream=False,
                 ),
             )
+        replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
+        if replay_pattern_rule is not None:
+            cache_meta["replay_scope"] = replay_scope
+            cache_meta["replay_scope_id_available"] = bool(replay_scope_id)
+            if not can_cache:
+                _replay_allowed, replay_canary = cache_replay_canary_decision(
+                    cache_meta=cache_meta,
+                    dependency_audit=cache_meta.get("file_dependency_audit"),
+                    session_id=session_id,
+                )
+                if replay_canary:
+                    _record_openai_cache_replay_bypass(cache_meta, replay_canary)
         key = cache_key_for(
             crunched,
             path,
             provider="openai",
             upstream=context.openai_upstream,
+            replay_scope=replay_scope,
+            replay_scope_id=replay_scope_id,
         )
         emb: Optional[list[float]] = None
         if can_cache:
-            cached, invalidated_reason = context.store.get_cache_with_reason(key)
-            if invalidated_reason:
-                cache_meta["reason"] = invalidated_reason
-                cache_meta["invalidated"] = True
-                cache_meta["invalidation_reason"] = invalidated_reason
+            replay_allowed = True
+            if replay_pattern_rule is not None:
+                dependency_audit = context.store.cache_file_dependency_audit(key)
+                replay_allowed, replay_canary = cache_replay_canary_decision(
+                    cache_meta=cache_meta,
+                    dependency_audit=dependency_audit,
+                    session_id=session_id,
+                )
+                cache_meta["cache_replay_canary"] = replay_canary
+                if not replay_allowed:
+                    _record_openai_cache_replay_bypass(cache_meta, replay_canary)
+                    if replay_canary.get("status") == "invalidated":
+                        context.store.delete_cache(key)
+            cached = None
+            if replay_allowed:
+                cached, invalidated_reason = context.store.get_cache_with_reason(key)
+                if invalidated_reason:
+                    cache_meta["reason"] = invalidated_reason
+                    cache_meta["invalidated"] = True
+                    cache_meta["invalidation_reason"] = invalidated_reason
+            if cached is not None:
+                compatible, compatibility_reason = _openai_cache_replay_response_compatible(cached, path)
+                if not compatible:
+                    context.store.delete_cache(key)
+                    cache_meta["status"] = "bypassed"
+                    cache_meta["reason"] = compatibility_reason
+                    cache_meta["cache_replay_shape"] = {
+                        "status": "incompatible",
+                        "reason": compatibility_reason,
+                        "endpoint": _openai_endpoint_for_path(path),
+                    }
+                    cached = None
             if cached is not None:
                 latency_ms = int((time.time() - started) * 1000)
                 out_tokens = estimate_tokens_from_text(response_output_text(cached))
@@ -1089,13 +1174,31 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             )
 
         if r.status_code < 400 and can_cache and response_body is not None:
-            context.store.set_cache(
-                key,
-                str(crunched.get("model")),
-                len(stable_json(crunched)),
-                response_body,
-                file_deps=file_deps,
-            )
+            compatible, compatibility_reason = _openai_cache_replay_response_compatible(response_body, path)
+            store_allowed, store_reason = _openai_cache_replay_store_allowed(cache_meta, has_tool_blocks=has_tool_blocks)
+            if compatible and store_allowed:
+                context.store.set_cache(
+                    key,
+                    str(crunched.get("model")),
+                    len(stable_json(crunched)),
+                    response_body,
+                    file_deps=file_deps,
+                )
+                if replay_pattern_rule is not None:
+                    cache_meta["cache_replay_store"] = {
+                        "status": "stored",
+                        "reason": "compatible-success-response",
+                        "endpoint": _openai_endpoint_for_path(path),
+                        "response_shape": compatibility_reason,
+                        "cache_key_included": False,
+                    }
+            elif replay_pattern_rule is not None:
+                cache_meta["cache_replay_store"] = {
+                    "status": "skipped",
+                    "reason": compatibility_reason if not compatible else store_reason,
+                    "endpoint": _openai_endpoint_for_path(path),
+                    "cache_key_included": False,
+                }
         if can_semantic_cache and emb is not None and r.status_code < 400 and response_body is not None:
             context.store.set_semantic_cache(key, str(crunched.get("model")), emb, response_body, len(stable_json(crunched)))
 

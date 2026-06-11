@@ -191,6 +191,14 @@ class StreamingCacheTest(unittest.TestCase):
         self.old_provider = server.PROVIDER
         self.old_upstream = server.ANTHROPIC_UPSTREAM
         self.old_openai_upstream = server.OPENAI_UPSTREAM
+        self.old_cache_enabled = cache_module.CACHE_ENABLED
+        self.old_cache_tool_calls = cache_module.CACHE_TOOL_CALLS
+        self.old_semantic_cache_enabled = cache_module.SEMANTIC_CACHE_ENABLED
+        self.old_cache_pattern_rules = cache_module.CACHE_PATTERN_RULES
+        cache_module.CACHE_ENABLED = True
+        cache_module.CACHE_TOOL_CALLS = False
+        cache_module.SEMANTIC_CACHE_ENABLED = False
+        cache_module.CACHE_PATTERN_RULES = ()
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
@@ -204,6 +212,10 @@ class StreamingCacheTest(unittest.TestCase):
     def tearDown(self):
         server.store.conn.close()
         self.tmp.close()
+        cache_module.CACHE_ENABLED = self.old_cache_enabled
+        cache_module.CACHE_TOOL_CALLS = self.old_cache_tool_calls
+        cache_module.SEMANTIC_CACHE_ENABLED = self.old_semantic_cache_enabled
+        cache_module.CACHE_PATTERN_RULES = self.old_cache_pattern_rules
         server.store = self.old_store
         server.configure_provider(
             self.old_provider,

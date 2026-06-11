@@ -430,6 +430,7 @@ def pattern_feature_diagnostics(unit: dict[str, Any]) -> dict[str, Any]:
         "workflow_phase": pattern_features.get("workflow_phase"),
         "category": pattern_features.get("category"),
         "source_surface": pattern_features.get("source_surface"),
+        "endpoint": unit.get("endpoint") or input_features.get("endpoint"),
         "app_family": pattern_features.get("app_family"),
         "requested_model": unit.get("requested_model"),
         "candidate_target_model": unit.get("candidate_target_model"),

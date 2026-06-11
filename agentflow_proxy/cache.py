@@ -515,7 +515,7 @@ def _cache_pattern_rule_match(
         if excluded_categories and str((pattern_features or {}).get("category") or "").lower() in excluded_categories:
             skip_reasons.append({"rule_id": rule_id, "reason": "category-excluded"})
             continue
-        for key in ("workflow_phase", "source_surface", "app_family", "text_bucket", "token_bucket"):
+        for key in ("workflow_phase", "source_surface", "endpoint", "app_family", "text_bucket", "token_bucket"):
             if not _condition_matches(conditions, key, (pattern_features or {}).get(key)):
                 skip_reasons.append({"rule_id": rule_id, "reason": f"{key}-mismatch"})
                 break
@@ -708,12 +708,19 @@ def cache_replay_canary_decision(
         "canary_cohort": canary.get("cohort") if canary else None,
         "dependency_audit": dependency_audit,
     }
+    if canary and (canary.get("selected") is False or canary.get("cohort") == "canary_holdout"):
+        decision.update({"status": "holdout", "reason": "canary_holdout"})
+        return False, decision
     if not canary or canary.get("status") != "applied" or canary.get("cohort") != "canary_applied":
         decision.update({"status": "bypassed", "reason": "canary-applied-required"})
         return False, decision
     if scope == "session" and not session_id:
         decision.update({"status": "bypassed", "reason": "session-scope-missing"})
         return False, decision
+    requires_dependency_evidence = bool(pattern_rule.get("allow_tool_calls") or pattern_rule.get("safe_invalidation"))
+    if not requires_dependency_evidence:
+        decision.update({"status": "applied", "reason": "no-dependency-required"})
+        return True, decision
     current_audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else None
     if isinstance(current_audit, dict) and not current_audit.get("safe_invalidation_evidence"):
         decision.update({

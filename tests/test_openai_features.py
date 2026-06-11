@@ -12,6 +12,7 @@ from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import openai_features
 from agentflow_proxy.optimization import openai_pipeline
 from agentflow_proxy import router as router_module
+from agentflow_proxy import cache as cache_module
 import agentflow_proxy.routing_experiments as routing_experiments_module
 from agentflow_proxy.store import stable_json
 
@@ -622,6 +623,260 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         importlib.reload(router_module)
         self.addCleanup(lambda: os.path.exists(policy_file.name) and os.unlink(policy_file.name))
         return policy_file.name
+
+    def _openai_cache_pattern_hash(self, request_body, path="/v1/responses"):
+        body = copy.deepcopy(request_body)
+        parsed = openai_pipeline.parse_openai_request_body(body, list(server.OPENAI_MODEL_LIST))
+        preflight = openai_pipeline.extract_openai_preflight_features(parsed, path=path)
+        local = openai_pipeline.execute_openai_local_policy(
+            raw_body=body,
+            path=path,
+            requested_model=parsed.requested_model,
+            category=parsed.category,
+            stream=parsed.stream,
+            session_id="test-session",
+            preflight=preflight,
+            policy_decision={},
+            store_obj=server.store,
+        )
+        return local.routing_meta["managed_pattern_features"]["cache_pattern_hash"]
+
+    def _enable_openai_cache_replay_rule(
+        self,
+        pattern_hash,
+        *,
+        source_surface="openai_responses",
+        endpoint="responses",
+        category="tool-light",
+        has_tools=True,
+        canary_fraction=1.0,
+    ):
+        rules = cache_module.normalize_cache_pattern_rules([
+            {
+                "id": "reviewed-openai-cache-replay",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "candidate_id": "openai-cache-replay-candidate",
+                "conditions": {
+                    "pattern_hashes": [pattern_hash],
+                    "source_surface": source_surface,
+                    "endpoint": endpoint,
+                    "app_family": "codex",
+                    "category": category,
+                    "has_tools": has_tools,
+                    "stream": False,
+                    "replayability_levels": ["local-exact-response"],
+                },
+                "rollout": {
+                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "recommendation_mode": "canary-only",
+                    "canary_enabled": True,
+                    "canary_fraction": canary_fraction,
+                    "canary_salt": "openai-cache-replay-test",
+                    "canary_unit": "request_fingerprint",
+                },
+                "action": {
+                    "type": "exact_cache_pattern",
+                    "allow_tool_calls": has_tools,
+                    "safe_invalidation": has_tools,
+                    "scope": "session",
+                },
+            }
+        ])
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        cache_module.CACHE_PATTERN_RULES = tuple(rules)
+        self.addCleanup(lambda: setattr(cache_module, "CACHE_PATTERN_RULES", old_rules))
+        return rules[0]
+
+    def test_openai_cache_replay_canary_applied_serves_cached_responses_response(self):
+        watched = os.path.join(self.cwd_tmp.name, "src", "example.py")
+        os.makedirs(os.path.dirname(watched), exist_ok=True)
+        with open(watched, "w", encoding="utf-8") as f:
+            f.write("print('stable replay dependency')\n")
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "Inspect ./src/example.py with the lookup tool and summarize the result.",
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        }
+        pattern_hash = self._openai_cache_pattern_hash(request_body)
+        self._enable_openai_cache_replay_rule(pattern_hash)
+        CapturingOpenAIClient.response_body = {
+            "id": "resp_cached",
+            "object": "response",
+            "model": "gpt-5-codex",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "cached response"}]}],
+            "usage": {"input_tokens": 25, "output_tokens": 5},
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            first = TestClient(server.app).post(
+                "/v1/responses",
+                json=request_body,
+                headers={"x-session-id": "raw-openai-session-must-not-leak"},
+            )
+            CapturingOpenAIClient.response_body = {
+                "id": "resp_upstream_should_not_be_used",
+                "object": "response",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "not used"}]}],
+                "usage": {"input_tokens": 25, "output_tokens": 5},
+            }
+            second = TestClient(server.app).post(
+                "/v1/responses",
+                json=request_body,
+                headers={"x-session-id": "raw-openai-session-must-not-leak"},
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["id"], "resp_cached")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
+        rows = server.store.conn.execute("select cache_hit, cache_json from calls order by rowid").fetchall()
+        self.assertEqual(rows[0]["cache_hit"], 0)
+        self.assertEqual(rows[1]["cache_hit"], 1)
+        seed_cache = json.loads(rows[0]["cache_json"])
+        hit_cache = json.loads(rows[1]["cache_json"])
+        self.assertEqual(seed_cache["cache_replay_store"]["status"], "stored")
+        self.assertFalse(seed_cache["cache_replay_store"]["cache_key_included"])
+        self.assertEqual(hit_cache["status"], "hit")
+        self.assertEqual(hit_cache["cache_replay_canary"]["status"], "applied")
+        self.assertEqual(hit_cache["cache_replay_canary"]["canary_cohort"], "canary_applied")
+        self.assertEqual(hit_cache["pattern_rule"]["rule_id"], "reviewed-openai-cache-replay")
+        self.assertEqual(hit_cache["pattern_rule"]["candidate_id"], "openai-cache-replay-candidate")
+        self.assertGreater(hit_cache["estimated_saved_cost_usd"], 0)
+        rendered = json.dumps({"seed": seed_cache, "hit": hit_cache}, sort_keys=True)
+        self.assertNotIn("src/example.py", rendered)
+        self.assertNotIn(watched, rendered)
+        self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+
+    def test_openai_cache_replay_canary_serves_cached_chat_response(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "messages": [{"role": "user", "content": "Repeatable chat cache replay prompt"}],
+        }
+        pattern_hash = self._openai_cache_pattern_hash(request_body, path="/v1/chat/completions")
+        self._enable_openai_cache_replay_rule(
+            pattern_hash,
+            source_surface="openai_chat",
+            endpoint="chat_completions",
+            category="short-completion",
+            has_tools=False,
+        )
+        CapturingOpenAIClient.response_body = {
+            "id": "chatcmpl_cached",
+            "object": "chat.completion",
+            "choices": [{"message": {"role": "assistant", "content": "cached chat"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            first = TestClient(server.app).post("/v1/chat/completions", json=request_body, headers={"x-session-id": "chat-session"})
+            CapturingOpenAIClient.response_body = {
+                "id": "chatcmpl_upstream_should_not_be_used",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "not used"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+            }
+            second = TestClient(server.app).post("/v1/chat/completions", json=request_body, headers={"x-session-id": "chat-session"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["id"], "chatcmpl_cached")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 1)
+        [hit_row] = server.store.conn.execute("select cache_json from calls where cache_hit = 1").fetchall()
+        hit_cache = json.loads(hit_row["cache_json"])
+        self.assertEqual(hit_cache["cache_replay_canary"]["reason"], "no-dependency-required")
+        self.assertEqual(hit_cache["pattern_rule"]["scope"], "session")
+
+    def test_openai_cache_replay_canary_holdout_forwards_upstream(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "Inspect ./src/holdout.py with the lookup tool.",
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        }
+        pattern_hash = self._openai_cache_pattern_hash(request_body)
+        self._enable_openai_cache_replay_rule(pattern_hash, canary_fraction=0.0)
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            first = TestClient(server.app).post("/v1/responses", json=request_body, headers={"x-session-id": "holdout-session"})
+            second = TestClient(server.app).post("/v1/responses", json=request_body, headers={"x-session-id": "holdout-session"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        rows = server.store.conn.execute("select cache_hit, cache_json from calls order by rowid").fetchall()
+        self.assertEqual([row["cache_hit"] for row in rows], [0, 0])
+        cache = json.loads(rows[-1]["cache_json"])
+        self.assertEqual(cache["status"], "holdout")
+        self.assertEqual(cache["reason"], "canary_holdout")
+        self.assertEqual(cache["cache_replay_canary"]["status"], "holdout")
+        self.assertEqual(cache["cache_replay_canary"]["canary_cohort"], "canary_holdout")
+
+    def test_openai_cache_replay_invalidated_dependency_forwards_upstream(self):
+        watched = os.path.join(self.cwd_tmp.name, "src", "changing.py")
+        os.makedirs(os.path.dirname(watched), exist_ok=True)
+        with open(watched, "w", encoding="utf-8") as f:
+            f.write("print('old')\n")
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "Inspect ./src/changing.py with the lookup tool and summarize it.",
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        }
+        pattern_hash = self._openai_cache_pattern_hash(request_body)
+        self._enable_openai_cache_replay_rule(pattern_hash)
+        CapturingOpenAIClient.response_body = {
+            "id": "resp_old",
+            "object": "response",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "old"}]}],
+            "usage": {"input_tokens": 25, "output_tokens": 5},
+        }
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            first = TestClient(server.app).post("/v1/responses", json=request_body, headers={"x-session-id": "changing-session"})
+            with open(watched, "w", encoding="utf-8") as f:
+                f.write("print('new')\n")
+            CapturingOpenAIClient.response_body = {
+                "id": "resp_new",
+                "object": "response",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "new"}]}],
+                "usage": {"input_tokens": 25, "output_tokens": 5},
+            }
+            second = TestClient(server.app).post("/v1/responses", json=request_body, headers={"x-session-id": "changing-session"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["id"], "resp_new")
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        rows = server.store.conn.execute("select cache_hit, cache_json from calls order by rowid").fetchall()
+        self.assertEqual(rows[-1]["cache_hit"], 0)
+        cache = json.loads(rows[-1]["cache_json"])
+        self.assertEqual(cache["status"], "invalidated")
+        self.assertEqual(cache["reason"], "dependency-changed")
+        self.assertEqual(cache["cache_replay_canary"]["status"], "invalidated")
+        self.assertFalse(cache["cache_replay_canary"]["dependency_audit"]["paths_included"])
+
+    def test_openai_cache_replay_missing_dependency_evidence_forwards_upstream(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "Inspect ./src/missing.py with the lookup tool and summarize it.",
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        }
+        pattern_hash = self._openai_cache_pattern_hash(request_body)
+        self._enable_openai_cache_replay_rule(pattern_hash)
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            first = TestClient(server.app).post("/v1/responses", json=request_body, headers={"x-session-id": "missing-session"})
+            second = TestClient(server.app).post("/v1/responses", json=request_body, headers={"x-session-id": "missing-session"})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        rows = server.store.conn.execute("select cache_hit, cache_json from calls order by rowid").fetchall()
+        self.assertEqual([row["cache_hit"] for row in rows], [0, 0])
+        cache = json.loads(rows[-1]["cache_json"])
+        self.assertEqual(cache["status"], "bypassed")
+        self.assertIn(cache["reason"], {"file-dependency-missing", "dependency-missing"})
+        self.assertEqual(cache["cache_replay_store"]["status"], "skipped")
+        self.assertFalse(cache["cache_replay_store"]["cache_key_included"])
 
     def test_openai_route_persists_source_surface_and_sanitized_feature_summaries(self):
         request_body = {
