@@ -3261,6 +3261,91 @@ def openai_cache_replay_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def _openai_cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.openai_cache_replay_dry_run.v1",
+        "ok": False,
+        "summary": {
+            "openai_rows_considered": 0,
+            "policy_rule_count": 0,
+            "projected_applied_rows": 0,
+            "holdout_rows": 0,
+            "blocked_rows": 0,
+            "projected_hits": 0,
+            "projected_savings_usd": 0.0,
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+        },
+        "read_error": read_error,
+        "rows": [],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "cache_keys_included": False,
+            "request_fingerprints_included": False,
+            "pattern_hashes_included": False,
+        },
+    }
+
+
+def openai_cache_replay_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run OpenAI cache replay pattern rules against local metadata")
+    parser.add_argument(
+        "path",
+        help="Proposed cache policy JSON path, policy bundle JSON path, or '-' for stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent OpenAI provider calls to inspect and aggregate rows to return, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    proposed, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        result = _openai_cache_replay_dry_run_read_error_result(read_error)
+        if args.pretty:
+            stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        else:
+            _write_json(stdout, result)
+        return 1
+
+    from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_openai_cache_replay_dry_run(store, proposed, limit=args.limit)
+    finally:
+        store.conn.close()
+    result["ok"] = True
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def openai_old_context_summary_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run OpenAI old-context summary plans with protocol preservation checks")
     parser.add_argument(
@@ -5517,6 +5602,10 @@ def openai_old_context_summary_report_main() -> None:
 
 def openai_cache_replay_report_main() -> None:
     raise SystemExit(openai_cache_replay_report_cli())
+
+
+def openai_cache_replay_dry_run_main() -> None:
+    raise SystemExit(openai_cache_replay_dry_run_cli())
 
 
 def openai_old_context_summary_dry_run_main() -> None:

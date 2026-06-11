@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from agentflow_proxy import cli
+from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_report import build_openai_cache_replay_report
 from agentflow_proxy.stats import stats_openai_cache_replay_report
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
@@ -57,9 +58,11 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         stream: int = 0,
         has_tools: bool = False,
         request_fingerprint: str | None = None,
+        pattern_hashes: list[str] | None = None,
         file_dependency_audit: dict[str, object] | None = None,
         cost: float = 0.01,
         session_id: str = "raw-openai-session-must-not-leak",
+        created_at: str | None = None,
     ) -> None:
         path = "/v1/responses" if endpoint == "responses" else "/v1/chat/completions"
         text_chars = 2400
@@ -72,6 +75,10 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         }
         if request_fingerprint:
             cache_json["pattern_features"] = {"request_fingerprint": request_fingerprint}
+        if pattern_hashes:
+            features = cache_json.setdefault("pattern_features", {})
+            if isinstance(features, dict):
+                features["pattern_hashes"] = pattern_hashes
         if file_dependency_audit is not None:
             cache_json["file_dependency_audit"] = file_dependency_audit
             cache_json["file_dependency_evidence_available"] = bool(
@@ -81,7 +88,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         self.store.log_call(
             id=str(uuid.uuid4()),
-            created_at=utc_now(),
+            created_at=created_at or utc_now(),
             path=path,
             requested_model="gpt-5.4-mini",
             routed_model="gpt-5.4-mini",
@@ -212,6 +219,163 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_opportunity.v1")
         self.assertEqual(payload["summary"]["openai_call_count"], 2)
         self.assertNotIn("raw-cli-request-fingerprint", output.getvalue())
+
+    def test_openai_dry_run_projects_session_scoped_replay_and_dependency_blockers(self) -> None:
+        pattern_hash = "sha256:" + "b" * 64
+        policy = {
+            "policies": {
+                "cache": {
+                    "pattern_rules": [
+                        {
+                            "id": "openai-session-cache-rule",
+                            "candidate_id": "openai-session-cache-candidate",
+                            "conditions": {
+                                "pattern_hashes": [pattern_hash],
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "tool-light",
+                                "has_tools": True,
+                                "stream": False,
+                                "replayability_levels": ["local-exact-response"],
+                            },
+                            "action": {
+                                "type": "exact_cache_pattern",
+                                "allow_tool_calls": True,
+                                "safe_invalidation": True,
+                                "scope": "session",
+                            },
+                            "rollout": {
+                                "canary_enabled": True,
+                                "canary_fraction": 1.0,
+                                "canary_salt": "openai-dry-run-test",
+                                "canary_unit": "session",
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+        for index, cost in enumerate((0.01, 0.03)):
+            self._log_openai_call(
+                category="tool-light",
+                has_tools=True,
+                request_fingerprint="raw-openai-request-fingerprint-must-not-leak",
+                pattern_hashes=[pattern_hash],
+                file_dependency_audit=self._audit(safe=True),
+                cost=cost,
+                created_at=f"2026-06-11T07:0{index}:00+00:00",
+            )
+        self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            request_fingerprint="raw-openai-request-fingerprint-must-not-leak",
+            pattern_hashes=[pattern_hash],
+            file_dependency_audit=self._audit(reason="dependency-changed", safe=False),
+            cost=0.05,
+            created_at="2026-06-11T07:02:00+00:00",
+        )
+
+        result = build_openai_cache_replay_dry_run(self.store, policy, limit=20)
+
+        self.assertEqual(result["schema"], "agentflow.openai_cache_replay_dry_run.v1")
+        self.assertEqual(result["summary"]["openai_rows_considered"], 3)
+        self.assertEqual(result["summary"]["projected_applied_rows"], 2)
+        self.assertEqual(result["summary"]["invalidation_required_rows"], 1)
+        self.assertEqual(result["summary"]["projected_hits"], 1)
+        self.assertAlmostEqual(result["summary"]["projected_savings_usd"], 0.02)
+        self.assertFalse(result["summary"]["cache_table_mutated"])
+        applied = next(row for row in result["rows"] if row["status"] == "projected-applied")
+        self.assertEqual(applied["rule_id"], "openai-session-cache-rule")
+        self.assertEqual(applied["candidate_id"], "openai-session-cache-candidate")
+        self.assertTrue(applied["session_scoped_key_available"])
+        self.assertTrue(applied["session_scoped_key_fingerprint"].startswith("sha256:"))
+        self.assertEqual(applied["projected_hits"], 1)
+        self.assertFalse(applied["matched_pattern_hashes_included"])
+        self.assertEqual(applied["canary"]["cohort"], "canary_applied")
+        blocked = next(row for row in result["rows"] if row["status"] == "invalidation-required")
+        self.assertIn("dependency-changed", blocked["blockers"])
+        endpoints = {row["value"]: row["count"] for row in result["endpoint_breakdown"]}
+        self.assertEqual(endpoints["responses"], 3)
+        encoded = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw prompt must not leak", encoded)
+        self.assertNotIn("raw response must not leak", encoded)
+        self.assertNotIn("raw-openai-request-fingerprint-must-not-leak", encoded)
+        self.assertNotIn("raw-openai-session-must-not-leak", encoded)
+        self.assertNotIn(pattern_hash, encoded)
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["raw_responses_included"])
+        self.assertFalse(result["privacy"]["raw_session_ids_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["request_fingerprints_included"])
+        self.assertFalse(result["privacy"]["pattern_hashes_included"])
+        self.assertFalse(result["privacy"]["provider_calls_made"])
+
+        holdout_policy = json.loads(json.dumps(policy))
+        holdout_policy["policies"]["cache"]["pattern_rules"][0]["rollout"]["canary_fraction"] = 0.0
+        holdout = build_openai_cache_replay_dry_run(self.store, holdout_policy, limit=20)
+        self.assertEqual(holdout["summary"]["projected_applied_rows"], 0)
+        self.assertEqual(holdout["summary"]["holdout_rows"], 2)
+        self.assertEqual(holdout["summary"]["invalidation_required_rows"], 1)
+        holdout_row = next(row for row in holdout["rows"] if row["status"] == "holdout")
+        self.assertEqual(holdout_row["canary"]["cohort"], "canary_holdout")
+        self.assertTrue(holdout_row["session_scoped_key_available"])
+
+    def test_openai_dry_run_cli_reads_policy_without_mutating_cache(self) -> None:
+        pattern_hash = "sha256:" + "c" * 64
+        policy = {
+            "policies": {
+                "cache": {
+                    "pattern_rules": [
+                        {
+                            "id": "openai-cli-cache-rule",
+                            "candidate_id": "openai-cli-cache-candidate",
+                            "conditions": {
+                                "pattern_hashes": [pattern_hash],
+                                "source_surface": "openai_chat_completions",
+                                "endpoint": "chat_completions",
+                                "category": "chat",
+                                "has_tools": False,
+                                "stream": False,
+                            },
+                            "action": {"type": "exact_cache_pattern", "scope": "session"},
+                        }
+                    ]
+                }
+            }
+        }
+        policy_path = Path(self.tmpdir.name) / "openai-cache-policy.json"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        self.store.set_cache("existing-openai-cli-cache-key", "gpt-5.4-mini", 10, {"output_text": "cached"})
+        self._log_openai_call(
+            endpoint="chat_completions",
+            category="chat",
+            request_fingerprint="raw-openai-cli-fingerprint",
+            pattern_hashes=[pattern_hash],
+            cost=0.01,
+        )
+        self._log_openai_call(
+            endpoint="chat_completions",
+            category="chat",
+            request_fingerprint="raw-openai-cli-fingerprint",
+            pattern_hashes=[pattern_hash],
+            cost=0.04,
+        )
+
+        stdout = io.StringIO()
+        code = cli.openai_cache_replay_dry_run_cli([str(policy_path), "--db", self.db_path, "--limit", "20"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_dry_run.v1")
+        self.assertEqual(payload["summary"]["cache_rows_before"], 1)
+        self.assertEqual(payload["summary"]["cache_rows_after"], 1)
+        self.assertFalse(payload["summary"]["cache_table_mutated"])
+        self.assertEqual(payload["summary"]["projected_hits"], 1)
+        self.assertNotIn("existing-openai-cli-cache-key", stdout.getvalue())
+        self.assertNotIn("raw-openai-cli-fingerprint", stdout.getvalue())
+        self.assertNotIn(pattern_hash, stdout.getvalue())
 
 
 if __name__ == "__main__":
