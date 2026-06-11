@@ -97,6 +97,67 @@ def _record_routing_rate_limit_fallback(
         phase_canary["actual_forwarded_model"] = str(requested_model)
 
 
+def _anthropic_stream_primary_response_body(
+    *,
+    output_text: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_creation_input_tokens: int,
+    cache_read_input_tokens: int,
+    thinking_output_tokens: int | None,
+) -> dict[str, Any]:
+    usage: dict[str, Any] = {}
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+    if output_tokens is not None:
+        usage["output_tokens"] = output_tokens
+    if cache_creation_input_tokens:
+        usage["cache_creation_input_tokens"] = cache_creation_input_tokens
+    if cache_read_input_tokens:
+        usage["cache_read_input_tokens"] = cache_read_input_tokens
+    if thinking_output_tokens is not None:
+        usage["thinking_output_tokens"] = thinking_output_tokens
+    return {
+        "type": "message",
+        "content": [{"type": "text", "text": output_text}] if output_text else [],
+        "usage": usage,
+        "agentflow_streaming_capture": {
+            "complete": True,
+            "output_text_sha256": hashlib.sha256(output_text.encode("utf-8")).hexdigest(),
+            "raw_stream_included": False,
+        },
+    }
+
+
+def _mark_streaming_experiment_skip(
+    routing_meta: dict[str, Any],
+    *,
+    reason: str,
+    stream_complete: bool,
+    status_code: int | None,
+    error: str | None,
+) -> None:
+    experiment_meta = routing_meta.get("routing_experiment")
+    if not isinstance(experiment_meta, dict):
+        return
+    if experiment_meta.get("mode") != "shadow_candidate_pass_through":
+        return
+    experiment_meta.update(
+        {
+            "status": "skipped",
+            "sampled": False,
+            "reason": reason,
+            "streaming": {
+                "complete": bool(stream_complete),
+                "primary_status_code": status_code,
+                "primary_error_present": bool(error),
+                "raw_stream_included": False,
+            },
+        }
+    )
+    routing_meta["routing_experiment"] = experiment_meta
+
+
 def _attach_session_memory_hints(
     *,
     context: ProviderContext,
@@ -472,6 +533,7 @@ async def _run_anthropic_routing_experiment(
     primary_model = str(experiment_meta.get("primary_model") or request_body.get("model") or routing_meta.get("routed_model") or "")
     shadow_body = copy.deepcopy(request_body)
     shadow_body["model"] = shadow_model
+    shadow_body["stream"] = False
     shadow_status_code: Optional[int] = None
     shadow_response_body: Optional[dict[str, Any]] = None
     shadow_latency_ms: Optional[int] = None
@@ -941,9 +1003,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 sse_frame_buf = b""
                 stream_retry_count = 0
                 stream_net_retries = 0
+                stream_complete = False
+                stream_cancelled = False
 
                 def parse_sse_usage(frame: bytes) -> None:
-                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in, thinking_chars
+                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in, thinking_chars, stream_complete
                     for line in frame.decode("utf-8", errors="replace").splitlines():
                         if not line.startswith("data: "):
                             continue
@@ -960,6 +1024,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             actual_in = u.get("input_tokens")
                             cache_creation_in = u.get("cache_creation_input_tokens") or 0
                             cache_read_in = u.get("cache_read_input_tokens") or 0
+                        elif t == "message_stop":
+                            stream_complete = True
                         elif t == "message_delta":
                             out = (data.get("usage") or {}).get("output_tokens")
                             if out is not None:
@@ -1026,6 +1092,9 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     error = exc.message
                     payload = tier_backoff_payload(exc)
                     yield f"event: error\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+                except asyncio.CancelledError:
+                    stream_cancelled = True
+                    raise
                 except Exception as exc:
                     logging.exception("agentflow anthropic streaming proxy error")
                     status_code = 500
@@ -1065,8 +1134,69 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 output_text="".join(output_text_parts),
                             ),
                             file_deps=file_deps,
-                        )
+                    )
                     thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
+                    experiment_meta = routing_meta.get("routing_experiment")
+                    if (
+                        isinstance(experiment_meta, dict)
+                        and experiment_meta.get("mode") == "shadow_candidate_pass_through"
+                        and experiment_meta.get("sampled")
+                    ):
+                        if stream_cancelled:
+                            _mark_streaming_experiment_skip(
+                                routing_meta,
+                                reason="streaming-cancelled",
+                                stream_complete=stream_complete,
+                                status_code=status_code,
+                                error=error,
+                            )
+                        elif status_code >= 400 or error is not None:
+                            _mark_streaming_experiment_skip(
+                                routing_meta,
+                                reason="streaming-primary-error",
+                                stream_complete=stream_complete,
+                                status_code=status_code,
+                                error=error,
+                            )
+                        elif not stream_complete:
+                            _mark_streaming_experiment_skip(
+                                routing_meta,
+                                reason="streaming-incomplete",
+                                stream_complete=stream_complete,
+                                status_code=status_code,
+                                error=error,
+                            )
+                        else:
+                            experiment_meta["streaming"] = {
+                                "complete": True,
+                                "primary_status_code": status_code,
+                                "primary_error_present": False,
+                                "raw_stream_included": False,
+                            }
+                            primary_response_body = _anthropic_stream_primary_response_body(
+                                output_text="".join(output_text_parts),
+                                input_tokens=actual_in,
+                                output_tokens=actual_out,
+                                cache_creation_input_tokens=cache_creation_in,
+                                cache_read_input_tokens=cache_read_in,
+                                thinking_output_tokens=thinking_tokens,
+                            )
+                            await _run_anthropic_routing_experiment(
+                                context=context,
+                                call_id=call_id,
+                                path=path,
+                                headers=headers,
+                                request_body=crunched,
+                                routing_meta=routing_meta,
+                                experiment_meta=experiment_meta,
+                                primary_response_body=primary_response_body,
+                                primary_status_code=status_code,
+                                primary_latency_ms=latency_ms,
+                                primary_cost_est_usd=cost,
+                                input_tokens_est=input_tokens,
+                            )
+                            if experiment_meta.get("status") in {"shadow-error", "shadow-unavailable"}:
+                                experiment_meta["reason"] = "streaming-shadow-error"
                     context.store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,

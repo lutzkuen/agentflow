@@ -86,6 +86,100 @@ class RoutingExperimentPolicyTest(unittest.TestCase):
         self.assertEqual(meta["source_surface"], "anthropic_messages")
         self.assertEqual(meta["policy_source"], "local-default")
 
+    def test_default_policy_can_sample_anthropic_streaming_shadow_pass_through(self):
+        meta = experiments.routing_experiment_decision(
+            {"model": "claude-sonnet-4-6", "stream": True},
+            {
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "category": "short-completion",
+                "text_chars": 1000,
+            },
+            stream=True,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertTrue(meta["sampled"])
+        self.assertEqual(meta["reason"], "streaming-shadow-sampled")
+        self.assertTrue(meta["streaming_shadow_supported"])
+        self.assertTrue(meta["stream"])
+        self.assertEqual(meta["primary_model"], "claude-sonnet-4-6")
+        self.assertEqual(meta["shadow_model"], "claude-haiku-4-5-20251001")
+
+    def test_streaming_shadow_gate_skips_non_anthropic_surfaces(self):
+        meta = experiments.routing_experiment_decision(
+            {"model": "gpt-5.4", "stream": True},
+            {
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4",
+                "category": "chat",
+                "text_chars": 1000,
+            },
+            stream=True,
+            provider="openai",
+            source_surface="openai_responses",
+            random_value=lambda: 0.0,
+        )
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "streaming-shadow-unsupported")
+        self.assertFalse(meta["streaming_shadow_supported"])
+
+    def test_streaming_shadow_budget_exhaustion_uses_existing_budget_controls(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_routing_experiment(
+                    id="spent-streaming-budget",
+                    call_id="call-1",
+                    created_at=utc_now(),
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    primary_model="claude-sonnet-4-6",
+                    shadow_model="claude-haiku-4-5-20251001",
+                    category="short-completion",
+                    routing_reason="streaming-shadow-sampled",
+                    input_tokens_est=100,
+                    primary_status_code=200,
+                    shadow_status_code=200,
+                    primary_latency_ms=10,
+                    shadow_latency_ms=20,
+                    primary_output_chars=1,
+                    shadow_output_chars=1,
+                    primary_output_sha256="a",
+                    shadow_output_sha256="b",
+                    output_similarity=1.0,
+                    passed_threshold=1,
+                    primary_cost_est_usd=0.001,
+                    shadow_cost_est_usd=10.0,
+                    routing_json=stable_json({}),
+                    experiment_json=stable_json({"sampled": True, "stream": True}),
+                )
+                meta = experiments.routing_experiment_decision(
+                    {"model": "claude-sonnet-4-6", "stream": True},
+                    {
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "short-completion",
+                        "text_chars": 1000,
+                    },
+                    stream=True,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    store_obj=store,
+                    random_value=lambda: 0.0,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertFalse(meta["sampled"])
+        self.assertEqual(meta["reason"], "daily-budget-exhausted")
+        self.assertTrue(meta["budget_exhausted"])
+
     def test_default_policy_samples_codex_turn_shadow_pass_through(self):
         self.assertIn("codex-turn", experiments.ROUTING_EXPERIMENT_POLICY["categories"])
 

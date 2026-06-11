@@ -15,7 +15,10 @@ if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
     import agentflow_proxy.cache as cache_module
+    import agentflow_proxy.anthropic_proxy as anthropic_proxy
+    import agentflow_proxy.routing_experiments as routing_experiments
     from agentflow_proxy.crunch import crunch_body, estimate_tokens_from_text
+    from agentflow_proxy.managed_egress import assert_managed_egress_safe
     from agentflow_proxy.recommendations import build_optimization_unit, pattern_feature_diagnostics
     from agentflow_proxy.router import categorize_request, extract_text, route_model
     from agentflow_proxy import server
@@ -60,6 +63,73 @@ class FakeAsyncClient:
     def stream(self, *args, **kwargs):
         FakeAsyncClient.calls += 1
         return FakeStreamResponse()
+
+
+class FakeShadowPostResponse:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+    text = '{"content":[{"type":"text","text":"Hello"}],"usage":{"input_tokens":4,"output_tokens":2}}'
+    content = text.encode("utf-8")
+
+    def json(self):
+        return {
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {"input_tokens": 4, "output_tokens": 2},
+        }
+
+
+class FakeShadowErrorPostResponse:
+    status_code = 400
+    headers = {"content-type": "application/json"}
+    text = '{"error":{"message":"shadow failed"}}'
+    content = text.encode("utf-8")
+
+    def json(self):
+        return {"error": {"message": "shadow failed"}}
+
+
+class FakeShadowStreamingClient:
+    stream_calls = 0
+    post_calls = 0
+    post_payloads = []
+    post_response = FakeShadowPostResponse()
+    frames = STREAM_FRAMES
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def stream(self, *args, **kwargs):
+        FakeShadowStreamingClient.stream_calls += 1
+        return FakeStreamResponseForFrames(FakeShadowStreamingClient.frames)
+
+    async def post(self, *args, **kwargs):
+        FakeShadowStreamingClient.post_calls += 1
+        FakeShadowStreamingClient.post_payloads.append(kwargs.get("json"))
+        return FakeShadowStreamingClient.post_response
+
+
+class FakeStreamResponseForFrames:
+    status_code = 200
+    headers = {}
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aiter_bytes(self):
+        for frame in self.frames:
+            yield frame
 
 
 class FakeStreamErrorResponse:
@@ -125,6 +195,11 @@ class StreamingCacheTest(unittest.TestCase):
         server.store = Store(self.tmp.name)
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
         FakeAsyncClient.calls = 0
+        FakeShadowStreamingClient.stream_calls = 0
+        FakeShadowStreamingClient.post_calls = 0
+        FakeShadowStreamingClient.post_payloads = []
+        FakeShadowStreamingClient.post_response = FakeShadowPostResponse()
+        FakeShadowStreamingClient.frames = STREAM_FRAMES
 
     def tearDown(self):
         server.store.conn.close()
@@ -187,6 +262,159 @@ class StreamingCacheTest(unittest.TestCase):
                 "allow_tool_calls": False,
             },
         }])[0]
+
+    def _streaming_experiment_decision(self, *, random_value):
+        def decide(body, routing_meta, **kwargs):
+            return routing_experiments.routing_experiment_decision(
+                body,
+                routing_meta,
+                **kwargs,
+                random_value=lambda: random_value,
+            )
+
+        return decide
+
+    def test_sampled_anthropic_stream_records_shadow_experiment_after_completion(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.stream_calls, 1)
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        self.assertEqual(FakeShadowStreamingClient.post_payloads[0]["model"], "claude-haiku-4-5-20251001")
+        self.assertFalse(FakeShadowStreamingClient.post_payloads[0]["stream"])
+
+        [call] = server.store.conn.execute(
+            "select stream, routing_json from calls"
+        ).fetchall()
+        routing_meta = json.loads(call["routing_json"])
+        experiment_meta = routing_meta["routing_experiment"]
+        self.assertEqual(call["stream"], 1)
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-sampled")
+        self.assertEqual(experiment_meta["status"], "compared")
+        self.assertTrue(experiment_meta["streaming"]["complete"])
+        self.assertEqual(experiment_meta["primary_output_chars"], 5)
+        self.assertEqual(experiment_meta["shadow_output_chars"], 5)
+
+        [sample] = server.store.conn.execute(
+            "select provider, source_surface, primary_model, shadow_model, primary_response_json, shadow_response_json from routing_experiments"
+        ).fetchall()
+        self.assertEqual(sample["provider"], "anthropic")
+        self.assertEqual(sample["source_surface"], "anthropic_messages")
+        self.assertEqual(sample["primary_model"], "claude-sonnet-4-6")
+        self.assertEqual(sample["shadow_model"], "claude-haiku-4-5-20251001")
+        self.assertIsNone(sample["primary_response_json"])
+        self.assertIsNone(sample["shadow_response_json"])
+
+        [queued] = server.store.conn.execute(
+            "select payload_json from managed_outcome_feedback_queue"
+        ).fetchall()
+        payload = json.loads(queued["payload_json"])
+        assert_managed_egress_safe(payload)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("What is the capital", serialized)
+        self.assertNotIn("Hello", serialized)
+
+    def test_unsampled_anthropic_stream_records_clear_skip_without_shadow_call(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.99)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.stream_calls, 1)
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["status"], "skipped")
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-not-sampled")
+        self.assertFalse(experiment_meta["sampled"])
+        self.assertEqual(
+            server.store.conn.execute("select count(*) as c from routing_experiments").fetchone()["c"],
+            0,
+        )
+
+    def test_incomplete_anthropic_stream_skips_shadow_with_auditable_reason(self):
+        incomplete_frames = STREAM_FRAMES[:-1]
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "Incomplete stream"}],
+        }
+        FakeShadowStreamingClient.frames = incomplete_frames
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(incomplete_frames))
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["status"], "skipped")
+        self.assertEqual(experiment_meta["reason"], "streaming-incomplete")
+        self.assertFalse(experiment_meta["streaming"]["complete"])
+
+    def test_anthropic_stream_shadow_upstream_error_is_recorded_without_raw_payloads(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "Shadow should fail"}],
+        }
+        FakeShadowStreamingClient.post_response = FakeShadowErrorPostResponse()
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-error")
+        self.assertEqual(experiment_meta["shadow_status_code"], 400)
+        [sample] = server.store.conn.execute(
+            "select shadow_status_code, primary_response_json, shadow_response_json from routing_experiments"
+        ).fetchall()
+        self.assertEqual(sample["shadow_status_code"], 400)
+        self.assertIsNone(sample["primary_response_json"])
+        self.assertIsNone(sample["shadow_response_json"])
 
     def test_streamed_non_tool_response_is_not_cached_without_explicit_rule(self):
         request_body = {

@@ -22,6 +22,8 @@ source_surfaces:
   - openai_responses
   - openai_chat
   - codex_turn
+streaming_shadow_source_surfaces:
+  - anthropic_messages
 model_pairs:
   - requested_model: claude-sonnet-4-6
     routed_model: claude-haiku-4-5-20251001

@@ -78,6 +78,7 @@ def _default_experiment_policy() -> dict[str, Any]:
         "max_text_chars": 8000,
         "providers": ["anthropic", "openai"],
         "source_surfaces": ["anthropic_messages", "openai_responses", "openai_chat", "codex_turn"],
+        "streaming_shadow_source_surfaces": ["anthropic_messages"],
         "model_pairs": [
             {"requested_model": "claude-sonnet-4-6", "routed_model": "claude-haiku-4-5-20251001"},
             {"requested_model": "claude-opus-4-5", "routed_model": "claude-sonnet-4-6"},
@@ -119,7 +120,7 @@ def _apply_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str
         policy["min_text_chars"] = int(data["min_text_chars"])
     if data.get("max_text_chars") is not None:
         policy["max_text_chars"] = int(data["max_text_chars"])
-    for key in ("providers", "source_surfaces", "workflow_phases", "categories"):
+    for key in ("providers", "source_surfaces", "streaming_shadow_source_surfaces", "workflow_phases", "categories"):
         values = data.get(key)
         if isinstance(values, list):
             policy[key] = [str(c) for c in values if c is not None]
@@ -308,6 +309,12 @@ def routing_experiment_decision(
         "min_samples_for_confidence": ROUTING_EXPERIMENT_MIN_SAMPLES,
         "provider": provider,
         "source_surface": source_surface,
+        "stream": bool(stream),
+        "streaming_shadow_supported": (
+            bool(stream)
+            and mode == "shadow_candidate_pass_through"
+            and _value_allowed(source_surface, ROUTING_EXPERIMENT_POLICY.get("streaming_shadow_source_surfaces"))
+        ),
         "requested_model": requested,
         "routed_model": routed,
         "shadow_model": requested,
@@ -336,8 +343,8 @@ def routing_experiment_decision(
     if not _value_allowed(source_surface, ROUTING_EXPERIMENT_POLICY.get("source_surfaces")):
         meta["reason"] = "source-surface-not-enabled"
         return meta
-    if stream:
-        meta["reason"] = "streaming"
+    if stream and not meta["streaming_shadow_supported"]:
+        meta["reason"] = "streaming-shadow-unsupported"
         return meta
     if not requested:
         meta["reason"] = "missing-requested-model"
@@ -394,16 +401,19 @@ def routing_experiment_decision(
         meta["reason"] = "sample-rate-zero"
         return meta
     if random_value() >= ROUTING_EXPERIMENT_SAMPLE_RATE:
-        meta["reason"] = "not-sampled"
+        meta["reason"] = "streaming-shadow-not-sampled" if stream else "not-sampled"
         return meta
 
     meta["status"] = "selected"
     meta["sampled"] = True
-    meta["reason"] = (
-        "sampled-shadow-candidate-pass-through"
-        if mode == "shadow_candidate_pass_through"
-        else "sampled-routed-down-call"
-    )
+    if stream and mode == "shadow_candidate_pass_through":
+        meta["reason"] = "streaming-shadow-sampled"
+    else:
+        meta["reason"] = (
+            "sampled-shadow-candidate-pass-through"
+            if mode == "shadow_candidate_pass_through"
+            else "sampled-routed-down-call"
+        )
     return meta
 
 
@@ -1150,6 +1160,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "daily_budget_exhausted": bool(ROUTING_EXPERIMENT_ENABLED and (budget_limit <= 0 or today_spend >= budget_limit)),
             "providers": list(ROUTING_EXPERIMENT_POLICY.get("providers") or []),
             "source_surfaces": list(ROUTING_EXPERIMENT_POLICY.get("source_surfaces") or []),
+            "streaming_shadow_source_surfaces": list(ROUTING_EXPERIMENT_POLICY.get("streaming_shadow_source_surfaces") or []),
             "model_pairs": list(ROUTING_EXPERIMENT_POLICY.get("model_pairs") or []),
             "categories": list(ROUTING_EXPERIMENT_POLICY.get("categories") or []),
             "workflow_phases": list(ROUTING_EXPERIMENT_POLICY.get("workflow_phases") or []),
