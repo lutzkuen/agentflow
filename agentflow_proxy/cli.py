@@ -5469,6 +5469,77 @@ def _write_policy_rollback_result(stream: Any, payload: dict[str, Any], *, prett
         _write_json(stream, payload)
 
 
+def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Build a sanitized data-backed AgentFlow research-mode backlog plan")
+    parser.add_argument(
+        "--issues-json",
+        required=True,
+        help="Path to a GitHub issue-list JSON array. Use '-' to read from stdin.",
+    )
+    parser.add_argument(
+        "--stats-json",
+        help="Optional path to local stats JSON from the dashboard/API.",
+    )
+    parser.add_argument(
+        "--log",
+        action="append",
+        default=[],
+        help="Recent orchestrator log path to inspect. Can be repeated.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=int(os.getenv("AGENTFLOW_RESEARCH_BACKLOG_THRESHOLD", "3")),
+        help="Minimum status:ready actionable issue count before research mode is skipped.",
+    )
+    parser.add_argument(
+        "--trusted-author",
+        default=os.getenv("AGENTFLOW_GITHUB_TRUSTED_AUTHOR", "lutzkuen"),
+        help="Only issues from this GitHub author are considered unattended-actionable.",
+    )
+    parser.add_argument(
+        "--stale-days",
+        type=int,
+        default=14,
+        help="Age in days before a blocked issue is treated as stale for research comments.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.orchestrator_research import build_research_plan, load_json_file, write_json
+
+    try:
+        if args.issues_json == "-":
+            issues = json.loads(sys.stdin.read())
+        else:
+            issues = load_json_file(args.issues_json)
+        stats = load_json_file(args.stats_json) if args.stats_json else None
+    except (OSError, ValueError, TypeError) as exc:
+        _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+        return 1
+
+    if not isinstance(issues, list):
+        _write_json(stderr, {"ok": False, "error": {"type": "invalid_issues_json", "message": "issues JSON must be an array"}})
+        return 1
+    if stats is not None and not isinstance(stats, dict):
+        _write_json(stderr, {"ok": False, "error": {"type": "invalid_stats_json", "message": "stats JSON must be an object"}})
+        return 1
+
+    plan = build_research_plan(
+        issues=issues,
+        stats=stats,
+        log_sources=args.log,
+        threshold=args.threshold,
+        trusted_author=args.trusted_author,
+        stale_days=args.stale_days,
+    )
+    write_json(stdout, plan, pretty=args.pretty)
+    return 0
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -5682,3 +5753,7 @@ def managed_feedback_status_main() -> None:
 
 def managed_feedback_flush_main() -> None:
     raise SystemExit(managed_feedback_flush_cli())
+
+
+def orchestrator_research_main() -> None:
+    raise SystemExit(orchestrator_research_cli())
