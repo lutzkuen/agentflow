@@ -7156,6 +7156,12 @@ async def stats_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict
     return build_openai_routing_report(store_obj, limit=limit)
 
 
+async def stats_openai_old_context_summary_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.openai_old_context_summary_report import build_openai_old_context_summary_report
+
+    return build_openai_old_context_summary_report(store_obj, limit=limit)
+
+
 def _optimization_eval_reason_codes(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
