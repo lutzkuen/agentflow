@@ -181,6 +181,10 @@ def create_dashboard_router(
     async def stats_openai_canary_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_canary_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/claude-canary-impact")
+    async def stats_claude_canary_impact(limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_claude_canary_impact(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/openai-old-context-summary")
     async def stats_openai_old_context_summary(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_openai_old_context_summary_report(_store(store_obj), limit=limit)

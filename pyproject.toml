@@ -62,6 +62,7 @@ agentflow-openai-cache-replay-readiness = "agentflow_proxy.cli:openai_cache_repl
 agentflow-openai-cache-replay-dry-run = "agentflow_proxy.cli:openai_cache_replay_dry_run_main"
 agentflow-openai-old-context-summary-dry-run = "agentflow_proxy.cli:openai_old_context_summary_dry_run_main"
 agentflow-openai-canary-impact = "agentflow_proxy.cli:openai_canary_impact_main"
+agentflow-claude-canary-impact = "agentflow_proxy.cli:claude_canary_impact_main"
 agentflow-routing-experiment-report = "agentflow_proxy.cli:routing_experiment_report_main"
 agentflow-routing-promotion-draft-stage = "agentflow_proxy.cli:routing_promotion_draft_stage_main"
 agentflow-phase-routing-report = "agentflow_proxy.cli:phase_routing_report_main"

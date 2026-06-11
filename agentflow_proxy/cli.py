@@ -3924,6 +3924,60 @@ def openai_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     return 0
 
 
+def claude_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report Claude local routing canary impact and promotion verdicts from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Maximum recent Claude calls to scan, default: 500, max: 10000.")
+    parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied canary samples before widening, default: 2.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout canary samples before widening, default: 1.")
+    parser.add_argument("--max-evidence-age-hours", type=float, default=72.0, help="Mark evidence stale after this many hours, default: 72.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum applied error rate before hold, default: 0.05.")
+    parser.add_argument("--max-error-rate-delta", type=float, default=0.05, help="Maximum applied-minus-holdout error-rate delta before hold, default: 0.05.")
+    parser.add_argument("--max-retry-rate-delta", type=float, default=0.10, help="Maximum applied-minus-holdout retry-rate delta before hold, default: 0.10.")
+    parser.add_argument("--max-fallback-rate-delta", type=float, default=0.10, help="Maximum applied-minus-holdout fallback-rate delta before hold, default: 0.10.")
+    parser.add_argument("--max-rate-limit-fallback-rate-delta", type=float, default=0.05, help="Maximum applied-minus-holdout rate-limit fallback-rate delta before hold, default: 0.05.")
+    parser.add_argument("--max-latency-regression-ms", type=int, default=2000, help="Maximum applied-minus-holdout latency regression before hold, default: 2000.")
+    parser.add_argument("--rollback-error-rate", type=float, default=0.20, help="Applied error rate that triggers rollback, default: 0.20.")
+    parser.add_argument("--rollback-fallback-rate", type=float, default=0.50, help="Applied fallback rate that triggers rollback, default: 0.50.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_claude_canary_impact_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+            max_evidence_age_hours=args.max_evidence_age_hours,
+            max_error_rate=args.max_error_rate,
+            max_error_rate_delta=args.max_error_rate_delta,
+            max_retry_rate_delta=args.max_retry_rate_delta,
+            max_fallback_rate_delta=args.max_fallback_rate_delta,
+            max_rate_limit_fallback_rate_delta=args.max_rate_limit_fallback_rate_delta,
+            max_latency_regression_ms=args.max_latency_regression_ms,
+            rollback_error_rate=args.rollback_error_rate,
+            rollback_fallback_rate=args.rollback_fallback_rate,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report local budgeted routing A/B experiment results from metadata")
     parser.add_argument(
@@ -6190,6 +6244,10 @@ def openai_old_context_summary_dry_run_main() -> None:
 
 def openai_canary_impact_main() -> None:
     raise SystemExit(openai_canary_impact_cli())
+
+
+def claude_canary_impact_main() -> None:
+    raise SystemExit(claude_canary_impact_cli())
 
 
 def routing_experiment_report_main() -> None:

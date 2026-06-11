@@ -7589,6 +7589,13 @@ async def stats_openai_canary_readiness(store_obj: Any, limit: int = 1000) -> di
     }
 
 
+async def stats_claude_canary_impact(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    return build_claude_canary_impact_report(store_obj, limit=capped_limit)
+
+
 def _shadow_routing_candidate_id(row: dict[str, Any]) -> str:
     parts = [
         row.get("provider"),
