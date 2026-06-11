@@ -260,10 +260,13 @@ def _default_phase_canary_policy() -> dict[str, Any]:
     return {
         "enabled": False,
         "policy_id": "local-phase-sonnet-haiku-canary-v1",
+        "provider": "anthropic",
         "source_surface": "anthropic_messages",
         "app_family": "anthropic",
         "model_pattern": "sonnet",
         "target_model": "haiku",
+        "requested_model": "sonnet",
+        "routed_model": "haiku",
         "eligible_workflow_phases": ["tool-execution", "summary"],
         "excluded_workflow_phases": ["planning", "thinking", "unknown"],
         "eligible_categories": [],
@@ -275,6 +278,12 @@ def _default_phase_canary_policy() -> dict[str, Any]:
         "holdout_fraction": 0.0,
         "salt": "agentflow-phase-routing-canary-v1",
         "cohort_unit": "request_features",
+        "safety_gates": {
+            "block_thinking_history": True,
+            "block_top_level_thinking": True,
+            "strip_model_incompatible_params": True,
+            "fallback_to_requested_on_rate_limit": True,
+        },
         "safety_stop": {
             "enabled": True,
             "window_hours": 24,
@@ -356,11 +365,14 @@ def _apply_phase_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, Any
         "policy_id",
         "promotion_action_id",
         "target_candidate_id",
+        "provider",
         "source_surface",
         "app_family",
         "policy_source",
         "model_pattern",
         "target_model",
+        "requested_model",
+        "routed_model",
         "min_workflow_phase_confidence",
         "salt",
         "cohort_unit",
@@ -378,10 +390,22 @@ def _apply_phase_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, Any
     for key in ("min_text_chars", "max_text_chars"):
         if key in data:
             policy[key] = _int_min(data.get(key), int(policy[key]), 0)
+    if "stream" in data:
+        policy["stream"] = _as_bool(data.get("stream"), False)
     for key in ("canary_fraction", "rollout_fraction", "holdout_fraction"):
         if key in data:
             target_key = "canary_fraction" if key == "rollout_fraction" else key
             policy[target_key] = _float_0_1(data.get(key), float(policy[target_key]))
+    if isinstance(data.get("safety_gates"), dict):
+        merged_gates = dict(policy.get("safety_gates") or {})
+        for key, value in data["safety_gates"].items():
+            if isinstance(value, bool):
+                merged_gates[str(key)] = value
+            elif value in (None, ""):
+                continue
+            elif isinstance(value, (str, int, float)):
+                merged_gates[str(key)] = value
+        policy["safety_gates"] = merged_gates
 
     safety = data.get("safety_stop")
     if isinstance(safety, dict):
@@ -713,6 +737,7 @@ def _phase_canary_base_meta(
     target_model: str,
     text_chars: int,
     tools: bool,
+    stream: bool,
     category: str,
     phase_meta: dict[str, str],
     reason: str,
@@ -731,6 +756,7 @@ def _phase_canary_base_meta(
         "requested_model": requested,
         "target_model": target_model,
         "actual_forwarded_model": requested,
+        "provider": str(ROUTING_PHASE_CANARY.get("provider") or "anthropic"),
         "source_surface": str(ROUTING_PHASE_CANARY.get("source_surface") or "anthropic_messages"),
         "app_family": str(ROUTING_PHASE_CANARY.get("app_family") or "anthropic"),
         "workflow_phase": phase_meta.get("workflow_phase") or "unknown",
@@ -739,9 +765,11 @@ def _phase_canary_base_meta(
         "text_chars": text_chars,
         "text_bucket": _text_bucket(text_chars),
         "has_tools": tools,
+        "stream": stream,
         "canary_fraction": float(ROUTING_PHASE_CANARY.get("canary_fraction") or 0.0),
         "holdout_fraction": float(ROUTING_PHASE_CANARY.get("holdout_fraction") or 0.0),
         "policy_source": ROUTING_PHASE_CANARY.get("policy_source") or ROUTING_RULES_SOURCE,
+        "safety_gates": ROUTING_PHASE_CANARY.get("safety_gates") if isinstance(ROUTING_PHASE_CANARY.get("safety_gates"), dict) else {},
     }
 
 
@@ -868,6 +896,7 @@ def phase_canary_decision(
     text_chars: int,
     tools: bool,
     category: str,
+    stream: bool,
     phase_meta: dict[str, str],
     session_id: str | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
@@ -878,6 +907,7 @@ def phase_canary_decision(
         target_model=target_model,
         text_chars=text_chars,
         tools=tools,
+        stream=stream,
         category=category,
         phase_meta=phase_meta,
         reason="disabled",
@@ -885,8 +915,14 @@ def phase_canary_decision(
     )
     if not ROUTING_PHASE_CANARY.get("enabled"):
         return None, meta
+    if meta["provider"] != "anthropic":
+        meta.update({"status": "ineligible", "reason": "provider-not-supported"})
+        return requested, meta
     if meta["source_surface"] != "anthropic_messages":
         meta.update({"status": "ineligible", "reason": "source-surface-not-supported"})
+        return requested, meta
+    if ROUTING_PHASE_CANARY.get("stream") is not None and bool(ROUTING_PHASE_CANARY.get("stream")) != bool(stream):
+        meta.update({"status": "ineligible", "reason": "stream-scope-not-enabled"})
         return requested, meta
 
     requested_l = requested.lower()
@@ -938,6 +974,7 @@ def phase_canary_decision(
         "category": category,
         "text_bucket": meta["text_bucket"],
         "has_tools": tools,
+        "stream": stream,
         "policy_id": meta["policy_id"],
     }
     cohort_unit = str(ROUTING_PHASE_CANARY.get("cohort_unit") or "request_features")
@@ -949,6 +986,7 @@ def phase_canary_decision(
             "target_model": target_model,
             "policy_id": meta["policy_id"],
             "cohort_unit": "session",
+            "stream": stream,
             "session_id_hash": _hash_local_identifier("session_id", session_id),
         }
     else:
@@ -1283,6 +1321,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
     max_tokens = body.get("max_tokens")  # None when caller didn't set it
     category = categorize_request(body)
     phase_meta = classify_workflow_phase(body, category)
+    stream = _as_bool(body.get("stream"), False)
     if not ROUTING_ENABLED:
         return requested, {
             "enabled": False,
@@ -1304,6 +1343,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             text_chars=text_chars,
             tools=tools,
             category=category,
+            stream=stream,
             phase_meta=phase_meta,
             session_id=session_id,
         )

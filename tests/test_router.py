@@ -768,6 +768,133 @@ rules: []
             finally:
                 importlib.reload(router_module)
 
+    def test_phase_canary_rejects_non_anthropic_provider(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  provider: openai
+  source_surface: anthropic_messages
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["phase_canary"]["status"], "ineligible")
+                    self.assertEqual(meta["phase_canary"]["reason"], "provider-not-supported")
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_enforces_stream_scope(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  provider: anthropic
+  source_surface: anthropic_messages
+  stream: true
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    base = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            }
+                        ],
+                    }
+
+                    non_stream_routed, non_stream_meta = manual_router.route_model({**base, "stream": False})
+                    stream_routed, stream_meta = manual_router.route_model({**base, "stream": True})
+
+                    self.assertEqual(non_stream_routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(non_stream_meta["phase_canary"]["reason"], "stream-scope-not-enabled")
+                    self.assertEqual(stream_routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(stream_meta["phase_canary"]["status"], "applied")
+                    self.assertTrue(stream_meta["phase_canary"]["stream"])
+                    self.assertNotIn("content", stable_json(stream_meta["phase_canary"]["cohort_features"]))
+            finally:
+                importlib.reload(router_module)
+
+    def test_phase_canary_thinking_history_stays_gated(self):
+        with TemporaryDirectory() as tmp:
+            try:
+                with self._reload_with_routing_yaml(
+                    tmp,
+                    """
+phase_canary:
+  enabled: true
+  policy_id: test-phase-canary
+  provider: anthropic
+  source_surface: anthropic_messages
+  stream: true
+  canary_fraction: 1.0
+  holdout_fraction: 0.0
+  excluded_categories: []
+  safety_stop:
+    enabled: false
+rules: []
+""",
+                ):
+                    manual_router = importlib.reload(router_module)
+                    body = {
+                        "model": manual_router.SONNET_DEFAULT,
+                        "stream": True,
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "content": [{"type": "thinking", "thinking": "internal reasoning"}],
+                            },
+                            {
+                                "role": "user",
+                                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                            },
+                        ],
+                    }
+
+                    routed, meta = manual_router.route_model(body)
+
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
+                    self.assertEqual(meta["workflow_phase"], "thinking")
+                    self.assertEqual(meta["phase_canary"]["status"], "ineligible")
+                    self.assertEqual(meta["phase_canary"]["reason"], "workflow-phase-not-enabled")
+                    self.assertTrue(meta["phase_canary"]["safety_gates"]["block_thinking_history"])
+            finally:
+                importlib.reload(router_module)
+
     def test_phase_canary_session_cohort_uses_hashed_session_only(self):
         with TemporaryDirectory() as tmp:
             try:

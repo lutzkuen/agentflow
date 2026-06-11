@@ -3150,6 +3150,7 @@ async def _maybe_run_codex_routing_experiment(
             created_at=utc_now(),
             provider="openai",
             source_surface="codex_turn",
+            stream=0,
             requested_model=experiment_meta.get("requested_model"),
             routed_model=experiment_meta.get("routed_model"),
             primary_model=primary_model,

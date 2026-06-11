@@ -1557,6 +1557,7 @@ similarity_threshold: 0.86
         error: str | None = None,
         workflow_phase: str = "summary",
         fallback: bool = False,
+        stream: bool = False,
     ) -> None:
         created_at = created_at or utc_now()
         similarity = 0.94 if passed else 0.7
@@ -1580,6 +1581,7 @@ similarity_threshold: 0.86
             created_at=created_at,
             provider="openai",
             source_surface="codex_turn",
+            stream=1 if stream else 0,
             requested_model="gpt-5-codex",
             routed_model="gpt-5-mini",
             primary_model="gpt-5-codex",
@@ -1700,6 +1702,24 @@ similarity_threshold: 0.86
         self.assertEqual(set(modes), {"shadow_candidate_pass_through", "applied_routed_down"})
         self.assertFalse(modes["shadow_candidate_pass_through"]["promotion"]["canary_evidence"])
         self.assertTrue(modes["applied_routed_down"]["promotion"]["canary_evidence"])
+
+    def test_shadow_promotion_report_separates_streaming_scope(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manual = self._reload_with_promotion_fixture_policy(tmp_path)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            try:
+                for idx in range(3):
+                    self._log_shadow_promotion_sample(store, idx=idx, stream=True)
+                    self._log_shadow_promotion_sample(store, idx=idx + 10, stream=False)
+                report = manual.build_routing_experiment_report(store, limit=10)
+            finally:
+                store.conn.close()
+
+        streams = {candidate["stream"] for candidate in report["candidates"]}
+        self.assertEqual(streams, {True, False})
+        for candidate in report["candidates"]:
+            self.assertEqual(candidate["promotion_verdict"], "promote")
 
     def test_routing_experiment_report_cli_and_stats_full_expose_promotion_verdicts(self):
         with TemporaryDirectory() as tmp:

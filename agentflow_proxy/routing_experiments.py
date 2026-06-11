@@ -1563,6 +1563,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         select created_at,
                coalesce(provider, 'anthropic') as provider,
                coalesce(source_surface, 'anthropic_messages') as source_surface,
+               coalesce(stream, 0) as stream,
                requested_model,
                routed_model,
                primary_model,
@@ -1585,7 +1586,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         limit 50000
         """
     ).fetchall()
-    grouped: dict[tuple[str, str, str, str, str, str, str], dict[str, Any]] = {}
+    grouped: dict[tuple[str, str, bool, str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
         experiment = _parse_jsonish(row["experiment_json"])
         routing = _parse_jsonish(row["routing_json"])
@@ -1594,6 +1595,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         key = (
             _public_label(row["provider"]),
             _public_label(row["source_surface"]),
+            bool(row["stream"]),
             _public_label(row["requested_model"], fallback=""),
             _public_label(row["routed_model"], fallback=""),
             _public_label(row["category"]),
@@ -1605,11 +1607,12 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             {
                 "provider": key[0],
                 "source_surface": key[1],
-                "requested_model": key[2],
-                "routed_model": key[3],
-                "category": key[4],
-                "workflow_phase": key[5],
-                "mode": key[6],
+                "stream": key[2],
+                "requested_model": key[3],
+                "routed_model": key[4],
+                "category": key[5],
+                "workflow_phase": key[6],
+                "mode": key[7],
                 "routing_reasons": {},
                 "mode_composition": {},
                 "samples": 0,

@@ -428,6 +428,7 @@ async def _run_openai_routing_experiment(
         created_at=utc_now(),
         provider=experiment_meta.get("provider") or "openai",
         source_surface=experiment_meta.get("source_surface") or "openai_responses",
+        stream=1 if request_body.get("stream") else 0,
         requested_model=experiment_meta.get("requested_model") or routing_meta.get("requested_model"),
         routed_model=experiment_meta.get("routed_model") or routing_meta.get("routed_model"),
         primary_model=primary_model,

@@ -7214,6 +7214,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         promoted = {
             "provider": "anthropic",
             "source_surface": "anthropic_messages",
+            "stream": True,
             "requested_model": "claude-sonnet-4-6",
             "routed_model": "claude-haiku-4-5-20251001",
             "category": "tool-result",
@@ -7346,9 +7347,20 @@ class PolicyReloadCliTests(unittest.TestCase):
             canary = bundle["policies"]["routing"]["phase_canary"]
             self.assertTrue(canary["enabled"])
             self.assertEqual(canary["target_model"], "claude-haiku-4-5-20251001")
+            self.assertEqual(canary["provider"], "anthropic")
+            self.assertEqual(canary["source_surface"], "anthropic_messages")
+            self.assertTrue(canary["stream"])
+            self.assertEqual(canary["requested_model"], "claude-sonnet-4-6")
+            self.assertEqual(canary["routed_model"], "claude-haiku-4-5-20251001")
             self.assertEqual(canary["eligible_categories"], ["tool-result"])
             self.assertEqual(canary["eligible_workflow_phases"], ["tool-execution"])
+            self.assertEqual(canary["min_text_chars"], 0)
+            self.assertEqual(canary["max_text_chars"], 8000)
+            self.assertTrue(canary["safety_gates"]["block_thinking_history"])
+            self.assertTrue(canary["safety_gates"]["strip_model_incompatible_params"])
+            self.assertTrue(canary["safety_gates"]["fallback_to_requested_on_rate_limit"])
             self.assertEqual(canary["promotion"]["evidence_summary"]["samples"], 24)
+            self.assertTrue(canary["promotion"]["evidence_summary"]["stream"])
             self.assertEqual(canary["promotion"]["rollback_metadata"]["rollback_action_type"], "disable_canary")
             rendered = json.dumps(canary["promotion"], sort_keys=True)
             self.assertIn("tool-result", rendered)

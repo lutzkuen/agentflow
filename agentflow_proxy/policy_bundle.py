@@ -623,9 +623,26 @@ def _validate_routing_policy(policy: dict[str, Any], errors: list[dict[str, str]
     canary = _validate_object_field(policy, "$.policies.routing", "phase_canary", errors)
     if "enabled" in canary:
         _validate_boolish(errors, "$.policies.routing.phase_canary.enabled", canary["enabled"])
-    for key in ("policy_id", "model_pattern", "target_model", "min_workflow_phase_confidence", "salt"):
+    for key in (
+        "policy_id",
+        "promotion_action_id",
+        "target_candidate_id",
+        "provider",
+        "source_surface",
+        "app_family",
+        "policy_source",
+        "model_pattern",
+        "target_model",
+        "requested_model",
+        "routed_model",
+        "min_workflow_phase_confidence",
+        "salt",
+        "cohort_unit",
+    ):
         if key in canary and canary[key] not in (None, ""):
             _validate_non_empty_string(errors, f"$.policies.routing.phase_canary.{key}", canary[key])
+    if "stream" in canary:
+        _validate_boolish(errors, "$.policies.routing.phase_canary.stream", canary["stream"])
     for key in ("eligible_workflow_phases", "excluded_workflow_phases", "eligible_categories", "excluded_categories"):
         if key in canary:
             value = canary[key]

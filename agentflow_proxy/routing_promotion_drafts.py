@@ -221,6 +221,7 @@ def _candidate_id(candidate: dict[str, Any]) -> str:
         candidate.get("routed_model"),
         candidate.get("category"),
         candidate.get("workflow_phase"),
+        candidate.get("stream"),
         candidate.get("mode"),
     )
 
@@ -278,6 +279,8 @@ def _candidate_omission_reason(report: dict[str, Any], candidate: dict[str, Any]
             return "missing-evidence"
     if not _string(candidate.get("workflow_phase")):
         return "missing-evidence"
+    if candidate.get("stream") in (None, ""):
+        return "missing-evidence"
     if candidate.get("samples") in (None, "") or candidate.get("compared_samples") in (None, ""):
         return "missing-evidence"
     reason_codes = {str(code) for code in promotion.get("reason_codes") or candidate.get("promotion_reason_codes") or []}
@@ -319,6 +322,9 @@ def _evidence_summary(report: dict[str, Any], candidate: dict[str, Any]) -> dict
         "schema": "agentflow.routing_promotion_evidence_summary.v1",
         "source_report_schema": report.get("schema"),
         "source_report_generated_at": report.get("generated_at"),
+        "provider": candidate.get("provider"),
+        "source_surface": candidate.get("source_surface"),
+        "stream": bool(candidate.get("stream")),
         "mode": candidate.get("mode"),
         "promotion_scope": promotion.get("promotion_scope"),
         "evidence_kind": promotion.get("evidence_kind"),
@@ -334,6 +340,8 @@ def _evidence_summary(report: dict[str, Any], candidate: dict[str, Any]) -> dict
         "avg_latency_delta_ms": candidate.get("avg_latency_delta_ms"),
         "last_sample_at": candidate.get("last_sample_at"),
         "last_sample_age_hours": candidate.get("last_sample_age_hours"),
+        "effective_min_text_chars": candidate.get("effective_min_text_chars"),
+        "effective_max_text_chars": candidate.get("effective_max_text_chars"),
         "promotion_reason_codes": list(promotion.get("reason_codes") or []),
         "thresholds": promotion.get("thresholds") if isinstance(promotion.get("thresholds"), dict) else {},
         "coverage": promotion.get("coverage") if isinstance(promotion.get("coverage"), dict) else {},
@@ -375,15 +383,24 @@ def _routing_payload(
     report_policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
     min_text_chars = _as_int(report_policy.get("min_text_chars"), 0)
     max_text_chars = _as_int(report_policy.get("max_text_chars"), 30000 if target_key == "phase_canary" else 8000)
+    min_text_chars = _as_int(candidate.get("effective_min_text_chars"), min_text_chars)
+    max_text_chars = _as_int(candidate.get("effective_max_text_chars"), max_text_chars)
+    provider = _string(candidate.get("provider"))
+    source_surface = _string(candidate.get("source_surface"))
+    stream = bool(candidate.get("stream"))
     canary = {
         "enabled": True,
         "policy_id": policy_id,
         "target_candidate_id": candidate_id,
-        "source_surface": candidate.get("source_surface"),
+        "provider": provider,
+        "source_surface": source_surface,
         "app_family": candidate.get("app_family") or "anthropic",
         "policy_source": "local-manual",
         "model_pattern": requested,
         "target_model": routed,
+        "requested_model": requested,
+        "routed_model": routed,
+        "stream": stream,
         "eligible_categories": _string_list(category),
         "excluded_categories": ["code-gen"] if category != "code-gen" else [],
         "min_text_chars": min_text_chars,
@@ -392,6 +409,17 @@ def _routing_payload(
         "holdout_fraction": _bounded_fraction(holdout_fraction, 0.10),
         "salt": _stable_id("routing-promotion-salt", candidate_id, requested, routed),
         "cohort_unit": "session",
+        "safety_gates": {
+            "provider": provider,
+            "source_surface": source_surface,
+            "stream": stream,
+            "block_thinking_history": True,
+            "block_top_level_thinking": True,
+            "strip_model_incompatible_params": True,
+            "fallback_to_requested_on_rate_limit": True,
+            "content_free": True,
+            "provider_calls_made_by_apply": False,
+        },
         "safety_stop": _safety_stop(candidate),
         "promotion": {
             "schema": "agentflow.routing_promotion_local_draft_metadata.v1",

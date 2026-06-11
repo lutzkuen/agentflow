@@ -650,6 +650,7 @@ async def _run_anthropic_routing_experiment(
         created_at=utc_now(),
         provider=experiment_meta.get("provider") or "anthropic",
         source_surface=experiment_meta.get("source_surface") or "anthropic_messages",
+        stream=1 if experiment_meta.get("stream") else 0,
         requested_model=experiment_meta.get("requested_model") or routing_meta.get("requested_model"),
         routed_model=experiment_meta.get("routed_model") or routing_meta.get("routed_model"),
         primary_model=primary_model,

@@ -341,6 +341,7 @@ class SQLiteStore:
               created_at text not null,
               provider text,
               source_surface text,
+              stream integer,
               requested_model text not null,
               routed_model text not null,
               primary_model text not null,
@@ -373,6 +374,7 @@ class SQLiteStore:
             """)
             self._ensure_column("routing_experiments", "provider", "text")
             self._ensure_column("routing_experiments", "source_surface", "text")
+            self._ensure_column("routing_experiments", "stream", "integer")
             self._ensure_column("routing_experiments", "budget_limit_usd", "real")
             self._ensure_column("routing_experiments", "budget_spent_before_usd", "real")
             self._ensure_column("routing_experiments", "budget_remaining_before_usd", "real")
@@ -902,7 +904,7 @@ class SQLiteStore:
 
     def log_routing_experiment(self, **kwargs: Any) -> None:
         cols = [
-            "id", "call_id", "created_at", "provider", "source_surface", "requested_model", "routed_model",
+            "id", "call_id", "created_at", "provider", "source_surface", "stream", "requested_model", "routed_model",
             "primary_model", "shadow_model", "category", "routing_reason",
             "input_tokens_est", "primary_status_code", "shadow_status_code",
             "primary_latency_ms", "shadow_latency_ms", "primary_output_chars",
@@ -1031,6 +1033,7 @@ class PostgresStore(SQLiteStore):
               created_at timestamptz not null,
               provider text,
               source_surface text,
+              stream integer,
               requested_model text not null,
               routed_model text not null,
               primary_model text not null,
@@ -1127,6 +1130,7 @@ class PostgresStore(SQLiteStore):
         for column, definition in (
             ("provider", "text"),
             ("source_surface", "text"),
+            ("stream", "integer"),
             ("budget_limit_usd", "numeric"),
             ("budget_spent_before_usd", "numeric"),
             ("budget_remaining_before_usd", "numeric"),
