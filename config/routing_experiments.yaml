@@ -27,6 +27,7 @@ workflow_phases: []
 categories:
   - chat
   - short-completion
+  - tool-light
   - codex-turn
 similarity_threshold: 0.86
 min_samples_for_confidence: 20
