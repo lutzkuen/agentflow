@@ -42,6 +42,7 @@ agentflow-managed-rollout-actions-dry-run = "agentflow_proxy.cli:managed_rollout
 agentflow-managed-rollout-actions-impact = "agentflow_proxy.cli:managed_rollout_actions_impact_main"
 agentflow-old-context-summary-dry-run = "agentflow_proxy.cli:old_context_summary_dry_run_main"
 agentflow-old-context-summary-impact = "agentflow_proxy.cli:old_context_summary_impact_main"
+agentflow-old-context-summary-quality-gate = "agentflow_proxy.cli:old_context_summary_quality_gate_main"
 agentflow-old-context-summary-rollout-actions-review = "agentflow_proxy.cli:old_context_summary_rollout_actions_review_main"
 agentflow-old-context-summary-rollout-actions-apply = "agentflow_proxy.cli:old_context_summary_rollout_actions_apply_main"
 agentflow-old-context-summary-rollout-actions-dry-run = "agentflow_proxy.cli:old_context_summary_rollout_actions_dry_run_main"

@@ -3298,7 +3298,7 @@ class PolicyReloadCliTests(unittest.TestCase):
             ("promote", "promote", "quality-gate-passed"),
             ("hold", "hold", "applied-retry-rate-above-threshold"),
             ("rollback", "rollback", "rollback-error-rate"),
-            ("insufficient-evidence", "insufficient-evidence", "insufficient-matched-samples"),
+            ("insufficient-evidence", "hold", "insufficient-matched-samples"),
         ):
             dry_run = self._old_context_summary_quality_gate_dry_run()
             with self.subTest(scenario=scenario):
@@ -3331,6 +3331,51 @@ class PolicyReloadCliTests(unittest.TestCase):
                 self.assertNotIn("quality-gate-session-secret", encoded)
                 self.assertNotIn("raw quality error", encoded)
 
+    def test_old_context_summary_quality_gate_cli_returns_compact_verdicts(self):
+        for scenario, expected_verdict, expected_reason in (
+            ("promote", "promote", "quality-gate-passed"),
+            ("insufficient-evidence", "hold", "insufficient-matched-samples"),
+            ("rollback", "rollback", "rollback-error-rate"),
+        ):
+            dry_run = self._old_context_summary_quality_gate_dry_run()
+            with self.subTest(scenario=scenario):
+                with TemporaryDirectory() as tmp:
+                    db_path = str(Path(tmp) / "agentflow.sqlite3")
+                    self._write_old_context_summary_quality_gate_rows(db_path, scenario=scenario)
+                    stdout = io.StringIO()
+
+                    code = cli.old_context_summary_quality_gate_cli(
+                        ["-", "--db", db_path, "--limit", "10"],
+                        stdin=io.StringIO(json.dumps(dry_run)),
+                        stdout=stdout,
+                    )
+
+                self.assertEqual(code, 0)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["schema"], "agentflow.old_context_summary_quality_gate.v1")
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["candidate_id"], "candidate-old-context-quality-gate")
+                self.assertEqual(payload["rule_id"], "test-old-context-quality-gate")
+                self.assertEqual(payload["verdict"], expected_verdict)
+                self.assertIn(expected_reason, payload["reason_codes"])
+                self.assertIn(payload["verdict"], {"promote", "hold", "rollback"})
+                self.assertFalse(payload["privacy"]["raw_old_context_included"])
+                self.assertFalse(payload["privacy"]["generated_summaries_included"])
+                self.assertFalse(payload["privacy"]["file_paths_included"])
+                self.assertFalse(payload["privacy"]["cache_keys_included"])
+                self.assertFalse(payload["privacy"]["request_ids_included"])
+                encoded = json.dumps(payload, sort_keys=True)
+                for forbidden in (
+                    "raw quality secret",
+                    "generated quality summary",
+                    "quality-gate-session-secret",
+                    "raw quality error",
+                    "/tmp/quality-gate-secret.py",
+                    "cache-key-quality-secret",
+                    "req_quality_secret",
+                ):
+                    self.assertNotIn(forbidden, encoded)
+
     def test_old_context_summary_impact_cli_exits_nonzero_without_matches(self):
         dry_run = self._old_context_summary_impact_dry_run()
         with TemporaryDirectory() as tmp:
@@ -3348,7 +3393,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "no-post-apply-matches")
         self.assertEqual(payload["error"]["type"], "no_post_apply_matches")
-        self.assertEqual(payload["quality_gate"]["verdict"], "insufficient-evidence")
+        self.assertEqual(payload["quality_gate"]["verdict"], "hold")
         self.assertIn("insufficient-matched-samples", payload["quality_gate"]["reason_codes"])
 
     def test_old_context_summary_impact_sends_metadata_only_lifecycle_feedback(self):
@@ -3511,6 +3556,53 @@ class PolicyReloadCliTests(unittest.TestCase):
                 self.assertEqual(flushed["status"], "sent")
             finally:
                 store.conn.close()
+
+    def test_old_context_summary_quality_gate_cli_sends_metadata_only_verdict_feedback(self):
+        dry_run = self._old_context_summary_quality_gate_dry_run()
+        ManagedFeedbackFlushClient.calls = []
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            self._write_old_context_summary_quality_gate_rows(db_path, scenario="promote")
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.old_context_summary_quality_gate_cli(
+                        ["-", "--db", db_path, "--limit", "10"],
+                        stdin=io.StringIO(json.dumps(dry_run)),
+                        stdout=stdout,
+                    )
+
+        self.assertEqual(code, 0)
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(output["managed_lifecycle_feedback"]["status"], "sent")
+        sent_payload = ManagedFeedbackFlushClient.calls[0]["json"]
+        self.assertEqual(sent_payload["event_type"], "quality-gate")
+        metadata = sent_payload["metadata"]
+        self.assertEqual(metadata["command"], "old-context-summary-quality-gate")
+        gate = metadata["old_context_summary_quality_gate"]
+        self.assertEqual(gate["schema"], "agentflow.old_context_summary_quality_gate_feedback.v1")
+        self.assertEqual(gate["verdict"], "promote")
+        self.assertEqual(gate["cohort_counts"]["matched"], 4)
+        self.assertFalse(gate["privacy"]["raw_old_context_included"])
+        self.assertFalse(gate["privacy"]["generated_summaries_included"])
+        rendered = json.dumps(sent_payload, sort_keys=True)
+        for forbidden in (
+            "raw quality secret",
+            "generated quality summary",
+            "quality-gate-session-secret",
+            "raw quality error",
+            "/tmp/quality-gate-secret.py",
+            "cache-key-quality-secret",
+            "req_quality_secret",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def _summary_rollout_action_bundle(self, *, action_type: str = "widen", raw_like: bool = False, verdict: str = "promote") -> dict:
         action = {

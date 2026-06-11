@@ -523,7 +523,7 @@ def decide_old_context_summary_quality_gate(
         verdict = "rollback"
         reason_codes = rollback_reasons
     elif any(code.startswith("insufficient-") for code in blockers):
-        verdict = "insufficient-evidence"
+        verdict = "hold"
         reason_codes = blockers
     elif blockers:
         verdict = "hold"
@@ -576,6 +576,118 @@ def decide_old_context_summary_quality_gate(
             "file_paths_included": False,
         },
     }
+
+
+def build_old_context_summary_quality_gate(
+    dry_run_or_review_report: Any,
+    *,
+    store_obj: Any,
+    limit: int = 500,
+    since: str | None = None,
+) -> dict[str, Any]:
+    impact = measure_old_context_summary_impact(
+        dry_run_or_review_report,
+        store_obj=store_obj,
+        limit=limit,
+        since=since,
+    )
+    gate = impact.get("quality_gate") if isinstance(impact.get("quality_gate"), dict) else {}
+    dry_run = impact.get("dry_run") if isinstance(impact.get("dry_run"), dict) else {}
+    policy = dry_run.get("policy") if isinstance(dry_run.get("policy"), dict) else {}
+    projection = dry_run.get("projection") if isinstance(dry_run.get("projection"), dict) else {}
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    actual = impact.get("actual") if isinstance(impact.get("actual"), dict) else {}
+    delta = impact.get("delta") if isinstance(impact.get("delta"), dict) else {}
+    privacy = gate.get("privacy") if isinstance(gate.get("privacy"), dict) else {}
+    if not privacy:
+        privacy = impact.get("privacy") if isinstance(impact.get("privacy"), dict) else {}
+    result: dict[str, Any] = {
+        "schema": OLD_CONTEXT_SUMMARY_QUALITY_GATE_SCHEMA,
+        "ok": bool(gate),
+        "generated_at": impact.get("generated_at") or utc_now(),
+        "read_only": True,
+        "wrote_policy_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "impact_schema": impact.get("schema"),
+        "impact_ok": bool(impact.get("ok")),
+        "impact_status": impact.get("status"),
+        "source_error_type": (impact.get("error") or {}).get("type") if isinstance(impact.get("error"), dict) else None,
+        "candidate_id": policy.get("candidate_id"),
+        "rule_id": policy.get("rule_id"),
+        "policy_source": policy.get("policy_source"),
+        "model": policy.get("model"),
+        "canary": policy.get("canary") if isinstance(policy.get("canary"), dict) else {},
+        "safety_gates": policy.get("safety_gates") if isinstance(policy.get("safety_gates"), dict) else {},
+        "projection": projection,
+        "summary": {
+            "sampled_call_count": summary.get("sampled_call_count"),
+            "old_context_summary_metadata_row_count": summary.get("old_context_summary_metadata_row_count"),
+            "projected_affected_metadata_row_count": summary.get("projected_affected_metadata_row_count"),
+            "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+            "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+            "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+            "actual_bypassed_or_disabled_count": summary.get("actual_bypassed_or_disabled_count"),
+            "summary_failure_count": summary.get("summary_failure_count"),
+            "error_rate": summary.get("error_rate"),
+            "retry_rate": summary.get("retry_rate"),
+            "actual_tokens_saved_est": summary.get("actual_tokens_saved_est"),
+            "actual_gross_savings_usd": summary.get("actual_gross_savings_usd"),
+            "actual_summary_model_cost_usd": summary.get("actual_summary_model_cost_usd"),
+            "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
+            "net_savings_vs_projection_delta_usd": summary.get("net_savings_vs_projection_delta_usd"),
+        },
+        "actual": actual,
+        "delta": delta,
+        "privacy": {
+            "metadata_only": True,
+            "raw_old_context_included": bool(privacy.get("raw_old_context_included", False)),
+            "generated_summaries_included": bool(privacy.get("generated_summaries_included", False)),
+            "raw_prompts_included": bool(privacy.get("raw_prompts_included", False)),
+            "raw_messages_included": bool(privacy.get("raw_messages_included", False)),
+            "raw_request_bodies_included": bool(privacy.get("raw_request_bodies_included", False)),
+            "raw_responses_included": bool(privacy.get("raw_responses_included", False)),
+            "raw_transcripts_included": bool(privacy.get("raw_transcripts_included", False)),
+            "provider_bodies_included": bool(privacy.get("provider_bodies_included", False)),
+            "tool_payloads_included": bool(privacy.get("tool_payloads_included", False)),
+            "cache_keys_included": bool(privacy.get("cache_keys_included", False)),
+            "request_ids_included": bool(privacy.get("request_ids_included", False)),
+            "tenant_ids_included": bool(privacy.get("tenant_ids_included", False)),
+            "local_session_ids_included": bool(privacy.get("local_session_ids_included", False)),
+            "file_paths_included": bool(privacy.get("file_paths_included", False)),
+            "basis": "dry-run aggregate projections plus post-apply old-context summarization metadata, status buckets, latency buckets, and size-derived savings only",
+        },
+    }
+    if gate:
+        result.update({
+            "verdict": gate.get("verdict"),
+            "reason_codes": gate.get("reason_codes") if isinstance(gate.get("reason_codes"), list) else [],
+            "warning_codes": gate.get("warning_codes") if isinstance(gate.get("warning_codes"), list) else [],
+            "thresholds": gate.get("thresholds") if isinstance(gate.get("thresholds"), dict) else {},
+            "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
+            "cohorts": gate.get("cohorts") if isinstance(gate.get("cohorts"), dict) else {},
+            "quality_gate": {
+                "schema": gate.get("schema"),
+                "verdict": gate.get("verdict"),
+                "reason_codes": gate.get("reason_codes") if isinstance(gate.get("reason_codes"), list) else [],
+                "warning_codes": gate.get("warning_codes") if isinstance(gate.get("warning_codes"), list) else [],
+                "thresholds": gate.get("thresholds") if isinstance(gate.get("thresholds"), dict) else {},
+                "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
+                "cohorts": gate.get("cohorts") if isinstance(gate.get("cohorts"), dict) else {},
+                "privacy": result["privacy"],
+            },
+        })
+    else:
+        result["verdict"] = "hold"
+        result["reason_codes"] = ["quality-gate-not-computed"]
+        result["warning_codes"] = []
+        result["thresholds"] = {}
+        result["metrics"] = {}
+        result["cohorts"] = {}
+        if isinstance(impact.get("error"), dict):
+            result["error"] = impact["error"]
+    return result
 
 
 def _delta(projection: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:

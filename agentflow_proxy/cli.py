@@ -2351,6 +2351,111 @@ def old_context_summary_impact_cli(
     return 0 if result.get("ok") else 1
 
 
+def old_context_summary_quality_gate_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Evaluate the local old-context summary canary quality gate")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="-",
+        help="Old-context summary dry-run or policy review JSON path, or '-' for stdin. Default: stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local AgentFlow SQLite DB path, default: ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500.")
+    parser.add_argument(
+        "--since",
+        help="Only count metadata at or after this ISO-8601 post-apply timestamp. Defaults to dry-run generated_at.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print quality gate JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    report, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+    if read_error:
+        from agentflow_proxy.old_context_summary_impact import OLD_CONTEXT_SUMMARY_QUALITY_GATE_SCHEMA
+
+        result = {
+            "schema": OLD_CONTEXT_SUMMARY_QUALITY_GATE_SCHEMA,
+            "ok": False,
+            "read_only": True,
+            "wrote_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "verdict": "hold",
+            "reason_codes": ["input-read-failed"],
+            "warning_codes": [],
+            "validation": read_error,
+            "error": {"type": "read_failed", "message": "old-context summary dry-run or review report could not be read"},
+            "privacy": {
+                "metadata_only": True,
+                "raw_old_context_included": False,
+                "generated_summaries_included": False,
+                "raw_request_bodies_included": False,
+                "raw_responses_included": False,
+                "request_ids_included": False,
+                "tenant_ids_included": False,
+                "local_session_ids_included": False,
+                "cache_keys_included": False,
+                "file_paths_included": False,
+            },
+        }
+    else:
+        from agentflow_proxy.old_context_summary_impact import build_old_context_summary_quality_gate
+
+        store = _open_store_for_db(args.db)
+        try:
+            result = build_old_context_summary_quality_gate(
+                report,
+                store_obj=store,
+                limit=args.limit,
+                since=args.since,
+            )
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.policy_events import log_policy_event
+
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "old-context-summary-quality-gate",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "input_source": "stdin" if args.path == "-" else "file",
+            "db_configured": bool(args.db),
+            "since": args.since,
+            "candidate_id": result.get("candidate_id"),
+            "rule_id": result.get("rule_id"),
+            "verdict": result.get("verdict"),
+            "reason_codes": result.get("reason_codes"),
+            "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
+            "actual_canary_applied_count": summary.get("actual_canary_applied_count"),
+            "actual_canary_holdout_count": summary.get("actual_canary_holdout_count"),
+            "summary_failure_count": summary.get("summary_failure_count"),
+            "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else result.get("source_error_type"),
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if result.get("ok"):
+        _attach_old_context_summary_lifecycle_feedback(result, command="quality-gate", db_path=str(args.db))
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 def _summary_rollout_event_details(command: str, result: dict[str, Any], *, path: str | None, config_dir: str | None = None, db_path: str | None = None) -> dict[str, Any]:
     actions = [item for item in result.get("actions", []) if isinstance(item, dict)]
     review = result.get("review") if isinstance(result.get("review"), dict) else {}
@@ -4783,6 +4888,8 @@ def _old_context_summary_lifecycle_result(command: str, result: dict[str, Any]) 
 def _old_context_summary_lifecycle_event_type(command: str, result: dict[str, Any]) -> str:
     if not result.get("ok"):
         return "rejected"
+    if command == "quality-gate":
+        return "quality-gate"
     if command == "impact":
         return "impact"
     if command == "review":
@@ -4889,14 +4996,27 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
     dry_run = _old_context_summary_lifecycle_result(command, result)
     if not isinstance(dry_run, dict):
         return None
-    if command == "impact":
+    if command in {"impact", "quality-gate"}:
         dry_run_meta = dry_run.get("dry_run") if isinstance(dry_run.get("dry_run"), dict) else {}
-        policy = dry_run_meta.get("policy") if isinstance(dry_run_meta.get("policy"), dict) else {}
-        projection = dry_run_meta.get("projection") if isinstance(dry_run_meta.get("projection"), dict) else {}
+        if command == "quality-gate":
+            policy = {
+                "rule_id": dry_run.get("rule_id"),
+                "candidate_id": dry_run.get("candidate_id"),
+                "policy_source": dry_run.get("policy_source"),
+                "model": dry_run.get("model"),
+                "canary": dry_run.get("canary") if isinstance(dry_run.get("canary"), dict) else {},
+                "safety_gates": dry_run.get("safety_gates") if isinstance(dry_run.get("safety_gates"), dict) else {},
+            }
+            projection = dry_run.get("projection") if isinstance(dry_run.get("projection"), dict) else {}
+        else:
+            policy = dry_run_meta.get("policy") if isinstance(dry_run_meta.get("policy"), dict) else {}
+            projection = dry_run_meta.get("projection") if isinstance(dry_run_meta.get("projection"), dict) else {}
         summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
         actual = dry_run.get("actual") if isinstance(dry_run.get("actual"), dict) else {}
         delta = dry_run.get("delta") if isinstance(dry_run.get("delta"), dict) else {}
         quality_gate = dry_run.get("quality_gate") if isinstance(dry_run.get("quality_gate"), dict) else {}
+        if command == "quality-gate" and not quality_gate:
+            quality_gate = dry_run
         quality_gate_feedback = _old_context_summary_quality_gate_feedback(
             quality_gate=quality_gate,
             policy=policy,
@@ -4916,7 +5036,7 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         metadata = {
             "schema": "agentflow.old_context_summary_lifecycle_metadata.v1",
             "lifecycle_kind": "old_context_summarization",
-            "command": "old-context-summary-impact",
+            "command": "old-context-summary-quality-gate" if command == "quality-gate" else "old-context-summary-impact",
             "local_result_status": "ok" if dry_run.get("ok") else "error",
             "dry_run": False,
             "read_only": bool(dry_run.get("read_only", True)),
@@ -5197,6 +5317,10 @@ def old_context_summary_dry_run_main() -> None:
 
 def old_context_summary_impact_main() -> None:
     raise SystemExit(old_context_summary_impact_cli())
+
+
+def old_context_summary_quality_gate_main() -> None:
+    raise SystemExit(old_context_summary_quality_gate_cli())
 
 
 def old_context_summary_rollout_actions_review_main() -> None:
