@@ -12,3 +12,9 @@ file_watch:
   #   that carry no explicit path references in the request body.  Off by default: only enable
   #   when local files are known to be the relevant dependency signal for repeated shapes.
 pattern_rules: []
+# Example managed/reviewed exact replay canary action fields:
+# action:
+#   type: exact_cache_pattern
+#   allow_tool_calls: true
+#   safe_invalidation: true
+#   scope: session  # session-scoped keying is the conservative default for replay canaries

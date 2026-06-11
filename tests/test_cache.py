@@ -693,6 +693,188 @@ pattern_rules:
             finally:
                 store.conn.close()
 
+    def _session_cache_replay_rules(self, pattern_hash, *, canary_fraction="1.0"):
+        return f"""
+exact_cache:
+  enabled: true
+  cache_tool_calls: false
+pattern_rules:
+  - id: reviewed-session-cache-replay
+    enabled: true
+    policy_source: managed-recommended
+    candidate_id: session-cache-replay-candidate
+    conditions:
+      pattern_hashes:
+        - {pattern_hash}
+      source_surface: anthropic_messages
+      app_family: claude_code
+      category: tool-result
+      workflow_phase: tool-result
+      has_tools: true
+      stream: false
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: {canary_fraction}
+      canary_salt: session-cache-replay-test
+      canary_unit: request_fingerprint
+    action:
+      type: exact_cache_pattern
+      allow_tool_calls: true
+      safe_invalidation: true
+      scope: session
+"""
+
+    def _session_cache_replay_features(self, pattern_hash):
+        return {
+            "pattern_hashes": [pattern_hash],
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": "tool-result",
+            "workflow_phase": "tool-result",
+            "text_bucket": "2k_8k_chars",
+            "token_bucket": "1k_4k_tokens",
+            "has_tools": True,
+            "stream": False,
+            "request_fingerprint": "fixture-cache-replay-request",
+            "raw_pattern_strings_included": False,
+        }
+
+    def test_session_cache_replay_canary_allows_stable_dependency_hit(self):
+        pattern_hash = "sha256:" + "1" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "cache_rules.yaml").write_text(
+                self._session_cache_replay_rules(pattern_hash),
+                encoding="utf-8",
+            )
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('stable')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            manual = importlib.reload(cache_module)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
+            try:
+                can_exact, can_semantic, meta = manual.cache_lookup_meta(
+                    has_tool_blocks=True,
+                    pattern_features=self._session_cache_replay_features(pattern_hash),
+                    store_obj=store,
+                )
+                self.assertTrue(can_exact)
+                self.assertFalse(can_semantic)
+                scope, scope_id, _rule = manual.cache_replay_scope_for_meta(meta, "session-a")
+                other_scope, other_scope_id, _ = manual.cache_replay_scope_for_meta(meta, "session-b")
+                key = manual.cache_key_for(body, "/v1/messages", replay_scope=scope, replay_scope_id=scope_id)
+                other_key = manual.cache_key_for(body, "/v1/messages", replay_scope=other_scope, replay_scope_id=other_scope_id)
+                self.assertNotEqual(key, other_key)
+
+                deps = manual.cache_file_dependency_snapshots(body)
+                store.set_cache(key, "claude-sonnet-4-6", 20, {"content": [{"type": "text", "text": "cached"}]}, file_deps=deps)
+                allowed, replay_meta = manual.cache_replay_canary_decision(
+                    cache_meta=meta,
+                    dependency_audit=store.cache_file_dependency_audit(key),
+                    session_id="session-a",
+                )
+                self.assertTrue(allowed, replay_meta)
+                cached, invalidated_reason = store.get_cache_with_reason(key)
+                hit_meta = manual.cache_hit_decision_meta(
+                    "exact-match",
+                    hit_type="exact",
+                    exact_enabled=can_exact,
+                    semantic_enabled=can_semantic,
+                    lookup_meta={**meta, "cache_replay_canary": replay_meta},
+                    estimated_saved_cost_usd=0.001,
+                )
+
+                self.assertIsNone(invalidated_reason)
+                self.assertEqual(cached["content"][0]["text"], "cached")
+                self.assertEqual(hit_meta["status"], "hit")
+                self.assertEqual(hit_meta["cache_replay_canary"]["status"], "applied")
+                self.assertEqual(hit_meta["cache_replay_canary"]["reason"], "dependency-stable")
+                self.assertEqual(hit_meta["cache_replay_canary"]["canary_cohort"], "canary_applied")
+                self.assertFalse(hit_meta["cache_replay_canary"]["dependency_audit"]["paths_included"])
+            finally:
+                store.conn.close()
+
+    def test_session_cache_replay_canary_blocks_changed_dependency(self):
+        pattern_hash = "sha256:" + "2" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "cache_rules.yaml").write_text(
+                self._session_cache_replay_rules(pattern_hash),
+                encoding="utf-8",
+            )
+            watched = tmp_path / "src" / "example.py"
+            watched.parent.mkdir()
+            watched.write_text("print('old')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            manual = importlib.reload(cache_module)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            body = {"messages": [{"role": "user", "content": "Read src/example.py"}]}
+            try:
+                can_exact, _can_semantic, meta = manual.cache_lookup_meta(
+                    has_tool_blocks=True,
+                    pattern_features=self._session_cache_replay_features(pattern_hash),
+                    store_obj=store,
+                )
+                self.assertTrue(can_exact)
+                scope, scope_id, _rule = manual.cache_replay_scope_for_meta(meta, "session-a")
+                key = manual.cache_key_for(body, "/v1/messages", replay_scope=scope, replay_scope_id=scope_id)
+                store.set_cache(
+                    key,
+                    "claude-sonnet-4-6",
+                    20,
+                    {"content": [{"type": "text", "text": "stale"}]},
+                    file_deps=manual.cache_file_dependency_snapshots(body),
+                )
+                watched.write_text("print('new')\n", encoding="utf-8")
+
+                allowed, replay_meta = manual.cache_replay_canary_decision(
+                    cache_meta=meta,
+                    dependency_audit=store.cache_file_dependency_audit(key),
+                    session_id="session-a",
+                )
+
+                self.assertFalse(allowed)
+                self.assertEqual(replay_meta["status"], "invalidated")
+                self.assertEqual(replay_meta["reason"], "dependency-changed")
+                self.assertEqual(replay_meta["dependency_audit"]["changed_path_count"], 1)
+                self.assertFalse(replay_meta["dependency_audit"]["paths_included"])
+            finally:
+                store.conn.close()
+
+    def test_session_cache_replay_canary_holdout_forwards_upstream_with_cohort(self):
+        pattern_hash = "sha256:" + "3" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "cache_rules.yaml").write_text(
+                self._session_cache_replay_rules(pattern_hash, canary_fraction="0.0"),
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(cache_module)
+
+            can_exact, can_semantic, meta = manual.cache_lookup_meta(
+                has_tool_blocks=True,
+                pattern_features=self._session_cache_replay_features(pattern_hash),
+            )
+
+            self.assertFalse(can_exact)
+            self.assertFalse(can_semantic)
+            self.assertEqual(meta["status"], "skipped")
+            self.assertEqual(meta["reason"], "tools-disabled")
+            self.assertEqual(meta["canary_cohort"], "canary_holdout")
+            self.assertEqual(meta["canary"]["status"], "holdout")
+            self.assertEqual(meta["pattern_rules"]["skip_reasons"][-1]["reason"], "canary_holdout")
+
     def _streaming_static_features(self, pattern_hash):
         return {
             "pattern_hashes": [pattern_hash],

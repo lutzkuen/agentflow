@@ -40,7 +40,8 @@ from agentflow_proxy.crunch import (
 )
 from agentflow_proxy.cache import (
     CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD, CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH,
-    cache_decision_meta, cache_file_dependency_audit, cache_hit_decision_meta, cache_key_for, cache_lookup_meta, response_output_text,
+    cache_decision_meta, cache_file_dependency_audit, cache_hit_decision_meta, cache_key_for, cache_lookup_meta,
+    cache_replay_canary_decision, cache_replay_scope_for_meta, response_output_text,
     is_stream_cache_payload, stream_cache_frames, stream_cache_payload,
     streaming_cache_lookup_meta, cache_file_dependency_snapshots,
 )
@@ -1095,19 +1096,43 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cache_meta=cache_meta,
             current_thinking=_has_top_level_thinking(crunched),
         )
+        replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
+        if replay_pattern_rule is not None:
+            cache_meta["replay_scope"] = replay_scope
+            cache_meta["replay_scope_id_available"] = bool(replay_scope_id)
         key = cache_key_for(
             crunched,
             path,
             provider="anthropic",
             upstream=context.anthropic_upstream,
+            replay_scope=replay_scope,
+            replay_scope_id=replay_scope_id,
         )
         emb: Optional[list[float]] = None
         if can_cache:
-            cached, invalidated_reason = context.store.get_cache_with_reason(key)
-            if invalidated_reason:
-                cache_meta["reason"] = invalidated_reason
-                cache_meta["invalidated"] = True
-                cache_meta["invalidation_reason"] = invalidated_reason
+            replay_allowed = True
+            if replay_pattern_rule is not None:
+                dependency_audit = context.store.cache_file_dependency_audit(key)
+                replay_allowed, replay_canary = cache_replay_canary_decision(
+                    cache_meta=cache_meta,
+                    dependency_audit=dependency_audit,
+                    session_id=session_id,
+                )
+                cache_meta["cache_replay_canary"] = replay_canary
+                if not replay_allowed:
+                    cache_meta["status"] = replay_canary.get("status", "bypassed")
+                    cache_meta["reason"] = str(replay_canary.get("reason") or "cache-replay-canary-bypassed")
+                    if replay_canary.get("status") == "invalidated":
+                        cache_meta["invalidated"] = True
+                        cache_meta["invalidation_reason"] = str(replay_canary.get("reason") or "dependency-invalidated")
+                        context.store.delete_cache(key)
+            cached = None
+            if replay_allowed:
+                cached, invalidated_reason = context.store.get_cache_with_reason(key)
+                if invalidated_reason:
+                    cache_meta["reason"] = invalidated_reason
+                    cache_meta["invalidated"] = True
+                    cache_meta["invalidation_reason"] = invalidated_reason
             if cached is not None:
                 cache_hit = True
                 response_body = cached

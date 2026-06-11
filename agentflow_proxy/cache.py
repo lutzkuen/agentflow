@@ -216,6 +216,7 @@ def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
                     False,
                 ),
                 "streaming": _as_bool(action.get("streaming"), False),
+                "scope": str(action.get("scope") or "session"),
             },
             "rollout": normalize_pattern_rollout(item.get("rollout")),
         })
@@ -597,6 +598,7 @@ def _cache_pattern_rule_match(
                 "replayability_level": local_replayability_level,
                 "allow_tool_calls": bool(action.get("allow_tool_calls")),
                 "safe_invalidation": bool(action.get("safe_invalidation")),
+                "scope": str(action.get("scope") or "session"),
                 "rollout": pattern_rollout_public_meta(rule.get("rollout")),
                 "canary": canary if canary.get("enabled") else None,
             }, skip_reasons
@@ -625,6 +627,7 @@ def _attach_cache_pattern_meta(
                 "replayability_level",
                 "allow_tool_calls",
                 "safe_invalidation",
+                "scope",
                 "rollout",
                 "canary",
             }
@@ -662,9 +665,65 @@ def cache_hit_decision_meta(
         meta["session_memory_hints"] = lookup_meta["session_memory_hints"]
     if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("session_memory_replayability"), dict):
         meta["session_memory_replayability"] = lookup_meta["session_memory_replayability"]
+    if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("cache_replay_canary"), dict):
+        meta["cache_replay_canary"] = lookup_meta["cache_replay_canary"]
     if estimated_saved_cost_usd is not None:
         meta["estimated_saved_cost_usd"] = round(max(0.0, float(estimated_saved_cost_usd)), 9)
     return meta
+
+
+def cache_replay_scope_for_meta(cache_meta: dict[str, Any], session_id: str | None) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta, dict) else None
+    if not isinstance(pattern_rule, dict):
+        return None, None, None
+    scope = str(pattern_rule.get("scope") or "session")
+    if scope == "session":
+        return scope, session_id, pattern_rule
+    if scope in {"workflow", "grouping"}:
+        grouping = cache_meta.get("grouping_scope") if isinstance(cache_meta.get("grouping_scope"), dict) else {}
+        scope_id = grouping.get("scope_id") or grouping.get("workflow_id_hash")
+        return scope, str(scope_id) if scope_id else None, pattern_rule
+    return scope, None, pattern_rule
+
+
+def cache_replay_canary_decision(
+    *,
+    cache_meta: dict[str, Any],
+    dependency_audit: dict[str, Any] | None,
+    session_id: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta, dict) else None
+    if not isinstance(pattern_rule, dict):
+        return True, {}
+    canary = pattern_rule.get("canary") if isinstance(pattern_rule.get("canary"), dict) else None
+    scope = str(pattern_rule.get("scope") or "session")
+    decision: dict[str, Any] = {
+        "schema": "agentflow.cache_replay_canary_decision.v1",
+        "rule_id": pattern_rule.get("rule_id"),
+        "candidate_id": pattern_rule.get("candidate_id"),
+        "policy_source": pattern_rule.get("policy_source"),
+        "scope": scope,
+        "canary": canary,
+        "canary_cohort": canary.get("cohort") if canary else None,
+        "dependency_audit": dependency_audit,
+    }
+    if not canary or canary.get("status") != "applied" or canary.get("cohort") != "canary_applied":
+        decision.update({"status": "bypassed", "reason": "canary-applied-required"})
+        return False, decision
+    if scope == "session" and not session_id:
+        decision.update({"status": "bypassed", "reason": "session-scope-missing"})
+        return False, decision
+    if not isinstance(dependency_audit, dict):
+        decision.update({"status": "bypassed", "reason": "dependency-audit-missing"})
+        return False, decision
+    if not dependency_audit.get("safe_invalidation_evidence"):
+        decision.update({
+            "status": "invalidated" if dependency_audit.get("invalidation_reason") else "bypassed",
+            "reason": dependency_audit.get("invalidation_reason") or "file-dependency-missing",
+        })
+        return False, decision
+    decision.update({"status": "applied", "reason": "dependency-stable"})
+    return True, decision
 
 
 _PATH_TRAILING_JUNK = ".,;:)\\]}>\"'"
@@ -953,6 +1012,17 @@ def cache_lookup_meta(
         meta["managed_profile"] = managed_profile
         if managed_profile.get("semantic_threshold") is not None:
             meta["semantic_threshold"] = float(managed_profile["semantic_threshold"])
+    if pattern_skip_reasons:
+        selected_skip = pattern_skip_reasons[-1]
+        if selected_skip.get("reason") in {"canary_holdout", LOCAL_CANARY_SAFETY_STOP_REASON}:
+            meta["pattern_rule"] = {
+                key: selected_skip.get(key)
+                for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop")
+                if selected_skip.get(key) is not None
+            }
+            if isinstance(selected_skip.get("canary"), dict):
+                meta["canary"] = selected_skip["canary"]
+                meta["canary_cohort"] = selected_skip["canary"].get("cohort")
     return exact_enabled, semantic_enabled, meta
 
 
@@ -1068,20 +1138,26 @@ def cache_key_for(
     provider: str | None = None,
     upstream: str | None = None,
     namespace: str | None = None,
+    replay_scope: str | None = None,
+    replay_scope_id: str | None = None,
 ) -> str:
     # Do not include auth. Include endpoint and body after crunch/routing.
     # Namespacing prevents cache reuse across providers, upstreams, or user-selected projects.
     provider = (provider or _default_cache_provider()).lower()
     upstream = (upstream or _default_cache_upstream(provider)).rstrip("/")
     namespace = namespace if namespace is not None else os.getenv("AGENTFLOW_CACHE_NAMESPACE", "default")
-    key_material = stable_json({
+    key_payload: dict[str, Any] = {
         "version": 2,
         "namespace": namespace,
         "provider": provider,
         "upstream": upstream,
         "path": path,
         "body": body,
-    })
+    }
+    if replay_scope:
+        key_payload["replay_scope"] = replay_scope
+        key_payload["replay_scope_id"] = replay_scope_id
+    key_material = stable_json(key_payload)
     return sha256_text(key_material)
 
 
