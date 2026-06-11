@@ -1,5 +1,6 @@
 import io
 import asyncio
+import functools
 import importlib
 import inspect
 import json
@@ -2416,7 +2417,7 @@ summary_model_hint:
             },
         }
 
-        for reason in ("daily-budget-zero", "not-sampled"):
+        for reason in ("daily-budget-zero", "sample-rate-not-selected"):
             pending = {}
 
             def skipped_decision(body, routing_meta, *, stream, provider, source_surface, store_obj, reason=reason):
@@ -2438,6 +2439,188 @@ summary_model_hint:
                 )
 
             self.assertEqual(pending, {})
+
+    def test_codex_routing_experiment_active_model_pair_mismatch_is_visible(self):
+        secret_prompt = "secret active worker prompt must not leak"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-mismatch",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-routing-experiment-mismatch",
+                "model": "gpt-5.5",
+                "input": [{"type": "text", "text": secret_prompt}],
+            },
+        }
+        optimization_metadata = {
+            "routing": {
+                "status": "skipped",
+                "reason": "keep requested Codex model",
+                "requested_model": "gpt-5.5",
+                "routed_model": "gpt-5.5",
+                "workflow_phase": "summary",
+                "model_field": "model",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                request_started = {}
+                pending = {}
+                with patch.object(codex_app_proxy, "store", test_store):
+                    start_event_id = codex_app_proxy._record_message(
+                        json.dumps(message),
+                        direction="client_to_server",
+                        session_id="session-routing-experiment-mismatch",
+                        request_started=request_started,
+                        optimization_metadata=optimization_metadata,
+                    )
+                    codex_app_proxy._attach_codex_routing_experiment_pending(
+                        json.dumps(message),
+                        optimization_metadata=optimization_metadata,
+                        start_event_id=start_event_id,
+                        pending_routing_experiments=pending,
+                    )
+                row = test_store.conn.execute(
+                    "select routing_json from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+                from agentflow_proxy.routing_experiments import build_routing_experiment_report
+
+                report = build_routing_experiment_report(test_store, limit=5)
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(pending, {})
+        routing = json.loads(row["routing_json"])
+        experiment = routing["routing_experiment"]
+        self.assertEqual(experiment["provider"], "openai")
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["requested_model"], "gpt-5.5")
+        self.assertEqual(experiment["routed_model"], "gpt-5.5")
+        self.assertEqual(experiment["status"], "skipped")
+        self.assertEqual(experiment["reason"], "model-pair-not-enabled")
+        self.assertFalse(experiment["sampled"])
+        self.assertTrue(experiment["privacy"]["metadata_only"])
+        self.assertEqual(report["summary"]["decision_count"], 1)
+        self.assertEqual(report["decision_reasons"][0]["reason"], "model-pair-not-enabled")
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn(secret_prompt, rendered)
+        self.assertNotIn("turn-routing-experiment-mismatch", rendered)
+        self.assertNotIn("thread-routing-experiment-mismatch", rendered)
+
+    def test_codex_routing_experiment_sample_rate_skip_is_visible(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-rate-skip",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Summarize the completed work."}],
+            },
+        }
+        optimization_metadata = {
+            "routing": {
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                request_started = {}
+                pending = {}
+                decision = functools.partial(codex_app_proxy.routing_experiment_decision, random_value=lambda: 1.0)
+                with (
+                    patch.object(codex_app_proxy, "store", test_store),
+                    patch.object(codex_app_proxy, "routing_experiment_decision", decision),
+                ):
+                    start_event_id = codex_app_proxy._record_message(
+                        json.dumps(message),
+                        direction="client_to_server",
+                        session_id="session-routing-experiment-rate-skip",
+                        request_started=request_started,
+                        optimization_metadata=optimization_metadata,
+                    )
+                    codex_app_proxy._attach_codex_routing_experiment_pending(
+                        json.dumps(message),
+                        optimization_metadata=optimization_metadata,
+                        start_event_id=start_event_id,
+                        pending_routing_experiments=pending,
+                    )
+                row = test_store.conn.execute(
+                    "select routing_json from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(pending, {})
+        experiment = json.loads(row["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment["status"], "skipped")
+        self.assertEqual(experiment["reason"], "sample-rate-not-selected")
+        self.assertFalse(experiment["sampled"])
+
+    def test_codex_routing_experiment_request_too_large_skip_is_visible(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-large",
+            "method": "turn/start",
+            "params": {
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "x" * 9001}],
+            },
+        }
+        optimization_metadata = {
+            "routing": {
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                request_started = {}
+                pending = {}
+                with patch.object(codex_app_proxy, "store", test_store):
+                    start_event_id = codex_app_proxy._record_message(
+                        json.dumps(message),
+                        direction="client_to_server",
+                        session_id="session-routing-experiment-large",
+                        request_started=request_started,
+                        optimization_metadata=optimization_metadata,
+                    )
+                    codex_app_proxy._attach_codex_routing_experiment_pending(
+                        json.dumps(message),
+                        optimization_metadata=optimization_metadata,
+                        start_event_id=start_event_id,
+                        pending_routing_experiments=pending,
+                    )
+                row = test_store.conn.execute(
+                    "select routing_json, input_text_chars from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(pending, {})
+        self.assertEqual(row["input_text_chars"], 9001)
+        experiment = json.loads(row["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment["status"], "skipped")
+        self.assertEqual(experiment["reason"], "request-too-large")
+        self.assertFalse(experiment["sampled"])
+        self.assertEqual(experiment["text_chars"], 9001)
 
     def test_codex_routing_experiment_skip_is_visible_without_sample_rows(self):
         message = {

@@ -401,7 +401,7 @@ def routing_experiment_decision(
         meta["reason"] = "sample-rate-zero"
         return meta
     if random_value() >= ROUTING_EXPERIMENT_SAMPLE_RATE:
-        meta["reason"] = "streaming-shadow-not-sampled" if stream else "not-sampled"
+        meta["reason"] = "streaming-shadow-not-sampled" if stream else "sample-rate-not-selected"
         return meta
 
     meta["status"] = "selected"
