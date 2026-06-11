@@ -7162,6 +7162,12 @@ async def stats_openai_cache_replay_report(store_obj: Any, limit: int = 1000) ->
     return build_openai_cache_replay_report(store_obj, limit=limit)
 
 
+async def stats_openai_cache_replay_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
+
+    return build_openai_cache_replay_impact_report(store_obj, limit=limit)
+
+
 async def stats_openai_old_context_summary_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_old_context_summary_report import build_openai_old_context_summary_report
     from agentflow_proxy.openai_old_context_summary import load_openai_old_context_summary_policy

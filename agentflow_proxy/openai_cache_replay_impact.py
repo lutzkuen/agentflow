@@ -1,0 +1,615 @@
+from __future__ import annotations
+
+import hashlib
+import re
+from collections import Counter
+from datetime import datetime, timezone
+from typing import Any
+
+from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, _json_obj
+from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_source_surface
+from agentflow_proxy.store import utc_now
+
+
+SCHEMA = "agentflow.openai_cache_replay_impact.v1"
+QUALITY_GATE_SCHEMA = "agentflow.openai_cache_replay_quality_gate.v1"
+LIFECYCLE_SCHEMA = "agentflow.openai_cache_replay_lifecycle_feedback.v1"
+
+DEFAULT_MIN_APPLIED_SAMPLES = 2
+DEFAULT_MIN_HOLDOUT_SAMPLES = 1
+DEFAULT_MAX_ERROR_RATE = 0.05
+DEFAULT_MAX_ERROR_RATE_DELTA = 0.05
+DEFAULT_MAX_RETRY_RATE_DELTA = 0.10
+DEFAULT_MAX_LATENCY_REGRESSION_MS = 2_000
+DEFAULT_MAX_INVALIDATION_RATE = 0.02
+DEFAULT_MIN_CACHE_HIT_RATE = 0.01
+DEFAULT_ROLLBACK_ERROR_RATE = 0.20
+DEFAULT_MIN_SAVINGS_REALIZATION_RATIO = 0.50
+DEFAULT_MAX_EVIDENCE_AGE_HOURS = 72.0
+
+_PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
+_RAW_ID_HINT_RE = re.compile(
+    r"[/\\]|\s|raw|secret|token|cache[-_]?key|request[-_]?id|session[-_]?id|thread[-_]?id|sha256:[0-9a-f]{32,}",
+    re.IGNORECASE,
+)
+
+
+def _privacy_summary() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "content_free": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "filesystem_paths_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "raw_session_ids_included": False,
+        "pattern_hashes_included": False,
+        "request_fingerprints_included": False,
+        "provider_calls_made": False,
+    }
+
+
+def _public_id(value: Any, prefix: str) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if _PUBLIC_ID_RE.match(text) and not _RAW_ID_HINT_RE.search(text):
+        return text
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}:{digest}"
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _status_bucket(status_code: Any) -> str:
+    code = _as_int(status_code, -1)
+    if code < 0:
+        return "unknown"
+    if code < 300:
+        return "2xx"
+    if code < 400:
+        return "3xx"
+    if code < 500:
+        return "4xx"
+    return "5xx"
+
+
+def _reason_code(value: Any, fallback: str = "unknown") -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    return text if re.match(r"^[a-z0-9][a-z0-9_.:-]{0,79}$", text) else fallback
+
+
+def _counter_rows(counter: Counter[str]) -> list[dict[str, Any]]:
+    return [
+        {"value": value, "count": count}
+        for value, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _source_surface(row: dict[str, Any]) -> str:
+    return str(row.get("source_surface") or openai_source_surface(str(row.get("path") or "")))
+
+
+def _endpoint(row: dict[str, Any]) -> str:
+    return str(row.get("endpoint") or openai_endpoint(str(row.get("path") or "")))
+
+
+def _feature_unit(routing: dict[str, Any]) -> dict[str, Any]:
+    for key in ("openai_feature_unit", "openai_preflight_unit", "openai_local_feature_unit"):
+        value = routing.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _cache_replay_rule(cache: dict[str, Any]) -> dict[str, Any] | None:
+    rule = cache.get("pattern_rule") if isinstance(cache.get("pattern_rule"), dict) else None
+    if isinstance(rule, dict):
+        return rule
+    pattern_rules = cache.get("pattern_rules") if isinstance(cache.get("pattern_rules"), dict) else {}
+    for candidate in pattern_rules.get("rules") or []:
+        if isinstance(candidate, dict):
+            return candidate
+    for candidate in reversed(pattern_rules.get("skip_reasons") or []):
+        if isinstance(candidate, dict) and (
+            candidate.get("rule_id")
+            or candidate.get("candidate_id")
+            or candidate.get("canary")
+            or candidate.get("safety_stop")
+        ):
+            return candidate
+    return None
+
+
+def _cache_replay_canary(cache: dict[str, Any], rule: dict[str, Any] | None) -> dict[str, Any]:
+    value = cache.get("cache_replay_canary") if isinstance(cache.get("cache_replay_canary"), dict) else None
+    if value is not None:
+        return value
+    if isinstance(rule, dict) and isinstance(rule.get("canary"), dict):
+        return rule["canary"]
+    return {}
+
+
+def _canary_public(canary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: canary.get(key)
+        for key in ("enabled", "selected", "cohort", "fraction", "threshold", "unit", "reason", "status")
+        if canary.get(key) is not None
+    } | {"pattern_hashes_included": False}
+
+
+def _cohort(cache: dict[str, Any], rule: dict[str, Any], canary: dict[str, Any]) -> str:
+    status = str(cache.get("status") or "").strip().lower()
+    reason = str(cache.get("reason") or canary.get("reason") or rule.get("reason") or "").strip().lower()
+    canary_status = str(canary.get("status") or "").strip().lower()
+    nested_canary = canary.get("canary") if isinstance(canary.get("canary"), dict) else {}
+    canary_cohort = str(canary.get("canary_cohort") or nested_canary.get("cohort") or "").strip().lower()
+    rule_canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+    safety_stop = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else cache.get("safety_stop")
+    if isinstance(safety_stop, dict) or "safety-stop" in reason or status == "safety_stopped":
+        return "safety_stop"
+    if status == "invalidated" or canary_status == "invalidated" or cache.get("invalidated"):
+        return "invalidated"
+    if canary_status == "holdout" or reason == "canary_holdout" or canary_cohort == "canary_holdout":
+        return "holdout"
+    if rule_canary.get("selected") is False or rule_canary.get("cohort") == "canary_holdout":
+        return "holdout"
+    if canary_status == "applied" or status == "hit":
+        return "applied"
+    return "blocked"
+
+
+def _empty_cohort() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "error_count": 0,
+        "retry_rows": 0,
+        "retry_attempts": 0,
+        "latency_ms_total": 0,
+        "latency_sample_count": 0,
+        "cost_est_usd": 0.0,
+        "cost_baseline_usd": 0.0,
+        "observed_savings_usd": 0.0,
+        "projected_savings_usd": 0.0,
+        "cache_hit_count": 0,
+        "invalidation_count": 0,
+    }
+
+
+def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
+    count = _as_int(raw.get("count"))
+    latency_samples = _as_int(raw.get("latency_sample_count"))
+    return {
+        "count": count,
+        "error_count": _as_int(raw.get("error_count")),
+        "retry_rows": _as_int(raw.get("retry_rows")),
+        "retry_attempts": _as_int(raw.get("retry_attempts")),
+        "cache_hit_count": _as_int(raw.get("cache_hit_count")),
+        "invalidation_count": _as_int(raw.get("invalidation_count")),
+        "error_rate": round(_as_int(raw.get("error_count")) / count, 6) if count else 0.0,
+        "retry_rate": round(_as_int(raw.get("retry_rows")) / count, 6) if count else 0.0,
+        "cache_hit_rate": round(_as_int(raw.get("cache_hit_count")) / count, 6) if count else 0.0,
+        "invalidation_rate": round(_as_int(raw.get("invalidation_count")) / count, 6) if count else 0.0,
+        "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
+        "cost_est_usd": round(_as_float(raw.get("cost_est_usd")), 8),
+        "cost_baseline_usd": round(_as_float(raw.get("cost_baseline_usd")), 8),
+        "observed_savings_usd": round(_as_float(raw.get("observed_savings_usd")), 8),
+        "projected_savings_usd": round(_as_float(raw.get("projected_savings_usd")), 8),
+    }
+
+
+def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any], row: dict[str, Any], feature: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "rule_id": rule_id,
+        "policy_source": rule.get("policy_source") or "unknown",
+        "source_surface": feature.get("source_surface") or _source_surface(row),
+        "endpoint": feature.get("endpoint") or _endpoint(row),
+        "category": row.get("category") or feature.get("category") or "unknown",
+        "workflow_phase": feature.get("workflow_phase") or row.get("category") or "unknown",
+        "cohorts": {
+            "applied": _empty_cohort(),
+            "holdout": _empty_cohort(),
+            "blocked": _empty_cohort(),
+            "invalidated": _empty_cohort(),
+            "safety_stop": _empty_cohort(),
+        },
+        "status_buckets": Counter(),
+        "endpoint_buckets": Counter(),
+        "category_buckets": Counter(),
+        "workflow_phase_buckets": Counter(),
+        "cache_decision_buckets": Counter(),
+        "invalidation_reason_buckets": Counter(),
+        "reason_buckets": Counter(),
+        "latest_observed_at": None,
+        "oldest_observed_at": None,
+        "canary": _canary_public(rule.get("canary") if isinstance(rule.get("canary"), dict) else {}),
+    }
+
+
+def _projected_savings(cache: dict[str, Any], canary: dict[str, Any], row: dict[str, Any]) -> float:
+    for value in (
+        cache.get("estimated_saved_cost_usd"),
+        canary.get("projected_input_savings_usd"),
+        canary.get("projected_savings_usd"),
+    ):
+        amount = _as_float(value)
+        if amount > 0:
+            return amount
+    baseline = _as_float(row.get("cost_baseline_usd"))
+    actual = _as_float(row.get("cost_est_usd"))
+    return max(0.0, baseline - actual)
+
+
+def _observed_savings(cache: dict[str, Any], row: dict[str, Any], cohort: str) -> float:
+    if cohort != "applied":
+        return 0.0
+    baseline = _as_float(row.get("cost_baseline_usd"))
+    actual = _as_float(row.get("cost_est_usd"))
+    if baseline or actual:
+        return baseline - actual
+    return _as_float(cache.get("estimated_saved_cost_usd"))
+
+
+def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[str, Any]]:
+    capped = max(1, min(int(limit or 500), 10_000))
+    params: tuple[Any, ...]
+    where = "where cache_json is not null and coalesce(provider, 'anthropic') = 'openai'"
+    if since:
+        where += " and created_at >= ?"
+        params = (since, capped)
+    else:
+        params = (capped,)
+    return [
+        dict(row)
+        for row in store_obj.conn.execute(
+            f"""
+            select created_at, path, coalesce(provider, 'anthropic') as provider,
+                   source_surface, endpoint, requested_model, routed_model, stream,
+                   cache_hit, status_code, latency_ms, retry_count, cost_est_usd,
+                   cost_baseline_usd, category, routing_json, cache_json
+            from calls
+            {where}
+            order by created_at desc
+            limit ?
+            """,
+            params,
+        ).fetchall()
+    ]
+
+
+def _add_row(candidate: dict[str, Any], row: dict[str, Any], cache: dict[str, Any], canary: dict[str, Any], cohort: str) -> None:
+    raw = candidate["cohorts"][cohort]
+    raw["count"] += 1
+    status_code = _as_int(row.get("status_code"), -1)
+    if status_code >= 400:
+        raw["error_count"] += 1
+    retry_count = _as_int(row.get("retry_count"))
+    if retry_count > 0:
+        raw["retry_rows"] += 1
+        raw["retry_attempts"] += retry_count
+    latency_ms = _as_int(row.get("latency_ms"), -1)
+    if latency_ms >= 0:
+        raw["latency_ms_total"] += latency_ms
+        raw["latency_sample_count"] += 1
+    raw["cost_est_usd"] += _as_float(row.get("cost_est_usd"))
+    raw["cost_baseline_usd"] += _as_float(row.get("cost_baseline_usd"))
+    raw["observed_savings_usd"] += _observed_savings(cache, row, cohort)
+    raw["projected_savings_usd"] += _projected_savings(cache, canary, row)
+    if _as_int(row.get("cache_hit")) or cache.get("status") == "hit":
+        raw["cache_hit_count"] += 1
+    if cohort == "invalidated" or cache.get("invalidated") or cache.get("invalidation_reason"):
+        raw["invalidation_count"] += 1
+
+    candidate["status_buckets"][_status_bucket(row.get("status_code"))] += 1
+    candidate["endpoint_buckets"][_reason_code(row.get("endpoint") or row.get("source_surface"), "unknown")] += 1
+    candidate["category_buckets"][_reason_code(row.get("category"), "unknown")] += 1
+    candidate["workflow_phase_buckets"][_reason_code(candidate.get("workflow_phase"), "unknown")] += 1
+    candidate["cache_decision_buckets"][_reason_code(f"{cache.get('status') or 'unknown'}:{cache.get('reason') or 'unknown'}")] += 1
+    candidate["reason_buckets"][_reason_code(cache.get("reason") or canary.get("reason"), "unknown")] += 1
+    if cache.get("invalidation_reason"):
+        candidate["invalidation_reason_buckets"][_reason_code(cache.get("invalidation_reason"))] += 1
+    created_at = row.get("created_at")
+    if created_at:
+        if candidate["latest_observed_at"] is None or str(created_at) > str(candidate["latest_observed_at"]):
+            candidate["latest_observed_at"] = str(created_at)
+        if candidate["oldest_observed_at"] is None or str(created_at) < str(candidate["oldest_observed_at"]):
+            candidate["oldest_observed_at"] = str(created_at)
+
+
+def _stale_evidence(latest_observed_at: str | None, *, now: datetime, max_age_hours: float) -> dict[str, Any]:
+    latest = _parse_time(latest_observed_at)
+    if latest is None:
+        return {"stale": False, "age_hours": None, "max_age_hours": round(float(max_age_hours), 3)}
+    age_hours = (now.astimezone(timezone.utc) - latest).total_seconds() / 3600.0
+    return {"stale": age_hours > max_age_hours, "age_hours": round(age_hours, 3), "max_age_hours": round(float(max_age_hours), 3)}
+
+
+def _decide_gate(
+    *,
+    cohorts: dict[str, dict[str, Any]],
+    deltas: dict[str, Any],
+    stale: dict[str, Any],
+    thresholds: dict[str, Any],
+) -> dict[str, Any]:
+    applied = cohorts["applied"]
+    holdout = cohorts["holdout"]
+    reason_codes: list[str] = []
+    warning_codes: list[str] = []
+
+    if _as_int(applied.get("count")) < _as_int(thresholds["min_applied_samples"]):
+        reason_codes.append("insufficient-applied-samples")
+    if _as_int(holdout.get("count")) < _as_int(thresholds["min_holdout_samples"]):
+        reason_codes.append("insufficient-holdout-samples")
+    if reason_codes:
+        return {"verdict": "need-more-samples", "reason_codes": reason_codes, "warning_codes": warning_codes}
+
+    if _as_int(cohorts["safety_stop"].get("count")):
+        reason_codes.append("safety-stop-observed")
+    if _as_int(cohorts["invalidated"].get("count")) and _as_float(cohorts["invalidated"].get("invalidation_rate")) > _as_float(thresholds["max_invalidation_rate"]):
+        reason_codes.append("invalidation-rate-above-threshold")
+    if _as_float(applied.get("observed_savings_usd")) < 0:
+        reason_codes.append("negative-observed-savings")
+    if _as_float(applied.get("error_rate")) >= _as_float(thresholds["rollback_error_rate"]):
+        reason_codes.append("rollback-error-rate")
+    if reason_codes:
+        return {"verdict": "rollback", "reason_codes": reason_codes, "warning_codes": warning_codes}
+
+    if stale.get("stale"):
+        reason_codes.append("stale-evidence")
+    if _as_float(applied.get("error_rate")) > _as_float(thresholds["max_error_rate"]):
+        reason_codes.append("applied-error-rate-above-threshold")
+    if _as_float(deltas.get("applied_minus_holdout_error_rate")) > _as_float(thresholds["max_error_rate_delta"]):
+        reason_codes.append("error-rate-regression")
+    if _as_float(deltas.get("applied_minus_holdout_retry_rate")) > _as_float(thresholds["max_retry_rate_delta"]):
+        reason_codes.append("retry-rate-regression")
+    latency_delta = deltas.get("applied_minus_holdout_latency_avg_ms")
+    if latency_delta is not None and _as_float(latency_delta) > _as_float(thresholds["max_latency_regression_ms"]):
+        reason_codes.append("latency-regression")
+    if _as_float(applied.get("cache_hit_rate")) < _as_float(thresholds["min_cache_hit_rate"]):
+        reason_codes.append("cache-hit-rate-below-threshold")
+    projected = _as_float(applied.get("projected_savings_usd"))
+    observed = _as_float(applied.get("observed_savings_usd"))
+    if projected > 0 and observed / projected < _as_float(thresholds["min_savings_realization_ratio"]):
+        reason_codes.append("savings-below-projection")
+    elif observed > 0:
+        warning_codes.append("target-savings-met")
+
+    if reason_codes:
+        return {"verdict": "hold", "reason_codes": reason_codes, "warning_codes": warning_codes}
+    return {"verdict": "promote", "reason_codes": ["target-savings-met"], "warning_codes": warning_codes}
+
+
+def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds: dict[str, Any]) -> dict[str, Any]:
+    cohorts = {key: _finalize_cohort(value) for key, value in candidate["cohorts"].items()}
+    applied = cohorts["applied"]
+    holdout = cohorts["holdout"]
+    latency_delta = None
+    if applied["latency_avg_ms"] is not None and holdout["latency_avg_ms"] is not None:
+        latency_delta = round(_as_float(applied["latency_avg_ms"]) - _as_float(holdout["latency_avg_ms"]), 2)
+    deltas = {
+        "applied_minus_holdout_error_rate": round(_as_float(applied["error_rate"]) - _as_float(holdout["error_rate"]), 6),
+        "applied_minus_holdout_retry_rate": round(_as_float(applied["retry_rate"]) - _as_float(holdout["retry_rate"]), 6),
+        "applied_minus_holdout_cache_hit_rate": round(_as_float(applied["cache_hit_rate"]) - _as_float(holdout["cache_hit_rate"]), 6),
+        "applied_minus_holdout_latency_avg_ms": latency_delta,
+    }
+    stale = _stale_evidence(
+        candidate.get("latest_observed_at"),
+        now=now,
+        max_age_hours=_as_float(thresholds["max_evidence_age_hours"]),
+    )
+    gate = _decide_gate(cohorts=cohorts, deltas=deltas, stale=stale, thresholds=thresholds)
+    sample_count = sum(_as_int(value.get("count")) for value in cohorts.values())
+    projected = sum(_as_float(value.get("projected_savings_usd")) for value in cohorts.values())
+    observed = _as_float(applied.get("observed_savings_usd"))
+    return {
+        "schema": QUALITY_GATE_SCHEMA,
+        "candidate_id": candidate["candidate_id"],
+        "rule_id": candidate.get("rule_id"),
+        "policy_source": candidate.get("policy_source"),
+        "source_surface": candidate.get("source_surface"),
+        "endpoint": candidate.get("endpoint"),
+        "category": candidate.get("category"),
+        "workflow_phase": candidate.get("workflow_phase"),
+        "sample_count": sample_count,
+        "cohort_counts": {key: value["count"] for key, value in cohorts.items()},
+        "cohort_metrics": cohorts,
+        "applied_vs_holdout_deltas": deltas,
+        "observed_savings_usd": round(observed, 8),
+        "projected_savings_usd": round(projected, 8),
+        "status_code_breakdown": _counter_rows(candidate["status_buckets"]),
+        "endpoint_breakdown": _counter_rows(candidate["endpoint_buckets"]),
+        "category_breakdown": _counter_rows(candidate["category_buckets"]),
+        "workflow_phase_breakdown": _counter_rows(candidate["workflow_phase_buckets"]),
+        "cache_decision_breakdown": _counter_rows(candidate["cache_decision_buckets"]),
+        "invalidation_reason_breakdown": _counter_rows(candidate["invalidation_reason_buckets"]),
+        "reason_code_breakdown": _counter_rows(candidate["reason_buckets"]),
+        "canary": candidate.get("canary") or {"pattern_hashes_included": False},
+        "oldest_observed_at": candidate.get("oldest_observed_at"),
+        "latest_observed_at": candidate.get("latest_observed_at"),
+        "stale_evidence": stale,
+        "thresholds": thresholds,
+        "verdict": gate["verdict"],
+        "reason_codes": gate["reason_codes"],
+        "warning_codes": gate["warning_codes"],
+        "next_action": {
+            "promote": "consider_widening_local_openai_cache_replay_rule",
+            "hold": "keep_current_openai_cache_replay_fraction",
+            "rollback": "rollback_or_disable_openai_cache_replay_rule",
+            "need-more-samples": "collect_more_applied_and_holdout_cache_replay_evidence",
+        }[gate["verdict"]],
+        "privacy": _privacy_summary(),
+    }
+
+
+def build_openai_cache_replay_impact_report(
+    store_obj: Any,
+    *,
+    limit: int = 500,
+    since: str | None = None,
+    min_applied_samples: int = DEFAULT_MIN_APPLIED_SAMPLES,
+    min_holdout_samples: int = DEFAULT_MIN_HOLDOUT_SAMPLES,
+    max_error_rate: float = DEFAULT_MAX_ERROR_RATE,
+    max_error_rate_delta: float = DEFAULT_MAX_ERROR_RATE_DELTA,
+    max_retry_rate_delta: float = DEFAULT_MAX_RETRY_RATE_DELTA,
+    max_latency_regression_ms: int = DEFAULT_MAX_LATENCY_REGRESSION_MS,
+    max_invalidation_rate: float = DEFAULT_MAX_INVALIDATION_RATE,
+    min_cache_hit_rate: float = DEFAULT_MIN_CACHE_HIT_RATE,
+    rollback_error_rate: float = DEFAULT_ROLLBACK_ERROR_RATE,
+    min_savings_realization_ratio: float = DEFAULT_MIN_SAVINGS_REALIZATION_RATIO,
+    max_evidence_age_hours: float = DEFAULT_MAX_EVIDENCE_AGE_HOURS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    lookback_limit = max(1, min(int(limit or 500), 10_000))
+    thresholds = {
+        "min_applied_samples": max(0, _as_int(min_applied_samples)),
+        "min_holdout_samples": max(0, _as_int(min_holdout_samples)),
+        "max_error_rate": round(float(max_error_rate), 6),
+        "max_error_rate_delta": round(float(max_error_rate_delta), 6),
+        "max_retry_rate_delta": round(float(max_retry_rate_delta), 6),
+        "max_latency_regression_ms": _as_int(max_latency_regression_ms),
+        "max_invalidation_rate": round(float(max_invalidation_rate), 6),
+        "min_cache_hit_rate": round(float(min_cache_hit_rate), 6),
+        "rollback_error_rate": round(float(rollback_error_rate), 6),
+        "min_savings_realization_ratio": round(float(min_savings_realization_ratio), 6),
+        "max_evidence_age_hours": round(float(max_evidence_age_hours), 3),
+    }
+    rows = _call_rows(store_obj, limit=lookback_limit, since=since)
+    candidates: dict[str, dict[str, Any]] = {}
+    observed_rows = 0
+    cohort_counts: Counter[str] = Counter()
+    for row in rows:
+        cache = _json_obj(row.get("cache_json"))
+        rule = _cache_replay_rule(cache)
+        if rule is None:
+            continue
+        routing = _json_obj(row.get("routing_json"))
+        feature = _feature_unit(routing)
+        canary = _cache_replay_canary(cache, rule)
+        cid = _public_id(rule.get("candidate_id") or canary.get("candidate_id") or rule.get("rule_id"), "candidate-id")
+        rid = _public_id(rule.get("rule_id") or canary.get("rule_id"), "rule-id")
+        if cid is None:
+            cid = rid or "unknown-openai-cache-replay"
+        aggregate = candidates.setdefault(cid, _new_candidate(cid, rid, rule, row, feature))
+        cohort = _cohort(cache, rule, canary)
+        _add_row(aggregate, row, cache, canary, cohort)
+        observed_rows += 1
+        cohort_counts[cohort] += 1
+
+    now_dt = now or datetime.now(timezone.utc)
+    quality_gates = [
+        _finalize_candidate(candidate, now=now_dt, thresholds=thresholds)
+        for candidate in candidates.values()
+    ]
+    quality_gates.sort(key=lambda item: (str(item.get("verdict")), str(item.get("candidate_id"))))
+    verdict_counts = Counter(str(item.get("verdict") or "unknown") for item in quality_gates)
+    reason_counts: Counter[str] = Counter()
+    for item in quality_gates:
+        for reason in item.get("reason_codes") or []:
+            reason_counts[str(reason)] += 1
+
+    top_level_gate = {
+        "schema": QUALITY_GATE_SCHEMA,
+        "thresholds": thresholds,
+        "verdict_counts": _counter_rows(verdict_counts),
+        "reason_code_counts": _counter_rows(reason_counts),
+        "candidate_results": [
+            {
+                "candidate_id": item.get("candidate_id"),
+                "rule_id": item.get("rule_id"),
+                "verdict": item.get("verdict"),
+                "reason_codes": item.get("reason_codes") or [],
+                "cohort_counts": item.get("cohort_counts") or {},
+                "observed_savings_usd": item.get("observed_savings_usd"),
+                "projected_savings_usd": item.get("projected_savings_usd"),
+            }
+            for item in quality_gates
+        ],
+        "default_apply": False,
+        "wrote_local_files": False,
+        "provider_calls_made": False,
+    }
+    return {
+        "schema": SCHEMA,
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "lookback_limit": lookback_limit,
+        "since": since,
+        "status": "matched" if observed_rows else "no-openai-cache-replay-metadata",
+        "summary": {
+            "sampled_call_count": len(rows),
+            "observed_openai_cache_replay_metadata_row_count": observed_rows,
+            "candidate_count": len(quality_gates),
+            "applied_count": cohort_counts.get("applied", 0),
+            "holdout_count": cohort_counts.get("holdout", 0),
+            "blocked_count": cohort_counts.get("blocked", 0),
+            "invalidated_count": cohort_counts.get("invalidated", 0),
+            "safety_stop_count": cohort_counts.get("safety_stop", 0),
+            "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
+            "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
+        },
+        "cohort_breakdown": _counter_rows(cohort_counts),
+        "quality_gate": top_level_gate,
+        "candidates": quality_gates,
+        "privacy": {
+            **_privacy_summary(),
+            "basis": "local calls table metadata plus sanitized cache replay canary and decision summaries only",
+        },
+    }
+
+
+def build_openai_cache_replay_lifecycle_feedback(result: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(result, dict) or result.get("schema") != SCHEMA:
+        return None
+    return {
+        "schema": LIFECYCLE_SCHEMA,
+        "event_type": "openai_cache_replay_impact",
+        "lifecycle_kind": "openai_cache_replay",
+        "lifecycle_phase": "impact",
+        "generated_at": result.get("generated_at") or utc_now(),
+        "summary": result.get("summary") or {},
+        "quality_gate": result.get("quality_gate") or {},
+        "candidate_results": [
+            {
+                "candidate_id": item.get("candidate_id"),
+                "rule_id": item.get("rule_id"),
+                "policy_source": item.get("policy_source"),
+                "verdict": item.get("verdict"),
+                "reason_codes": item.get("reason_codes") or [],
+                "warning_codes": item.get("warning_codes") or [],
+                "cohort_counts": item.get("cohort_counts") or {},
+                "observed_savings_usd": item.get("observed_savings_usd"),
+                "projected_savings_usd": item.get("projected_savings_usd"),
+                "endpoint": item.get("endpoint"),
+                "category": item.get("category"),
+                "workflow_phase": item.get("workflow_phase"),
+            }
+            for item in result.get("candidates") or []
+            if isinstance(item, dict)
+        ],
+        "privacy": result.get("privacy") or _privacy_summary(),
+    }

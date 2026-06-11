@@ -3261,6 +3261,105 @@ def openai_cache_replay_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def _attach_openai_cache_replay_lifecycle_feedback(result: dict[str, Any], *, db_path: str) -> None:
+    from agentflow_proxy import recommendations
+    from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_lifecycle_feedback
+
+    payload = build_openai_cache_replay_lifecycle_feedback(result)
+    if payload is None:
+        return
+    if not recommendations.recommendations_enabled():
+        result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta({
+            **recommendations.disabled_outcome_feedback_meta(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "disabled",
+        })
+        return
+
+    store = None
+    try:
+        store = _open_store_for_db(str(db_path))
+        meta = asyncio.run(
+            recommendations.queue_policy_event_feedback(
+                store,
+                payload,
+                source_surface=recommendations.CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": True,
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+        }
+    finally:
+        if store is not None:
+            store.conn.close()
+
+    public_meta = _public_lifecycle_feedback_meta(meta)
+    result["managed_lifecycle_feedback"] = public_meta
+    if public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
+        result["managed_server_calls_made"] = True
+
+
+def openai_cache_replay_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report OpenAI cache replay canary impact and safety gates from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Maximum recent OpenAI calls to scan, default: 500, max: 10000.")
+    parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied cache replay samples before promotion, default: 2.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout cache replay samples before promotion, default: 1.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Maximum applied error rate before hold, default: 0.05.")
+    parser.add_argument("--max-error-rate-delta", type=float, default=0.05, help="Maximum applied-minus-holdout error-rate delta before hold, default: 0.05.")
+    parser.add_argument("--max-retry-rate-delta", type=float, default=0.10, help="Maximum applied-minus-holdout retry-rate delta before hold, default: 0.10.")
+    parser.add_argument("--max-latency-regression-ms", type=int, default=2000, help="Maximum applied-minus-holdout latency regression before hold, default: 2000.")
+    parser.add_argument("--max-invalidation-rate", type=float, default=0.02, help="Invalidation rate that triggers rollback, default: 0.02.")
+    parser.add_argument("--min-cache-hit-rate", type=float, default=0.01, help="Minimum applied cache hit rate before promotion, default: 0.01.")
+    parser.add_argument("--rollback-error-rate", type=float, default=0.20, help="Applied error rate that triggers rollback, default: 0.20.")
+    parser.add_argument("--min-savings-realization-ratio", type=float, default=0.50, help="Minimum observed/projected savings ratio before hold, default: 0.50.")
+    parser.add_argument("--max-evidence-age-hours", type=float, default=72.0, help="Mark evidence stale after this many hours, default: 72.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_openai_cache_replay_impact_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+            max_error_rate=args.max_error_rate,
+            max_error_rate_delta=args.max_error_rate_delta,
+            max_retry_rate_delta=args.max_retry_rate_delta,
+            max_latency_regression_ms=args.max_latency_regression_ms,
+            max_invalidation_rate=args.max_invalidation_rate,
+            min_cache_hit_rate=args.min_cache_hit_rate,
+            rollback_error_rate=args.rollback_error_rate,
+            min_savings_realization_ratio=args.min_savings_realization_ratio,
+            max_evidence_age_hours=args.max_evidence_age_hours,
+        )
+    finally:
+        store.conn.close()
+    _attach_openai_cache_replay_lifecycle_feedback(result, db_path=str(args.db))
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _openai_cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "agentflow.openai_cache_replay_dry_run.v1",
@@ -5673,6 +5772,10 @@ def openai_old_context_summary_report_main() -> None:
 
 def openai_cache_replay_report_main() -> None:
     raise SystemExit(openai_cache_replay_report_cli())
+
+
+def openai_cache_replay_impact_main() -> None:
+    raise SystemExit(openai_cache_replay_impact_cli())
 
 
 def openai_cache_replay_dry_run_main() -> None:
