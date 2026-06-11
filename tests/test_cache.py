@@ -909,6 +909,114 @@ pattern_rules:
             finally:
                 store.conn.close()
 
+    def test_session_cache_replay_canary_blocks_missing_dependency_evidence(self):
+        pattern_hash = "sha256:" + "5" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "cache_rules.yaml").write_text(
+                self._session_cache_replay_rules(pattern_hash),
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(cache_module)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            body = {"messages": [{"role": "user", "content": "Summarize the previous tool output."}]}
+            try:
+                can_exact, _can_semantic, meta = manual.cache_lookup_meta(
+                    has_tool_blocks=True,
+                    pattern_features=self._session_cache_replay_features(pattern_hash),
+                    store_obj=store,
+                )
+                self.assertTrue(can_exact)
+                meta["file_dependency_audit"] = manual.cache_file_dependency_audit(body)
+                scope, scope_id, _rule = manual.cache_replay_scope_for_meta(meta, "session-missing-deps")
+                key = manual.cache_key_for(body, "/v1/messages", replay_scope=scope, replay_scope_id=scope_id)
+                store.set_cache(
+                    key,
+                    "claude-sonnet-4-6",
+                    20,
+                    {"content": [{"type": "text", "text": "cached without dependency evidence"}]},
+                    file_deps=[],
+                )
+
+                allowed, replay_meta = manual.cache_replay_canary_decision(
+                    cache_meta=meta,
+                    dependency_audit=store.cache_file_dependency_audit(key),
+                    session_id="session-missing-deps",
+                )
+
+                self.assertFalse(allowed)
+                self.assertEqual(replay_meta["status"], "bypassed")
+                self.assertEqual(replay_meta["reason"], "file-dependency-missing")
+                self.assertFalse(replay_meta["current_dependency_evidence"]["safe_invalidation_evidence"])
+                self.assertFalse(replay_meta["current_dependency_evidence"]["paths_included"])
+                self.assertNotIn("cached without dependency evidence", json.dumps(replay_meta))
+            finally:
+                store.conn.close()
+
+    def test_session_cache_replay_canary_blocks_dependency_cap_exceeded(self):
+        pattern_hash = "sha256:" + "6" * 64
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "cache_rules.yaml").write_text(
+                self._session_cache_replay_rules(pattern_hash)
+                + """
+file_watch:
+  enabled: true
+  max_paths: 1
+""",
+                encoding="utf-8",
+            )
+            (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+            (tmp_path / "b.txt").write_text("b\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            capped = importlib.reload(cache_module)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            body = {"messages": [{"role": "user", "content": "Read ./a.txt and ./b.txt"}]}
+            try:
+                can_exact, _can_semantic, meta = capped.cache_lookup_meta(
+                    has_tool_blocks=True,
+                    pattern_features=self._session_cache_replay_features(pattern_hash),
+                    store_obj=store,
+                )
+                self.assertTrue(can_exact)
+                current_audit = capped.cache_file_dependency_audit(body)
+                self.assertTrue(current_audit["cap_exceeded"])
+                self.assertEqual(current_audit["invalidation_reason"], "dependency-cap-exceeded")
+                meta["file_dependency_audit"] = current_audit
+                scope, scope_id, _rule = capped.cache_replay_scope_for_meta(meta, "session-cap-exceeded")
+                key = capped.cache_key_for(body, "/v1/messages", replay_scope=scope, replay_scope_id=scope_id)
+                store.set_cache(
+                    key,
+                    "claude-sonnet-4-6",
+                    20,
+                    {"content": [{"type": "text", "text": "truncated dependency cache"}]},
+                    file_deps=capped.cache_file_dependency_snapshots(body),
+                )
+                stored_audit = store.cache_file_dependency_audit(key)
+                self.assertTrue(stored_audit["safe_invalidation_evidence"])
+
+                allowed, replay_meta = capped.cache_replay_canary_decision(
+                    cache_meta=meta,
+                    dependency_audit=stored_audit,
+                    session_id="session-cap-exceeded",
+                )
+
+                self.assertFalse(allowed)
+                self.assertEqual(replay_meta["status"], "bypassed")
+                self.assertEqual(replay_meta["reason"], "dependency-cap-exceeded")
+                self.assertTrue(replay_meta["current_dependency_evidence"]["cap_exceeded"])
+                serialized = json.dumps(replay_meta, sort_keys=True)
+                self.assertNotIn("a.txt", serialized)
+                self.assertNotIn("b.txt", serialized)
+                self.assertNotIn("truncated dependency cache", serialized)
+            finally:
+                store.conn.close()
+
     def test_session_cache_replay_canary_holdout_forwards_upstream_with_cohort(self):
         pattern_hash = "sha256:" + "3" * 64
         with TemporaryDirectory() as tmp:
@@ -993,6 +1101,54 @@ pattern_rules:
         self.assertEqual(event["safety_stop"]["decision"], "stop")
         self.assertNotIn("sha256:" + "4" * 64, json.dumps(event))
         self.assertNotIn("/tmp/private.py", json.dumps(event))
+        assert_managed_egress_safe(event)
+
+    def test_cache_replay_lifecycle_feedback_redacts_raw_like_rule_metadata(self):
+        raw_path = "/tmp/private/project/secret.py"
+        raw_prompt = "raw prompt must not leave local machine"
+        raw_cache_key = "cache-key-user-workspace-secret"
+        event = cache_module.build_cache_replay_lifecycle_feedback(
+            cache_meta={
+                "status": "hit",
+                "reason": "exact-match",
+                "policy_source": "managed-recommended",
+                "pattern_rule": {
+                    "policy_id": raw_cache_key,
+                    "rule_id": raw_path,
+                    "candidate_id": raw_prompt,
+                    "policy_source": "managed-recommended",
+                },
+                "cache_replay_canary": {
+                    "status": "applied",
+                    "reason": "dependency-stable",
+                    "dependency_audit": {"safe_invalidation_evidence": True, "paths_included": False},
+                    "canary": {"enabled": True, "selected": True, "cohort": "canary_applied"},
+                },
+            },
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=200,
+            latency_ms=5,
+            retry_count=0,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.002,
+            category="tool-result",
+            stream=False,
+        )
+
+        self.assertEqual(event["cohort"], "replayed")
+        self.assertTrue(event["policy_id"].startswith("redacted-policy-id-"))
+        self.assertTrue(event["rule_id"].startswith("redacted-rule-id-"))
+        self.assertTrue(event["candidate_id"].startswith("redacted-candidate-id-"))
+        serialized = json.dumps(event, sort_keys=True)
+        self.assertNotIn(raw_path, serialized)
+        self.assertNotIn(raw_prompt, serialized)
+        self.assertNotIn(raw_cache_key, serialized)
+        self.assertFalse(event["privacy"]["file_paths_included"])
+        self.assertFalse(event["privacy"]["cache_keys_included"])
+        self.assertTrue(RAW_FEATURE_KEYS.isdisjoint(self._keys_in(event)))
         assert_managed_egress_safe(event)
 
     def test_cache_replay_lifecycle_feedback_rejects_raw_egress_fields(self):

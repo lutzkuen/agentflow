@@ -714,6 +714,21 @@ def cache_replay_canary_decision(
     if scope == "session" and not session_id:
         decision.update({"status": "bypassed", "reason": "session-scope-missing"})
         return False, decision
+    current_audit = cache_meta.get("file_dependency_audit") if isinstance(cache_meta.get("file_dependency_audit"), dict) else None
+    if isinstance(current_audit, dict) and not current_audit.get("safe_invalidation_evidence"):
+        decision.update({
+            "status": "bypassed",
+            "reason": current_audit.get("invalidation_reason") or "file-dependency-missing",
+            "current_dependency_evidence": {
+                "safe_invalidation_evidence": False,
+                "reason": current_audit.get("invalidation_reason") or "file-dependency-missing",
+                "snapshot_count_bucket": current_audit.get("snapshot_count_bucket"),
+                "candidate_path_count_bucket": current_audit.get("candidate_path_count_bucket"),
+                "cap_exceeded": bool(current_audit.get("cap_exceeded")),
+                "paths_included": False,
+            },
+        })
+        return False, decision
     if not isinstance(dependency_audit, dict):
         decision.update({"status": "bypassed", "reason": "dependency-audit-missing"})
         return False, decision
@@ -855,9 +870,12 @@ def build_cache_replay_lifecycle_feedback(
         "schema": "agentflow.cache_replay_lifecycle_feedback.v1",
         "provider": provider,
         "source_surface": source_surface,
-        "policy_id": rule.get("policy_id") or rule.get("candidate_id") or rule.get("rule_id"),
-        "rule_id": rule.get("rule_id"),
-        "candidate_id": rule.get("candidate_id"),
+        "policy_id": _cache_replay_public_id(
+            rule.get("policy_id") or rule.get("candidate_id") or rule.get("rule_id"),
+            "policy-id",
+        ),
+        "rule_id": _cache_replay_public_id(rule.get("rule_id"), "rule-id"),
+        "candidate_id": _cache_replay_public_id(rule.get("candidate_id"), "candidate-id"),
         "policy_source": rule.get("policy_source") or cache_meta.get("policy_source") or "unknown",
         "cohort": cohort,
         "event_reason": event_reason,
@@ -934,6 +952,29 @@ def _model_family(model: str | None) -> str | None:
         if family in model_l:
             return family
     return "other"
+
+
+_CACHE_REPLAY_PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
+_CACHE_REPLAY_RAW_VALUE_HINT_RE = re.compile(
+    r"[/\\]|\s|cache[-_]?key|request[-_]?id|raw[-_]?prompt|provider[-_]?body|tool[-_]?payload",
+    re.IGNORECASE,
+)
+
+
+def _cache_replay_public_id(value: Any, kind: str) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    is_sha256_value = text.lower().startswith("sha256:") and len(text) >= 71
+    if (
+        _CACHE_REPLAY_PUBLIC_ID_RE.match(text)
+        and not is_sha256_value
+        and not _CACHE_REPLAY_RAW_VALUE_HINT_RE.search(text)
+    ):
+        return text
+    return f"redacted-{kind}-{sha256_text(kind + ':' + text)[:12]}"
 
 
 _PATH_TRAILING_JUNK = ".,;:)\\]}>\"'"

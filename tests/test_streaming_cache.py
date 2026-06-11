@@ -327,6 +327,9 @@ class StreamingCacheTest(unittest.TestCase):
             self.assertEqual(cache_meta["reason"], "malformed-stream-cache")
             self.assertEqual(cache_meta["malformed_stream_cache"]["reason"], "sse-data-missing")
             self.assertFalse(cache_meta["malformed_stream_cache"]["raw_payload_included"])
+            serialized_cache = json.dumps(cache_meta, sort_keys=True)
+            self.assertNotIn("cached garbage", serialized_cache)
+            self.assertNotIn(key, serialized_cache)
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
 
