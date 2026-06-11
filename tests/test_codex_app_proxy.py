@@ -1,6 +1,7 @@
 import io
 import asyncio
 import importlib
+import inspect
 import json
 import os
 import tempfile
@@ -168,6 +169,13 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
 
         self.assertIn("1", request_started)
         self.assertIn("database is locked", stderr.getvalue())
+
+    def test_upstream_relay_uses_expanded_websocket_frame_limit(self):
+        self.assertGreaterEqual(codex_app_proxy.CODEX_APP_WEBSOCKET_MAX_SIZE, 64 * 1024 * 1024)
+        self.assertIn(
+            "websockets.connect(upstream_url, max_size=CODEX_APP_WEBSOCKET_MAX_SIZE)",
+            inspect.getsource(codex_app_proxy.relay),
+        )
 
     def test_quota_and_token_usage_metadata_is_allowlisted(self):
         raw_prompt = "secret raw prompt must not be stored"

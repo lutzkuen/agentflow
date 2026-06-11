@@ -84,6 +84,7 @@ CODEX_APP_CACHE_CANARY = codex_app_cache_canary()
 CODEX_APP_SUMMARY_MODEL_HINT = codex_app_summary_model_hint_enabled()
 CODEX_APP_SUMMARY_MODEL_HINT_TARGET = codex_app_summary_model_hint_target()
 CODEX_APP_SUMMARY_MODEL_HINT_CANARY = codex_app_summary_model_hint_canary()
+CODEX_APP_WEBSOCKET_MAX_SIZE = int(os.getenv("AGENTFLOW_CODEX_APP_WEBSOCKET_MAX_SIZE", str(64 * 1024 * 1024)))
 CODEX_APP_RULES = [
     rule for rule in (CODEX_APP_POLICY.get("rules") or [])
     if isinstance(rule, dict)
@@ -3476,7 +3477,7 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
     model_states: dict[str, dict[str, Any]] = {}
 
     try:
-        async with websockets.connect(upstream_url) as upstream:
+        async with websockets.connect(upstream_url, max_size=CODEX_APP_WEBSOCKET_MAX_SIZE) as upstream:
             async def client_to_upstream() -> None:
                 while True:
                     msg = await websocket.receive()
