@@ -1346,6 +1346,105 @@ def policy_draft_validate_cli(
     return 0 if result.get("ok") else 1
 
 
+def openai_optimization_draft_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Dry-run a staged managed OpenAI optimization draft through the local governor"
+    )
+    parser.add_argument(
+        "draft",
+        help="Staged draft ID, draft directory, draft.json path, or policy_bundle.json path.",
+    )
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local SQLite DB path for metadata-only OpenAI dry-run rows.",
+    )
+    parser.add_argument("--limit", type=int, default=1000, help="Recent local call metadata rows to inspect, default: 1000.")
+    parser.add_argument(
+        "--canary-fraction",
+        type=float,
+        default=1.0,
+        help="Projected per-action and governor canary fraction for the dry-run, default: 1.0.",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.0,
+        help="Projected per-action and governor holdout fraction for the dry-run, default: 0.0.",
+    )
+    parser.add_argument(
+        "--queue-feedback",
+        action="store_true",
+        help="Queue sanitized dry-run lifecycle feedback in the local metadata queue.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print dry-run JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.openai_optimization_draft_dry_run import dry_run_openai_optimization_draft
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.store import Store
+
+    store = None
+    try:
+        db_path = Path(args.db).expanduser()
+        if db_path.exists():
+            store = Store(str(db_path))
+        result = asyncio.run(
+            dry_run_openai_optimization_draft(
+                args.draft,
+                workspace=args.workspace,
+                store_obj=store,
+                limit=args.limit,
+                canary_fraction=args.canary_fraction,
+                holdout_fraction=args.holdout_fraction,
+                queue_feedback=args.queue_feedback,
+            )
+        )
+    finally:
+        if store is not None:
+            store.conn.close()
+
+    log_policy_event(
+        "openai-optimization-draft-dry-run",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "draft": args.draft,
+            "workspace": args.workspace,
+            "db": args.db,
+            "limit": args.limit,
+            "queue_feedback": bool(args.queue_feedback),
+            "openai_rows_considered": (result.get("summary") or {}).get("openai_rows_considered")
+            if isinstance(result.get("summary"), dict)
+            else None,
+            "applied_if_enabled_total": (result.get("summary") or {}).get("applied_if_enabled_total")
+            if isinstance(result.get("summary"), dict)
+            else None,
+            "suppressed_total": (result.get("summary") or {}).get("suppressed_total")
+            if isinstance(result.get("summary"), dict)
+            else None,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "active_policy_files_written": False,
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    stdout.write(json.dumps(result, indent=2 if args.pretty else None, sort_keys=True) + "\n")
+    return 0 if result.get("ok") else 1
+
+
 async def _reload_policy_state_via_url(url: str, *, timeout: float) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url)
@@ -5901,6 +6000,10 @@ def policy_draft_stage_main() -> None:
 
 def policy_draft_validate_main() -> None:
     raise SystemExit(policy_draft_validate_cli())
+
+
+def openai_optimization_draft_dry_run_main() -> None:
+    raise SystemExit(openai_optimization_draft_dry_run_cli())
 
 
 def policy_draft_apply_main() -> None:

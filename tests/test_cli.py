@@ -6159,6 +6159,227 @@ class PolicyReloadCliTests(unittest.TestCase):
                 )
                 self.assertFalse((Path(tmp) / "drafts").exists())
 
+    def test_openai_optimization_draft_dry_run_projects_governor_conflicts_without_writes(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        def select_all_actions(bundle):
+            selected = bundle["openai_optimization"]["selected_actions"][0]
+            summary = bundle["openai_optimization"]["suppressed_actions"][0]
+            cache = bundle["openai_optimization"]["omitted_actions"][0]
+            for action in (selected, summary, cache):
+                action["decision"] = "selected"
+                action["local_executor_compatibility"] = {
+                    "compatible": True,
+                    "supported_local_action_families": ["cache", "old_context_summarization", "routing"],
+                    "reason_codes": [],
+                }
+            bundle["openai_optimization"]["selected_actions"] = [selected, summary, cache]
+            bundle["openai_optimization"]["suppressed_actions"] = []
+            bundle["openai_optimization"]["omitted_actions"] = []
+            bundle["recommendation"]["selected_action_count"] = 3
+            bundle["recommendation"]["suppressed_action_count"] = 0
+            bundle["recommendation"]["omitted_action_count"] = 0
+            bundle["recommendation"]["candidate_ids"] = [
+                "openai-routing-candidate",
+                "openai-summary-candidate",
+                "openai-cache-candidate",
+            ]
+            bundle["recommendation"]["policy_sections"] = ["routing", "crunch", "cache"]
+
+        bundle = self._openai_review_bundle_for_draft(mutate=select_all_actions)
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            config_dir = Path(tmp) / "config"
+            config_dir.mkdir()
+            active_routing = config_dir / "routing_rules.yaml"
+            active_crunch = config_dir / "crunch_rules.yaml"
+            active_cache = config_dir / "cache_rules.yaml"
+            active_routing.write_text("rules: []\n", encoding="utf-8")
+            active_crunch.write_text("enabled: true\n", encoding="utf-8")
+            active_cache.write_text("exact_cache:\n  enabled: true\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_POLICY_CONFIG_DIR": str(config_dir),
+                    "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                },
+                clear=False,
+            ):
+                stage_stdout = io.StringIO()
+                stage_code = cli.policy_draft_stage_cli(
+                    ["--draft-id", "openai-review-all", "--workspace", str(workspace), "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stage_stdout,
+                )
+            self.assertEqual(stage_code, 0, stage_stdout.getvalue())
+
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="openai-routing-cache-match",
+                    created_at="2026-06-11T10:00:00+00:00",
+                    path="/v1/responses",
+                    requested_model="gpt-5",
+                    routed_model="gpt-5",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.004,
+                    cost_baseline_usd=0.004,
+                    routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                    crunch_json=stable_json({}),
+                    cache_json=stable_json({"status": "miss", "pattern_hash": "managed:openai-cache-candidate"}),
+                    retry_count=0,
+                    provider="openai",
+                    source_surface="openai_responses",
+                    endpoint="responses",
+                    requested_model_family="gpt-5",
+                    session_id="raw-session-id-must-not-leak",
+                )
+                store.log_call(
+                    id="openai-summary-cache-match",
+                    created_at="2026-06-11T10:01:00+00:00",
+                    path="/v1/responses",
+                    requested_model="gpt-5",
+                    routed_model="gpt-5",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1200,
+                    input_tokens_est=12000,
+                    output_tokens_est=250,
+                    actual_input_tokens=12000,
+                    actual_output_tokens=250,
+                    cost_est_usd=0.04,
+                    cost_baseline_usd=0.04,
+                    routing_json=stable_json({"category": "chat", "text_chars": 48000, "has_tools": False}),
+                    crunch_json=stable_json({}),
+                    cache_json=stable_json({"status": "miss", "pattern_hash": "managed:openai-cache-candidate"}),
+                    retry_count=0,
+                    provider="openai",
+                    source_surface="openai_responses",
+                    endpoint="responses",
+                    requested_model_family="gpt-5",
+                    session_id="raw-session-id-must-not-leak-2",
+                )
+            finally:
+                store.conn.close()
+
+            dry_stdout = io.StringIO()
+            dry_code = cli.openai_optimization_draft_dry_run_cli(
+                [
+                    "openai-review-all",
+                    "--workspace",
+                    str(workspace),
+                    "--db",
+                    db_path,
+                    "--queue-feedback",
+                    "--pretty",
+                ],
+                stdout=dry_stdout,
+            )
+
+            self.assertEqual(active_routing.read_text(encoding="utf-8"), "rules: []\n")
+            self.assertEqual(active_crunch.read_text(encoding="utf-8"), "enabled: true\n")
+            self.assertEqual(active_cache.read_text(encoding="utf-8"), "exact_cache:\n  enabled: true\n")
+
+            payload = json.loads(dry_stdout.getvalue())
+            self.assertEqual(dry_code, 0, dry_stdout.getvalue())
+            self.assertEqual(payload["schema"], "agentflow.openai_optimization_draft_dry_run.v1")
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["dry_run"])
+            self.assertEqual(payload["summary"]["openai_rows_considered"], 2)
+            self.assertGreaterEqual(payload["families"]["routing"]["applied_if_enabled"], 1)
+            self.assertGreaterEqual(payload["families"]["old_context_summary"]["applied_if_enabled"], 1)
+            self.assertGreaterEqual(payload["families"]["cache_replay"]["applied_if_enabled"], 2)
+            self.assertGreaterEqual(payload["families"]["cache_replay"]["suppressed"], 2)
+            self.assertGreaterEqual(payload["families"]["cache_replay"]["conflict"], 2)
+            self.assertGreater(payload["summary"]["expected_net_savings_usd"], 0)
+            self.assertFalse(payload["privacy"]["provider_calls_made"])
+            self.assertFalse(payload["privacy"]["managed_server_calls_made"])
+            self.assertFalse(payload["privacy"]["active_policy_files_written"])
+            self.assertIsNotNone(payload["feedback"]["queue_id"])
+            rendered = dry_stdout.getvalue()
+            self.assertNotIn("raw-session-id-must-not-leak", rendered)
+            self.assertNotIn('"request_json"', rendered)
+            self.assertNotIn('"response_json"', rendered)
+            self.assertNotIn('"cache_key"', rendered)
+
+            store = Store(db_path)
+            try:
+                queued = store.conn.execute(
+                    "select source_surface, payload_json from managed_outcome_feedback_queue"
+                ).fetchall()
+            finally:
+                store.conn.close()
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(queued[0]["source_surface"], "openai_optimization_lifecycle")
+            self.assertNotIn("raw-session-id-must-not-leak", queued[0]["payload_json"])
+
+            holdout_stdout = io.StringIO()
+            holdout_code = cli.openai_optimization_draft_dry_run_cli(
+                [
+                    "openai-review-all",
+                    "--workspace",
+                    str(workspace),
+                    "--db",
+                    db_path,
+                    "--canary-fraction",
+                    "0",
+                    "--holdout-fraction",
+                    "1",
+                ],
+                stdout=holdout_stdout,
+            )
+            holdout = json.loads(holdout_stdout.getvalue())
+            self.assertEqual(holdout_code, 0)
+            self.assertGreaterEqual(holdout["summary"]["holdout_total"], 1)
+            self.assertEqual(holdout["summary"]["applied_if_enabled_total"], 0)
+
+    def test_openai_optimization_draft_dry_run_rejects_raw_like_staged_payload(self):
+        from agentflow_proxy.store import Store
+
+        bundle = self._openai_review_bundle_for_draft()
+
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "drafts"
+            with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret"}, clear=False):
+                stage_stdout = io.StringIO()
+                stage_code = cli.policy_draft_stage_cli(
+                    ["--draft-id", "openai-review-raw-edited", "--workspace", str(workspace), "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stage_stdout,
+                )
+            self.assertEqual(stage_code, 0, stage_stdout.getvalue())
+            staged_path = workspace / "openai-review-raw-edited" / "policy_bundle.json"
+            staged = json.loads(staged_path.read_text(encoding="utf-8"))
+            staged["policies"]["routing"]["openai"]["canary"]["managed_recommendation"]["raw_prompt"] = "raw prompt must not leak"
+            staged_path.write_text(json.dumps(staged), encoding="utf-8")
+
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            store.conn.close()
+            stdout = io.StringIO()
+            code = cli.openai_optimization_draft_dry_run_cli(
+                ["openai-review-raw-edited", "--workspace", str(workspace), "--db", db_path],
+                stdout=stdout,
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "validation_failed")
+        self.assertIn("raw_prompt", {error["path"].split(".")[-1] for error in payload["error"]["errors"]})
+        self.assertNotIn("raw prompt must not leak", stdout.getvalue())
+
     def test_codex_app_policy_dry_run_projects_synthetic_fixture_and_recent_rows_without_mutation(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 
