@@ -436,6 +436,111 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         self.assertEqual(public_feedback_meta["status"], "queued")
         _assert_openai_canary_privacy_clean(self, public_feedback_meta)
 
+    def test_openai_old_context_summary_failure_feedback_queue_is_metadata_only(self) -> None:
+        store = FakeQueuedFeedbackStore()
+        routing_meta = {
+            "reason": "OpenAI old-context summary canary selected",
+            "policy_source": "local-manual",
+            "category": "chat",
+            "managed_recommendation": {
+                "enabled": True,
+                "optimization_unit_id": 88,
+                "recommendation_id": "rec-openai-summary-privacy",
+                "policy_id": "local-openai-old-context-summary",
+                "mode": "canary",
+                "status": "applied",
+                "lifecycle_event": "canary_applied",
+                "applied": True,
+                "canary": {"enabled": True, "cohort": "canary_applied"},
+                **_raw_like_extra_fields(),
+            },
+            **_raw_like_extra_fields(),
+        }
+        crunch_meta = {
+            "old_context_summarization": {
+                "schema": "agentflow.openai_old_context_summary.v1",
+                "enabled": True,
+                "status": "skipped",
+                "applied": False,
+                "changed": False,
+                "rule_id": "local-openai-old-context-summary",
+                "candidate_id": "secret-content-derived-openai-summary-candidate",
+                "policy_source": "local-manual",
+                "summary_model": "gpt-5-mini",
+                "endpoint": "responses",
+                "source_item_count": 5,
+                "source_chars": 64_000,
+                "estimated_chars_saved": 52_000,
+                "estimated_tokens_saved": 13_000,
+                "summary_cost_est_usd": 0.0,
+                "estimated_net_savings_usd": 0.0,
+                "summary_cache_hit": False,
+                "reason_codes": ["summary_fetch_error"],
+                "summary_error_type": "TimeoutError",
+                "summary_error": "raw-canary-content-secret req_canary_raw_secret /home/lutz/private/canary_secret.py",
+                "summary": "raw-canary-prompt-secret",
+                "summary_request": {"input": "raw-canary-message-secret"},
+                "cache_key": "cache-key-canary-secret",
+                "canary": {
+                    "cohort": "canary_applied",
+                    "canary_fraction": 0.25,
+                    "holdout_fraction": 0.75,
+                },
+                **_raw_like_extra_fields(),
+            },
+            **_raw_like_extra_fields(),
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}):
+            asyncio.run(
+                record_managed_outcome_feedback(
+                    store=store,
+                    call_id="call-openai-summary-privacy",
+                    path="/v1/responses",
+                    requested_model="gpt-5.4",
+                    routed_model="gpt-5.4",
+                    status_code=200,
+                    latency_ms=1500,
+                    retry_count=0,
+                    input_tokens_est=16000,
+                    output_tokens_est=80,
+                    actual_input_tokens=16000,
+                    actual_output_tokens=80,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    thinking_output_tokens=0,
+                    cost_est_usd=0.01,
+                    cost_baseline_usd=0.02,
+                    cache_meta={"status": "miss", "reason": "exact-miss", **_raw_like_extra_fields()},
+                    crunch_meta=crunch_meta,
+                    routing_meta=routing_meta,
+                    category="chat",
+                    session_id="raw-openai-session-canary",
+                    error='{"error":{"type":"upstream_error","message":"raw-canary-content-secret"}}',
+                )
+            )
+
+        self.assertEqual(len(store.rows), 1)
+        payload = json.loads(str(store.rows[0]["payload_json"]))
+        summary = payload["old_context_summarization"]
+        self.assertEqual(payload["provider"], "openai")
+        self.assertEqual(payload["source_surface"], "openai_responses")
+        self.assertEqual(summary["status"], "skipped")
+        self.assertEqual(summary["reason"], "summary_fetch_error")
+        self.assertEqual(summary["outcome"], "skipped")
+        self.assertEqual(summary["eligible_chars_bucket"], "32k_128k_chars")
+        self.assertEqual(summary["saved_tokens_bucket"], "4k_16k_tokens")
+        self.assertTrue(summary["candidate_id"].startswith("sha256:"))
+        self.assertTrue(summary["privacy"]["metadata_only"])
+        self.assertFalse(summary["privacy"]["raw_summary_included"])
+        self.assertFalse(summary["privacy"]["summary_request_content_included"])
+        self.assertFalse(summary["privacy"]["request_ids_included"])
+        _assert_openai_canary_privacy_clean(self, payload)
+        self.assertEqual(len(store.updated), 1)
+        public_feedback_meta = store.updated[0][1]["managed_recommendation"]["outcome_feedback"]
+        self.assertEqual(public_feedback_meta["status"], "queued")
+        _assert_openai_canary_privacy_clean(self, public_feedback_meta)
+
 
 if __name__ == "__main__":
     unittest.main()

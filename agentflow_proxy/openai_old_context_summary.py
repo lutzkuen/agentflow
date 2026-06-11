@@ -508,8 +508,17 @@ async def maybe_apply_openai_old_context_summary(
         meta["summary_input_tokens"] = cached.get("summary_input_tokens")
         meta["summary_output_tokens"] = cached.get("summary_output_tokens")
     else:
-        summary_response = await fetch_summary(build_summary_request(source_items, policy))
-        summary_text = str(summary_response.get("summary") or "").strip()
+        try:
+            summary_response = await fetch_summary(build_summary_request(source_items, policy))
+        except Exception as exc:
+            meta["status"] = "skipped"
+            meta["reason_codes"] = ["summary_fetch_error"]
+            meta["summary_error_type"] = type(exc).__name__
+            return body, meta
+        if not isinstance(summary_response, dict):
+            summary_response = {}
+        raw_summary = summary_response.get("summary")
+        summary_text = raw_summary.strip() if isinstance(raw_summary, str) else ""
         summary_cost = _as_float(summary_response.get("summary_cost_est_usd"))
         meta["summary_status_code"] = summary_response.get("summary_status_code")
         meta["summary_input_tokens"] = summary_response.get("summary_input_tokens")

@@ -205,6 +205,64 @@ class OpenAIOldContextSummaryApplyTests(unittest.TestCase):
         self.assertEqual(meta["reason_codes"], ["summary_empty_or_malformed"])
         self.assertFalse(meta["applied"])
 
+    def test_summary_fetch_exception_fails_closed_without_raw_error(self) -> None:
+        body = self._responses_body()
+
+        async def fetch_summary(_request):
+            raise TimeoutError("raw summary timeout secret /tmp/openai-private.py req_secret_summary")
+
+        new_body, meta = asyncio.run(maybe_apply_openai_old_context_summary(
+            body=copy.deepcopy(body),
+            path="/v1/responses",
+            requested_model="gpt-5.4",
+            category="chat",
+            stream=True,
+            fetch_summary=fetch_summary,
+            get_cached_summary=lambda _key: None,
+            set_cached_summary=lambda _key, _value: None,
+            policy=self._policy(),
+        ))
+
+        self.assertEqual(new_body, body)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason_codes"], ["summary_fetch_error"])
+        self.assertEqual(meta["summary_error_type"], "TimeoutError")
+        self.assertFalse(meta["applied"])
+        rendered_meta = json.dumps(meta, sort_keys=True)
+        self.assertNotIn("raw summary timeout secret", rendered_meta)
+        self.assertNotIn("/tmp/openai-private.py", rendered_meta)
+        self.assertNotIn("req_secret_summary", rendered_meta)
+
+    def test_malformed_non_string_summary_fails_closed(self) -> None:
+        body = self._chat_body()
+
+        async def fetch_summary(_request):
+            return {
+                "summary": {"text": "raw malformed generated summary secret must not leak"},
+                "summary_status_code": 200,
+                "summary_input_tokens": 100,
+                "summary_output_tokens": 6,
+                "summary_cost_est_usd": 0.00012,
+            }
+
+        new_body, meta = asyncio.run(maybe_apply_openai_old_context_summary(
+            body=copy.deepcopy(body),
+            path="/v1/chat/completions",
+            requested_model="gpt-5.4",
+            category="chat",
+            stream=False,
+            fetch_summary=fetch_summary,
+            get_cached_summary=lambda _key: None,
+            set_cached_summary=lambda _key, _value: None,
+            policy=self._policy(),
+        ))
+
+        self.assertEqual(new_body, body)
+        self.assertEqual(meta["status"], "skipped")
+        self.assertEqual(meta["reason_codes"], ["summary_empty_or_malformed"])
+        self.assertFalse(meta["applied"])
+        self.assertNotIn("raw malformed generated summary secret", json.dumps(meta, sort_keys=True))
+
 
 if __name__ == "__main__":
     unittest.main()

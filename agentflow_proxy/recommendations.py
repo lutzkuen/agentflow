@@ -1859,31 +1859,48 @@ def build_old_context_summary_outcome_feedback(
     if not isinstance(summary_meta, dict) or not summary_meta.get("enabled"):
         return None
     status = str(summary_meta.get("status") or "")
-    reason = str(summary_meta.get("reason") or "")
+    reason_codes = [str(item) for item in summary_meta.get("reason_codes") or [] if str(item)]
+    reason = str(summary_meta.get("reason") or (reason_codes[0] if reason_codes else ""))
     canary = summary_meta.get("canary") if isinstance(summary_meta.get("canary"), dict) else {}
+    canary_cohort = str(canary.get("cohort") or "")
+    fail_closed_reasons = OLD_CONTEXT_SUMMARY_FAIL_CLOSED_REASONS | {
+        "summary_fetch_error",
+        "summary_empty_or_malformed",
+        "summary_cost_over_budget",
+        "tool_function_protocol_ambiguous",
+        "file_reference_in_source_window",
+        "preservation_mismatch",
+    }
     relevant = (
         status in {"applied", "bypass", "error"}
         or reason in {"canary_holdout", "local-canary-safety-stop"}
-        or reason in OLD_CONTEXT_SUMMARY_FAIL_CLOSED_REASONS
-        or (canary.get("enabled") and canary.get("cohort") in {"canary_applied", "canary_holdout"})
+        or reason in fail_closed_reasons
+        or bool(set(reason_codes) & fail_closed_reasons)
+        or canary_cohort in {"canary_applied", "canary_holdout", "holdout"}
+        or (canary.get("enabled") and canary_cohort in {"canary_applied", "canary_holdout"})
     )
     if not relevant:
         return None
 
     try:
-        eligible_chars = int(summary_meta.get("eligible_chars") or 0)
+        eligible_chars = int(summary_meta.get("eligible_chars") or summary_meta.get("source_chars") or 0)
     except (TypeError, ValueError):
         eligible_chars = 0
     try:
-        eligible_turns = int(summary_meta.get("eligible_turns") or 0)
+        eligible_turns = int(summary_meta.get("eligible_turns") or summary_meta.get("source_item_count") or 0)
     except (TypeError, ValueError):
         eligible_turns = 0
     try:
-        saved_chars = int(summary_meta.get("saved_chars") or 0)
+        saved_chars = int(
+            summary_meta.get("saved_chars")
+            or summary_meta.get("estimated_chars_saved")
+            or summary_meta.get("actual_chars_saved_est")
+            or 0
+        )
     except (TypeError, ValueError):
         saved_chars = 0
     try:
-        saved_tokens = int(summary_meta.get("tokens_saved_est") or 0)
+        saved_tokens = int(summary_meta.get("tokens_saved_est") or summary_meta.get("estimated_tokens_saved") or 0)
     except (TypeError, ValueError):
         saved_tokens = max(0, saved_chars // TOKEN_CHARS)
     try:
@@ -1937,13 +1954,13 @@ def build_old_context_summary_outcome_feedback(
         },
         "canary": {
             "enabled": bool(canary.get("enabled")),
-            "selected": canary.get("selected"),
+            "selected": canary.get("selected") if canary.get("selected") is not None else canary_cohort == "canary_applied",
             "status": canary.get("status"),
-            "cohort": canary.get("cohort"),
-            "fraction": canary.get("fraction"),
+            "cohort": canary_cohort or None,
+            "fraction": canary.get("fraction") if canary.get("fraction") is not None else canary.get("canary_fraction"),
             "unit": canary.get("unit"),
         },
-        "canary_cohort": canary.get("cohort"),
+        "canary_cohort": canary_cohort or None,
         "eligible_turns": eligible_turns,
         "eligible_chars": eligible_chars,
         "eligible_chars_bucket": _text_bucket(eligible_chars),
