@@ -797,13 +797,20 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(feedback["actual_input_tokens"], 9)
         self.assertEqual(feedback["actual_output_tokens"], 3)
         self.assertNotIn("raw openai prompt", str(feedback))
-        [queue_row] = server.store.conn.execute(
+        rows = server.store.conn.execute(
             "select source_surface, status, attempts, payload_json from managed_outcome_feedback_queue"
         ).fetchall()
-        self.assertEqual(queue_row["source_surface"], "openai_responses")
+        rows_by_surface = {row["source_surface"]: row for row in rows}
+        self.assertEqual(set(rows_by_surface), {"openai_optimization_lifecycle", "openai_responses"})
+        queue_row = rows_by_surface["openai_responses"]
         self.assertEqual(queue_row["status"], "sent")
         self.assertEqual(queue_row["attempts"], 1)
         self.assertNotIn("raw openai prompt", queue_row["payload_json"])
+        lifecycle_row = rows_by_surface["openai_optimization_lifecycle"]
+        self.assertEqual(lifecycle_row["status"], "queued")
+        lifecycle_payload = json.loads(lifecycle_row["payload_json"])
+        self.assertEqual(lifecycle_payload["schema"], "agentflow.openai_optimization_lifecycle_feedback.v1")
+        self.assertNotIn("raw openai prompt", lifecycle_row["payload_json"])
 
     def test_anthropic_route_forwards_allowlisted_headers_and_does_not_log_bodies(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

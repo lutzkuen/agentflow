@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from agentflow_proxy.optimization.openai_pipeline import serialize_openai_outcome_summary
-from agentflow_proxy.recommendations import build_outcome_feedback, queue_outcome_feedback
+from agentflow_proxy.openai_optimization_governor import (
+    LIFECYCLE_SOURCE_SURFACE,
+    build_openai_optimization_lifecycle_event,
+    openai_optimization_lifecycle_public_meta,
+)
+from agentflow_proxy.recommendations import build_outcome_feedback, queue_outcome_feedback, queue_policy_event_feedback
 from agentflow_proxy.store import stable_json
 
 
@@ -86,6 +91,33 @@ async def record_managed_outcome_feedback(
     store_obj = store if store is not None else getattr(context, "store", None)
     if store_obj is None:
         raise ValueError("record_managed_outcome_feedback requires a store or context with a store")
+    lifecycle = build_openai_optimization_lifecycle_event(
+        routing_meta=routing_meta,
+        crunch_meta=crunch_meta,
+        cache_meta=cache_meta,
+        path=path,
+        requested_model=requested_model,
+        routed_model=routed_model,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        retry_count=retry_count,
+        cost_est_usd=cost_est_usd,
+        cost_baseline_usd=cost_baseline_usd,
+        category=category,
+        stream=False,
+        call_id=call_id,
+    )
+    if lifecycle is not None:
+        lifecycle_meta = await queue_policy_event_feedback(
+            store_obj,
+            lifecycle,
+            source_surface=LIFECYCLE_SOURCE_SURFACE,
+            queue_when_disabled=True,
+            flush_immediately=False,
+        )
+        routing_meta["openai_optimization_lifecycle_feedback"] = openai_optimization_lifecycle_public_meta(lifecycle_meta)
+        if hasattr(store_obj, "update_call_routing_json"):
+            store_obj.update_call_routing_json(call_id, stable_json(routing_meta))
     managed = routing_meta.get("managed_recommendation")
     if not isinstance(managed, dict) or not managed.get("enabled"):
         return

@@ -1282,6 +1282,117 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(result["due_samples"][0]["payload_included"])
         self.assertTrue(result["privacy"]["metadata_only"])
 
+    def test_feedback_status_counts_openai_optimization_lifecycle_cohorts(self):
+        payload = {
+            "schema": "agentflow.openai_optimization_lifecycle_feedback.v1",
+            "event_type": "openai_optimization_lifecycle",
+            "provider": "openai",
+            "source_surface": "openai_optimization_lifecycle",
+            "endpoint": "responses",
+            "status_bucket": "2xx",
+            "retry_bucket": "none",
+            "family_events": [
+                {
+                    "action_family": "routing",
+                    "cohort": "applied",
+                    "selected": True,
+                    "eligible": True,
+                    "status": "applied",
+                    "candidate_id": "routing-candidate",
+                    "rule_id": "routing-rule",
+                    "reason_codes": ["selected-canary"],
+                },
+                {
+                    "action_family": "old_context_summary",
+                    "cohort": "holdout",
+                    "selected": False,
+                    "eligible": True,
+                    "status": "holdout",
+                    "candidate_id": "summary-candidate",
+                    "rule_id": "summary-rule",
+                    "reason_codes": ["missing-holdout"],
+                },
+                {
+                    "action_family": "cache_replay",
+                    "cohort": "invalidated",
+                    "selected": False,
+                    "eligible": True,
+                    "status": "invalidated",
+                    "candidate_id": "cache-candidate",
+                    "rule_id": "cache-rule",
+                    "reason_codes": ["cache-replay-invalidation-missing"],
+                },
+                {
+                    "action_family": "routing",
+                    "cohort": "fallback",
+                    "selected": False,
+                    "eligible": True,
+                    "status": "applied",
+                    "candidate_id": "routing-candidate",
+                    "rule_id": "routing-rule",
+                    "reason_codes": ["rate-limited"],
+                },
+                {
+                    "action_family": "old_context_summary",
+                    "cohort": "safety_stop",
+                    "selected": False,
+                    "eligible": True,
+                    "status": "safety-stopped",
+                    "candidate_id": "summary-candidate",
+                    "rule_id": "summary-rule",
+                    "reason_codes": ["stale-evidence"],
+                },
+                {
+                    "action_family": "cache_replay",
+                    "cohort": "suppressed",
+                    "selected": False,
+                    "eligible": True,
+                    "status": "hit",
+                    "candidate_id": "cache-candidate",
+                    "rule_id": "cache-rule",
+                    "reason_codes": ["conflicts-with-selected-family"],
+                },
+            ],
+            "privacy": {"metadata_only": True, "raw_payload_included": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                now = utc_now()
+                store.enqueue_managed_outcome_feedback(
+                    id="openai-lifecycle-queue-1",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface="openai_optimization_lifecycle",
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(payload),
+                    status="queued",
+                    attempts=0,
+                    next_attempt_at=now,
+                )
+                result = feedback.managed_feedback_status_result(
+                    store,
+                    source_surface="openai_optimization_lifecycle",
+                    sample_limit=5,
+                )
+            finally:
+                store.conn.close()
+
+        lifecycle = result["openai_optimization_lifecycle"]
+        self.assertEqual(lifecycle["schema"], "agentflow.openai_optimization_lifecycle_queue_status.v1")
+        self.assertEqual(lifecycle["queue_rows"], 1)
+        self.assertEqual(lifecycle["family_event_count"], 6)
+        cohorts = {item["value"]: item["count"] for item in lifecycle["cohort_breakdown"]}
+        for cohort in ("applied", "holdout", "suppressed", "invalidated", "safety_stop", "fallback"):
+            self.assertEqual(cohorts[cohort], 1)
+        family_cohorts = {item["value"]: item["count"] for item in lifecycle["family_cohort_breakdown"]}
+        self.assertEqual(family_cohorts["routing:applied"], 1)
+        self.assertEqual(family_cohorts["old_context_summary:safety_stop"], 1)
+        self.assertEqual(family_cohorts["cache_replay:suppressed"], 1)
+        self.assertFalse(lifecycle["payload_json_included"])
+
     def test_feedback_status_includes_routing_experiment_queue_summary(self):
         event = {
             "schema": "agentflow.routing_experiment_outcome_event.v1",

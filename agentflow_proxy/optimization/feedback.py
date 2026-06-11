@@ -461,6 +461,118 @@ def _routing_promotion_lifecycle_status(
     }
 
 
+def _openai_optimization_lifecycle_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    event_count = 0
+    queue_state_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    family_cohort_counts: dict[str, int] = {}
+    status_bucket_counts: dict[str, int] = {}
+    retry_bucket_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    family_breakdown: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        payload = _safe_payload_json(row)
+        if payload.get("schema") != "agentflow.openai_optimization_lifecycle_feedback.v1":
+            continue
+        events = [item for item in payload.get("family_events") or [] if isinstance(item, dict)]
+        if not events:
+            continue
+        row_count += 1
+        queue_state = _queue_state(row.get("status"))
+        _add_count(queue_state_counts, queue_state)
+        _add_count(status_bucket_counts, payload.get("status_bucket"))
+        _add_count(retry_bucket_counts, payload.get("retry_bucket"))
+        for event in events:
+            event_count += 1
+            family = str(event.get("action_family") or "unknown")
+            cohort = str(event.get("cohort") or "unknown")
+            _add_count(family_counts, family)
+            _add_count(cohort_counts, cohort)
+            _add_count(family_cohort_counts, f"{family}:{cohort}")
+            if event.get("candidate_id"):
+                _add_count(candidate_counts, event.get("candidate_id"))
+            if event.get("rule_id"):
+                _add_count(rule_counts, event.get("rule_id"))
+            for reason in event.get("reason_codes") or []:
+                _add_count(reason_counts, reason)
+            family_item = family_breakdown.setdefault(
+                family,
+                {
+                    "action_family": family,
+                    "event_count": 0,
+                    "cohort_breakdown": {},
+                    "queue_state_breakdown": {},
+                    "status_bucket_breakdown": {},
+                    "retry_bucket_breakdown": {},
+                    "reason_code_breakdown": {},
+                    "candidate_id_breakdown": {},
+                    "rule_id_breakdown": {},
+                    "payload_json_included": False,
+                },
+            )
+            family_item["event_count"] += 1
+            for key, value in (
+                ("cohort_breakdown", cohort),
+                ("queue_state_breakdown", queue_state),
+                ("status_bucket_breakdown", payload.get("status_bucket")),
+                ("retry_bucket_breakdown", payload.get("retry_bucket")),
+            ):
+                _add_count(family_item[key], value)
+            if event.get("candidate_id"):
+                _add_count(family_item["candidate_id_breakdown"], event.get("candidate_id"))
+            if event.get("rule_id"):
+                _add_count(family_item["rule_id_breakdown"], event.get("rule_id"))
+            for reason in event.get("reason_codes") or []:
+                _add_count(family_item["reason_code_breakdown"], reason)
+
+    family_items: list[dict[str, Any]] = []
+    for item in family_breakdown.values():
+        converted = dict(item)
+        for key in (
+            "cohort_breakdown",
+            "queue_state_breakdown",
+            "status_bucket_breakdown",
+            "retry_bucket_breakdown",
+            "reason_code_breakdown",
+            "candidate_id_breakdown",
+            "rule_id_breakdown",
+        ):
+            converted[key] = breakdown_from_counts(converted[key])
+        family_items.append(converted)
+    family_items.sort(key=lambda item: (-int(item["event_count"]), str(item["action_family"])))
+
+    return {
+        "schema": "agentflow.openai_optimization_lifecycle_queue_status.v1",
+        "queue_rows": row_count,
+        "family_event_count": event_count,
+        "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
+        "action_family_breakdown": breakdown_from_counts(family_counts),
+        "cohort_breakdown": breakdown_from_counts(cohort_counts),
+        "family_cohort_breakdown": breakdown_from_counts(family_cohort_counts),
+        "status_bucket_breakdown": breakdown_from_counts(status_bucket_counts),
+        "retry_bucket_breakdown": breakdown_from_counts(retry_bucket_counts),
+        "reason_code_breakdown": breakdown_from_counts(reason_counts),
+        "candidate_id_breakdown": breakdown_from_counts(candidate_counts),
+        "rule_id_breakdown": breakdown_from_counts(rule_counts),
+        "family_breakdown": family_items,
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -552,6 +664,7 @@ def managed_feedback_status_result(
     routing_experiments = _routing_experiment_status(store, source_surface=source_surface)
     codex_app_canaries = _codex_app_canary_lifecycle_status(store, source_surface=source_surface)
     routing_promotion_lifecycle = _routing_promotion_lifecycle_status(store, source_surface=source_surface)
+    openai_optimization_lifecycle = _openai_optimization_lifecycle_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -563,6 +676,7 @@ def managed_feedback_status_result(
         "routing_experiments": routing_experiments,
         "codex_app_canaries": codex_app_canaries,
         "routing_promotion_lifecycle": routing_promotion_lifecycle,
+        "openai_optimization_lifecycle": openai_optimization_lifecycle,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,

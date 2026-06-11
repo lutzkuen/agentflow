@@ -8,8 +8,31 @@ from agentflow_proxy.optimization.openai_features import openai_endpoint
 
 
 SCHEMA = "agentflow.openai_optimization_governor.v1"
+LIFECYCLE_SCHEMA = "agentflow.openai_optimization_lifecycle_feedback.v1"
+LIFECYCLE_SOURCE_SURFACE = "openai_optimization_lifecycle"
 FAMILIES = ("routing", "old_context_summary", "cache_replay")
 PRIORITY = ("routing", "old_context_summary", "cache_replay")
+RAW_IDENTIFIER_TERMS = {
+    "apikey",
+    "api_key",
+    "authorization",
+    "body",
+    "cache_key",
+    "content",
+    "file",
+    "message",
+    "path",
+    "payload",
+    "prompt",
+    "request",
+    "response",
+    "secret",
+    "session",
+    "summary_text",
+    "tenant",
+    "tool",
+    "transcript",
+}
 
 
 def _float_0_1(value: Any, default: float) -> float:
@@ -39,6 +62,105 @@ def _hash_value(parts: list[str]) -> tuple[str, float]:
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     score = int(digest[:8], 16) / 0xFFFFFFFF
     return "sha256:" + digest, score
+
+
+def _hash_identifier(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _public_identifier(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    lowered = text.lower()
+    if (
+        len(text) > 128
+        or any(char.isspace() for char in text)
+        or any(char in text for char in ("/", "\\", "{", "}", "[", "]", "\"", "'"))
+        or any(term in lowered for term in RAW_IDENTIFIER_TERMS)
+    ):
+        return _hash_identifier(text)
+    return text
+
+
+def _reason_code(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower().replace("_", "-").replace(" ", "-")
+    if not text:
+        return None
+    safe = all(char.isalnum() or char in {"-", ".", ":"} for char in text)
+    if len(text) > 96 or not safe or any(term in text for term in RAW_IDENTIFIER_TERMS):
+        return _hash_identifier(text)
+    return text
+
+
+def _reason_codes(*values: Any) -> list[str]:
+    codes: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            for item in value:
+                code = _reason_code(item)
+                if code:
+                    codes.append(code)
+        else:
+            code = _reason_code(value)
+            if code:
+                codes.append(code)
+    return sorted(set(codes))
+
+
+def _status_code_bucket(value: Any) -> str:
+    try:
+        code = int(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if code < 200:
+        return "lt_2xx"
+    if code < 300:
+        return "2xx"
+    if code < 400:
+        return "3xx"
+    if code < 500:
+        return "4xx"
+    return "5xx"
+
+
+def _retry_bucket(value: Any) -> str:
+    try:
+        count = int(value or 0)
+    except (TypeError, ValueError):
+        return "unknown"
+    if count <= 0:
+        return "none"
+    if count == 1:
+        return "one"
+    if count <= 3:
+        return "two_three"
+    return "gte_4"
+
+
+def _latency_bucket(value: Any) -> str:
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if ms < 500:
+        return "lt_500ms"
+    if ms < 2_000:
+        return "500ms_2s"
+    if ms < 10_000:
+        return "2s_10s"
+    if ms < 30_000:
+        return "10s_30s"
+    return "gte_30s"
+
+
+def _money(value: Any) -> float | None:
+    try:
+        return round(float(value), 8)
+    except (TypeError, ValueError):
+        return None
 
 
 def _policy_source(*metas: dict[str, Any]) -> str:
@@ -151,6 +273,273 @@ def _cache_decision(cache_meta: dict[str, Any]) -> dict[str, Any]:
         "reason": reason,
         "policy_source": _policy_source(replay_canary, pattern_rule, cache_meta),
         "suppression_reasons": sorted(set(suppressed)),
+    }
+
+
+def _summary_meta(crunch_meta: dict[str, Any], summary_meta: dict[str, Any] | None) -> dict[str, Any]:
+    if isinstance(summary_meta, dict):
+        return summary_meta
+    existing = crunch_meta.get("old_context_summarization")
+    return existing if isinstance(existing, dict) else {}
+
+
+def _cache_replay_meta(cache_meta: dict[str, Any]) -> dict[str, Any]:
+    replay = cache_meta.get("cache_replay_canary")
+    if isinstance(replay, dict):
+        return replay
+    rule = cache_meta.get("pattern_rule")
+    if isinstance(rule, dict):
+        return rule
+    return {}
+
+
+def _family_identifier_meta(
+    family: str,
+    *,
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    summary_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if family == "routing":
+        canary = routing_meta.get("openai_canary") if isinstance(routing_meta.get("openai_canary"), dict) else {}
+        return {
+            "policy_id": _public_identifier(canary.get("policy_id") or routing_meta.get("managed_policy_id")),
+            "rule_id": _public_identifier(canary.get("rule_id") or canary.get("policy_id")),
+            "candidate_id": _public_identifier(
+                canary.get("candidate_id")
+                or canary.get("target_candidate_id")
+                or canary.get("promotion_action_id")
+            ),
+            "action_id": _public_identifier(canary.get("promotion_action_id")),
+        }
+    if family == "old_context_summary":
+        meta = _summary_meta(crunch_meta, summary_meta)
+        return {
+            "policy_id": _public_identifier(meta.get("policy_id") or meta.get("rule_id")),
+            "rule_id": _public_identifier(meta.get("rule_id")),
+            "candidate_id": _public_identifier(meta.get("candidate_id") or meta.get("target_candidate_id")),
+            "action_id": _public_identifier(meta.get("promotion_action_id")),
+        }
+    replay = _cache_replay_meta(cache_meta)
+    return {
+        "policy_id": _public_identifier(replay.get("policy_id") or replay.get("rule_id")),
+        "rule_id": _public_identifier(replay.get("rule_id")),
+        "candidate_id": _public_identifier(replay.get("candidate_id")),
+        "action_id": _public_identifier(replay.get("promotion_action_id")),
+    }
+
+
+def _family_reason_codes(
+    family: str,
+    *,
+    decision: dict[str, Any],
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    summary_meta: dict[str, Any] | None,
+    suppressed: list[dict[str, Any]],
+) -> list[str]:
+    suppressed_codes: list[str] = []
+    for item in suppressed:
+        if item.get("family") == family:
+            suppressed_codes.extend(str(code) for code in item.get("reason_codes") or [])
+    if family == "routing":
+        canary = routing_meta.get("openai_canary") if isinstance(routing_meta.get("openai_canary"), dict) else {}
+        safety = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
+        return _reason_codes(decision.get("reason"), canary.get("reason"), safety.get("reason_codes"), suppressed_codes)
+    if family == "old_context_summary":
+        meta = _summary_meta(crunch_meta, summary_meta)
+        return _reason_codes(decision.get("reason"), meta.get("reason_codes"), suppressed_codes)
+    replay = _cache_replay_meta(cache_meta)
+    return _reason_codes(decision.get("reason"), replay.get("reason"), suppressed_codes)
+
+
+def _family_cohort(
+    family: str,
+    *,
+    selected: str,
+    decision: dict[str, Any],
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    summary_meta: dict[str, Any] | None,
+    reason_codes: list[str],
+) -> str:
+    status = str(decision.get("status") or "")
+    if family == "routing":
+        canary = routing_meta.get("openai_canary") if isinstance(routing_meta.get("openai_canary"), dict) else {}
+        if canary.get("fallback_reason"):
+            return "fallback"
+        if canary.get("cohort") == "canary_holdout" or status == "holdout":
+            return "holdout"
+        safety = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
+        if status in {"safety_stopped", "safety-stop-tripped"} or safety.get("tripped"):
+            return "safety_stop"
+    elif family == "old_context_summary":
+        meta = _summary_meta(crunch_meta, summary_meta)
+        canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+        if canary.get("cohort") == "canary_holdout" or status == "holdout":
+            return "holdout"
+        if status in {"safety_stopped", "safety-stop-tripped"}:
+            return "safety_stop"
+    else:
+        replay = _cache_replay_meta(cache_meta)
+        if replay.get("canary_cohort") == "canary_holdout" or status == "holdout":
+            return "holdout"
+        if status == "invalidated":
+            return "invalidated"
+        if status in {"safety_stopped", "safety-stop-tripped"}:
+            return "safety_stop"
+    if "cache-replay-invalidation-missing" in reason_codes or status == "invalidated":
+        return "invalidated"
+    if any(code.startswith("safety") or code == "stale-evidence" for code in reason_codes):
+        return "safety_stop"
+    if family == selected and selected != "none" and status in {"applied", "hit"}:
+        return "applied"
+    if decision.get("eligible"):
+        return "suppressed"
+    return "not_eligible"
+
+
+def build_openai_optimization_lifecycle_event(
+    *,
+    routing_meta: dict[str, Any] | None,
+    crunch_meta: dict[str, Any] | None,
+    cache_meta: dict[str, Any] | None,
+    summary_meta: dict[str, Any] | None = None,
+    path: str = "/v1/responses",
+    requested_model: str | None = None,
+    routed_model: str | None = None,
+    status_code: int | None = None,
+    latency_ms: int | None = None,
+    retry_count: int | None = None,
+    cost_est_usd: float | None = None,
+    cost_baseline_usd: float | None = None,
+    category: str | None = None,
+    stream: bool = False,
+    call_id: str | None = None,
+) -> dict[str, Any] | None:
+    routing = routing_meta if isinstance(routing_meta, dict) else {}
+    governor = routing.get("openai_optimization_governor")
+    if not isinstance(governor, dict) or governor.get("schema") != SCHEMA:
+        return None
+    crunch = crunch_meta if isinstance(crunch_meta, dict) else {}
+    cache = cache_meta if isinstance(cache_meta, dict) else {}
+    family_status = governor.get("family_status") if isinstance(governor.get("family_status"), dict) else {}
+    suppressed = governor.get("suppressed_families") if isinstance(governor.get("suppressed_families"), list) else []
+    selected = str(governor.get("selected_action_family") or "none")
+    observed_savings = None
+    if cost_baseline_usd is not None and cost_est_usd is not None:
+        observed_savings = round(float(cost_baseline_usd) - float(cost_est_usd), 8)
+
+    events: list[dict[str, Any]] = []
+    for family in FAMILIES:
+        decision = family_status.get(family) if isinstance(family_status.get(family), dict) else {}
+        identifiers = {
+            key: value
+            for key, value in _family_identifier_meta(
+                family,
+                routing_meta=routing,
+                crunch_meta=crunch,
+                cache_meta=cache,
+                summary_meta=summary_meta,
+            ).items()
+            if value
+        }
+        reasons = _family_reason_codes(
+            family,
+            decision=decision,
+            routing_meta=routing,
+            crunch_meta=crunch,
+            cache_meta=cache,
+            summary_meta=summary_meta,
+            suppressed=suppressed,
+        )
+        cohort = _family_cohort(
+            family,
+            selected=selected,
+            decision=decision,
+            routing_meta=routing,
+            crunch_meta=crunch,
+            cache_meta=cache,
+            summary_meta=summary_meta,
+            reason_codes=reasons,
+        )
+        if cohort == "not_eligible" and not identifiers:
+            continue
+        events.append({
+            "action_family": family,
+            "cohort": cohort,
+            "selected": family == selected,
+            "eligible": bool(decision.get("eligible")),
+            "status": _reason_code(decision.get("status")) or "unknown",
+            "reason_codes": reasons,
+            **identifiers,
+        })
+    if not events:
+        return None
+    canary = governor.get("canary") if isinstance(governor.get("canary"), dict) else {}
+    cost_est = _money(cost_est_usd)
+    baseline_est = _money(cost_baseline_usd)
+    return {
+        "schema": LIFECYCLE_SCHEMA,
+        "event_type": "openai_optimization_lifecycle",
+        "provider": "openai",
+        "source_surface": LIFECYCLE_SOURCE_SURFACE,
+        "endpoint": openai_endpoint(path),
+        "category": category or routing.get("category") or "unknown",
+        "stream": bool(stream or routing.get("stream")),
+        "requested_model_family": _public_identifier(requested_model or routing.get("requested_model")),
+        "routed_model_family": _public_identifier(routed_model or routing.get("routed_model")),
+        "selected_action_family": selected,
+        "family_events": events,
+        "status_bucket": _status_code_bucket(status_code),
+        "retry_bucket": _retry_bucket(retry_count),
+        "latency_bucket": _latency_bucket(latency_ms),
+        "cost_estimate_usd": cost_est,
+        "baseline_estimate_usd": baseline_est,
+        "observed_savings_estimate_usd": observed_savings,
+        "governor": {
+            "schema": SCHEMA,
+            "cohort": canary.get("cohort"),
+            "cohort_key_hash": canary.get("cohort_key_hash"),
+            "selected": bool(canary.get("selected")),
+            "holdout": bool(canary.get("holdout")),
+            "conservative_single_mutation": True,
+        },
+        "local_call_hash": _hash_identifier(call_id) if call_id else None,
+        "privacy": {
+            "telemetry_profile": "metadata-only",
+            "raw_body_storage": False,
+            "metadata_only": True,
+            "aggregate_only": False,
+            "raw_payload_included": False,
+            "raw_prompt_included": False,
+            "raw_response_included": False,
+            "provider_body_included": False,
+            "provider_forwarding": False,
+            "cache_key_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        },
+    }
+
+
+def openai_optimization_lifecycle_public_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.openai_optimization_lifecycle_feedback_queue_meta.v1",
+        "enabled": bool(meta.get("enabled")),
+        "status": meta.get("status"),
+        "reason": meta.get("reason"),
+        "endpoint": meta.get("endpoint"),
+        "source_surface": LIFECYCLE_SOURCE_SURFACE,
+        "queue_id": meta.get("queue_id"),
+        "attempts": meta.get("attempts"),
+        "status_code": meta.get("status_code"),
+        "latency_ms": meta.get("latency_ms"),
+        "payload_included": False,
     }
 
 
