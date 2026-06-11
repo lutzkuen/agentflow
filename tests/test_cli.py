@@ -5640,6 +5640,242 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(call.kwargs["params"]["min_samples"], 3)
         self.assertEqual(call.kwargs["params"]["limit"], 7)
 
+    def test_policy_fetch_review_cli_fetches_signed_openai_review_bundle_with_capabilities(self):
+        from agentflow_proxy import __version__
+        from agentflow_proxy.policy_bundle import attach_policy_bundle_provenance
+
+        exported = io.StringIO()
+        cli.policy_export_cli([], stdout=exported)
+        bundle = json.loads(exported.getvalue())
+        supported = ["cache", "old_context_summarization", "routing"]
+        selected = {
+            "schema": "agentflow.openai_optimization_review_action.v1",
+            "action_id": "openai-review:routing",
+            "target_candidate_id": "openai-routing-candidate",
+            "action_family": "routing",
+            "candidate_family": "provider-routing-rule",
+            "policy_section": "routing",
+            "policy_source": "managed-recommended",
+            "decision": "selected",
+            "review_only": True,
+            "required_local_review": True,
+            "managed_enforced": False,
+            "feature_only": True,
+            "locally_executed": True,
+            "provider_forwarding": False,
+            "local_policy_surface": {
+                "policy_file": "config/routing_rules.yaml",
+                "policy_section": "routing",
+                "writes_local_policy_files": False,
+                "requires_local_apply": True,
+            },
+            "local_executor_compatibility": {
+                "compatible": True,
+                "supported_local_action_families": supported,
+                "reason_codes": [],
+            },
+            "expected_impact": {"net_savings_usd": 0.05, "score": 0.91},
+            "evidence_freshness": {"latest_event_at": "2026-06-10T12:00:00+00:00", "stale": False},
+            "reason_codes": ["preferred-highest-ranked-openai-optimization"],
+            "conflict_key": "openai_responses:gpt-5:routing",
+        }
+        suppressed = {
+            **selected,
+            "action_id": "openai-review:summary",
+            "target_candidate_id": "openai-summary-candidate",
+            "action_family": "old_context_summarization",
+            "candidate_family": "old-context-summary-policy-rule",
+            "policy_section": "crunch",
+            "decision": "suppressed",
+            "reason_codes": ["suppressed-by-higher-ranked-openai-optimization"],
+            "suppressed_by": {"target_candidate_id": "openai-routing-candidate"},
+            "local_policy_surface": {
+                "policy_file": "config/crunch_rules.yaml",
+                "policy_section": "crunch",
+                "writes_local_policy_files": False,
+                "requires_local_apply": True,
+            },
+        }
+        omitted = {
+            **selected,
+            "action_id": "openai-review:cache",
+            "target_candidate_id": "openai-cache-candidate",
+            "action_family": "cache",
+            "candidate_family": "cache-replay-policy-rule",
+            "policy_section": "cache",
+            "decision": "omitted",
+            "reason_codes": ["local-executor-cache-unsupported"],
+            "local_executor_compatibility": {
+                "compatible": False,
+                "supported_local_action_families": ["routing"],
+                "reason_codes": ["local-executor-cache-unsupported"],
+            },
+            "local_policy_surface": {
+                "policy_file": "config/cache_rules.yaml",
+                "policy_section": "cache",
+                "writes_local_policy_files": False,
+                "requires_local_apply": True,
+            },
+        }
+        bundle["managed_optimizer"] = {
+            "enabled": False,
+            "policy_source": "managed-recommended",
+            "recommendation_mode": "review-only",
+            "note": "Review-only managed OpenAI recommendation.",
+        }
+        bundle["local_executor_compatibility"] = {
+            "minimum_local_client_version": "0.1.0",
+            "compatible": True,
+            "supported_local_action_families": supported,
+            "writes_local_policy_files": False,
+            "provider_forwarding": False,
+        }
+        bundle["recommendation"] = {
+            "schema": "agentflow.policy_bundle_recommendation.v1",
+            "openai_optimization_schema": "agentflow.openai_optimization_review_bundle.v1",
+            "created_at": bundle["generated_at"],
+            "policy_source": "managed-recommended",
+            "recommendation_mode": "review-only-openai-optimization-bundle",
+            "required_local_review": True,
+            "selected_action_count": 1,
+            "suppressed_action_count": 1,
+            "omitted_action_count": 1,
+            "candidate_count": 3,
+            "candidate_ids": ["openai-routing-candidate"],
+            "policy_sections": ["routing"],
+            "supported_local_action_families": supported,
+            "expected_impact": {"net_savings_usd": 0.05, "source": "ranked-openai-optimization-lifecycle-feedback"},
+            "conflict_summary": {
+                "conflict_bucket_count": 1,
+                "selected_action_count": 1,
+                "suppressed_conflicting_action_count": 1,
+                "suppressed_reason_counts": {"suppressed-by-higher-ranked-openai-optimization": 1},
+                "omitted_reason_counts": {"local-executor-cache-unsupported": 1},
+            },
+        }
+        bundle["policies"]["routing"]["policy_source"] = "managed-recommended"
+        bundle["policies"]["routing"]["review_actions"] = [selected]
+        bundle["policies"]["routing"]["recommendation"] = {
+            "policy_source": "managed-recommended",
+            "selected_action_count": 1,
+            "suppressed_action_count": 0,
+            "omitted_action_count": 0,
+            "selected_actions": [selected],
+            "suppressed_actions": [],
+            "omitted_actions": [],
+        }
+        bundle["openai_optimization"] = {
+            "schema": "agentflow.openai_optimization_review_bundle.v1",
+            "ranking_schema": "agentflow.openai_optimization_rollout_ranking.v1",
+            "ranking_summary": {"candidate_count": 3, "conflict_bucket_count": 1},
+            "selected_actions": [selected],
+            "suppressed_actions": [suppressed],
+            "omitted_actions": [omitted],
+            "filters": {"source_surface": "openai_responses", "provider_endpoint": "responses"},
+            "thresholds": {"max_retry_rate": 0.02},
+        }
+        bundle["privacy_summary"] = {
+            "telemetry_profile": "metadata-only",
+            "metadata_only": True,
+            "feature_only": True,
+            "raw_payloads_returned": False,
+            "raw_prompts_returned": False,
+            "raw_responses_returned": False,
+            "provider_bodies_returned": False,
+            "request_ids_returned": False,
+            "tenant_ids_returned": False,
+            "cache_keys_returned": False,
+            "file_paths_returned": False,
+            "provider_forwarding": False,
+        }
+        signed = attach_policy_bundle_provenance(
+            bundle,
+            secret="openai-review-secret",
+            issuer="agentflow-server",
+            server_id="managed-test",
+            key_id="openai-review-key",
+            generated_at="2026-06-10T12:00:00+00:00",
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with TemporaryDirectory() as tmp:
+            env = {
+                "AGENTFLOW_POLICY_CONFIG_DIR": tmp,
+                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                cli.MANAGED_POLICY_API_KEY_ENV: "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                with patch("agentflow_proxy.cli.httpx.get") as get:
+                    get.return_value = httpx.Response(200, json=signed)
+                    code = cli.policy_fetch_review_cli(
+                        [
+                            "--url",
+                            "http://managed.test/v1/openai-optimization-review-bundle",
+                            "--allow-unauthenticated",
+                            "--source-surface",
+                            "openai_responses",
+                            "--provider-endpoint",
+                            "responses",
+                            "--requested-model-family",
+                            "gpt-5",
+                            "--max-retry-rate",
+                            "0.02",
+                            "--max-latency-regression-ms",
+                            "250",
+                            "--max-invalidation-rate",
+                            "0.01",
+                            "--supported-local-action-families",
+                            "routing",
+                            "--supported-local-action-families",
+                            "old_context_summarization",
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+            self.assertFalse((Path(tmp) / "routing_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "crunch_rules.yaml").exists())
+            self.assertFalse((Path(tmp) / "cache_rules.yaml").exists())
+
+        self.assertEqual(code, 0, stderr.getvalue())
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["fetch"]["status"], "received")
+        self.assertEqual(payload["provenance"]["status"], "verified")
+        self.assertFalse(payload["applied"])
+        self.assertFalse(payload["wrote_local_files"])
+        review = payload["openai_optimization_review"]
+        self.assertEqual(review["status"], "present")
+        self.assertEqual(review["selected_action_count"], 1)
+        self.assertEqual(review["suppressed_action_count"], 1)
+        self.assertEqual(review["omitted_action_count"], 1)
+        self.assertEqual(review["counts_by_family"]["routing"]["selected"], 1)
+        self.assertEqual(review["counts_by_family"]["old_context_summarization"]["suppressed"], 1)
+        self.assertEqual(review["counts_by_family"]["cache"]["omitted"], 1)
+        self.assertEqual(review["conflict_summary"]["conflict_bucket_count"], 1)
+        self.assertEqual(review["local_capability_gaps"][0]["action_family"], "cache")
+        self.assertIn("agentflow-policy-draft-stage", payload["next_manual_commands"][0])
+        call = get.call_args
+        self.assertEqual(call.kwargs["headers"]["x-agentflow-local-version"], __version__)
+        self.assertEqual(call.kwargs["headers"]["x-agentflow-supported-local-action-families"], "old_context_summarization,routing")
+        self.assertEqual(call.kwargs["params"]["provider_endpoint"], "responses")
+        self.assertEqual(call.kwargs["params"]["requested_model_family"], "gpt-5")
+        self.assertEqual(call.kwargs["params"]["max_retry_rate"], 0.02)
+        self.assertEqual(call.kwargs["params"]["max_latency_regression_ms"], 250.0)
+        self.assertEqual(call.kwargs["params"]["max_invalidation_rate"], 0.01)
+        self.assertEqual(call.kwargs["params"]["supported_local_action_families"], ["old_context_summarization", "routing"])
+        rendered_payload = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            '"raw_prompt"',
+            '"raw_response"',
+            '"provider_body"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, rendered_payload)
+
     def test_codex_app_policy_dry_run_projects_synthetic_fixture_and_recent_rows_without_mutation(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 

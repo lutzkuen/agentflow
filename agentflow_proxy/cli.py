@@ -505,7 +505,139 @@ def _managed_policy_query(args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, key)
         if value:
             params[key] = value
+    if _openai_optimization_review_requested(args):
+        for key in (
+            "provider_endpoint",
+            "requested_model_family",
+            "max_retry_rate",
+            "max_latency_regression_ms",
+            "max_invalidation_rate",
+        ):
+            value = getattr(args, key, None)
+            if value is not None and value != "":
+                params[key] = value
+        params["supported_local_action_families"] = _supported_openai_optimization_action_families(args)
     return params
+
+
+def _openai_optimization_review_requested(args: argparse.Namespace) -> bool:
+    url = str(getattr(args, "url", "") or "")
+    if "openai-optimization-review-bundle" in url:
+        return True
+    for key in (
+        "provider_endpoint",
+        "requested_model_family",
+        "max_retry_rate",
+        "max_latency_regression_ms",
+        "max_invalidation_rate",
+    ):
+        value = getattr(args, key, None)
+        if value is not None and value != "":
+            return True
+    return bool(getattr(args, "supported_local_action_families", None))
+
+
+def _supported_openai_optimization_action_families(args: argparse.Namespace) -> list[str]:
+    configured = getattr(args, "supported_local_action_families", None) or []
+    if configured:
+        return sorted({str(value).strip() for value in configured if str(value).strip()})
+    return ["cache", "old_context_summarization", "routing"]
+
+
+def _managed_policy_capability_headers(args: argparse.Namespace) -> dict[str, str]:
+    if not _openai_optimization_review_requested(args):
+        return {}
+    from agentflow_proxy import __version__
+
+    families = _supported_openai_optimization_action_families(args)
+    return {
+        "x-agentflow-local-version": __version__,
+        "x-agentflow-supported-local-action-families": ",".join(families),
+    }
+
+
+def _count_openai_review_actions_by_family(openai_review: dict[str, Any]) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for decision, key in (
+        ("selected", "selected_actions"),
+        ("suppressed", "suppressed_actions"),
+        ("omitted", "omitted_actions"),
+    ):
+        actions = openai_review.get(key) if isinstance(openai_review.get(key), list) else []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            family = str(action.get("action_family") or "unknown")
+            row = counts.setdefault(family, {"selected": 0, "suppressed": 0, "omitted": 0})
+            row[decision] += 1
+    return dict(sorted(counts.items()))
+
+
+def _openai_review_action_summary(action: Any) -> dict[str, Any]:
+    if not isinstance(action, dict):
+        return {}
+    compatibility = action.get("local_executor_compatibility") if isinstance(action.get("local_executor_compatibility"), dict) else {}
+    surface = action.get("local_policy_surface") if isinstance(action.get("local_policy_surface"), dict) else {}
+    return {
+        "action_id": action.get("action_id"),
+        "target_candidate_id": action.get("target_candidate_id"),
+        "action_family": action.get("action_family"),
+        "candidate_family": action.get("candidate_family"),
+        "policy_section": action.get("policy_section"),
+        "decision": action.get("decision"),
+        "reason_codes": action.get("reason_codes", []),
+        "compatible": compatibility.get("compatible"),
+        "compatibility_reason_codes": compatibility.get("reason_codes", []),
+        "policy_file": surface.get("policy_file"),
+        "expected_impact": action.get("expected_impact") if isinstance(action.get("expected_impact"), dict) else {},
+    }
+
+
+def _openai_optimization_review_summary(bundle: Any) -> dict[str, Any]:
+    if not isinstance(bundle, dict):
+        return {"schema": "agentflow.openai_optimization_review_summary.v1", "status": "missing"}
+    openai_review = bundle.get("openai_optimization") if isinstance(bundle.get("openai_optimization"), dict) else {}
+    recommendation = bundle.get("recommendation") if isinstance(bundle.get("recommendation"), dict) else {}
+    if not openai_review:
+        return {"schema": "agentflow.openai_optimization_review_summary.v1", "status": "missing"}
+    selected = openai_review.get("selected_actions") if isinstance(openai_review.get("selected_actions"), list) else []
+    suppressed = openai_review.get("suppressed_actions") if isinstance(openai_review.get("suppressed_actions"), list) else []
+    omitted = openai_review.get("omitted_actions") if isinstance(openai_review.get("omitted_actions"), list) else []
+    all_actions = [*selected, *suppressed, *omitted]
+    local_gaps: list[dict[str, Any]] = []
+    for action in all_actions:
+        if not isinstance(action, dict):
+            continue
+        compatibility = action.get("local_executor_compatibility") if isinstance(action.get("local_executor_compatibility"), dict) else {}
+        reason_codes = [
+            str(reason)
+            for reason in [
+                *(action.get("reason_codes") if isinstance(action.get("reason_codes"), list) else []),
+                *(compatibility.get("reason_codes") if isinstance(compatibility.get("reason_codes"), list) else []),
+            ]
+            if reason
+        ]
+        if compatibility.get("compatible") is False or any("unsupported" in reason for reason in reason_codes):
+            local_gaps.append({
+                "target_candidate_id": action.get("target_candidate_id"),
+                "action_family": action.get("action_family"),
+                "decision": action.get("decision"),
+                "reason_codes": sorted(set(reason_codes)),
+            })
+    return {
+        "schema": "agentflow.openai_optimization_review_summary.v1",
+        "status": "present",
+        "review_bundle_schema": openai_review.get("schema") or recommendation.get("openai_optimization_schema"),
+        "selected_action_count": len(selected),
+        "suppressed_action_count": len(suppressed),
+        "omitted_action_count": len(omitted),
+        "counts_by_family": _count_openai_review_actions_by_family(openai_review),
+        "conflict_summary": recommendation.get("conflict_summary") if isinstance(recommendation.get("conflict_summary"), dict) else {},
+        "local_capability_gaps": local_gaps,
+        "selected_actions": [_openai_review_action_summary(action) for action in selected],
+        "suppressed_actions": [_openai_review_action_summary(action) for action in suppressed],
+        "omitted_actions": [_openai_review_action_summary(action) for action in omitted],
+    }
 
 
 def _managed_recommendation_summary(bundle: Any) -> dict[str, Any]:
@@ -653,6 +785,22 @@ def policy_fetch_review_cli(
     parser.add_argument("--source-surface", help="Optional managed server source_surface filter.")
     parser.add_argument("--app-family", help="Optional managed server app_family filter.")
     parser.add_argument("--category", help="Optional managed server category filter.")
+    parser.add_argument("--provider-endpoint", help="Optional OpenAI optimization provider endpoint filter, such as responses or chat_completions.")
+    parser.add_argument("--requested-model-family", help="Optional OpenAI optimization requested model family filter.")
+    parser.add_argument("--max-retry-rate", type=float, default=None, help="Maximum OpenAI optimization retry rate to request.")
+    parser.add_argument(
+        "--max-latency-regression-ms",
+        type=float,
+        default=None,
+        help="Maximum OpenAI optimization latency regression in milliseconds to request.",
+    )
+    parser.add_argument("--max-invalidation-rate", type=float, default=None, help="Maximum OpenAI cache replay invalidation rate to request.")
+    parser.add_argument(
+        "--supported-local-action-families",
+        action="append",
+        choices=("routing", "crunch", "cache", "old_context_summarization"),
+        help="Local OpenAI optimization action family supported by this executor. Repeat to send multiple values.",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -681,6 +829,7 @@ def policy_fetch_review_cli(
     stderr = stderr if stderr is not None else sys.stderr
 
     headers, auth_configured, auth_source = _managed_policy_auth(args)
+    headers.update(_managed_policy_capability_headers(args))
     safe_url = _redact_url(args.url)
     from agentflow_proxy.policy_events import log_policy_event
 
@@ -808,6 +957,13 @@ def policy_fetch_review_cli(
     current = asyncio.run(build_policy_bundle())
     review = review_policy_bundle(current, bundle, impact_db_path=args.db, impact_limit=max(0, args.impact_limit))
     recommendation = _managed_recommendation_summary(bundle)
+    openai_review = _openai_optimization_review_summary(bundle)
+    next_manual_commands = ["agentflow-policy-apply reviewed-bundle.json --dry-run --pretty"]
+    if openai_review.get("status") == "present":
+        next_manual_commands = [
+            "agentflow-policy-draft-stage reviewed-bundle.json --pretty",
+            "agentflow-policy-draft-validate <draft-id> --pretty",
+        ]
     ok = bool(validation["ok"] and review["ok"])
     result = {
         "schema": "agentflow.policy_bundle_fetch_review.v1",
@@ -828,8 +984,10 @@ def policy_fetch_review_cli(
         "review": review,
         "provenance": validation.get("provenance"),
         "recommendation": recommendation,
+        "openai_optimization_review": openai_review,
         "bundle": strip_raw_payload_fields(bundle),
-        "next_manual_command": "agentflow-policy-apply reviewed-bundle.json --dry-run --pretty",
+        "next_manual_command": next_manual_commands[0],
+        "next_manual_commands": next_manual_commands,
         "error": None if ok else {"type": "validation_failed", "message": "managed policy bundle is invalid"},
     }
     result = _redact_secret(result, secret)
@@ -853,6 +1011,13 @@ def policy_fetch_review_cli(
             "proposed_error_count": len(validation.get("errors", [])),
             "candidate_ids": result.get("recommendation", {}).get("candidate_ids", []),
             "candidate_count": result.get("recommendation", {}).get("candidate_count", 0),
+            "openai_optimization_review": {
+                "status": openai_review.get("status"),
+                "selected_action_count": openai_review.get("selected_action_count", 0),
+                "suppressed_action_count": openai_review.get("suppressed_action_count", 0),
+                "omitted_action_count": openai_review.get("omitted_action_count", 0),
+                "local_capability_gap_count": len(openai_review.get("local_capability_gaps", [])),
+            },
             "exit_code": 0 if ok else 1,
         },
     )
