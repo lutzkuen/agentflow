@@ -5,8 +5,11 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from agentflow_proxy import cli
 import agentflow_proxy.crunch as crunch_module
+from agentflow_proxy.managed_egress import RAW_FEATURE_KEYS
 from agentflow_proxy.recommendations import (
     build_old_context_summary_outcome_event,
     build_old_context_summary_outcome_feedback,
@@ -164,6 +167,47 @@ old_context_summarization:
             "summary_status_code": response.status_code,
             "summary_error": response.text[:500] if response.status_code >= 400 else None,
         }
+
+    def _keys_in(self, value):
+        keys = set()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                keys.add(str(key).lower())
+                keys.update(self._keys_in(item))
+        elif isinstance(value, list):
+            for item in value:
+                keys.update(self._keys_in(item))
+        return keys
+
+    def _summary_feedback_for_meta(self, meta: dict, *, status_code: int = 200):
+        return build_old_context_summary_outcome_feedback(
+            provider="anthropic",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=status_code,
+            latency_ms=120,
+            retry_count=0,
+            cache_hit=False,
+            crunch_meta={"old_context_summarization": meta},
+            category=meta.get("category"),
+            error="provider response bucket only" if status_code >= 400 else None,
+        )
+
+    def _assert_feedback_metadata_only(self, feedback: dict, forbidden: tuple[str, ...]):
+        self.assertIsNotNone(feedback)
+        event = build_old_context_summary_outcome_event(feedback)
+        rendered_feedback = json.dumps(feedback, sort_keys=True)
+        rendered_event = json.dumps(event, sort_keys=True)
+        for secret in forbidden:
+            self.assertNotIn(secret, rendered_feedback)
+            self.assertNotIn(secret, rendered_event)
+        self.assertTrue(RAW_FEATURE_KEYS.isdisjoint(self._keys_in(feedback)))
+        self.assertTrue(RAW_FEATURE_KEYS.isdisjoint(self._keys_in(event)))
+        self.assertTrue(feedback["privacy"]["metadata_only"])
+        self.assertFalse(feedback["privacy"]["raw_old_turns_included"])
+        self.assertFalse(feedback["privacy"]["raw_summary_included"])
+        self.assertFalse(event["metadata"]["privacy"]["summary_text_included"])
 
     def test_long_non_tool_fixture_preserves_constraints_and_recent_turns(self):
         manual = self._load_manual_crunch(self._summary_rules(keep_recent_turns=2, max_summary_chars=180))
@@ -323,6 +367,232 @@ old_context_summarization:
         self.assertFalse(event["metadata"]["privacy"]["summary_text_included"])
         self.assertEqual(queue_meta["status"], "disabled")
         self.assertEqual(store.managed_outcome_feedback_rows(limit=10), [])
+
+    def test_fail_closed_summary_fixtures_forward_unchanged_and_emit_metadata_only_feedback(self):
+        manual = self._load_manual_crunch(self._summary_rules(keep_recent_turns=2, max_summary_chars=180))
+        body = self._durable_non_tool_body()
+        raw_forbidden = (
+            "OFFLINE_FIXTURE_SECRET_A",
+            "/repo/src/agentflow_summary.py",
+            "RAW_PROVIDER_BODY_SECRET",
+            "RAW_GENERATED_SUMMARY_SECRET",
+            "cache-key-old-context-secret",
+            "req_old_context_secret",
+            "tenant-old-context-secret",
+            "tool_payload_old_context_secret",
+        )
+
+        async def provider_5xx(_summary_request):
+            return {
+                "summary": None,
+                "summary_status_code": 503,
+                "summary_error": "RAW_PROVIDER_BODY_SECRET req_old_context_secret",
+                "provider_body": {"content": "RAW_PROVIDER_BODY_SECRET"},
+                "request_id": "req_old_context_secret",
+            }
+
+        async def malformed_summary(_summary_request):
+            return {
+                "summary": "",
+                "summary_status_code": 200,
+                "summary_error": "RAW_GENERATED_SUMMARY_SECRET",
+            }
+
+        async def oversized_summary_cost(_summary_request):
+            return {
+                "summary": "RAW_GENERATED_SUMMARY_SECRET should be too expensive to apply",
+                "summary_status_code": 200,
+                "summary_cost_est_usd": 99.0,
+            }
+
+        cases = (
+            (provider_5xx, "summary-error"),
+            (malformed_summary, "summary-empty"),
+            (oversized_summary_cost, "summary-cost-too-high"),
+        )
+        for fetch, expected_reason in cases:
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=fetch,
+            ))
+
+            self.assertEqual(summarized, body)
+            self.assertFalse(meta["applied"])
+            self.assertEqual(meta["reason"], expected_reason)
+            feedback = self._summary_feedback_for_meta({
+                **meta,
+                "rule_id": "/private/project/raw_prompt_rule",
+                "candidate_id": "candidate with secret message",
+                "cache_key": "cache-key-old-context-secret",
+                "request_id": "req_old_context_secret",
+                "tenant_id": "tenant-old-context-secret",
+                "tool_payload": "tool_payload_old_context_secret",
+            })
+            self.assertEqual(feedback["outcome"], "skipped")
+            self.assertEqual(feedback["reason"], expected_reason)
+            self.assertTrue(str(feedback["rule_id"]).startswith("sha256:"))
+            self.assertTrue(str(feedback["candidate_id"]).startswith("sha256:"))
+            self._assert_feedback_metadata_only(feedback, raw_forbidden)
+
+        os.chdir(self.home.name)
+        default_manual = importlib.reload(crunch_module)
+        managed_profile = {
+            "policy_source": "managed-recommended",
+            "old_context_summarization": {
+                "enabled": True,
+                "rule_id": "managed-summary-provider-required",
+                "candidate_id": "candidate-provider-required",
+            },
+        }
+        summarized, meta = asyncio.run(default_manual.maybe_summarize_old_context(
+            body,
+            exact_cache_enabled=False,
+            get_cached_summary=lambda _key: None,
+            set_cached_summary=lambda _key, _value: None,
+            fetch_summary=self._synthetic_fixture_fetch,
+            managed_profile=managed_profile,
+        ))
+
+        self.assertEqual(summarized, body)
+        self.assertEqual(meta["reason"], "fallback-not-configured")
+        self.assertFalse(meta["configured"])
+        feedback = self._summary_feedback_for_meta(meta)
+        self.assertEqual(feedback["outcome"], "skipped")
+        self._assert_feedback_metadata_only(feedback, raw_forbidden)
+
+    def test_tool_protocol_mismatch_fixture_fails_closed_with_metadata_only_feedback(self):
+        manual = self._load_manual_crunch(
+            self._summary_rules(keep_recent_turns=2, max_turns=4, block_tool_protocol=False)
+        )
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "Old durable fact: use /repo/tasks/protocol.txt. " * 12},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_protocol_secret",
+                            "name": "Read",
+                            "input": {"file_path": "/repo/tasks/protocol.txt"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_protocol_secret",
+                            "content": "TOOL_PAYLOAD_PROTOCOL_SECRET",
+                        }
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "Old conclusion remains open. " * 12}]},
+                {"role": "user", "content": "Recent user turn must remain."},
+                {"role": "assistant", "content": "Recent assistant turn must remain."},
+            ],
+        }
+
+        def broken_apply(_body, _plan, _summary):
+            return {"model": "claude-sonnet-4-6", "messages": []}
+
+        with patch.object(manual, "apply_old_context_summary", broken_apply):
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=self._synthetic_fixture_fetch,
+            ))
+
+        self.assertEqual(summarized, body)
+        self.assertEqual(meta["status"], "bypass")
+        self.assertEqual(meta["reason"], "tool-protocol-reconstruction-mismatch")
+        self.assertFalse(meta["applied"])
+        self.assertFalse(meta["preservation_check"]["ok"])
+        feedback = self._summary_feedback_for_meta(meta)
+        self.assertEqual(feedback["outcome"], "bypassed")
+        self.assertEqual(feedback["enhanced_crunch"]["failure_state"], "tool-protocol-reconstruction-mismatch")
+        self._assert_feedback_metadata_only(
+            feedback,
+            (
+                "/repo/tasks/protocol.txt",
+                "toolu_protocol_secret",
+                "TOOL_PAYLOAD_PROTOCOL_SECRET",
+                "Recent user turn must remain.",
+                "Recent assistant turn must remain.",
+            ),
+        )
+
+    def test_old_context_lifecycle_payload_hashes_malformed_policy_ids_and_redacts_raw_fields(self):
+        payload = cli._old_context_summary_lifecycle_payload(
+            "dry-run",
+            {
+                "schema": "agentflow.old_context_summary_dry_run.v1",
+                "ok": True,
+                "dry_run": True,
+                "read_only": True,
+                "policy": {
+                    "policy_source": "managed-recommended",
+                    "rule_id": "/private/project/raw_prompt_rule",
+                    "candidate_id": "candidate with secret message",
+                    "model": "claude-haiku-4-5-20251001",
+                    "placement": "system",
+                    "canary": {"enabled": True, "fraction": 0.5},
+                    "safety_stop": {"enabled": True},
+                    "prompt": "RAW_PROMPT_SHOULD_NOT_LEAK",
+                    "provider_body": {"content": "RAW_PROVIDER_BODY_SHOULD_NOT_LEAK"},
+                },
+                "summary": {
+                    "sampled_call_count": 2,
+                    "eligible_call_count": 1,
+                    "projected_saved_tokens": 2000,
+                    "projected_net_savings_usd": 0.004,
+                    "cache_key": "cache-key-lifecycle-secret",
+                    "request_id": "req_lifecycle_secret",
+                    "tenant_id": "tenant-lifecycle-secret",
+                    "generated_summary": "RAW_GENERATED_SUMMARY_SHOULD_NOT_LEAK",
+                },
+                "groups": [
+                    {
+                        "blocker": "eligible",
+                        "call_count": 1,
+                        "source_surface": "anthropic_messages",
+                        "category": "chat",
+                        "file_path": "/private/project/secret.txt",
+                        "tool_payload": "TOOL_PAYLOAD_LIFECYCLE_SECRET",
+                    }
+                ],
+            },
+        )
+
+        self.assertIsNotNone(payload)
+        metadata = payload["metadata"]
+        self.assertTrue(metadata["rule_id"].startswith("sha256:"))
+        self.assertTrue(metadata["candidate_id"].startswith("sha256:"))
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "/private/project/raw_prompt_rule",
+            "candidate with secret message",
+            "RAW_PROMPT_SHOULD_NOT_LEAK",
+            "RAW_PROVIDER_BODY_SHOULD_NOT_LEAK",
+            "RAW_GENERATED_SUMMARY_SHOULD_NOT_LEAK",
+            "cache-key-lifecycle-secret",
+            "req_lifecycle_secret",
+            "tenant-lifecycle-secret",
+            "/private/project/secret.txt",
+            "TOOL_PAYLOAD_LIFECYCLE_SECRET",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(RAW_FEATURE_KEYS.isdisjoint(self._keys_in(payload) - {"command"}))
+        self.assertFalse(metadata["privacy"]["cache_keys_included"])
+        self.assertFalse(metadata["privacy"]["request_ids_included"])
+        self.assertFalse(metadata["privacy"]["file_paths_included"])
 
 
 if __name__ == "__main__":

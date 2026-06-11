@@ -4897,6 +4897,43 @@ def _old_context_summary_lifecycle_event_type(command: str, result: dict[str, An
     return "dry-run"
 
 
+def _old_context_summary_metadata_identifier(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    text_l = text.lower()
+    unsafe_terms = {
+        "account",
+        "apikey",
+        "api_key",
+        "authorization",
+        "body",
+        "cache_key",
+        "content",
+        "file",
+        "message",
+        "path",
+        "payload",
+        "prompt",
+        "request",
+        "response",
+        "secret",
+        "session",
+        "summary_text",
+        "tenant",
+        "tool",
+        "transcript",
+    }
+    if (
+        len(text) > 128
+        or any(char.isspace() for char in text)
+        or any(char in text for char in ("/", "\\", "{", "}", "[", "]", "\"", "'"))
+        or any(term in text_l for term in unsafe_terms)
+    ):
+        return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return text
+
+
 def _old_context_summary_quality_gate_feedback(
     *,
     quality_gate: dict[str, Any],
@@ -4923,8 +4960,8 @@ def _old_context_summary_quality_gate_feedback(
     return {
         "schema": "agentflow.old_context_summary_quality_gate_feedback.v1",
         "quality_gate_schema": quality_gate.get("schema"),
-        "candidate_id": policy.get("candidate_id"),
-        "rule_id": policy.get("rule_id"),
+        "candidate_id": _old_context_summary_metadata_identifier(policy.get("candidate_id")),
+        "rule_id": _old_context_summary_metadata_identifier(policy.get("rule_id")),
         "policy_source": policy.get("policy_source"),
         "local_tool_version": local_tool_version,
         "verdict": quality_gate.get("verdict"),
@@ -5027,8 +5064,8 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         )
         basis = {
             "command": command,
-            "rule_id": policy.get("rule_id"),
-            "candidate_id": policy.get("candidate_id"),
+            "rule_id": _old_context_summary_metadata_identifier(policy.get("rule_id")),
+            "candidate_id": _old_context_summary_metadata_identifier(policy.get("candidate_id")),
             "actual_matched_metadata_row_count": summary.get("actual_matched_metadata_row_count"),
             "actual_net_savings_usd": summary.get("actual_net_savings_usd"),
         }
@@ -5041,8 +5078,8 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
             "dry_run": False,
             "read_only": bool(dry_run.get("read_only", True)),
             "policy_source": policy.get("policy_source"),
-            "rule_id": policy.get("rule_id"),
-            "candidate_id": policy.get("candidate_id"),
+            "rule_id": _old_context_summary_metadata_identifier(policy.get("rule_id")),
+            "candidate_id": _old_context_summary_metadata_identifier(policy.get("candidate_id")),
             "model": policy.get("model"),
             "canary_enabled": ((policy.get("canary") or {}).get("enabled") if isinstance(policy.get("canary"), dict) else None),
             "canary_fraction": ((policy.get("canary") or {}).get("fraction") if isinstance(policy.get("canary"), dict) else None),
@@ -5119,8 +5156,8 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         group_counts[blocker] = group_counts.get(blocker, 0) + int(group.get("call_count") or 0)
     basis = {
         "command": command,
-        "rule_id": policy.get("rule_id"),
-        "candidate_id": policy.get("candidate_id"),
+        "rule_id": _old_context_summary_metadata_identifier(policy.get("rule_id")),
+        "candidate_id": _old_context_summary_metadata_identifier(policy.get("candidate_id")),
         "eligible_call_count": summary.get("eligible_call_count"),
         "projected_saved_tokens": summary.get("projected_saved_tokens"),
     }
@@ -5134,8 +5171,8 @@ def _old_context_summary_lifecycle_payload(command: str, result: dict[str, Any])
         "dry_run": True,
         "read_only": bool(dry_run.get("read_only", True)),
         "policy_source": policy.get("policy_source"),
-        "rule_id": policy.get("rule_id"),
-        "candidate_id": policy.get("candidate_id"),
+        "rule_id": _old_context_summary_metadata_identifier(policy.get("rule_id")),
+        "candidate_id": _old_context_summary_metadata_identifier(policy.get("candidate_id")),
         "model": policy.get("model"),
         "placement": policy.get("placement"),
         "canary_enabled": ((policy.get("canary") or {}).get("enabled") if isinstance(policy.get("canary"), dict) else None),

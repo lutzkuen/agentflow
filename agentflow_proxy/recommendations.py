@@ -56,12 +56,58 @@ TOKEN_BUCKETS = (
     (16_000, "4k_16k_tokens"),
     (64_000, "16k_64k_tokens"),
 )
+OLD_CONTEXT_SUMMARY_FAIL_CLOSED_REASONS = {
+    "fallback-not-configured",
+    "summary-fetch-error",
+    "summary-empty",
+    "summary-error",
+    "summary-cost-too-high",
+    "summary-apply-error",
+    "tool-protocol-reconstruction-mismatch",
+}
 
 
 def _hash_identifier(value: str | None) -> str | None:
     if not value:
         return None
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _metadata_identifier(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    text_l = text.lower()
+    unsafe_terms = {
+        "account",
+        "apikey",
+        "api_key",
+        "authorization",
+        "body",
+        "cache_key",
+        "content",
+        "file",
+        "message",
+        "path",
+        "payload",
+        "prompt",
+        "request",
+        "response",
+        "secret",
+        "session",
+        "summary_text",
+        "tenant",
+        "tool",
+        "transcript",
+    }
+    if (
+        len(text) > 128
+        or any(char.isspace() for char in text)
+        or any(char in text for char in ("/", "\\", "{", "}", "[", "]", "\"", "'"))
+        or any(term in text_l for term in unsafe_terms)
+    ):
+        return _hash_identifier(text)
+    return text
 
 
 def _metadata_only_privacy_summary() -> dict[str, Any]:
@@ -1816,8 +1862,9 @@ def build_old_context_summary_outcome_feedback(
     reason = str(summary_meta.get("reason") or "")
     canary = summary_meta.get("canary") if isinstance(summary_meta.get("canary"), dict) else {}
     relevant = (
-        status in {"applied", "bypass"}
+        status in {"applied", "bypass", "error"}
         or reason in {"canary_holdout", "local-canary-safety-stop"}
+        or reason in OLD_CONTEXT_SUMMARY_FAIL_CLOSED_REASONS
         or (canary.get("enabled") and canary.get("cohort") in {"canary_applied", "canary_holdout"})
     )
     if not relevant:
@@ -1873,9 +1920,9 @@ def build_old_context_summary_outcome_feedback(
         ),
         "requested_model_tier": _model_family(requested_model),
         "routed_model_tier": _model_family(routed_model),
-        "summary_policy_id": summary_meta.get("rule_id"),
-        "rule_id": summary_meta.get("rule_id"),
-        "candidate_id": summary_meta.get("candidate_id"),
+        "summary_policy_id": _metadata_identifier(summary_meta.get("rule_id")),
+        "rule_id": _metadata_identifier(summary_meta.get("rule_id")),
+        "candidate_id": _metadata_identifier(summary_meta.get("candidate_id")),
         "policy_source": summary_meta.get("policy_source"),
         "enhanced_crunch": {
             "state": summary_meta.get("enhanced_crunch_state") or enhanced_provider.get("state"),
