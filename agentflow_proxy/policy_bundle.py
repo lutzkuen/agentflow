@@ -826,8 +826,72 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
             f"{base}.thinking_deduplication.skip_latest_assistant",
             thinking_dedup["skip_latest_assistant"],
         )
+    _validate_repeated_provider_scaffolding(policy.get("repeated_provider_scaffolding"), errors, base=base)
     _validate_crunch_pattern_rules(policy.get("pattern_rules"), errors, base=base)
     _validate_pattern_recommendation(policy, errors, base=base, expected_section="crunch")
+
+
+def _validate_repeated_provider_scaffolding(value: Any, errors: list[dict[str, str]], *, base: str) -> None:
+    if value is None:
+        return
+    path = f"{base}.repeated_provider_scaffolding"
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected object")
+        return
+    if "enabled" in value:
+        _validate_boolish(errors, f"{path}.enabled", value["enabled"])
+    for key in ("min_request_chars", "min_section_chars", "keep_recent_messages", "keep_recent_matches", "max_replacements"):
+        if key in value:
+            _validate_intish(errors, f"{path}.{key}", value[key], min_value=0)
+    for key in ("block_tool_protocol", "block_thinking"):
+        if key in value:
+            _validate_boolish(errors, f"{path}.{key}", value[key])
+    rules = value.get("rules")
+    if rules is None:
+        return
+    if not isinstance(rules, list):
+        _add_error(errors, f"{path}.rules", "expected list")
+        return
+    for index, rule in enumerate(rules):
+        rule_path = f"{path}.rules[{index}]"
+        if not isinstance(rule, dict):
+            _add_error(errors, rule_path, "expected object")
+            continue
+        if "id" in rule:
+            _validate_non_empty_string(errors, f"{rule_path}.id", rule["id"])
+        if "rule_id" in rule:
+            _validate_non_empty_string(errors, f"{rule_path}.rule_id", rule["rule_id"])
+        if "candidate_id" in rule:
+            _validate_non_empty_string(errors, f"{rule_path}.candidate_id", rule["candidate_id"])
+        if "enabled" in rule:
+            _validate_boolish(errors, f"{rule_path}.enabled", rule["enabled"])
+        if "policy_source" in rule and rule["policy_source"] not in POLICY_SOURCES:
+            _add_error(errors, f"{rule_path}.policy_source", "expected known policy source")
+        hashes = rule.get("pattern_hashes", rule.get("pattern_hash"))
+        if isinstance(hashes, str):
+            _validate_non_empty_string(errors, f"{rule_path}.pattern_hash", hashes)
+        elif isinstance(hashes, list):
+            if not hashes:
+                _add_error(errors, f"{rule_path}.pattern_hashes", "expected at least one hash")
+            for hash_index, item in enumerate(hashes):
+                _validate_non_empty_string(errors, f"{rule_path}.pattern_hashes[{hash_index}]", item)
+        else:
+            _add_error(errors, f"{rule_path}.pattern_hashes", "expected string or list")
+        for key in ("min_repeated_count", "keep_recent_matches", "max_applications", "min_section_chars", "min_request_chars"):
+            if key in rule:
+                _validate_intish(errors, f"{rule_path}.{key}", rule[key], min_value=0)
+        for key in ("block_tool_protocol", "block_thinking"):
+            if key in rule:
+                _validate_boolish(errors, f"{rule_path}.{key}", rule[key])
+        action = rule.get("action")
+        if action is not None:
+            if not isinstance(action, dict):
+                _add_error(errors, f"{rule_path}.action", "expected object")
+            else:
+                if "type" in action and action["type"] not in {"omit"}:
+                    _add_error(errors, f"{rule_path}.action.type", "expected omit")
+                if "max_replacement_chars" in action:
+                    _validate_intish(errors, f"{rule_path}.action.max_replacement_chars", action["max_replacement_chars"], min_value=1)
 
 
 def _validate_crunch_pattern_rules(value: Any, errors: list[dict[str, str]], *, base: str) -> None:

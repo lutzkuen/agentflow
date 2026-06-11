@@ -851,6 +851,7 @@ async def stats_policies() -> dict[str, Any]:
             "old_context_summarization": _copy_policy(crunch.OLD_CONTEXT_SUMMARY_POLICY),
             "thinking_deduplication": _copy_policy(crunch.THINKING_DEDUP_POLICY),
             "pattern_rules": _copy_policy(crunch.PATTERN_RULES),
+            "repeated_provider_scaffolding": _copy_policy(crunch.REPEATED_PROVIDER_SCAFFOLDING_POLICY),
             "codex_repeated_scaffolding": _copy_policy(crunch.CODEX_REPEATED_SCAFFOLDING_POLICY),
         },
         "cache": {

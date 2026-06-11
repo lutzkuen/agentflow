@@ -145,6 +145,41 @@ pattern_rules: []
 #       head_chars: 800
 #       tail_chars: 600
 #       max_replacement_chars: 1800
+repeated_provider_scaffolding:
+  # Provider-message profile for reviewed repeated scaffolding candidates.
+  # Disabled by default. When a local/manual or managed-recommended rule with
+  # reviewed pattern hashes is present, AgentFlow may replace older repeated
+  # provider-message sections with bounded notices. System/developer messages,
+  # tool_use/tool_result protocol payloads, thinking/reasoning blocks, and the
+  # newest task tail are preserved by default.
+  enabled: false
+  min_request_chars: 12000
+  min_section_chars: 700
+  keep_recent_messages: 2
+  keep_recent_matches: 1
+  max_replacements: 16
+  block_tool_protocol: true
+  block_thinking: true
+  rules: []
+# Example reviewed provider scaffolding rule:
+# repeated_provider_scaffolding:
+#   enabled: true
+#   rules:
+#     - id: reviewed-provider-scaffold-example
+#       enabled: true
+#       policy_source: managed-recommended
+#       candidate_id: repeated-provider-scaffold-candidate-123
+#       pattern_hashes:
+#         - sha256:...
+#       min_repeated_count: 2
+#       keep_recent_matches: 1
+#       max_applications: 4
+#       rollout:
+#         recommendation_mode: canary-only
+#         canary_enabled: true
+#         canary_fraction: 0.10
+#         canary_salt: sha256:...
+#         canary_unit: request_fingerprint
 codex_repeated_scaffolding:
   # Codex app-server turn/start only. Text-only input blocks may contain large
   # repeated context scaffolding that is not represented as provider messages.

@@ -146,6 +146,42 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["errors"], [])
 
+    def test_policy_bundle_validation_accepts_repeated_provider_scaffolding_rules(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["crunch"]["repeated_provider_scaffolding"] = {
+            "enabled": True,
+            "min_request_chars": 12000,
+            "min_section_chars": 700,
+            "keep_recent_messages": 2,
+            "keep_recent_matches": 1,
+            "max_replacements": 8,
+            "block_tool_protocol": True,
+            "block_thinking": True,
+            "rules": [
+                {
+                    "id": "reviewed-provider-scaffold",
+                    "enabled": True,
+                    "policy_source": "managed-recommended",
+                    "candidate_id": "candidate-provider-scaffold",
+                    "pattern_hashes": [
+                        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    ],
+                    "min_repeated_count": 2,
+                    "keep_recent_matches": 1,
+                    "max_applications": 4,
+                    "action": {
+                        "type": "omit",
+                        "max_replacement_chars": 360,
+                    },
+                }
+            ],
+        }
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+
     def _managed_policy_bundle(self):
         bundle = asyncio.run(build_policy_bundle())
         bundle["recommendation"] = {

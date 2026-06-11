@@ -130,6 +130,17 @@ def _default_crunch_policy() -> dict[str, Any]:
             },
         },
         "pattern_rules": [],
+        "repeated_provider_scaffolding": {
+            "enabled": False,
+            "rules": [],
+            "min_request_chars": 12000,
+            "min_section_chars": 700,
+            "keep_recent_messages": 2,
+            "keep_recent_matches": 1,
+            "max_replacements": 16,
+            "block_tool_protocol": True,
+            "block_thinking": True,
+        },
         "session_memory_hints": {
             "enabled": False,
             "rule_id": "local-session-plateau-crunch-hint",
@@ -204,6 +215,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-manual")
+            provider_scaffolding = data.get("repeated_provider_scaffolding") or {}
+            if isinstance(provider_scaffolding, dict):
+                _apply_provider_scaffolding_policy_yaml(policy, provider_scaffolding, default_policy_source="local-manual")
             session_memory_hints = data.get("session_memory_hints") or {}
             if isinstance(session_memory_hints, dict):
                 _apply_session_memory_hints_policy_yaml(policy, session_memory_hints)
@@ -248,6 +262,9 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-default")
+            provider_scaffolding = data.get("repeated_provider_scaffolding") or {}
+            if isinstance(provider_scaffolding, dict):
+                _apply_provider_scaffolding_policy_yaml(policy, provider_scaffolding, default_policy_source="local-default")
             session_memory_hints = data.get("session_memory_hints") or {}
             if isinstance(session_memory_hints, dict):
                 _apply_session_memory_hints_policy_yaml(policy, session_memory_hints)
@@ -535,6 +552,92 @@ def _apply_codex_scaffolding_policy_yaml(policy: dict[str, Any], codex_scaffoldi
             target[key] = int(codex_scaffolding[key])
 
 
+def _parse_provider_scaffolding_rules_yaml(value: Any, *, default_policy_source: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        pattern_hashes = _parse_pattern_hashes(
+            item.get("pattern_hashes")
+            or item.get("pattern_hash")
+            or (item.get("conditions") or {}).get("pattern_hashes")
+            or (item.get("conditions") or {}).get("pattern_hash")
+        )
+        if not pattern_hashes:
+            continue
+        action = item.get("action") or {}
+        if not isinstance(action, dict):
+            action = {}
+        conditions = item.get("conditions") or {}
+        if not isinstance(conditions, dict):
+            conditions = {}
+        normalized: dict[str, Any] = {
+            "id": str(item.get("id") or item.get("rule_id") or item.get("candidate_id") or f"repeated-provider-scaffold-{index + 1}"),
+            "candidate_id": item.get("candidate_id"),
+            "enabled": _as_bool(item.get("enabled"), True),
+            "policy_source": str(item.get("policy_source") or default_policy_source),
+            "pattern_hashes": pattern_hashes,
+            "min_repeated_count": int(conditions.get("min_repeated_count", item.get("min_repeated_count", 2))),
+            "action": {
+                "type": str(action.get("type") or item.get("action_type") or "omit").strip().lower(),
+                "max_replacement_chars": int(action.get("max_replacement_chars", item.get("max_replacement_chars", 360))),
+            },
+            "rollout": normalize_pattern_rollout(item.get("rollout")),
+        }
+        if normalized["action"]["type"] not in {"omit"}:
+            normalized["action"]["type"] = "omit"
+        for key in ("min_section_chars", "min_request_chars"):
+            value_for_key = conditions.get(key, item.get(key))
+            if value_for_key is not None:
+                normalized[key] = int(value_for_key)
+        for key in ("keep_recent_matches", "max_applications"):
+            value_for_key = conditions.get(key, item.get(key))
+            if value_for_key is not None:
+                normalized[key] = int(value_for_key)
+        for key in ("block_tool_protocol", "block_thinking"):
+            value_for_key = conditions.get(key, item.get(key))
+            if value_for_key is not None:
+                normalized[key] = _as_bool(value_for_key, True)
+        if item.get("description") is not None:
+            normalized["description"] = str(item["description"])
+        rules.append(normalized)
+    return rules
+
+
+def _apply_provider_scaffolding_policy_yaml(
+    policy: dict[str, Any],
+    provider_scaffolding: dict[str, Any],
+    *,
+    default_policy_source: str,
+) -> None:
+    target = policy["repeated_provider_scaffolding"]
+    target["enabled"] = _as_bool(provider_scaffolding.get("enabled"), target["enabled"])
+    for key in (
+        "min_request_chars",
+        "min_section_chars",
+        "keep_recent_messages",
+        "keep_recent_matches",
+        "max_replacements",
+    ):
+        if provider_scaffolding.get(key) is not None:
+            target[key] = int(provider_scaffolding[key])
+    for key in ("block_tool_protocol", "block_thinking"):
+        if provider_scaffolding.get(key) is not None:
+            target[key] = _as_bool(provider_scaffolding[key], target[key])
+    rules = provider_scaffolding.get("rules")
+    if rules is None and (
+        provider_scaffolding.get("pattern_hash")
+        or provider_scaffolding.get("pattern_hashes")
+        or provider_scaffolding.get("candidate_id")
+    ):
+        rules = [provider_scaffolding]
+    parsed = _parse_provider_scaffolding_rules_yaml(rules, default_policy_source=default_policy_source)
+    if parsed:
+        target["rules"] = parsed
+
+
 def _apply_session_memory_hints_policy_yaml(policy: dict[str, Any], session_memory_hints: dict[str, Any]) -> None:
     target = policy["session_memory_hints"]
     target["enabled"] = _as_bool(session_memory_hints.get("enabled"), target["enabled"])
@@ -594,6 +697,7 @@ TERMINAL_LOG_MIN_REPEATED_LINES = int(TERMINAL_LOG_POLICY["min_repeated_lines"])
 TERMINAL_LOG_MAX_ANNOTATIONS = int(TERMINAL_LOG_POLICY["max_annotations"])
 PATTERN_MODULES_POLICY = copy.deepcopy(CRUNCH_POLICY["pattern_modules"])
 PATTERN_RULES = list(CRUNCH_POLICY["pattern_rules"])
+REPEATED_PROVIDER_SCAFFOLDING_POLICY = CRUNCH_POLICY["repeated_provider_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_POLICY = CRUNCH_POLICY["codex_repeated_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_ENABLED = bool(CODEX_REPEATED_SCAFFOLDING_POLICY["enabled"])
 CODEX_REPEATED_SCAFFOLDING_MIN_REQUEST_CHARS = int(CODEX_REPEATED_SCAFFOLDING_POLICY["min_request_chars"])
@@ -1160,6 +1264,386 @@ def _apply_pattern_rules(body: dict[str, Any], *, store_obj: Any | None = None) 
         {"rule_id": rule_id, "reason": reason, "count": count}
         for (rule_id, reason), count in sorted(skip_counts.items())
     ]
+    return total_saved, meta
+
+
+def _copy_repeated_provider_scaffolding_policy() -> dict[str, Any]:
+    return copy.deepcopy(REPEATED_PROVIDER_SCAFFOLDING_POLICY)
+
+
+def _provider_scaffolding_profile_from_managed_profile(managed_profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(managed_profile, dict):
+        return None
+    profile = managed_profile.get("repeated_provider_scaffolding")
+    return profile if isinstance(profile, dict) else None
+
+
+def _effective_repeated_provider_scaffolding_policy(
+    managed_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = _copy_repeated_provider_scaffolding_policy()
+    policy["policy_source"] = CRUNCH_POLICY_SOURCE
+    profile = _provider_scaffolding_profile_from_managed_profile(managed_profile)
+    if not isinstance(profile, dict):
+        return policy
+
+    policy["policy_source"] = str((managed_profile or {}).get("policy_source") or profile.get("policy_source") or "managed-recommended")
+    if profile.get("enabled") is not None:
+        policy["enabled"] = _as_bool(profile.get("enabled"), bool(policy.get("enabled")))
+    for key in (
+        "min_request_chars",
+        "min_section_chars",
+        "keep_recent_messages",
+        "keep_recent_matches",
+        "max_replacements",
+    ):
+        if profile.get(key) is not None:
+            policy[key] = int(profile[key])
+    for key in ("block_tool_protocol", "block_thinking"):
+        if profile.get(key) is not None:
+            policy[key] = _as_bool(profile.get(key), bool(policy.get(key)))
+    rules = profile.get("rules")
+    if rules is None and (profile.get("pattern_hash") or profile.get("pattern_hashes") or profile.get("candidate_id")):
+        rules = [profile]
+    parsed = _parse_provider_scaffolding_rules_yaml(rules, default_policy_source=policy["policy_source"])
+    if parsed:
+        policy["rules"] = parsed
+    return policy
+
+
+def _provider_scaffolding_meta(policy: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.repeated_provider_scaffolding.v1",
+        "enabled": bool(policy.get("enabled")),
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "rule_path": CRUNCH_RULES_PATH,
+        "configured_rule_count": len(policy.get("rules") or []),
+        "rules": [],
+        "skip_reasons": [],
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "raw_text_included": False,
+        "raw_hashes_included": False,
+        "system_instructions_preserved": True,
+        "developer_instructions_preserved": True,
+        "tool_protocol_preserved": True,
+        "thinking_preserved": True,
+        "newest_task_tail_preserved": True,
+    }
+
+
+def _message_role(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("role") or item.get("type") or "").strip().lower()
+    return ""
+
+
+def _content_has_tool_protocol(content: Any) -> bool:
+    if isinstance(content, dict):
+        block_type = str(content.get("type") or "").strip().lower()
+        if block_type in {
+            "tool_use",
+            "tool_result",
+            "function_call",
+            "function_call_output",
+            "web_search_call",
+            "computer_call",
+            "reasoning",
+        }:
+            return True
+        if "tool_calls" in content or "tool_call_id" in content:
+            return True
+        return any(_content_has_tool_protocol(value) for value in content.values())
+    if isinstance(content, list):
+        return any(_content_has_tool_protocol(item) for item in content)
+    return False
+
+
+def _content_has_thinking(content: Any) -> bool:
+    if isinstance(content, dict):
+        block_type = str(content.get("type") or "").strip().lower()
+        if block_type in {"thinking", "reasoning"} or "thinking" in content:
+            return True
+        return any(_content_has_thinking(value) for value in content.values())
+    if isinstance(content, list):
+        return any(_content_has_thinking(item) for item in content)
+    return False
+
+
+def _provider_text_entries(body: dict[str, Any], policy: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    entries: list[dict[str, Any]] = []
+    skips = {
+        "system_or_developer_message": 0,
+        "tool_protocol_payload": 0,
+        "thinking_payload": 0,
+        "non_message_input": 0,
+    }
+    block_tool = _as_bool(policy.get("block_tool_protocol"), True)
+    block_thinking = _as_bool(policy.get("block_thinking"), True)
+    keep_recent_messages = max(0, int(policy.get("keep_recent_messages", 2)))
+
+    def add_text(container: Any, key: Any, text: str, location: str, message_index: int, protected: bool) -> None:
+        parts = re.split(r"(\n\s*\n+)", text)
+        section_indexes = [
+            idx
+            for idx in range(0, len(parts), 2)
+            if len(normalize_text(parts[idx])) >= int(policy.get("min_section_chars", 700))
+        ]
+        for section_number, part_index in enumerate(section_indexes, start=1):
+            section = parts[part_index]
+            normalized = normalize_text(section)
+            entries.append({
+                "container": container,
+                "key": key,
+                "parts": parts,
+                "part_index": part_index,
+                "section_number": section_number,
+                "text": section,
+                "hash": _pattern_hash_for_text(section),
+                "normalized_chars": len(normalized),
+                "location": location,
+                "message_index": message_index,
+                "protected": protected,
+            })
+
+    def collect_from_content(content: Any, location: str, message_index: int, protected: bool) -> None:
+        if isinstance(content, str):
+            add_text(None, None, content, location, message_index, protected)
+            return
+        if isinstance(content, list):
+            for block_index, block in enumerate(content):
+                block_location = f"{location}[{block_index}]"
+                if isinstance(block, str):
+                    add_text(content, block_index, block, block_location, message_index, protected)
+                elif isinstance(block, dict):
+                    for key in ("text", "input_text", "output_text", "content"):
+                        if isinstance(block.get(key), str):
+                            add_text(block, key, block[key], f"{block_location}.{key}", message_index, protected)
+                            break
+
+    def collect_messages(messages: Any, prefix: str) -> None:
+        if not isinstance(messages, list):
+            return
+        protect_start = max(0, len(messages) - keep_recent_messages)
+        for idx, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+            role = _message_role(msg)
+            if role in {"system", "developer"}:
+                skips["system_or_developer_message"] += 1
+                continue
+            content = msg.get("content")
+            has_tool_protocol = bool(msg.get("tool_calls") or msg.get("tool_call_id") or _content_has_tool_protocol(content))
+            has_thinking = _content_has_thinking(content)
+            if block_tool and has_tool_protocol:
+                skips["tool_protocol_payload"] += 1
+            if block_thinking and has_thinking:
+                skips["thinking_payload"] += 1
+            if (block_tool and has_tool_protocol) or (block_thinking and has_thinking):
+                continue
+            protected = idx >= protect_start
+            if isinstance(content, str):
+                add_text(msg, "content", content, f"{prefix}[{idx}].content", idx, protected)
+            else:
+                collect_from_content(content, f"{prefix}[{idx}].content", idx, protected)
+
+    collect_messages(body.get("messages"), "messages")
+    input_value = body.get("input")
+    if isinstance(input_value, list):
+        collect_messages(input_value, "input")
+    elif input_value is not None:
+        skips["non_message_input"] += 1
+    return entries, skips
+
+
+def _set_provider_section_entry(entry: dict[str, Any], replacement: str) -> None:
+    parts = list(entry["parts"])
+    parts[int(entry["part_index"])] = replacement
+    new_text = "".join(parts)
+    container = entry.get("container")
+    key = entry.get("key")
+    if isinstance(container, dict) and isinstance(key, str):
+        container[key] = new_text
+    elif isinstance(container, list) and isinstance(key, int):
+        container[key] = new_text
+
+
+def _provider_scaffold_notice(
+    *,
+    rule_id: str,
+    candidate_id: Any,
+    section_hash: str,
+    original_chars: int,
+    max_chars: int,
+) -> str:
+    short_hash = section_hash.split("sha256:", 1)[-1][:12]
+    candidate = f"; candidate_id={candidate_id}" if candidate_id else ""
+    notice = (
+        "[AgentFlow: repeated provider scaffolding omitted; "
+        f"rule_id={rule_id}{candidate}; scaffold_hash={short_hash}; original_chars={original_chars}]"
+    )
+    return notice[:max(1, max_chars)]
+
+
+def _provider_scaffolding_canary_features(
+    *,
+    body: dict[str, Any],
+    category: str,
+    pattern_hash: str,
+    before_chars: int,
+) -> dict[str, Any]:
+    return {
+        "source_surface": "provider_request",
+        "app_family": "unknown",
+        "category": category,
+        "workflow_phase": category,
+        "text_bucket": _text_bucket(before_chars),
+        "token_bucket": _token_bucket(max(1, before_chars // TOKEN_CHARS)),
+        "requested_model": body.get("model"),
+        "candidate_target_model": body.get("model"),
+        "pattern_hashes": [pattern_hash],
+    }
+
+
+def _apply_repeated_provider_scaffolding(
+    body: dict[str, Any],
+    *,
+    managed_profile: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    policy = _effective_repeated_provider_scaffolding_policy(managed_profile)
+    before_chars = len(stable_json(body))
+    meta = _provider_scaffolding_meta(policy, "skipped", "disabled")
+    meta["before_chars"] = before_chars
+    if not _as_bool(policy.get("enabled"), False):
+        return 0, meta
+    if not policy.get("rules"):
+        meta["reason"] = "no-reviewed-rules"
+        return 0, meta
+    if before_chars < int(policy.get("min_request_chars", 12000)):
+        meta["reason"] = "request-too-small"
+        return 0, meta
+
+    entries, safety_skips = _provider_text_entries(body, policy)
+    meta["safety_skips"] = {key: value for key, value in safety_skips.items() if value}
+    if not entries:
+        meta["reason"] = "no-safe-provider-sections"
+        return 0, meta
+
+    counts: dict[str, int] = {}
+    for entry in entries:
+        counts[str(entry["hash"])] = counts.get(str(entry["hash"]), 0) + 1
+    total_saved = 0
+    applied_count = 0
+    holdout_count = 0
+    skip_counts: dict[tuple[str, str], int] = {}
+    category = _crunch_request_category(body)
+
+    for rule in policy.get("rules") or []:
+        rule_id = str(rule.get("id") or "repeated-provider-scaffold")
+        rule_policy_source = str(rule.get("policy_source") or policy.get("policy_source") or CRUNCH_POLICY_SOURCE)
+        rule_meta = {
+            "rule_id": rule_id,
+            "candidate_id": rule.get("candidate_id"),
+            "enabled": _as_bool(rule.get("enabled"), True),
+            "policy_source": rule_policy_source,
+            "matched_pattern_count": 0,
+            "applied_count": 0,
+            "holdout_count": 0,
+            "saved_chars": 0,
+            "rollout": pattern_rollout_public_meta(rule.get("rollout")),
+            "skip_reasons": [],
+        }
+        if not rule_meta["enabled"]:
+            skip_counts[(rule_id, "disabled")] = skip_counts.get((rule_id, "disabled"), 0) + 1
+            rule_meta["skip_reasons"].append({"reason": "disabled", "count": 1})
+            meta["rules"].append(rule_meta)
+            continue
+        min_repeated = max(1, int(rule.get("min_repeated_count", 2)))
+        keep_recent_matches = max(0, int(rule.get("keep_recent_matches", policy.get("keep_recent_matches", 1))))
+        max_applications = max(0, min(
+            int(rule.get("max_applications", policy.get("max_replacements", 16))),
+            int(policy.get("max_replacements", 16)),
+        ))
+        for pattern_hash in [str(item) for item in rule.get("pattern_hashes") or []]:
+            occurrences = [entry for entry in entries if str(entry["hash"]) == pattern_hash]
+            if len(occurrences) < min_repeated:
+                skip_counts[(rule_id, "min-repeated-count-not-met")] = skip_counts.get((rule_id, "min-repeated-count-not-met"), 0) + 1
+                rule_meta["skip_reasons"].append({"reason": "min-repeated-count-not-met", "count": len(occurrences)})
+                continue
+            rule_meta["matched_pattern_count"] += 1
+            canary = pattern_canary_decision(
+                rollout=rule.get("rollout"),
+                rule_id=rule_id,
+                candidate_id=rule.get("candidate_id"),
+                pattern_hashes=[pattern_hash],
+                features=_provider_scaffolding_canary_features(
+                    body=body,
+                    category=category,
+                    pattern_hash=pattern_hash,
+                    before_chars=before_chars,
+                ),
+            )
+            canary.pop("pattern_hashes", None)
+            if canary.get("enabled"):
+                rule_meta["canary"] = canary
+            if canary.get("enabled") and not canary.get("selected", True):
+                count = len(occurrences)
+                rule_meta["holdout_count"] += count
+                holdout_count += count
+                skip_counts[(rule_id, "canary_holdout")] = skip_counts.get((rule_id, "canary_holdout"), 0) + count
+                rule_meta["skip_reasons"].append({"reason": "canary_holdout", "count": count, "canary": canary})
+                continue
+            mutable = [entry for entry in occurrences if not entry.get("protected")]
+            protected_start = max(0, len(mutable) - keep_recent_matches)
+            for occurrence_index, entry in enumerate(mutable):
+                if rule_meta["applied_count"] >= max_applications:
+                    skip_counts[(rule_id, "max-applications-reached")] = skip_counts.get((rule_id, "max-applications-reached"), 0) + 1
+                    break
+                if occurrence_index >= protected_start:
+                    skip_counts[(rule_id, "kept-recent-match")] = skip_counts.get((rule_id, "kept-recent-match"), 0) + 1
+                    continue
+                if rule.get("min_section_chars") is not None and int(entry["normalized_chars"]) < int(rule["min_section_chars"]):
+                    skip_counts[(rule_id, "section-too-small")] = skip_counts.get((rule_id, "section-too-small"), 0) + 1
+                    continue
+                replacement = _provider_scaffold_notice(
+                    rule_id=rule_id,
+                    candidate_id=rule.get("candidate_id"),
+                    section_hash=pattern_hash,
+                    original_chars=len(str(entry.get("text") or "")),
+                    max_chars=int((rule.get("action") or {}).get("max_replacement_chars", 360)),
+                )
+                if len(replacement) >= len(str(entry.get("text") or "")):
+                    skip_counts[(rule_id, "replacement-not-smaller")] = skip_counts.get((rule_id, "replacement-not-smaller"), 0) + 1
+                    continue
+                before_len = len(str(entry["text"]))
+                _set_provider_section_entry(entry, replacement)
+                saved = before_len - len(replacement)
+                total_saved += saved
+                applied_count += 1
+                rule_meta["applied_count"] += 1
+                rule_meta["saved_chars"] += saved
+        meta["rules"].append(rule_meta)
+
+    after_chars = len(stable_json(body))
+    meta.update({
+        "status": "applied" if applied_count else "skipped",
+        "reason": "repeated-provider-scaffolding-crunched" if applied_count else "no-repeated-provider-scaffolding",
+        "changed": applied_count > 0,
+        "after_chars": after_chars,
+        "saved_chars": before_chars - after_chars,
+        "text_saved_chars": total_saved,
+        "tokens_saved_est": (before_chars - after_chars) // TOKEN_CHARS,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "category": category,
+        "skip_reasons": [
+            {"rule_id": rule_id, "reason": reason, "count": count}
+            for (rule_id, reason), count in sorted(skip_counts.items())
+        ],
+    })
     return total_saved, meta
 
 
@@ -2531,6 +3015,10 @@ def crunch_body(
         rule_path=CRUNCH_RULES_PATH,
         category=category,
     )
+    _provider_scaffolding_saved_chars, provider_scaffolding_meta = _apply_repeated_provider_scaffolding(
+        new_body,
+        managed_profile=managed_profile,
+    )
     _pattern_saved_chars, pattern_rules_meta = _apply_pattern_rules(new_body, store_obj=store_obj)
     seen: dict[str, int] = {}
     seen_shingles: list[tuple[frozenset, int]] = []
@@ -2630,6 +3118,7 @@ def crunch_body(
         "pattern_rules_applied": pattern_rules_meta["applied_count"],
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
         "pattern_rules": pattern_rules_meta,
+        "repeated_provider_scaffolding": provider_scaffolding_meta,
         "policy_source": policy_source,
         "rule_path": CRUNCH_RULES_PATH,
         "threshold_chars": threshold_chars,

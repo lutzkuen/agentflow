@@ -619,6 +619,207 @@ pattern_rules:
         self.assertEqual(meta["pattern_rules"]["configured_count"], 0)
         self.assertEqual(meta["pattern_rules"]["applied_count"], 0)
 
+    def test_repeated_provider_scaffolding_compacts_anthropic_messages_under_reviewed_rule(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            scaffold = (
+                "Reviewed provider scaffold.\n"
+                + "\n".join(f"stable instruction line {i}" for i in range(24))
+            )
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+repeated_provider_scaffolding:
+  enabled: true
+  min_request_chars: 1
+  min_section_chars: 100
+  keep_recent_messages: 1
+  keep_recent_matches: 0
+  rules:
+    - id: reviewed-provider-scaffold
+      enabled: true
+      policy_source: managed-recommended
+      candidate_id: candidate-provider-123
+      pattern_hashes:
+        - {pattern_hash}
+      min_repeated_count: 2
+      keep_recent_matches: 0
+      max_applications: 4
+      rollout:
+        canary_enabled: true
+        canary_fraction: 1.0
+        canary_salt: provider-scaffold-test
+        canary_unit: request_fingerprint
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "system": "System instruction must stay verbatim.",
+                "messages": [
+                    {"role": "user", "content": scaffold + "\n\nOld task details."},
+                    {"role": "assistant", "content": "ack"},
+                    {"role": "user", "content": scaffold + "\n\nNewest task tail must remain."},
+                ],
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            provider_meta = meta["repeated_provider_scaffolding"]
+            rendered_meta = json.dumps(provider_meta, sort_keys=True)
+            self.assertTrue(meta["changed"])
+            self.assertEqual(provider_meta["status"], "applied")
+            self.assertEqual(provider_meta["reason"], "repeated-provider-scaffolding-crunched")
+            self.assertEqual(provider_meta["applied_count"], 1)
+            self.assertGreater(provider_meta["saved_chars"], 100)
+            self.assertEqual(provider_meta["rules"][0]["rule_id"], "reviewed-provider-scaffold")
+            self.assertEqual(provider_meta["rules"][0]["candidate_id"], "candidate-provider-123")
+            self.assertEqual(provider_meta["rules"][0]["policy_source"], "managed-recommended")
+            self.assertEqual(provider_meta["rules"][0]["canary"]["cohort"], "canary_applied")
+            self.assertNotIn(pattern_hash, rendered_meta)
+            self.assertNotIn("stable instruction line", rendered_meta)
+            self.assertEqual(crunched["system"], body["system"])
+            self.assertIn("repeated provider scaffolding omitted", crunched["messages"][0]["content"])
+            self.assertIn("Old task details.", crunched["messages"][0]["content"])
+            self.assertEqual(crunched["messages"][2]["content"], body["messages"][2]["content"])
+
+    def test_repeated_provider_scaffolding_preserves_tool_and_thinking_protocol(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            scaffold = "Reviewed tool scaffold.\n" + "\n".join(f"tool-safe line {i}" for i in range(24))
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+repeated_provider_scaffolding:
+  enabled: true
+  min_request_chars: 1
+  min_section_chars: 100
+  keep_recent_messages: 1
+  keep_recent_matches: 0
+  rules:
+    - id: reviewed-provider-tool-safe
+      candidate_id: candidate-tool-safe
+      pattern_hashes: [{pattern_hash}]
+      min_repeated_count: 2
+      keep_recent_matches: 0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "messages": [
+                    {"role": "developer", "content": scaffold + "\n\nDeveloper instruction."},
+                    {"role": "user", "content": scaffold + "\n\nOld safe request."},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": scaffold + "\n\nPrivate chain state."},
+                            {"type": "tool_use", "id": "tool-1", "name": "read", "input": {"path": "file.py"}},
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": scaffold + "\n\nTool result wrapper."},
+                            {"type": "tool_result", "tool_use_id": "tool-1", "content": "stateful output"},
+                        ],
+                    },
+                    {"role": "user", "content": scaffold + "\n\nNewest task tail."},
+                ]
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            provider_meta = meta["repeated_provider_scaffolding"]
+            self.assertTrue(provider_meta["tool_protocol_preserved"])
+            self.assertTrue(provider_meta["thinking_preserved"])
+            self.assertEqual(provider_meta["applied_count"], 1)
+            self.assertEqual(crunched["messages"][0]["content"], body["messages"][0]["content"])
+            self.assertIn("repeated provider scaffolding omitted", crunched["messages"][1]["content"])
+            self.assertEqual(crunched["messages"][2]["content"], body["messages"][2]["content"])
+            self.assertEqual(crunched["messages"][3]["content"], body["messages"][3]["content"])
+            self.assertEqual(crunched["messages"][4]["content"], body["messages"][4]["content"])
+            self.assertGreaterEqual(provider_meta["safety_skips"]["system_or_developer_message"], 1)
+            self.assertGreaterEqual(provider_meta["safety_skips"]["tool_protocol_payload"], 1)
+            self.assertGreaterEqual(provider_meta["safety_skips"]["thinking_payload"], 1)
+
+    def test_repeated_provider_scaffolding_compacts_openai_message_input(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            scaffold = "Reviewed OpenAI scaffold.\n" + "\n".join(f"openai line {i}" for i in range(24))
+            pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+repeated_provider_scaffolding:
+  enabled: true
+  min_request_chars: 1
+  min_section_chars: 100
+  keep_recent_messages: 1
+  keep_recent_matches: 0
+  rules:
+    - id: reviewed-openai-provider-scaffold
+      policy_source: local-manual
+      candidate_id: candidate-openai
+      pattern_hash: {pattern_hash}
+      min_repeated_count: 2
+      keep_recent_matches: 0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "gpt-5.4",
+                "input": [
+                    {"role": "developer", "content": [{"type": "input_text", "text": scaffold + "\n\nDeveloper stays."}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": scaffold + "\n\nOld request."}]},
+                    {"role": "assistant", "content": [{"type": "output_text", "text": "ack"}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": scaffold + "\n\nNewest OpenAI request."}]},
+                ],
+            }
+
+            crunched, meta = manual.crunch_body(body)
+
+            provider_meta = meta["repeated_provider_scaffolding"]
+            self.assertEqual(provider_meta["applied_count"], 1)
+            self.assertIn("repeated provider scaffolding omitted", crunched["input"][1]["content"][0]["text"])
+            self.assertIn("Old request.", crunched["input"][1]["content"][0]["text"])
+            self.assertEqual(crunched["input"][0], body["input"][0])
+            self.assertEqual(crunched["input"][3], body["input"][3])
+
+    def test_repeated_provider_scaffolding_is_disabled_by_default_and_ignores_codex_input(self):
+        manual = importlib.reload(crunch_module)
+        scaffold = "Default inert scaffold.\n" + "\n".join(f"default line {i}" for i in range(24))
+        body = {
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": scaffold + "\n\nOld one."},
+                {"role": "user", "content": scaffold + "\n\nNewest two."},
+            ],
+        }
+        codex_like = {"input": scaffold + "\n\n" + scaffold}
+
+        crunched, meta = manual.crunch_body(body)
+        codex_crunched, codex_meta = manual.crunch_body(codex_like)
+
+        self.assertEqual(crunched, body)
+        self.assertFalse(meta["repeated_provider_scaffolding"]["enabled"])
+        self.assertEqual(meta["repeated_provider_scaffolding"]["reason"], "disabled")
+        self.assertEqual(codex_crunched, codex_like)
+        self.assertEqual(codex_meta["repeated_provider_scaffolding"]["reason"], "disabled")
+
     def test_terminal_log_boilerplate_simplifies_timestamp_level_prefixes_and_preserves_diagnostics(self):
         manual = importlib.reload(crunch_module)
         lines = [
