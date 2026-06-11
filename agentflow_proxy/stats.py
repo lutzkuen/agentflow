@@ -3455,6 +3455,249 @@ async def stats_cache_replay_confidence(store_obj: Any, limit: int = 1000) -> di
     }
 
 
+def _cache_replay_rule_public_from_config(rule: dict[str, Any]) -> dict[str, Any]:
+    action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    return {
+        "rule_id": str(rule.get("id") or rule.get("rule_id") or "cache-pattern-rule"),
+        "candidate_id": rule.get("candidate_id"),
+        "policy_source": str(rule.get("policy_source") or "managed-recommended"),
+        "enabled": bool(rule.get("enabled", True)),
+        "allow_tool_calls": bool(action.get("allow_tool_calls")),
+        "safe_invalidation": bool(action.get("safe_invalidation")),
+        "streaming": bool(action.get("streaming")),
+        "scope": action.get("scope") or "session",
+        "replayability_levels": [
+            str(item)
+            for item in conditions.get("replayability_levels") or []
+            if isinstance(item, (str, int, float, bool))
+        ],
+        "pattern_hash_count": len(conditions.get("pattern_hashes") or []),
+        "pattern_hashes_included": False,
+        "rollout": _public_cache_rollout(rule.get("rollout")),
+    }
+
+
+def _cache_replay_readiness_state(row: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    if bool(row.get("safety_stop_active")) or _as_int(row.get("safety_stop_count")):
+        return "safety-stopped", [_CACHE_REPLAY_SAFETY_STOP_REASON]
+    if _as_int(row.get("invalidation_count")):
+        reasons.extend(str(item.get("value")) for item in row.get("invalidation_reasons") or [] if item.get("value"))
+    if _as_int(row.get("stale_risk_blocked_count")):
+        reasons.extend(str(item.get("value")) for item in row.get("stale_risk_reasons") or [] if item.get("value"))
+    if reasons:
+        return "blocked", sorted(set(reasons))
+
+    replayed = _as_int(row.get("replayed_count"))
+    holdout = _as_int(row.get("holdout_count"))
+    hits = _as_int(row.get("hit_count"))
+    misses = _as_int(row.get("miss_count"))
+    skips = _as_int(row.get("skip_count"))
+    if replayed and holdout:
+        return "ready", ["replay-and-holdout-observed"]
+    if hits:
+        return "active-no-holdout", ["replay-observed-without-holdout"]
+    if holdout:
+        return "holdout-only", ["canary-holdout-observed"]
+    if misses:
+        return "miss-only", ["exact-miss-observed"]
+    if skips:
+        return "blocked", ["skipped-no-replay"]
+    return "not-observed", ["no-recent-rule-metadata"]
+
+
+async def stats_cache_replay_readiness(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    confidence = await stats_cache_replay_confidence(store_obj, limit=limit)
+    replayability = await stats_cache_replayability(store_obj, limit=50)
+    policies = await stats_policies()
+    cache_policy = policies.get("cache") if isinstance(policies.get("cache"), dict) else {}
+    cache_file = cache_policy.get("file") if isinstance(cache_policy.get("file"), dict) else {}
+
+    try:
+        from agentflow_proxy import cache as cache_module
+
+        configured_rules = [
+            _cache_replay_rule_public_from_config(dict(rule))
+            for rule in getattr(cache_module, "CACHE_PATTERN_RULES", ())
+            if isinstance(rule, dict)
+        ]
+    except Exception:
+        configured_rules = []
+
+    rows: list[dict[str, Any]] = []
+    observed_rule_ids: set[str] = set()
+    for rule in confidence.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        state, reason_codes = _cache_replay_readiness_state(rule)
+        rule_id = str(rule.get("rule_id") or "unruled-cache-decision")
+        if rule_id != "unruled-cache-decision":
+            observed_rule_ids.add(rule_id)
+        canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+        rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+        dependency_status = "not-required"
+        if bool(rule.get("has_tools")):
+            dependency_status = "blocked" if _as_int(rule.get("invalidation_count")) else "ready"
+        elif _as_int(rule.get("invalidation_count")):
+            dependency_status = "invalidated"
+        rows.append({
+            "rule_id": rule_id,
+            "candidate_id": rule.get("candidate_id"),
+            "policy_source": rule.get("policy_source") or "unknown",
+            "source_surface": rule.get("source_surface") or "unknown",
+            "category": rule.get("category") or "unknown",
+            "stream": bool(rule.get("stream")),
+            "has_tools": bool(rule.get("has_tools")),
+            "readiness": state,
+            "reason_codes": reason_codes,
+            "sample_count": _as_int(rule.get("sample_count")),
+            "hit_count": _as_int(rule.get("hit_count")),
+            "replayed_count": _as_int(rule.get("replayed_count")),
+            "miss_count": _as_int(rule.get("miss_count")),
+            "holdout_count": _as_int(rule.get("holdout_count")),
+            "skip_count": _as_int(rule.get("skip_count")),
+            "safety_stop_count": _as_int(rule.get("safety_stop_count")),
+            "safety_stop_active": bool(rule.get("safety_stop_active")),
+            "invalidation_count": _as_int(rule.get("invalidation_count")),
+            "stale_risk_blocked_count": _as_int(rule.get("stale_risk_blocked_count")),
+            "dependency_evidence_status": dependency_status,
+            "canary_enabled": bool(canary.get("enabled") if canary else rollout.get("canary_enabled", False)),
+            "canary_fraction": canary.get("fraction") if canary.get("fraction") is not None else rollout.get("canary_fraction"),
+            "holdout_fraction_observed": rule.get("holdout_rate"),
+            "replayed_error_rate": rule.get("replayed_error_rate"),
+            "holdout_error_rate": rule.get("holdout_error_rate"),
+            "replayed_retry_rate": rule.get("replayed_retry_rate"),
+            "holdout_retry_rate": rule.get("holdout_retry_rate"),
+            "replayed_avg_latency_ms": rule.get("replayed_avg_latency_ms"),
+            "holdout_avg_latency_ms": rule.get("holdout_avg_latency_ms"),
+            "replayed_savings_rate_usd": rule.get("replayed_savings_rate_usd"),
+            "holdout_savings_rate_usd": rule.get("holdout_savings_rate_usd"),
+            "estimated_saved_cost_usd": rule.get("estimated_saved_cost_usd"),
+            "invalidation_reasons": rule.get("invalidation_reasons") or [],
+            "stale_risk_reasons": rule.get("stale_risk_reasons") or [],
+            "safety_stop_reasons": rule.get("safety_stop_reasons") or [],
+            "last_seen_at": rule.get("last_seen_at"),
+            "pattern_hashes_included": False,
+        })
+
+    for rule in configured_rules:
+        rule_id = str(rule.get("rule_id") or "cache-pattern-rule")
+        if rule_id in observed_rule_ids:
+            continue
+        state = "not-observed" if rule.get("enabled") else "disabled"
+        reason = "no-recent-rule-metadata" if rule.get("enabled") else "disabled-rule"
+        rows.append({
+            **rule,
+            "source_surface": "unknown",
+            "category": "unknown",
+            "stream": bool(rule.get("streaming")),
+            "has_tools": bool(rule.get("allow_tool_calls")),
+            "readiness": state,
+            "reason_codes": [reason],
+            "sample_count": 0,
+            "hit_count": 0,
+            "replayed_count": 0,
+            "miss_count": 0,
+            "holdout_count": 0,
+            "skip_count": 0,
+            "safety_stop_count": 0,
+            "safety_stop_active": False,
+            "invalidation_count": 0,
+            "stale_risk_blocked_count": 0,
+            "dependency_evidence_status": "not-observed",
+            "canary_enabled": bool(((rule.get("rollout") or {}).get("canary_enabled")) if isinstance(rule.get("rollout"), dict) else False),
+            "canary_fraction": ((rule.get("rollout") or {}).get("canary_fraction") if isinstance(rule.get("rollout"), dict) else None),
+            "holdout_fraction_observed": 0.0,
+            "estimated_saved_cost_usd": 0.0,
+            "invalidation_reasons": [],
+            "stale_risk_reasons": [],
+            "safety_stop_reasons": [],
+        })
+
+    rows.sort(
+        key=lambda row: (
+            row.get("readiness") == "safety-stopped",
+            row.get("readiness") == "blocked",
+            _as_int(row.get("sample_count")),
+            _as_float(row.get("estimated_saved_cost_usd")),
+        ),
+        reverse=True,
+    )
+    readiness_counts: dict[str, int] = {}
+    for row in rows:
+        state = str(row.get("readiness") or "unknown")
+        readiness_counts[state] = readiness_counts.get(state, 0) + 1
+
+    confidence_summary = confidence.get("summary") if isinstance(confidence.get("summary"), dict) else {}
+    replay_summary = replayability.get("summary") if isinstance(replayability.get("summary"), dict) else {}
+    active = sum(1 for row in rows if row.get("readiness") in {"ready", "active-no-holdout"})
+    blocked = sum(1 for row in rows if row.get("readiness") in {"blocked", "safety-stopped", "disabled"})
+    if confidence_summary.get("safety_stop_active"):
+        status = "safety-stopped"
+    elif active and not blocked:
+        status = "ready"
+    elif active:
+        status = "partial"
+    elif blocked:
+        status = "blocked"
+    elif configured_rules:
+        status = "not-observed"
+    else:
+        status = "no-rules"
+
+    return {
+        "schema": "agentflow.cache_replay_readiness.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "summary": {
+            "configured_rule_count": len(configured_rules),
+            "observed_rule_count": len(observed_rule_ids),
+            "active_rule_count": active,
+            "blocked_rule_count": blocked,
+            "ready_rule_count": readiness_counts.get("ready", 0),
+            "safety_stop_active": bool(confidence_summary.get("safety_stop_active")),
+            "safety_stop_rows": _as_int(confidence_summary.get("safety_stop_rows")),
+            "hit_rows": _as_int(confidence_summary.get("hit_rows")),
+            "holdout_rows": _as_int(confidence_summary.get("holdout_rows")),
+            "miss_rows": _as_int(confidence_summary.get("miss_rows")),
+            "invalidation_rows": _as_int(confidence_summary.get("invalidation_rows")),
+            "stale_risk_blocked_rows": _as_int(confidence_summary.get("stale_risk_blocked_rows")),
+            "estimated_saved_cost_usd": _as_float(confidence_summary.get("estimated_saved_cost_usd")),
+            "repeated_shape_groups": _as_int(replay_summary.get("repeated_shape_groups")),
+            "repeated_shape_exists_but_cache_is_unsafe": bool(replay_summary.get("repeated_shape_exists_but_cache_is_unsafe")),
+            "policy_source": cache_policy.get("policy_source") or "unknown",
+            "cache_enabled": bool(cache_policy.get("enabled")),
+            "exact_cache_enabled": bool(((cache_policy.get("exact_cache") or {}) if isinstance(cache_policy.get("exact_cache"), dict) else {}).get("enabled")),
+            "tool_cache_enabled": bool(((cache_policy.get("exact_cache") or {}) if isinstance(cache_policy.get("exact_cache"), dict) else {}).get("cache_tool_calls")),
+            "file_watch_enabled": bool(((cache_policy.get("file_watch") or {}) if isinstance(cache_policy.get("file_watch"), dict) else {}).get("enabled")),
+            "policy_reload_required": bool(cache_file.get("reload_required")),
+        },
+        "readiness_breakdown": _breakdown_from_counts(readiness_counts),
+        "invalidation_breakdown": confidence.get("invalidation_breakdown") or [],
+        "stale_risk_breakdown": confidence.get("stale_risk_breakdown") or [],
+        "safety_stop_breakdown": confidence.get("safety_stop_breakdown") or [],
+        "blocker_breakdown": replayability.get("blocker_breakdown") or [],
+        "rules": rows[: max(1, min(int(limit or 50), 1000))],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
+            "pattern_hashes_included": False,
+            "provider_calls_made": 0,
+            "dashboard_read_only": True,
+            "basis": "local cache policy state, bounded replay canary metadata, invalidation reason codes, safety-stop summaries, and aggregate cache replayability blockers",
+        },
+    }
+
+
 async def stats_cache_effectiveness(store_obj: Any, *, limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
     return build_cache_smoke_diagnostic(store_obj, limit=limit, scan_limit=scan_limit)
 
@@ -11949,6 +12192,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
     cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
+    cache_replay_readiness = await stats_cache_replay_readiness(store_obj, limit=50)
     cache_effectiveness = await stats_cache_effectiveness(store_obj, limit=5, scan_limit=5000)
     pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows)
     today_pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows, today_only=True)
@@ -12104,6 +12348,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_effectiveness": cache_effectiveness,
         "cache_replayability": cache_replayability,
         "cache_replay_confidence": cache_replay_confidence,
+        "cache_replay_readiness": cache_replay_readiness,
         "old_context_summary_opportunity": old_context_summary_opportunity,
         "pattern_decision_breakdown": pattern_decision_breakdown,
         "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
@@ -13132,6 +13377,15 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Type</th><th data-sort-type="text">Reason</th><th data-sort-type="number">Count</th>
     </tr></thead>
     <tbody id="local-cache-reasons-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Cache replay activation readiness</h2>
+  <table data-table-id="cache-replay-readiness" data-filter-label="Filter cache replay readiness">
+    <thead><tr>
+      <th data-sort-type="text">Rule</th><th data-sort-type="text">Readiness</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Canary</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Replay</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Invalidated</th><th data-sort-type="number">Safety</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="cache-replay-readiness-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -14328,6 +14582,44 @@ async function refreshCache(){
       <td class="model">${esc(row.value||'unknown')}</td>
       <td class="tokens">${(row.count||0).toLocaleString()}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No local cache reason codes recorded yet</td></tr>';
+    const readiness=d.cache_replay_readiness||{};
+    const readinessRows=readiness.rules||[];
+    document.getElementById('cache-replay-readiness-tbody').innerHTML=readinessRows.map(row=>{
+      const state=row.readiness||'unknown';
+      const cls=state==='ready'?'hit':(state==='blocked'||state==='safety-stopped'||state==='disabled')?'err':state==='active-no-holdout'?'routed':'miss';
+      const reasonCodes=(row.reason_codes||[]).map(reason=>`<span class="badge ${reason==='local-canary-safety-stop'?'err':'miss'}">${esc(reason)}</span>`).join(' ');
+      const invalidation=(row.invalidation_reasons||[]).slice(0,3).map(r=>`<span class="badge routed">${esc(r.value)} ${(r.count||0).toLocaleString()}</span>`).join(' ');
+      const stale=(row.stale_risk_reasons||[]).slice(0,3).map(r=>`<span class="badge miss">${esc(r.value)} ${(r.count||0).toLocaleString()}</span>`).join(' ');
+      const blockers=[reasonCodes,invalidation,stale].filter(Boolean).join(' ')||'<span class="badge hit">none</span>';
+      const canary=[
+        row.canary_enabled?'canary on':'canary off',
+        row.canary_fraction!=null?'target '+fmtPctValue(Number(row.canary_fraction)||0):null,
+        row.holdout_fraction_observed!=null?'holdout '+fmtPctValue(Number(row.holdout_fraction_observed)||0):null
+      ].filter(Boolean).map(item=>`<span class="badge provider">${esc(item)}</span>`).join(' ');
+      const surface=[
+        shortSurface(row.source_surface||'unknown'),
+        row.stream?'stream':'non-stream',
+        row.has_tools?'tools':'no tools',
+        row.category||'unknown',
+        row.dependency_evidence_status||'unknown'
+      ].join(' · ');
+      const rule=row.candidate_id?`${row.rule_id||'unknown'} / ${row.candidate_id}`:(row.rule_id||'unknown');
+      const privacy=row.pattern_hashes_included?'<span class="badge err">pattern hashes</span>':'<span class="badge hit">bounded metadata</span>';
+      return `<tr>
+        <td class="model">${esc(rule)}</td>
+        <td><span class="badge ${cls}">${esc(state)}</span></td>
+        <td><span class="badge provider">${esc(surface)}</span></td>
+        <td class="flags">${canary||'<span class="badge miss">no canary</span>'}</td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.replayed_count||row.hit_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.invalidation_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.estimated_saved_cost_usd||0,6)}</td>
+        <td class="flags">${blockers}</td>
+        <td class="flags">${privacy}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="12" style="color:#8b949e">No cache replay activation metadata recorded yet</td></tr>';
     const confidence=d.cache_replay_confidence||{};
     const confidenceRows=confidence.rules||[];
     document.getElementById('cache-replay-confidence-tbody').innerHTML=confidenceRows.map(row=>{

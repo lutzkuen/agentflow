@@ -4754,7 +4754,11 @@ class StatsFullTest(unittest.TestCase):
                 "status": "skipped",
                 "reason": "stale-risk-blockers",
                 "policy_source": "managed-recommended",
-                "pattern_rule": base_rule,
+                "pattern_rule": {
+                    **base_rule,
+                    "rule_id": "stale-cache",
+                    "candidate_id": "candidate-stale",
+                },
                 "cacheability": {
                     "cacheability_bucket": "low",
                     "time_sensitive_hint": True,
@@ -4817,6 +4821,233 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("Cache replay confidence", html)
             self.assertIn("cache-replay-confidence-tbody", html)
             self.assertNotIn("private replay prompt", html)
+
+    def test_cache_replay_readiness_endpoint_and_dashboard_show_blockers_without_raw_data(self):
+        from agentflow_proxy import cache as cache_module
+
+        base_rule = {
+            "rule_id": "static-chat-cache",
+            "candidate_id": "candidate-static",
+            "policy_source": "managed-recommended",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "rollout": {
+                "canary_enabled": True,
+                "canary_fraction": 0.5,
+                "canary_unit": "request_fingerprint",
+            },
+            "canary": {
+                "enabled": True,
+                "selected": True,
+                "cohort": "canary_applied",
+                "fraction": 0.5,
+                "pattern_hashes": ["sha256:" + "c" * 64],
+            },
+        }
+
+        def log_cache_row(
+            *,
+            cache_json,
+            status_code=200,
+            retry_count=0,
+            latency_ms=3,
+            category="chat",
+            has_tools=False,
+            cost=0.01,
+            baseline=0.02,
+        ):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=1 if cache_json.get("status") == "hit" else 0,
+                status_code=status_code,
+                latency_ms=latency_ms,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"text_chars": 900, "category": category, "has_tools": has_tools}),
+                cache_json=stable_json(cache_json),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "private readiness prompt /tmp/secret.py cache-key-secret"}]}),
+                response_json=None,
+                session_id="raw-readiness-session-id",
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=retry_count,
+                provider="anthropic",
+            )
+
+        log_cache_row(
+            cache_json={
+                "status": "hit",
+                "reason": "exact-match",
+                "policy_source": "managed-recommended",
+                "estimated_saved_cost_usd": 0.012,
+                "pattern_rule": base_rule,
+            },
+            cost=0.001,
+            baseline=0.013,
+        )
+        holdout_rule = {
+            **base_rule,
+            "canary": {
+                "enabled": True,
+                "selected": False,
+                "cohort": "canary_holdout",
+                "fraction": 0.5,
+                "pattern_hashes": ["sha256:" + "d" * 64],
+            },
+            "reason": "canary_holdout",
+        }
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "canary_holdout",
+                "policy_source": "managed-recommended",
+                "pattern_rules": {"skip_reasons": [holdout_rule]},
+            },
+            status_code=429,
+            retry_count=1,
+            latency_ms=40,
+        )
+        tool_rule = {
+            "rule_id": "tool-result-cache",
+            "candidate_id": "candidate-tool",
+            "policy_source": "managed-recommended",
+            "allow_tool_calls": True,
+            "safe_invalidation": True,
+        }
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "dependency-changed",
+                "policy_source": "managed-recommended",
+                "pattern_rule": tool_rule,
+                "file_dependency_audit": {
+                    "invalidation_reason": "dependency-changed",
+                    "changed_path_count": 1,
+                    "paths": ["/tmp/secret.py"],
+                    "paths_included": True,
+                },
+            },
+            category="tool-result",
+            has_tools=True,
+        )
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "stale-risk-blockers",
+                "policy_source": "managed-recommended",
+                "pattern_rule": {
+                    **base_rule,
+                    "rule_id": "stale-cache",
+                    "candidate_id": "candidate-stale",
+                },
+                "cacheability": {
+                    "cacheability_bucket": "low",
+                    "time_sensitive_hint": True,
+                    "user_specific_hint": True,
+                },
+            },
+        )
+        safety_rule = {
+            **base_rule,
+            "rule_id": "stopped-cache",
+            "candidate_id": "candidate-stop",
+            "reason": "local-canary-safety-stop",
+            "safety_stop": {"reason": "local-canary-safety-stop", "sample_count": 4, "error_rate": 0.5},
+        }
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "local-canary-safety-stop",
+                "policy_source": "managed-recommended",
+                "pattern_rules": {"skip_reasons": [safety_rule]},
+            },
+            status_code=500,
+        )
+
+        original_rules = cache_module.CACHE_PATTERN_RULES
+        cache_module.CACHE_PATTERN_RULES = (
+            {
+                "id": "disabled-cache-rule",
+                "enabled": False,
+                "policy_source": "local-manual",
+                "candidate_id": "candidate-disabled",
+                "conditions": {"pattern_hashes": ["sha256:" + "e" * 64]},
+                "action": {"type": "exact_cache_pattern", "allow_tool_calls": True, "safe_invalidation": True},
+                "rollout": {"canary_enabled": True, "canary_fraction": 0.25},
+            },
+        )
+        try:
+            result = asyncio.run(stats_views.stats_cache_replay_readiness(server.store, limit=20))
+        finally:
+            cache_module.CACHE_PATTERN_RULES = original_rules
+
+        self.assertEqual(result["schema"], "agentflow.cache_replay_readiness.v1")
+        self.assertTrue(result["summary"]["safety_stop_active"])
+        self.assertEqual(result["summary"]["ready_rule_count"], 1)
+        self.assertGreaterEqual(result["summary"]["invalidation_rows"], 1)
+        by_rule = {row["rule_id"]: row for row in result["rules"]}
+        self.assertEqual(by_rule["static-chat-cache"]["readiness"], "ready")
+        self.assertEqual(by_rule["tool-result-cache"]["readiness"], "blocked")
+        self.assertEqual(by_rule["tool-result-cache"]["dependency_evidence_status"], "blocked")
+        self.assertEqual(by_rule["stopped-cache"]["readiness"], "safety-stopped")
+        self.assertEqual(by_rule["disabled-cache-rule"]["readiness"], "disabled")
+        self.assertIn("dependency-changed", {row["value"] for row in result["invalidation_breakdown"]})
+        self.assertIn("current-state", {row["value"] for row in result["stale_risk_breakdown"]})
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("private readiness prompt", rendered)
+        self.assertNotIn("raw-readiness-session-id", rendered)
+        self.assertNotIn("/tmp/secret.py", rendered)
+        self.assertNotIn("cache-key-secret", rendered)
+        self.assertNotIn("sha256:" + "c" * 64, rendered)
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["pattern_hashes_included"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        cache_module.CACHE_PATTERN_RULES = (
+            {
+                "id": "disabled-cache-rule",
+                "enabled": False,
+                "policy_source": "local-manual",
+                "candidate_id": "candidate-disabled",
+                "conditions": {"pattern_hashes": ["sha256:" + "e" * 64]},
+                "action": {"type": "exact_cache_pattern", "allow_tool_calls": True, "safe_invalidation": True},
+                "rollout": {"canary_enabled": True, "canary_fraction": 0.25},
+            },
+        )
+        try:
+            with TestClient(app) as client:
+                response = client.get("/agentflow/stats/cache-replay-readiness?limit=20")
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["schema"], "agentflow.cache_replay_readiness.v1")
+                dashboard = client.get("/agentflow/dashboard")
+                self.assertEqual(dashboard.status_code, 200)
+                self.assertIn("Cache replay activation readiness", dashboard.text)
+                self.assertIn("cache-replay-readiness-tbody", dashboard.text)
+                self.assertNotIn("private readiness prompt", dashboard.text)
+        finally:
+            cache_module.CACHE_PATTERN_RULES = original_rules
 
     def test_cache_replayability_report_surfaces_file_dependency_audit_reasons_without_paths(self):
         def log_tool_candidate(name, audit):
