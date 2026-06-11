@@ -3360,6 +3360,48 @@ def openai_cache_replay_impact_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def openai_cache_replay_readiness_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Show OpenAI cache replay readiness from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--opportunity-limit",
+        type=int,
+        default=1000,
+        help="Recent OpenAI calls to scan for replay opportunity, default: 1000, max: 10000.",
+    )
+    parser.add_argument(
+        "--impact-limit",
+        type=int,
+        default=500,
+        help="Recent OpenAI calls to scan for replay impact evidence, default: 500, max: 10000.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_openai_cache_replay_readiness_report(
+            store,
+            opportunity_limit=args.opportunity_limit,
+            impact_limit=args.impact_limit,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def _openai_cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "agentflow.openai_cache_replay_dry_run.v1",
@@ -5776,6 +5818,10 @@ def openai_cache_replay_report_main() -> None:
 
 def openai_cache_replay_impact_main() -> None:
     raise SystemExit(openai_cache_replay_impact_cli())
+
+
+def openai_cache_replay_readiness_main() -> None:
+    raise SystemExit(openai_cache_replay_readiness_cli())
 
 
 def openai_cache_replay_dry_run_main() -> None:

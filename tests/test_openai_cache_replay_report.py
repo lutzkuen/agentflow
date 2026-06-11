@@ -9,11 +9,19 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 from agentflow_proxy import cli
+from agentflow_proxy.dashboard_app import create_dashboard_app
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
+from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
 from agentflow_proxy.openai_cache_replay_report import build_openai_cache_replay_report
-from agentflow_proxy.stats import stats_openai_cache_replay_impact, stats_openai_cache_replay_report
+from agentflow_proxy.stats import (
+    stats_openai_cache_replay_impact,
+    stats_openai_cache_replay_readiness,
+    stats_openai_cache_replay_report,
+)
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
 
@@ -462,6 +470,194 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertNotIn(raw_candidate, rendered)
         self.assertNotIn("raw-rule-id / cache key", rendered)
         self.assertNotIn("sha256:" + "a" * 64, rendered)
+        queued_rendered = json.dumps(sent["payload"], sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "raw response must not leak",
+            "raw-cache-key-secret",
+            "raw-openai-session-must-not-leak",
+            raw_candidate,
+            "raw-rule-id / cache key",
+            "sha256:" + "a" * 64,
+        ):
+            self.assertNotIn(forbidden, queued_rendered)
+
+    def test_openai_cache_replay_readiness_dashboard_api_cli_privacy_fixtures(self) -> None:
+        def replay_meta(
+            *,
+            candidate_id: str,
+            rule_id: str | None,
+            canary_status: str,
+            cohort: str,
+            projected: float,
+            reason: str,
+            invalidated: bool = False,
+        ) -> dict[str, object]:
+            rule: dict[str, object] = {
+                "candidate_id": candidate_id,
+                "policy_source": "managed-recommended",
+                "scope": "session",
+                "canary": {
+                    "enabled": True,
+                    "selected": cohort == "canary_applied",
+                    "cohort": cohort,
+                    "fraction": 0.5,
+                    "unit": "session",
+                    "status": canary_status,
+                    "pattern_hashes": ["sha256:" + "c" * 64],
+                },
+                "cache_key": "raw-cache-key-secret",
+                "raw_request_id": "req-secret-must-not-leak",
+                "session_id": "session-secret-must-not-leak",
+            }
+            if rule_id is not None:
+                rule["rule_id"] = rule_id
+            return {
+                "pattern_rule": rule,
+                "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": rule_id,
+                    "candidate_id": candidate_id,
+                    "policy_source": "managed-recommended",
+                    "status": canary_status,
+                    "reason": reason,
+                    "canary": rule["canary"],
+                    "projected_input_savings_usd": projected,
+                    "raw_tool_payload": {"path": "/tmp/openai-secret.py", "args": "tool payload must not leak"},
+                },
+                "estimated_saved_cost_usd": projected,
+                "invalidated": invalidated,
+                "invalidation_reason": "dependency-changed" if invalidated else None,
+                "cached_response_shape": "malformed-provider-payload",
+                "cached_response_preview": "raw response must not leak",
+                "endpoint_shape_mismatch": True,
+                "raw_cache_metadata": "raw-cache-key-secret req-secret-must-not-leak",
+            }
+
+        for baseline in (0.03, 0.04):
+            self._log_openai_call(
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=baseline,
+                cache_extra=replay_meta(
+                    candidate_id="openai-cache-readiness-candidate",
+                    rule_id="openai-cache-readiness-rule",
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    projected=baseline,
+                    reason="dependency-stable",
+                ),
+            )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-readiness-candidate",
+                rule_id="openai-cache-readiness-rule",
+                canary_status="holdout",
+                cohort="canary_holdout",
+                projected=0.03,
+                reason="canary_holdout",
+            ),
+        )
+        self._log_openai_call(
+            endpoint="chat_completions",
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            file_dependency_audit={
+                **self._audit(reason="dependency-changed", safe=False),
+                "paths": ["/tmp/openai-secret.py"],
+                "root_path": "/tmp",
+            },
+            cost=0.05,
+            cost_baseline=0.05,
+            cache_extra=replay_meta(
+                candidate_id="raw-cache-key / request_id session secret",
+                rule_id=None,
+                canary_status="invalidated",
+                cohort="canary_applied",
+                projected=0.05,
+                reason="dependency-changed",
+                invalidated=True,
+            ),
+        )
+
+        report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_readiness.v1")
+        self.assertEqual(report["state"], "saving")
+        self.assertEqual(report["summary"]["applied_count"], 2)
+        self.assertEqual(report["summary"]["holdout_count"], 1)
+        self.assertEqual(report["summary"]["invalidated_count"], 1)
+        self.assertGreater(report["summary"]["observed_savings_usd"], 0)
+        self.assertTrue(report["candidates"])
+        self.assertFalse(report["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(report["privacy"]["tool_payloads_included"])
+        self.assertFalse(report["privacy"]["file_paths_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+
+        stats_result = asyncio.run(stats_openai_cache_replay_readiness(self.store, opportunity_limit=20, impact_limit=20))
+        self.assertEqual(stats_result["schema"], "agentflow.openai_cache_replay_readiness.v1")
+
+        app = create_dashboard_app(
+            store_obj=lambda: self.store,
+            default_db=self.db_path,
+            upstream="https://openai.test",
+            limiter_status=lambda: [],
+            limiter_config={
+                "min_request_interval_ms": 0,
+                "max_tier_backoff_wait_s": 30,
+                "max_concurrent_per_tier": 2,
+            },
+        )
+        with TestClient(app) as client:
+            api_response = client.get("/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=20&impact_limit=20")
+            dashboard = client.get("/agentflow/dashboard")
+        self.assertEqual(api_response.status_code, 200)
+        self.assertEqual(api_response.json()["state"], "saving")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("/agentflow/stats/openai-cache-replay-readiness", dashboard.text)
+        self.assertIn("OpenAI cache replay readiness", dashboard.text)
+        self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
+        self.assertIn("OpenAI cache replay impact gates", dashboard.text)
+        self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
+
+        output = io.StringIO()
+        exit_code = cli.openai_cache_replay_readiness_cli(
+            ["--db", self.db_path, "--opportunity-limit", "20", "--impact-limit", "20"],
+            stdout=output,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue())["schema"], "agentflow.openai_cache_replay_readiness.v1")
+
+        rendered_outputs = [
+            json.dumps(report, sort_keys=True),
+            json.dumps(api_response.json(), sort_keys=True),
+            output.getvalue(),
+            dashboard.text,
+        ]
+        for rendered in rendered_outputs:
+            for forbidden in (
+                "raw prompt must not leak",
+                "raw response must not leak",
+                "raw-cache-key-secret",
+                "raw-openai-session-must-not-leak",
+                "req-secret-must-not-leak",
+                "session-secret-must-not-leak",
+                "/tmp/openai-secret.py",
+                "tool payload must not leak",
+                "raw-cache-key / request_id session secret",
+                "sha256:" + "c" * 64,
+            ):
+                self.assertNotIn(forbidden, rendered)
 
     def test_openai_dry_run_projects_session_scoped_replay_and_dependency_blockers(self) -> None:
         pattern_hash = "sha256:" + "b" * 64

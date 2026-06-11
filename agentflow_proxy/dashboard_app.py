@@ -185,6 +185,17 @@ def create_dashboard_router(
     async def stats_openai_cache_replay_impact(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_openai_cache_replay_impact(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/openai-cache-replay-readiness")
+    async def stats_openai_cache_replay_readiness(
+        opportunity_limit: int = 1000,
+        impact_limit: int = 500,
+    ) -> dict[str, Any]:
+        return await stats_views.stats_openai_cache_replay_readiness(
+            _store(store_obj),
+            opportunity_limit=opportunity_limit,
+            impact_limit=impact_limit,
+        )
+
     @router.get("/agentflow/stats/shadow-routing-promotion-readiness")
     async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_shadow_routing_promotion_readiness(_store(store_obj), limit=limit)

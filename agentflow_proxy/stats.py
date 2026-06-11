@@ -7168,6 +7168,20 @@ async def stats_openai_cache_replay_impact(store_obj: Any, limit: int = 500) -> 
     return build_openai_cache_replay_impact_report(store_obj, limit=limit)
 
 
+async def stats_openai_cache_replay_readiness(
+    store_obj: Any,
+    opportunity_limit: int = 1000,
+    impact_limit: int = 500,
+) -> dict[str, Any]:
+    from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
+
+    return build_openai_cache_replay_readiness_report(
+        store_obj,
+        opportunity_limit=opportunity_limit,
+        impact_limit=impact_limit,
+    )
+
+
 async def stats_openai_old_context_summary_report(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.openai_old_context_summary_report import build_openai_old_context_summary_report
     from agentflow_proxy.openai_old_context_summary import load_openai_old_context_summary_policy
@@ -13585,6 +13599,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>OpenAI cache replay readiness</h2>
+  <table data-table-id="openai-cache-replay-readiness" data-filter-label="Filter OpenAI cache replay readiness">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="number">OpenAI calls</th><th data-sort-type="number">Opportunity candidates</th><th data-sort-type="number">Impact candidates</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Invalidated</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-cache-replay-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI cache replay impact gates</h2>
+  <table data-table-id="openai-cache-replay-impact-gates" data-filter-label="Filter OpenAI cache replay impact gates">
+    <thead><tr>
+      <th data-sort-type="text">Readiness</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Blocked</th><th data-sort-type="number">Invalidated</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-cache-replay-impact-gates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Local cache reason codes</h2>
   <table data-table-id="local-cache-reasons" data-filter-label="Filter local cache reason codes">
     <thead><tr>
@@ -14808,6 +14840,71 @@ async function refreshCategories(){
   }catch(e){}
 }
 
+function openaiCacheReplayStateBadge(state){
+  if(state==='saving'||state==='promote')return'hit';
+  if(state==='blocked'||state==='rollback')return'err';
+  if(state==='canarying'||state==='hold')return'routed';
+  if(state==='disabled'||state==='need-more-samples')return'miss';
+  return'provider';
+}
+function openaiCacheReplayReasonBadges(rowsOrReasons){
+  rowsOrReasons=rowsOrReasons||[];
+  if(!rowsOrReasons.length)return'<span class="badge hit">none</span>';
+  return rowsOrReasons.slice(0,6).map(row=>{
+    const value=typeof row==='string'?row:(row.value||'unknown');
+    const count=typeof row==='string'||row.count==null?'':' '+Number(row.count||0).toLocaleString();
+    const cls=String(value).includes('safety')||String(value).includes('rollback')?'err':'miss';
+    return `<span class="badge ${cls}">${esc(value)}${count}</span>`;
+  }).join(' ');
+}
+function openaiCacheReplayPrivacyBadges(privacy){
+  privacy=privacy||{};
+  return `${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>'} ${privacy.raw_request_bodies_included?'<span class="badge err">raw bodies</span>':'<span class="badge hit">raw bodies omitted</span>'} ${privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'} ${privacy.session_ids_included?'<span class="badge err">session ids</span>':'<span class="badge hit">IDs omitted</span>'}`;
+}
+async function refreshOpenAICacheReplayReadiness(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=1000&impact_limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('openai-cache-replay-readiness-tbody').innerHTML=`<tr>
+      <td><span class="badge ${openaiCacheReplayStateBadge(d.state)}">${esc(d.state||'unknown')}</span><div class="sub">${esc(d.state_reason||'')}</div></td>
+      <td class="tokens">${(s.openai_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.opportunity_candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.impact_candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.invalidated_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safety_stop_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.observed_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(s.projected_savings_usd||0,6)}</td>
+      <td class="flags">${openaiCacheReplayReasonBadges(s.top_blockers||d.blocker_reason_breakdown)}</td>
+      <td class="flags">${openaiCacheReplayPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const rows=d.candidates||[];
+    document.getElementById('openai-cache-replay-impact-gates-tbody').innerHTML=rows.map(row=>{
+      const surface=[shortSurface(row.endpoint||'unknown'),row.category||'unknown',row.workflow_phase||'unknown',row.kind||'metadata'].filter(Boolean).join(' · ');
+      const candidate=row.rule_id?`${row.rule_id} / ${row.candidate_id||'unknown'}`:(row.candidate_id||'uncategorized');
+      return `<tr>
+        <td><span class="badge ${openaiCacheReplayStateBadge(row.readiness)}">${esc(row.readiness||'unknown')}</span></td>
+        <td><span class="badge ${openaiCacheReplayStateBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(candidate)}</td>
+        <td><span class="badge provider">${esc(surface)}</span></td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.blocked_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.invalidated_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.observed_savings_usd||0,6)}</td>
+        <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+        <td class="flags">${openaiCacheReplayReasonBadges(row.reason_codes)}</td>
+        <td class="flags">${openaiCacheReplayPrivacyBadges(row.privacy||{})}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="14" style="color:#8b949e">No OpenAI cache replay readiness or impact metadata recorded yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshCache(){
   try{
     const d=await loadFullStats();
@@ -16415,6 +16512,7 @@ refresh();
 refreshWeekly();
 refreshCategories();
 refreshCache();
+refreshOpenAICacheReplayReadiness();
 refreshErrors();
 refreshLimiter();
 refreshSafety();
@@ -16439,6 +16537,7 @@ setInterval(refresh,5000);
 setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
+setInterval(refreshOpenAICacheReplayReadiness,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
