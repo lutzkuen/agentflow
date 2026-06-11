@@ -84,6 +84,7 @@ def _default_experiment_policy() -> dict[str, Any]:
             {"requested_model": "claude-opus-4-5", "routed_model": "claude-sonnet-4-6"},
             {"requested_model": "gpt-5-codex", "routed_model": "gpt-5-mini"},
             {"requested_model": "gpt-5.4", "routed_model": "gpt-5.4-mini"},
+            {"requested_model": "gpt-5.5", "routed_model": "gpt-5-mini"},
         ],
         "workflow_phases": [],
         "categories": ["chat", "short-completion", "codex-turn"],

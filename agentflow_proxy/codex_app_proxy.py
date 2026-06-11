@@ -2859,6 +2859,8 @@ def _attach_codex_routing_experiment_pending(
     optimization_metadata: dict[str, dict[str, Any]] | None,
     start_event_id: str | None,
     pending_routing_experiments: dict[str, dict[str, Any]],
+    session_id: str | None = None,
+    model_states: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     msg = _jsonrpc_message(raw)
     if not isinstance(msg, dict):
@@ -2867,24 +2869,45 @@ def _attach_codex_routing_experiment_pending(
     if method != "turn/start":
         return
     request_id = _request_id(msg)
-    if request_id is None:
-        return
     params = msg.get("params") or {}
     if not isinstance(params, dict):
         return
-    result = _decide_codex_routing_experiment(params, optimization_metadata)
+    derived_model_state = None
+    if session_id:
+        derived_model_state = _lookup_model_state(
+            model_states,
+            session_id=session_id,
+            thread_id=_thread_id(params),
+        )
+    result = _decide_codex_routing_experiment(
+        params,
+        optimization_metadata,
+        derived_model_state=derived_model_state,
+    )
     if result is None:
         return
     experiment_meta, routing_meta = result
-    start_routing_meta = dict((optimization_metadata or {}).get("routing") or {})
+    if request_id is None and experiment_meta.get("sampled"):
+        experiment_meta = dict(experiment_meta)
+        experiment_meta.update({
+            "status": "skipped",
+            "sampled": False,
+            "reason": "missing-request-id",
+            "pending_outcome": False,
+            "would_sample": True,
+        })
+    live_routing_meta = (optimization_metadata or {}).get("routing") if isinstance(optimization_metadata, dict) else None
+    if isinstance(live_routing_meta, dict):
+        live_routing_meta["routing_experiment"] = experiment_meta
+    start_routing_meta = dict(live_routing_meta or routing_meta)
     if start_event_id:
-        routing_for_event = dict(start_routing_meta or routing_meta)
+        routing_for_event = dict(start_routing_meta)
         routing_for_event["routing_experiment"] = experiment_meta
         try:
             store.update_codex_app_event_routing_json(start_event_id, stable_json(routing_for_event))
         except Exception as exc:
             print(f"AgentFlow Codex routing experiment metadata update skipped: {exc}", file=sys.stderr)
-    if not experiment_meta.get("sampled"):
+    if request_id is None or not experiment_meta.get("sampled"):
         return
     pending_routing_experiments[request_id] = {
         "experiment_meta": experiment_meta,
@@ -2898,11 +2921,26 @@ def _attach_codex_routing_experiment_pending(
 def _decide_codex_routing_experiment(
     params: dict[str, Any],
     optimization_metadata: dict[str, dict[str, Any]] | None,
+    *,
+    derived_model_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Return metadata for sampled and skipped Codex routing experiment decisions."""
     _, requested_model = _model_field(params)
     routing = (optimization_metadata or {}).get("routing") or {}
-    requested_model = str(requested_model or routing.get("requested_model") or "")
+    requested_model_source = "turn-start-field" if requested_model else ""
+    if not requested_model and routing.get("requested_model"):
+        requested_model = str(routing.get("requested_model") or "")
+        requested_model_source = "routing-metadata"
+    if not requested_model and isinstance(derived_model_state, dict):
+        derived_model = str(derived_model_state.get("normalized_model") or "").strip()
+        if derived_model:
+            requested_model = derived_model
+            requested_model_source = "derived-model-state"
+    if not requested_model:
+        configured_model = str(codex_app_model() or "").strip()
+        if configured_model:
+            requested_model = configured_model
+            requested_model_source = "codex-app-config"
     routed_model = str(routing.get("routed_model") or requested_model)
     workflow_phase = str(routing.get("workflow_phase") or "unknown")
     text_chars = _input_text_chars(params.get("input"))
@@ -2912,7 +2950,16 @@ def _decide_codex_routing_experiment(
         "category": "codex-turn",
         "workflow_phase": workflow_phase,
         "text_chars": text_chars,
+        "requested_model_source": requested_model_source or "unknown",
     }
+    if isinstance(derived_model_state, dict):
+        experiment_routing_meta["model_state"] = {
+            "state": derived_model_state.get("state"),
+            "field": derived_model_state.get("field"),
+            "source_method": derived_model_state.get("source_method"),
+            "confidence": derived_model_state.get("confidence"),
+            "reason": derived_model_state.get("reason"),
+        }
     try:
         experiment_meta = routing_experiment_decision(
             params,
@@ -2922,6 +2969,9 @@ def _decide_codex_routing_experiment(
             source_surface="codex_turn",
             store_obj=store,
         )
+        experiment_meta.setdefault("requested_model_source", experiment_routing_meta["requested_model_source"])
+        if "model_state" in experiment_routing_meta:
+            experiment_meta.setdefault("model_state", experiment_routing_meta["model_state"])
     except Exception as exc:
         print(f"AgentFlow Codex routing experiment decision skipped: {exc}", file=sys.stderr)
         return None
@@ -3516,6 +3566,8 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             optimization_metadata=optimization_metadata,
                             start_event_id=start_event_id,
                             pending_routing_experiments=pending_routing_experiments,
+                            session_id=session_id,
+                            model_states=model_states,
                         )
                         replay_frame = cache_meta.get(_INTERNAL_REPLAY_FRAME_KEY)
                         if isinstance(replay_frame, str):
@@ -3585,6 +3637,8 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                             optimization_metadata=optimization_metadata,
                             start_event_id=start_event_id,
                             pending_routing_experiments=pending_routing_experiments,
+                            session_id=session_id,
+                            model_states=model_states,
                         )
                         await upstream.send(forwarded)
 

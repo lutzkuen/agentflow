@@ -2448,7 +2448,7 @@ summary_model_hint:
             "method": "turn/start",
             "params": {
                 "threadId": "thread-routing-experiment-mismatch",
-                "model": "gpt-5.5",
+                "model": "gpt-unconfigured",
                 "input": [{"type": "text", "text": secret_prompt}],
             },
         }
@@ -2456,8 +2456,8 @@ summary_model_hint:
             "routing": {
                 "status": "skipped",
                 "reason": "keep requested Codex model",
-                "requested_model": "gpt-5.5",
-                "routed_model": "gpt-5.5",
+                "requested_model": "gpt-unconfigured",
+                "routed_model": "gpt-unconfigured",
                 "workflow_phase": "summary",
                 "model_field": "model",
             },
@@ -2499,8 +2499,8 @@ summary_model_hint:
         experiment = routing["routing_experiment"]
         self.assertEqual(experiment["provider"], "openai")
         self.assertEqual(experiment["source_surface"], "codex_turn")
-        self.assertEqual(experiment["requested_model"], "gpt-5.5")
-        self.assertEqual(experiment["routed_model"], "gpt-5.5")
+        self.assertEqual(experiment["requested_model"], "gpt-unconfigured")
+        self.assertEqual(experiment["routed_model"], "gpt-unconfigured")
         self.assertEqual(experiment["status"], "skipped")
         self.assertEqual(experiment["reason"], "model-pair-not-enabled")
         self.assertFalse(experiment["sampled"])
@@ -2555,6 +2555,10 @@ summary_model_hint:
                         start_event_id=start_event_id,
                         pending_routing_experiments=pending,
                     )
+                    test_store.update_codex_app_event_routing_json(
+                        start_event_id,
+                        json.dumps(optimization_metadata["routing"]),
+                    )
                 row = test_store.conn.execute(
                     "select routing_json from codex_app_events where id = ?",
                     (start_event_id,),
@@ -2568,6 +2572,115 @@ summary_model_hint:
         self.assertEqual(experiment["reason"], "sample-rate-not-selected")
         self.assertFalse(experiment["sampled"])
 
+    def test_codex_routing_experiment_live_record_path_uses_active_model_state(self):
+        secret_prompt = "secret active turn prompt must stay local"
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": "init-active-model",
+            "method": "initialize",
+            "params": {
+                "model": "gpt-5.5",
+                "instructions": "private startup instructions",
+            },
+        }
+        start = {
+            "jsonrpc": "2.0",
+            "id": "turn-active-model",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-active-model",
+                "input": [{"type": "text", "text": secret_prompt}],
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-active-model",
+            "result": {"message": "completed"},
+        }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    active_windows = {}
+                    model_states = {}
+                    request_started = {}
+                    pending = {}
+                    decision = functools.partial(codex_app_proxy.routing_experiment_decision, random_value=lambda: 0.0)
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "routing_experiment_decision", decision),
+                    ):
+                        codex_app_proxy._record_message(
+                            json.dumps(initialize),
+                            direction="client_to_server",
+                            session_id="session-active-model",
+                            request_started=request_started,
+                            active_turn_windows=active_windows,
+                            model_states=model_states,
+                        )
+                        forwarded, optimization_metadata = codex_app_proxy._optimize_client_message(json.dumps(start))
+                        forwarded_obj = json.loads(forwarded)
+                        self.assertNotIn("model", forwarded_obj["params"])
+                        start_event_id = codex_app_proxy._record_message(
+                            forwarded,
+                            direction="client_to_server",
+                            session_id="session-active-model",
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                            active_turn_windows=active_windows,
+                            model_states=model_states,
+                        )
+                        codex_app_proxy._attach_codex_routing_experiment_pending(
+                            forwarded,
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending,
+                            session_id="session-active-model",
+                            model_states=model_states,
+                        )
+                        self.assertIn("turn-active-model", pending)
+                        await codex_app_proxy._maybe_run_codex_routing_experiment(
+                            json.dumps(response),
+                            request_started=request_started,
+                            pending_routing_experiments=pending,
+                        )
+                    routing_row = test_store.conn.execute(
+                        "select routing_json from codex_app_events where id = ?",
+                        (start_event_id,),
+                    ).fetchone()
+                    experiment_row = test_store.conn.execute(
+                        "select * from routing_experiments"
+                    ).fetchone()
+                    return json.loads(routing_row["routing_json"]), dict(experiment_row)
+                finally:
+                    test_store.conn.close()
+
+        routing, experiment_row = asyncio.run(run_fixture())
+
+        experiment = routing["routing_experiment"]
+        self.assertEqual(experiment["provider"], "openai")
+        self.assertEqual(experiment["source_surface"], "codex_turn")
+        self.assertEqual(experiment["mode"], "shadow_candidate_pass_through")
+        self.assertEqual(experiment["requested_model"], "gpt-5.5")
+        self.assertEqual(experiment["routed_model"], "gpt-5-mini")
+        self.assertEqual(experiment["primary_model"], "gpt-5.5")
+        self.assertEqual(experiment["shadow_model"], "gpt-5-mini")
+        self.assertEqual(experiment["user_visible_model"], "gpt-5.5")
+        self.assertEqual(experiment["requested_model_source"], "derived-model-state")
+        self.assertEqual(experiment["model_state"]["source_method"], "initialize")
+        self.assertTrue(experiment["privacy"]["metadata_only"])
+        self.assertFalse(experiment["privacy"]["request_ids_included"])
+        self.assertNotIn(secret_prompt, json.dumps(experiment, sort_keys=True))
+
+        self.assertEqual(experiment_row["provider"], "openai")
+        self.assertEqual(experiment_row["source_surface"], "codex_turn")
+        self.assertEqual(experiment_row["requested_model"], "gpt-5.5")
+        self.assertEqual(experiment_row["routed_model"], "gpt-5-mini")
+        self.assertEqual(experiment_row["primary_model"], "gpt-5.5")
+        self.assertEqual(experiment_row["shadow_model"], "gpt-5-mini")
+        self.assertEqual(json.loads(experiment_row["experiment_json"])["mode"], "shadow_candidate_pass_through")
+
     def test_codex_routing_experiment_request_too_large_skip_is_visible(self):
         message = {
             "jsonrpc": "2.0",
@@ -2575,7 +2688,7 @@ summary_model_hint:
             "method": "turn/start",
             "params": {
                 "model": "gpt-5-codex",
-                "input": [{"type": "text", "text": "x" * 9001}],
+                "input": [{"type": "text", "text": "x" * 33000}],
             },
         }
         optimization_metadata = {
@@ -2615,12 +2728,12 @@ summary_model_hint:
                 test_store.conn.close()
 
         self.assertEqual(pending, {})
-        self.assertEqual(row["input_text_chars"], 9001)
+        self.assertEqual(row["input_text_chars"], 33000)
         experiment = json.loads(row["routing_json"])["routing_experiment"]
         self.assertEqual(experiment["status"], "skipped")
         self.assertEqual(experiment["reason"], "request-too-large")
         self.assertFalse(experiment["sampled"])
-        self.assertEqual(experiment["text_chars"], 9001)
+        self.assertEqual(experiment["text_chars"], 33000)
 
     def test_codex_routing_experiment_skip_is_visible_without_sample_rows(self):
         message = {
@@ -2647,7 +2760,10 @@ summary_model_hint:
             try:
                 request_started = {}
                 pending = {}
-                with patch.object(codex_app_proxy, "store", test_store):
+                with (
+                    patch.object(codex_app_proxy, "store", test_store),
+                    patch.object(codex_app_proxy, "codex_app_model", return_value=""),
+                ):
                     start_event_id = codex_app_proxy._record_message(
                         json.dumps(message),
                         direction="client_to_server",
