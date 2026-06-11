@@ -2125,7 +2125,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         bundle = {
             "schema": "agentflow.optimization_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
-            "expires_at": "2026-06-11T05:00:00+00:00",
+            "expires_at": "2099-06-11T05:00:00+00:00",
             "summary": {
                 "candidate_count": 1,
                 "action_count": 1,
@@ -2154,7 +2154,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                     "provider_endpoint": "responses",
                     "confidence": 0.93,
                     "generated_at": "2026-06-10T05:00:00+00:00",
-                    "expires_at": "2026-06-11T05:00:00+00:00",
+                    "expires_at": "2099-06-11T05:00:00+00:00",
                     "required_local_review": True,
                     "managed_enforced": False,
                     "local_executor_compatibility": {

@@ -518,9 +518,12 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.old_log_bodies = server.LOG_BODIES
         self.saved_recommendation_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
         self.saved_routing_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
+        self.saved_crunch_rules = os.environ.get("AGENTFLOW_CRUNCH_RULES")
         self.saved_routing_experiments = os.environ.get("AGENTFLOW_ROUTING_EXPERIMENTS")
+        self.saved_openai_summary_enabled = os.environ.get("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED")
         os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
         os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
+        os.environ.pop("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
         importlib.reload(routing_experiments_module)
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
@@ -550,10 +553,18 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
         else:
             os.environ["AGENTFLOW_ROUTING_RULES"] = self.saved_routing_rules
+        if self.saved_crunch_rules is None:
+            os.environ.pop("AGENTFLOW_CRUNCH_RULES", None)
+        else:
+            os.environ["AGENTFLOW_CRUNCH_RULES"] = self.saved_crunch_rules
         if self.saved_routing_experiments is None:
             os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
         else:
             os.environ["AGENTFLOW_ROUTING_EXPERIMENTS"] = self.saved_routing_experiments
+        if self.saved_openai_summary_enabled is None:
+            os.environ.pop("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
+        else:
+            os.environ["AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED"] = self.saved_openai_summary_enabled
         importlib.reload(router_module)
         importlib.reload(routing_experiments_module)
         os.chdir(self.old_cwd)
@@ -920,6 +931,84 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertTrue(cache["semantic_enabled"])
         self.assertEqual(cache["semantic_threshold"], 0.82)
         self.assertNotIn(long_text, row["routing_json"])
+
+    def test_openai_old_context_summary_canary_applies_before_forwarding(self):
+        old_text = "old openai secret context should not be logged or forwarded. " * 120
+        request_body = {
+            "model": "gpt-5.4",
+            "instructions": "developer instruction remains top-level",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": old_text + "one"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": old_text + "two"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "recent user stays"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "recent assistant stays"}]},
+            ],
+        }
+        policy_file = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+        policy_file.write("\n".join([
+            "openai_old_context_summarization:",
+            "  enabled: true",
+            "  rule_id: test-openai-summary-canary",
+            "  summary_model: gpt-5-mini",
+            "  min_request_chars: 0",
+            "  min_source_chars: 1",
+            "  keep_recent_items: 2",
+            "  max_summary_chars: 200",
+            "  max_summary_cost_usd: 1",
+            "  blocked_categories: []",
+            "  canary:",
+            "    enabled: true",
+            "    canary_fraction: 1",
+            "    holdout_fraction: 0",
+            "    salt: route-test",
+            "rules: []",
+            "",
+        ]))
+        policy_file.close()
+        self.addCleanup(lambda: os.path.exists(policy_file.name) and os.unlink(policy_file.name))
+        CapturingOpenAIClient.calls = []
+        CapturingOpenAIClient.response_body = {
+            "id": "resp_summary_or_final",
+            "object": "response",
+            "model": "gpt-5-mini",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "safe compact continuity summary"}],
+                }
+            ],
+            "usage": {"input_tokens": 40, "output_tokens": 8},
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_CRUNCH_RULES": policy_file.name}, clear=False):
+            with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(CapturingOpenAIClient.calls), 2)
+        summary_request = CapturingOpenAIClient.calls[0]["json"]
+        forwarded = CapturingOpenAIClient.calls[1]["json"]
+        self.assertEqual(summary_request["model"], "gpt-5-mini")
+        self.assertIn("old openai secret context", summary_request["input"])
+        forwarded_json = json.dumps(forwarded, sort_keys=True)
+        self.assertIn("safe compact continuity summary", forwarded_json)
+        self.assertIn("recent user stays", forwarded_json)
+        self.assertIn("recent assistant stays", forwarded_json)
+        self.assertNotIn("old openai secret context", forwarded_json)
+
+        [row] = server.store.conn.execute("select crunch_json, cost_est_usd from calls").fetchall()
+        crunch = json.loads(row["crunch_json"])
+        summary = crunch["old_context_summarization"]
+        self.assertEqual(summary["status"], "applied")
+        self.assertTrue(summary["applied"])
+        self.assertEqual(summary["canary"]["cohort"], "canary_applied")
+        self.assertFalse(summary["summary_cache_hit"])
+        self.assertGreater(summary["summary_cost_est_usd"], 0)
+        self.assertGreater(summary["estimated_tokens_saved"], 0)
+        self.assertGreater(row["cost_est_usd"], summary["summary_cost_est_usd"])
+        rendered_meta = json.dumps(summary, sort_keys=True)
+        self.assertNotIn("safe compact continuity summary", rendered_meta)
+        self.assertNotIn("old openai secret context", rendered_meta)
 
     def test_openai_policy_decision_rejects_raw_like_unsafe_actions(self):
         request_body = {"model": "gpt-5-codex", "input": "short prompt"}

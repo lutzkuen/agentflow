@@ -40,6 +40,11 @@ from agentflow_proxy.headers import (
     read_json_object_body,
 )
 from agentflow_proxy.limiter import TierBackoffActive, model_tier, tier_backoff_headers, tier_backoff_payload
+from agentflow_proxy.openai_old_context_summary import (
+    add_summary_cost,
+    input_tokens_after_summary,
+    maybe_apply_openai_old_context_summary,
+)
 from agentflow_proxy.optimization.openai_features import (
     openai_call_store_fields,
 )
@@ -153,6 +158,58 @@ def response_output_text(resp: dict[str, Any]) -> str:
         if isinstance(delta.get("content"), str):
             parts.append(delta["content"])
     return "\n".join(parts)
+
+
+async def _fetch_openai_old_context_summary(
+    context: ProviderContext,
+    summary_request: dict[str, Any],
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    model = str(summary_request.get("model") or "")
+    try:
+        async with context.limiter.semaphores[model_tier(model)]:
+            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                await context.limiter.await_backoff(model)
+                await context.limiter.throttle_forward()
+                r = await client.post(
+                    context.openai_upstream.rstrip("/") + "/v1/responses",
+                    headers=headers,
+                    json=summary_request,
+                )
+    except Exception:
+        logging.exception("agentflow openai old-context summary error")
+        return {
+            "summary": None,
+            "summary_status_code": None,
+            "summary_error": INTERNAL_PROXY_ERROR_MESSAGE,
+        }
+
+    try:
+        body = r.json()
+    except Exception:
+        return {
+            "summary": None,
+            "summary_status_code": r.status_code,
+            "summary_error": r.text[:500],
+        }
+
+    input_tokens, output_tokens, _cache_read, _reasoning_tokens = usage_tokens(body)
+    meta = {
+        "summary": response_output_text(body).strip() if r.status_code < 400 else None,
+        "summary_status_code": r.status_code,
+        "summary_input_tokens": input_tokens,
+        "summary_output_tokens": output_tokens,
+    }
+    if input_tokens is not None or output_tokens is not None:
+        meta["summary_cost_est_usd"] = estimate_cost(
+            model,
+            input_tokens or 0,
+            output_tokens or 0,
+            provider="openai",
+        ) or 0.0
+    if r.status_code >= 400:
+        meta["summary_error"] = stable_json(body)[:500]
+    return meta
 
 
 def _media_type(headers: httpx.Headers) -> Optional[str]:
@@ -466,6 +523,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
     error: Optional[str] = None
     crunch_meta: dict[str, Any] = {}
     routing_meta: dict[str, Any] = {}
+    summary_meta: dict[str, Any] = {}
     cache_meta: dict[str, Any] = cache_decision_meta("skipped", "not-evaluated")
     retry_count = 0
     net_retries = 0
@@ -490,6 +548,24 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         resolved_requested_model = local_policy.resolved_requested_model
         managed_cache_profile = local_policy.managed_cache_profile
         headers = build_forward_headers(context, request)
+        crunched, summary_meta = await maybe_apply_openai_old_context_summary(
+            body=crunched,
+            path=path,
+            requested_model=requested_model,
+            category=category,
+            stream=stream,
+            fetch_summary=lambda summary_request: _fetch_openai_old_context_summary(context, summary_request, headers),
+            get_cached_summary=context.store.get_cache,
+            set_cached_summary=lambda key, value: context.store.set_cache(
+                key,
+                str(value.get("summary_model") or summary_meta.get("summary_model") or "openai-summary"),
+                0,
+                value,
+            ),
+        )
+        crunch_meta["old_context_summarization"] = summary_meta
+        if summary_meta.get("applied"):
+            input_tokens = input_tokens_after_summary(crunched)
         call_fields = openai_call_store_fields(path, requested_model, str(crunched.get("model")))
         experiment_meta = routing_experiment_decision(
             crunched,
@@ -602,7 +678,10 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     latency_ms = int((time.time() - started) * 1000)
                     cost_in = actual_in if actual_in is not None else input_tokens
                     cost_out = actual_out if actual_out is not None else 0
-                    cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai")
+                    cost = add_summary_cost(
+                        estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai"),
+                        summary_meta,
+                    )
                     cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
                     if status_code >= 400 and error is None:
                         error = upstream_error_text(b"".join(upstream_error_chunks), status_code)
@@ -721,6 +800,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     lookup_meta=cache_meta,
                     estimated_saved_cost_usd=cost_baseline,
                 )
+                cost = add_summary_cost(0.0, summary_meta)
                 attach_openai_outcome_summary(
                     path=path,
                     requested_model=requested_model,
@@ -735,7 +815,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     cache_creation_input_tokens=0,
                     cache_read_input_tokens=0,
                     thinking_output_tokens=None,
-                    cost_est_usd=0.0,
+                    cost_est_usd=cost,
                     cost_baseline_usd=cost_baseline,
                     cache_meta=hit_cache_meta,
                     crunch_meta=crunch_meta,
@@ -748,7 +828,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
                     cache_hit=1, status_code=200, latency_ms=latency_ms,
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
-                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     cache_json=stable_json(hit_cache_meta),
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
@@ -772,7 +852,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     cache_creation_input_tokens=0,
                     cache_read_input_tokens=0,
                     thinking_output_tokens=None,
-                    cost_est_usd=0.0,
+                    cost_est_usd=cost,
                     cost_baseline_usd=cost_baseline,
                     cache_meta=hit_cache_meta,
                     crunch_meta=crunch_meta,
@@ -798,6 +878,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     lookup_meta=cache_meta,
                     estimated_saved_cost_usd=cost_baseline,
                 )
+                cost = add_summary_cost(0.0, summary_meta)
                 attach_openai_outcome_summary(
                     path=path,
                     requested_model=requested_model,
@@ -812,7 +893,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     cache_creation_input_tokens=0,
                     cache_read_input_tokens=0,
                     thinking_output_tokens=None,
-                    cost_est_usd=0.0,
+                    cost_est_usd=cost,
                     cost_baseline_usd=cost_baseline,
                     cache_meta=hit_cache_meta,
                     crunch_meta=crunch_meta,
@@ -825,7 +906,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     requested_model=requested_model, routed_model=crunched.get("model"), stream=0,
                     cache_hit=1, status_code=200, latency_ms=latency_ms,
                     input_tokens_est=input_tokens, output_tokens_est=out_tokens,
-                    cost_est_usd=0.0, cost_baseline_usd=cost_baseline,
+                    cost_est_usd=cost, cost_baseline_usd=cost_baseline,
                     crunch_json=stable_json(crunch_meta), routing_json=stable_json(routing_meta),
                     cache_json=stable_json(hit_cache_meta),
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
@@ -849,7 +930,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     cache_creation_input_tokens=0,
                     cache_read_input_tokens=0,
                     thinking_output_tokens=None,
-                    cost_est_usd=0.0,
+                    cost_est_usd=cost,
                     cost_baseline_usd=cost_baseline,
                     cache_meta=hit_cache_meta,
                     crunch_meta=crunch_meta,
@@ -898,7 +979,10 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             response_body = r.json()
         except Exception:
             latency_ms = int((time.time() - started) * 1000)
-            cost = estimate_cost(str(crunched.get("model")), input_tokens, 0, provider="openai")
+            cost = add_summary_cost(
+                estimate_cost(str(crunched.get("model")), input_tokens, 0, provider="openai"),
+                summary_meta,
+            )
             cost_baseline = estimate_cost(requested_model, input_tokens, 0, provider="openai")
             error = upstream_error_text(r.text, status_code)
             attach_openai_outcome_summary(
@@ -987,7 +1071,10 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         out_tokens = estimate_tokens_from_text(response_output_text(response_body)) if response_body else 0
         cost_in = actual_in if actual_in is not None else input_tokens
         cost_out = actual_out if actual_out is not None else out_tokens
-        cost = estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai")
+        cost = add_summary_cost(
+            estimate_cost(str(crunched.get("model")), cost_in, cost_out, cache_read=cache_read_in, provider="openai"),
+            summary_meta,
+        )
         cost_baseline = estimate_cost(requested_model, cost_in, cost_out, cache_read=cache_read_in, provider="openai")
         latency_ms = int((time.time() - started) * 1000)
         error = None if status_code < 400 else upstream_error_text(response_body, status_code)

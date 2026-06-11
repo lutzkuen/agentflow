@@ -978,7 +978,7 @@ class OptimizationModuleTests(unittest.TestCase):
         return {
             "schema": "agentflow.optimization_rollout_actions.v1",
             "generated_at": "2026-06-10T05:00:00+00:00",
-            "expires_at": "2026-06-11T05:00:00+00:00",
+            "expires_at": "2099-06-11T05:00:00+00:00",
             "tenant_scope": "current-authenticated-tenant",
             "summary": {
                 "candidate_count": 1,
@@ -1014,7 +1014,7 @@ class OptimizationModuleTests(unittest.TestCase):
                     "provider_endpoint": "responses",
                     "confidence": 0.91,
                     "generated_at": "2026-06-10T05:00:00+00:00",
-                    "expires_at": "2026-06-11T05:00:00+00:00",
+                    "expires_at": "2099-06-11T05:00:00+00:00",
                     "required_local_review": True,
                     "managed_enforced": False,
                     "local_executor_compatibility": {
