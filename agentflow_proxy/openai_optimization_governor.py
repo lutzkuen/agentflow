@@ -175,16 +175,34 @@ def _policy_source(*metas: dict[str, Any]) -> str:
     return "local-default"
 
 
+def _is_managed_policy_source(value: Any) -> bool:
+    return value in {"managed-recommended", "managed-enforced"}
+
+
+def _has_managed_evidence(meta: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, dict) and value:
+            return True
+    return False
+
+
 def _routing_decision(routing_meta: dict[str, Any]) -> dict[str, Any]:
     canary = routing_meta.get("openai_canary") if isinstance(routing_meta.get("openai_canary"), dict) else {}
     requested = str(routing_meta.get("requested_model") or canary.get("requested_model") or "")
     routed = str(routing_meta.get("routed_model") or canary.get("actual_forwarded_model") or requested)
     status = str(canary.get("status") or "")
     reason = str(canary.get("reason") or routing_meta.get("reason") or "")
+    policy_source = _policy_source(canary, routing_meta)
+    managed_missing_evidence = _is_managed_policy_source(policy_source) and not canary
     eligible = False
     selected = False
     suppressed: list[str] = []
-    if canary:
+    if managed_missing_evidence:
+        eligible = requested != "" and routed != "" and requested != routed
+        selected = False
+        suppressed.append("missing-canary-evidence")
+    elif canary:
         eligible = bool(canary.get("enabled")) and status not in {"disabled", "ineligible", "noop"}
         selected = status == "applied" and routed and requested and routed != requested
         if status in {"holdout", "not_selected"}:
@@ -205,7 +223,7 @@ def _routing_decision(routing_meta: dict[str, Any]) -> dict[str, Any]:
         "selected": selected,
         "status": status or ("applied" if selected else "not_selected"),
         "reason": reason,
-        "policy_source": _policy_source(canary, routing_meta),
+        "policy_source": policy_source,
         "suppression_reasons": sorted(set(suppressed)),
     }
 
@@ -218,11 +236,21 @@ def _summary_decision(crunch_meta: dict[str, Any], summary_meta: dict[str, Any] 
     status = str(meta.get("status") or "")
     reason_codes = [str(item) for item in meta.get("reason_codes") or []]
     enabled = bool(meta.get("enabled")) if "enabled" in meta else bool(meta)
-    selected = bool(meta.get("applied")) or status == "applied"
+    policy_source = _policy_source(meta)
+    managed_missing_evidence = (
+        _is_managed_policy_source(policy_source)
+        and (bool(meta.get("applied")) or status == "applied")
+        and not _has_managed_evidence(meta, "canary", "impact_evidence", "quality_gate")
+    )
+    selected = (bool(meta.get("applied")) or status == "applied") and not managed_missing_evidence
     eligible = selected or status in {"holdout", "skipped", "not_evaluated"} or (enabled and status != "disabled")
     suppressed: list[str] = []
+    if managed_missing_evidence:
+        suppressed.append("missing-canary-evidence")
     if status == "holdout" or "holdout" in reason_codes:
         suppressed.append("missing-holdout")
+    if status in {"safety_stopped", "safety-stop-tripped"} or "stale-evidence" in reason_codes:
+        suppressed.append("stale-evidence")
     if any(code in reason_codes for code in ("summary_fetch_error", "summary_empty_or_malformed")):
         suppressed.append("summary-provider-unavailable")
     if "unsupported-streaming-shape" in reason_codes:
@@ -233,7 +261,7 @@ def _summary_decision(crunch_meta: dict[str, Any], summary_meta: dict[str, Any] 
         "selected": selected,
         "status": status or ("applied" if selected else "not_evaluated"),
         "reason": ",".join(reason_codes),
-        "policy_source": _policy_source(meta),
+        "policy_source": policy_source,
         "suppression_reasons": sorted(set(suppressed or reason_codes)),
     }
 
@@ -247,12 +275,22 @@ def _cache_decision(cache_meta: dict[str, Any]) -> dict[str, Any]:
     pattern_rule = cache_meta.get("pattern_rule") if isinstance(cache_meta.get("pattern_rule"), dict) else {}
     status = str(cache_meta.get("status") or "")
     reason = str(cache_meta.get("reason") or replay_canary.get("reason") or "")
+    policy_source = _policy_source(replay_canary, pattern_rule, cache_meta)
+    managed_missing_evidence = (
+        _is_managed_policy_source(policy_source)
+        and status == "hit"
+        and not _has_managed_evidence(cache_meta, "cache_replay_canary", "pattern_rule")
+    )
     eligible = bool(pattern_rule or replay_canary or status == "hit")
-    selected = status == "hit" and reason != "conflicts-with-selected-family"
+    selected = status == "hit" and reason != "conflicts-with-selected-family" and not managed_missing_evidence
     suppressed: list[str] = []
     replay_status = str(replay_canary.get("status") or "")
+    if managed_missing_evidence:
+        suppressed.append("missing-canary-evidence")
     if replay_status == "holdout":
         suppressed.append("missing-holdout")
+    if replay_status in {"safety_stopped", "safety-stop-tripped"}:
+        suppressed.append("stale-evidence")
     if reason in {"streaming", "unsupported-streaming-shape"}:
         suppressed.append("streaming-unsupported")
     if reason in {
@@ -271,7 +309,7 @@ def _cache_decision(cache_meta: dict[str, Any]) -> dict[str, Any]:
         "selected": selected,
         "status": status or replay_status or "not_evaluated",
         "reason": reason,
-        "policy_source": _policy_source(replay_canary, pattern_rule, cache_meta),
+        "policy_source": policy_source,
         "suppression_reasons": sorted(set(suppressed)),
     }
 
