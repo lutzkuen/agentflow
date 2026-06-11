@@ -197,12 +197,14 @@ class StreamingCacheTest(unittest.TestCase):
         self.old_cache_pattern_rules = cache_module.CACHE_PATTERN_RULES
         self.old_anthropic_cache_enabled = anthropic_proxy.CACHE_ENABLED
         self.old_anthropic_semantic_threshold = anthropic_proxy.SEMANTIC_CACHE_THRESHOLD
+        self.old_anthropic_streaming_cache_lookup_meta = anthropic_proxy.streaming_cache_lookup_meta
         cache_module.CACHE_ENABLED = True
         cache_module.CACHE_TOOL_CALLS = False
         cache_module.SEMANTIC_CACHE_ENABLED = False
         cache_module.CACHE_PATTERN_RULES = ()
         anthropic_proxy.CACHE_ENABLED = True
         anthropic_proxy.SEMANTIC_CACHE_THRESHOLD = cache_module.SEMANTIC_CACHE_THRESHOLD
+        anthropic_proxy.streaming_cache_lookup_meta = cache_module.streaming_cache_lookup_meta
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
@@ -222,6 +224,7 @@ class StreamingCacheTest(unittest.TestCase):
         cache_module.CACHE_PATTERN_RULES = self.old_cache_pattern_rules
         anthropic_proxy.CACHE_ENABLED = self.old_anthropic_cache_enabled
         anthropic_proxy.SEMANTIC_CACHE_THRESHOLD = self.old_anthropic_semantic_threshold
+        anthropic_proxy.streaming_cache_lookup_meta = self.old_anthropic_streaming_cache_lookup_meta
         server.store = self.old_store
         server.configure_provider(
             self.old_provider,

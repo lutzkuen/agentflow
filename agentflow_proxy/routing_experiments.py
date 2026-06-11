@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import random
 from datetime import datetime, timezone
@@ -889,6 +890,12 @@ def _parse_jsonish(value: Any) -> dict[str, Any]:
     if not value:
         return {}
     try:
+        parsed = json.loads(str(value))
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    try:
         parsed = yaml.safe_load(value) or {}
     except Exception:
         return {}
@@ -1080,11 +1087,8 @@ def _build_shadow_eligibility_projection(conn: Any) -> dict[str, Any]:
 
     grouped: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
     for row in rows:
-        try:
-            routing = yaml.safe_load(row["routing_json"]) or {}
-        except Exception:
-            continue
-        if not isinstance(routing, dict):
+        routing = _parse_jsonish(row["routing_json"])
+        if not routing:
             continue
         provider = str(row["provider"] or "unknown")
         source_surface = str(row["source_surface"] or "unknown")
@@ -1166,6 +1170,387 @@ def _build_shadow_eligibility_projection(conn: Any) -> dict[str, Any]:
             "request_ids_included": False,
             "session_ids_included": False,
             "file_paths_included": False,
+        },
+    }
+
+
+def _increment_count(target: dict[str, int], key: Any, *, fallback: str = "unknown", amount: int = 1) -> None:
+    label = _public_label(key, fallback=fallback)
+    target[label] = int(target.get(label, 0)) + int(amount)
+
+
+def _count_rows(mapping: dict[str, int], *, key_name: str = "reason") -> list[dict[str, Any]]:
+    return [
+        {key_name: key, "count": count}
+        for key, count in sorted(mapping.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _experiment_from_routing_json(value: Any) -> dict[str, Any]:
+    routing = _parse_jsonish(value)
+    experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
+    return experiment if isinstance(experiment, dict) else {}
+
+
+def _comparison_blocker(row: Any) -> str:
+    primary_status = row["primary_status_code"]
+    shadow_status = row["shadow_status_code"]
+    if primary_status is None:
+        return "primary-status-missing"
+    if int(primary_status) >= 400:
+        return "primary-error"
+    if shadow_status is None:
+        return "shadow-status-missing"
+    if int(shadow_status) >= 400:
+        return "shadow-error"
+    if row["output_similarity"] is None:
+        return "similarity-missing"
+    return "compared"
+
+
+def _build_claude_shadow_yield_report(
+    conn: Any,
+    *,
+    candidates: list[dict[str, Any]],
+    observed_limit: int = 5000,
+) -> dict[str, Any]:
+    provider = "anthropic"
+    source_surface = "anthropic_messages"
+    try:
+        call_rows = conn.execute(
+            """
+            select created_at,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(source_surface, 'anthropic_messages') as source_surface,
+                   coalesce(category, 'unknown') as category,
+                   coalesce(stream, 0) as stream,
+                   requested_model,
+                   routed_model,
+                   routing_json,
+                   cost_est_usd,
+                   cost_baseline_usd
+            from calls
+            where coalesce(provider, 'anthropic') = ?
+              and coalesce(source_surface, 'anthropic_messages') = ?
+            order by created_at desc
+            limit ?
+            """,
+            (provider, source_surface, max(1, int(observed_limit))),
+        ).fetchall()
+    except Exception:
+        call_rows = []
+
+    observed_groups: dict[tuple[str, bool, str, str], dict[str, Any]] = {}
+    decision_reason_counts: dict[str, int] = {}
+    decision_status_counts: dict[str, int] = {}
+    sampled_reason_counts: dict[str, int] = {}
+    skipped_reason_counts: dict[str, int] = {}
+    cap_block_reason_counts: dict[str, int] = {}
+    effective_cap_rows: dict[tuple[str, bool], dict[str, Any]] = {}
+    eligible_count = 0
+    ineligible_count = 0
+    selected_count = 0
+    skipped_count = 0
+    cap_unlimited_candidate_count = 0
+    expected_samples_at_current_rate = 0.0
+    expected_samples_at_full_rate = 0.0
+    expected_samples_if_category_caps_removed = 0.0
+    observed_cost_sum = 0.0
+    observed_baseline_sum = 0.0
+
+    for row in call_rows:
+        experiment = _experiment_from_routing_json(row["routing_json"])
+        routing = _parse_jsonish(row["routing_json"])
+        requested = _public_label(
+            experiment.get("requested_model") or row["requested_model"],
+            fallback="",
+        )
+        candidate = _public_label(
+            experiment.get("shadow_model")
+            or experiment.get("routed_model")
+            or _route_down_candidate_for_requested(str(row["requested_model"] or "")),
+            fallback="none",
+        )
+        category = _public_label(experiment.get("category") or row["category"])
+        stream = bool(row["stream"])
+        workflow_phase = str(experiment.get("workflow_phase") or routing.get("workflow_phase") or "")
+        text_chars = _text_chars_from_routing(routing)
+        controls = _effective_experiment_controls(
+            provider=provider,
+            source_surface=source_surface,
+            category=category,
+            workflow_phase=workflow_phase,
+            stream=stream,
+        )
+        decision_status = _public_label(experiment.get("status"), fallback="not-evaluated")
+        decision_reason = _public_label(experiment.get("reason"), fallback="not-evaluated")
+        cap_blocked = (
+            decision_reason.endswith("max-text-chars-exceeded")
+            or decision_reason.endswith("min-text-chars-not-met")
+            or decision_reason in {"request-too-large", "request-too-small"}
+        )
+        effectively_cap_eligible = text_chars >= int(controls["min_text_chars"]) and (
+            int(controls["max_text_chars"]) <= 0 or text_chars <= int(controls["max_text_chars"])
+        )
+        categories = set(str(c) for c in ROUTING_EXPERIMENT_POLICY.get("categories") or [])
+        workflow_phases = set(str(c) for c in ROUTING_EXPERIMENT_POLICY.get("workflow_phases") or [])
+        current_policy_eligible = (
+            ROUTING_EXPERIMENT_ENABLED
+            and not bool(ROUTING_EXPERIMENT_POLICY.get("kill_switch"))
+            and _value_allowed(provider, ROUTING_EXPERIMENT_POLICY.get("providers"))
+            and _value_allowed(source_surface, ROUTING_EXPERIMENT_POLICY.get("source_surfaces"))
+            and (not stream or _value_allowed(source_surface, ROUTING_EXPERIMENT_POLICY.get("streaming_shadow_source_surfaces")))
+            and bool(requested)
+            and candidate != "none"
+            and (ROUTING_EXPERIMENT_MODE != "shadow_candidate_pass_through" or str(row["requested_model"] or "") == str(row["routed_model"] or ""))
+            and (not categories or category in categories)
+            and (not workflow_phases or workflow_phase in workflow_phases)
+            and effectively_cap_eligible
+        )
+        category_cap_removed_eligible = text_chars >= int(controls["min_text_chars"]) and (
+            int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0) <= 0
+            or text_chars <= max(
+                int(ROUTING_EXPERIMENT_POLICY.get("max_text_chars") or 0),
+                int(controls["max_text_chars"]),
+                text_chars if cap_blocked and category in {"tool-result", "tool-heavy"} else 0,
+            )
+        ) and (
+            ROUTING_EXPERIMENT_ENABLED
+            and not bool(ROUTING_EXPERIMENT_POLICY.get("kill_switch"))
+            and _value_allowed(provider, ROUTING_EXPERIMENT_POLICY.get("providers"))
+            and _value_allowed(source_surface, ROUTING_EXPERIMENT_POLICY.get("source_surfaces"))
+            and (not stream or _value_allowed(source_surface, ROUTING_EXPERIMENT_POLICY.get("streaming_shadow_source_surfaces")))
+            and bool(requested)
+            and candidate != "none"
+            and (ROUTING_EXPERIMENT_MODE != "shadow_candidate_pass_through" or str(row["requested_model"] or "") == str(row["routed_model"] or ""))
+            and (not categories or category in categories)
+            and (not workflow_phases or workflow_phase in workflow_phases)
+        )
+        if decision_status == "selected":
+            selected_count += 1
+            eligible_count += 1
+            _increment_count(sampled_reason_counts, decision_reason)
+        else:
+            skipped_count += 1
+            _increment_count(skipped_reason_counts, decision_reason)
+            if cap_blocked:
+                _increment_count(cap_block_reason_counts, decision_reason)
+            if current_policy_eligible:
+                eligible_count += 1
+            else:
+                ineligible_count += 1
+        _increment_count(decision_reason_counts, decision_reason)
+        _increment_count(decision_status_counts, decision_status)
+
+        sample_rate = float(controls["sample_rate"])
+        if current_policy_eligible:
+            expected_samples_at_current_rate += sample_rate
+            expected_samples_at_full_rate += 1.0
+        if category_cap_removed_eligible:
+            expected_samples_if_category_caps_removed += sample_rate
+            if not effectively_cap_eligible:
+                cap_unlimited_candidate_count += 1
+
+        observed_cost_sum += float(row["cost_est_usd"] or 0.0)
+        observed_baseline_sum += float(row["cost_baseline_usd"] or 0.0)
+        group_key = (category, stream, requested, candidate)
+        group = observed_groups.setdefault(
+            group_key,
+            {
+                "category": category,
+                "stream": stream,
+                "requested_model": requested,
+                "candidate_target_model": candidate,
+                "observed_call_count": 0,
+                "selected_count": 0,
+                "skipped_count": 0,
+                "eligible_count": 0,
+                "ineligible_count": 0,
+                "effective_min_text_chars": int(controls["min_text_chars"]),
+                "effective_min_text_chars_scope": controls["min_text_chars_scope"],
+                "effective_max_text_chars": int(controls["max_text_chars"]),
+                "effective_max_text_chars_scope": controls["max_text_chars_scope"],
+                "effective_sample_rate": round(sample_rate, 6),
+                "effective_sample_rate_scope": controls["sample_rate_scope"],
+                "effective_daily_budget_usd": round(float(controls["daily_budget_usd"]), 6),
+                "effective_daily_budget_scope": controls["daily_budget_scope"],
+                "decision_reasons": {},
+            },
+        )
+        group["observed_call_count"] += 1
+        group["selected_count"] += 1 if decision_status == "selected" else 0
+        group["skipped_count"] += 0 if decision_status == "selected" else 1
+        if decision_status == "selected" or current_policy_eligible:
+            group["eligible_count"] += 1
+        else:
+            group["ineligible_count"] += 1
+        group["decision_reasons"][decision_reason] = group["decision_reasons"].get(decision_reason, 0) + 1
+
+        cap_key = (category, stream)
+        cap_row = effective_cap_rows.setdefault(
+            cap_key,
+            {
+                "category": category,
+                "stream": stream,
+                "min_text_chars": int(controls["min_text_chars"]),
+                "min_text_chars_scope": controls["min_text_chars_scope"],
+                "max_text_chars": int(controls["max_text_chars"]),
+                "max_text_chars_scope": controls["max_text_chars_scope"],
+                "sample_rate": round(sample_rate, 6),
+                "sample_rate_scope": controls["sample_rate_scope"],
+                "daily_budget_usd": round(float(controls["daily_budget_usd"]), 6),
+                "daily_budget_scope": controls["daily_budget_scope"],
+                "observed_call_count": 0,
+            },
+        )
+        cap_row["observed_call_count"] += 1
+
+    observed = list(observed_groups.values())
+    for group in observed:
+        group["decision_reasons"] = _count_rows(group["decision_reasons"])
+        group["projected_samples_current_rate"] = round(
+            float(group["eligible_count"]) * float(group["effective_sample_rate"]),
+            3,
+        )
+        group["projected_samples_sample_rate_100pct"] = int(group["eligible_count"])
+    observed.sort(
+        key=lambda item: (
+            not bool(item["stream"]),
+            -int(item["observed_call_count"]),
+            item["category"],
+            item["requested_model"],
+            item["candidate_target_model"],
+        )
+    )
+
+    try:
+        sample_rows = conn.execute(
+            """
+            select created_at,
+                   requested_model,
+                   routed_model,
+                   primary_model,
+                   shadow_model,
+                   coalesce(category, 'unknown') as category,
+                   coalesce(routing_reason, 'unknown') as routing_reason,
+                   primary_status_code,
+                   shadow_status_code,
+                   output_similarity,
+                   experiment_json,
+                   shadow_cost_est_usd
+            from routing_experiments
+            where coalesce(provider, 'anthropic') = ?
+              and coalesce(source_surface, 'anthropic_messages') = ?
+            order by created_at desc
+            limit 50000
+            """,
+            (provider, source_surface),
+        ).fetchall()
+    except Exception:
+        sample_rows = []
+
+    compared_count = 0
+    uncompared_count = 0
+    comparison_blocker_counts: dict[str, int] = {}
+    shadow_costs: list[float] = []
+    for row in sample_rows:
+        blocker = _comparison_blocker(row)
+        if blocker == "compared":
+            compared_count += 1
+        else:
+            uncompared_count += 1
+            _increment_count(comparison_blocker_counts, blocker)
+        if row["shadow_cost_est_usd"] is not None and float(row["shadow_cost_est_usd"] or 0.0) > 0:
+            shadow_costs.append(float(row["shadow_cost_est_usd"]))
+
+    avg_shadow_cost = _mean(shadow_costs)
+    try:
+        today_spend_row = conn.execute(
+            """
+            select coalesce(sum(coalesce(shadow_cost_est_usd, 0)), 0) as shadow_spend_usd
+            from routing_experiments
+            where date(created_at) = date('now')
+              and coalesce(provider, 'anthropic') = ?
+              and coalesce(source_surface, 'anthropic_messages') = ?
+            """,
+            (provider, source_surface),
+        ).fetchone()
+        today_shadow_spend = float(today_spend_row["shadow_spend_usd"] or 0.0) if today_spend_row else 0.0
+    except Exception:
+        today_shadow_spend = 0.0
+    policy_budget_remaining = max(0.0, ROUTING_EXPERIMENT_DAILY_BUDGET_USD - today_shadow_spend)
+    budget_limited_projected = expected_samples_at_current_rate
+    if avg_shadow_cost and avg_shadow_cost > 0:
+        budget_limited_projected = min(expected_samples_at_current_rate, policy_budget_remaining / avg_shadow_cost)
+
+    promotion_verdict_counts: dict[str, int] = {}
+    promotion_freshness_counts: dict[str, int] = {}
+    for candidate in candidates:
+        if candidate.get("provider") != "anthropic" or candidate.get("source_surface") != "anthropic_messages":
+            continue
+        verdict = candidate.get("promotion_verdict") or "unknown"
+        _increment_count(promotion_verdict_counts, verdict)
+        age = candidate.get("last_sample_age_hours")
+        if age is None:
+            freshness = "unknown"
+        elif float(age) <= ROUTING_PROMOTION_FRESHNESS_MAX_AGE_HOURS:
+            freshness = "fresh"
+        else:
+            freshness = "stale"
+        _increment_count(promotion_freshness_counts, freshness, fallback="unknown")
+
+    return {
+        "schema": "agentflow.claude_shadow_routing_yield.v1",
+        "provider": provider,
+        "source_surface": source_surface,
+        "observed_window_limit": max(1, int(observed_limit)),
+        "summary": {
+            "observed_call_count": len(call_rows),
+            "eligible_count": eligible_count,
+            "ineligible_count": ineligible_count,
+            "selected_count": selected_count,
+            "skipped_count": skipped_count,
+            "sampled_count": len(sample_rows),
+            "compared_count": compared_count,
+            "uncompared_count": uncompared_count,
+            "observed_cost_usd": round(observed_cost_sum, 6),
+            "observed_baseline_usd": round(observed_baseline_sum, 6),
+        },
+        "decision_status_counts": _count_rows(decision_status_counts, key_name="status"),
+        "decision_reason_counts": _count_rows(decision_reason_counts),
+        "sampled_reason_counts": _count_rows(sampled_reason_counts),
+        "skipped_reason_counts": _count_rows(skipped_reason_counts),
+        "cap_block_reason_counts": _count_rows(cap_block_reason_counts),
+        "comparison_blocker_counts": _count_rows(comparison_blocker_counts, key_name="blocker"),
+        "effective_caps": sorted(
+            effective_cap_rows.values(),
+            key=lambda item: (not bool(item["stream"]), item["category"]),
+        ),
+        "observed": observed,
+        "projection": {
+            "projected_samples_current_sample_rate": round(expected_samples_at_current_rate, 3),
+            "projected_samples_sample_rate_100pct": round(expected_samples_at_full_rate, 3),
+            "projected_samples_budget_unlimited": round(expected_samples_at_current_rate, 3),
+            "projected_samples_budget_limited": round(budget_limited_projected, 3),
+            "avg_shadow_sample_cost_usd": round(float(avg_shadow_cost), 6) if avg_shadow_cost is not None else None,
+            "projected_samples_if_category_caps_removed": round(expected_samples_if_category_caps_removed, 3),
+            "additional_cap_unlimited_candidate_count": cap_unlimited_candidate_count,
+        },
+        "promotion_verdict_counts": _count_rows(promotion_verdict_counts, key_name="verdict"),
+        "promotion_freshness_counts": _count_rows(promotion_freshness_counts, key_name="freshness"),
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "api_keys_included": False,
+            "rule_paths_included": False,
         },
     }
 
@@ -1342,9 +1727,8 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     feedback_status_counts: dict[str, int] = {}
     sample_mode_counts: dict[str, int] = {}
     for row in conn.execute("select experiment_json from routing_experiments where experiment_json is not null").fetchall():
-        try:
-            experiment = yaml.safe_load(row["experiment_json"]) or {}
-        except Exception:
+        experiment = _parse_jsonish(row["experiment_json"])
+        if not experiment:
             status = "invalid-json"
             mode = "invalid-json"
         else:
@@ -1359,9 +1743,8 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     decision_surface_counts: dict[tuple[str, str, str], int] = {}
 
     def record_decision(provider_value: Any, source_surface_value: Any, routing_json: Any) -> None:
-        try:
-            routing = yaml.safe_load(routing_json) or {}
-        except Exception:
+        routing = _parse_jsonish(routing_json)
+        if not routing:
             provider_label = _public_label(provider_value)
             source_surface_label = _public_label(source_surface_value)
             status = "unknown"
@@ -1446,6 +1829,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     avg_similarity_total = (summary_row or {}).get("avg_similarity")
     pass_rate_total = (summary_row or {}).get("pass_rate")
     eligibility_projection = _build_shadow_eligibility_projection(conn)
+    claude_shadow_yield = _build_claude_shadow_yield_report(conn, candidates=candidates)
     return {
         "schema": "agentflow.routing_experiment_report.v1",
         "generated_at": utc_now(),
@@ -1493,6 +1877,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         "decision_reasons": decision_reasons,
         "decision_surfaces": decision_surfaces,
         "eligibility_projection": eligibility_projection,
+        "claude_shadow_yield": claude_shadow_yield,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,

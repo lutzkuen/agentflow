@@ -1011,6 +1011,180 @@ eligibility_overrides:
         self.assertFalse(report["privacy"]["request_ids_included"])
         self.assertFalse(projection["privacy"]["file_paths_included"])
 
+    def test_report_explains_claude_shadow_yield_for_streaming_tool_result_and_blocked_row(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "routing_experiments.yaml").write_text(
+                """
+enabled: true
+mode: shadow_candidate_pass_through
+sample_rate: 1.0
+daily_budget_usd: 10.0
+min_text_chars: 0
+max_text_chars: 8000
+providers:
+  - anthropic
+source_surfaces:
+  - anthropic_messages
+streaming_shadow_source_surfaces:
+  - anthropic_messages
+model_pairs:
+  - requested_model: claude-sonnet-4-6
+    routed_model: claude-haiku-4-5-20251001
+categories:
+  - chat
+  - tool-result
+eligibility_overrides:
+  - scope: category
+    provider: anthropic
+    source_surface: anthropic_messages
+    category: tool-result
+    stream: true
+    max_text_chars: 128000
+    sample_rate: 1.0
+    daily_budget_usd: 10.0
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(experiments)
+            store = Store(str(tmp_path / "agentflow.sqlite3"))
+            try:
+                store.log_call(
+                    id="claude-stream-tool-result-secret",
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=20,
+                    input_tokens_est=1000,
+                    output_tokens_est=20,
+                    cost_est_usd=0.03,
+                    cost_baseline_usd=0.03,
+                    routing_json=stable_json({
+                        "category": "tool-result",
+                        "text_chars": 90000,
+                        "routing_experiment": {
+                            "schema": "agentflow.routing_experiment_decision.v1",
+                            "provider": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "status": "selected",
+                            "sampled": True,
+                            "reason": "streaming-shadow-sampled",
+                            "requested_model": "claude-sonnet-4-6",
+                            "routed_model": "claude-haiku-4-5-20251001",
+                            "shadow_model": "claude-haiku-4-5-20251001",
+                            "category": "tool-result",
+                            "stream": True,
+                            "text_chars": 90000,
+                        },
+                        "raw_prompt": "raw claude yield secret",
+                        "file_path": "/tmp/claude-yield-secret.py",
+                    }),
+                    category="tool-result",
+                )
+                store.log_call(
+                    id="claude-stream-chat-blocked-secret",
+                    created_at=utc_now(),
+                    path="/v1/messages",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=20,
+                    input_tokens_est=1000,
+                    output_tokens_est=20,
+                    cost_est_usd=0.03,
+                    cost_baseline_usd=0.03,
+                    routing_json=stable_json({
+                        "category": "chat",
+                        "text_chars": 90000,
+                        "routing_experiment": {
+                            "schema": "agentflow.routing_experiment_decision.v1",
+                            "provider": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "status": "skipped",
+                            "sampled": False,
+                            "reason": "request-too-large",
+                            "skip_diagnostic": "global-max-text-chars-exceeded",
+                            "requested_model": "claude-sonnet-4-6",
+                            "routed_model": "claude-haiku-4-5-20251001",
+                            "shadow_model": "claude-haiku-4-5-20251001",
+                            "category": "chat",
+                            "stream": True,
+                            "text_chars": 90000,
+                        },
+                    }),
+                    category="chat",
+                )
+                store.log_routing_experiment(
+                    id="claude-sampled-stream-tool-result",
+                    call_id="claude-stream-tool-result-secret",
+                    created_at=utc_now(),
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    primary_model="claude-sonnet-4-6",
+                    shadow_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    routing_reason="streaming-shadow-sampled",
+                    input_tokens_est=1000,
+                    primary_status_code=200,
+                    shadow_status_code=200,
+                    primary_latency_ms=100,
+                    shadow_latency_ms=80,
+                    primary_output_chars=20,
+                    shadow_output_chars=18,
+                    primary_output_sha256="primary",
+                    shadow_output_sha256="shadow",
+                    output_similarity=0.94,
+                    passed_threshold=1,
+                    primary_cost_est_usd=0.03,
+                    shadow_cost_est_usd=0.005,
+                    routing_json=stable_json({}),
+                    experiment_json=stable_json({"mode": "shadow_candidate_pass_through"}),
+                )
+                report = manual.build_routing_experiment_report(store, limit=10)
+            finally:
+                store.conn.close()
+
+        yield_report = report["claude_shadow_yield"]
+        self.assertEqual(yield_report["schema"], "agentflow.claude_shadow_routing_yield.v1")
+        self.assertEqual(yield_report["summary"]["observed_call_count"], 2)
+        self.assertEqual(yield_report["summary"]["selected_count"], 1)
+        self.assertEqual(yield_report["summary"]["skipped_count"], 1)
+        self.assertEqual(yield_report["summary"]["sampled_count"], 1)
+        self.assertEqual(yield_report["summary"]["compared_count"], 1)
+        self.assertIn({"reason": "request-too-large", "count": 1}, yield_report["skipped_reason_counts"])
+        self.assertIn({"reason": "request-too-large", "count": 1}, yield_report["cap_block_reason_counts"])
+        tool_row = next(row for row in yield_report["observed"] if row["category"] == "tool-result")
+        self.assertTrue(tool_row["stream"])
+        self.assertEqual(tool_row["candidate_target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(tool_row["effective_max_text_chars"], 128000)
+        self.assertEqual(tool_row["effective_max_text_chars_scope"], "category")
+        self.assertEqual(tool_row["selected_count"], 1)
+        chat_row = next(row for row in yield_report["observed"] if row["category"] == "chat")
+        self.assertEqual(chat_row["ineligible_count"], 1)
+        self.assertEqual(chat_row["decision_reasons"], [{"reason": "request-too-large", "count": 1}])
+        self.assertEqual(yield_report["projection"]["projected_samples_current_sample_rate"], 1.0)
+        self.assertEqual(yield_report["projection"]["projected_samples_sample_rate_100pct"], 1.0)
+        rendered_yield = stable_json(yield_report)
+        self.assertNotIn("raw claude yield secret", rendered_yield)
+        self.assertNotIn("/tmp/claude-yield-secret.py", rendered_yield)
+        self.assertFalse(yield_report["privacy"]["filesystem_paths_included"])
+        self.assertFalse(yield_report["privacy"]["request_ids_included"])
+
     def test_report_counts_codex_app_event_decision_reasons_without_sample_rows(self):
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))
