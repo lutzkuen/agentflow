@@ -5,7 +5,7 @@ kill_switch: false
 sample_rate: 0.10
 daily_budget_usd: 10.0
 min_text_chars: 0
-max_text_chars: 8000
+max_text_chars: 32000
 providers:
   - anthropic
   - openai
@@ -23,11 +23,15 @@ model_pairs:
     routed_model: gpt-5.4-mini
   - requested_model: gpt-5-codex
     routed_model: gpt-5-mini
+  - requested_model: gpt-5.5
+    routed_model: gpt-5-mini
 workflow_phases: []
 categories:
   - chat
   - short-completion
   - tool-light
+  - tool-result
+  - tool-heavy
   - codex-turn
 similarity_threshold: 0.86
 min_samples_for_confidence: 20
