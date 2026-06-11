@@ -356,6 +356,7 @@ async def stage_policy_draft(
     section: str | None = None,
     draft_id: str | None = None,
     workspace: str | Path | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from agentflow_proxy.policy_bundle import build_policy_bundle, compare_policy_bundles, validate_policy_bundle
     from agentflow_proxy.policy_bundle import _policy_apply_yaml  # local file renderer used by apply dry-runs
@@ -452,6 +453,8 @@ async def stage_policy_draft(
             "managed_server_calls_made": False,
         },
     }
+    if metadata is not None:
+        manifest["metadata"] = _json_clone(metadata)
     draft_manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {
         "schema": POLICY_DRAFT_STAGE_SCHEMA,

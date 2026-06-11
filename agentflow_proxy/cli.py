@@ -1195,6 +1195,10 @@ def policy_draft_stage_cli(
             _write_policy_draft_stage_result(stdout, result, pretty=args.pretty)
             return 1
 
+    from agentflow_proxy.openai_optimization_drafts import (
+        is_openai_optimization_review_payload,
+        stage_openai_optimization_review_draft,
+    )
     from agentflow_proxy.policy_events import log_policy_event
     from agentflow_proxy.policy_files import parse_policy_payload, stage_policy_draft
 
@@ -1214,6 +1218,12 @@ def policy_draft_stage_cli(
             "sections": [],
             "error": {"type": "parse_failed", "message": "policy draft payload could not be parsed", "errors": parse_error["errors"]},
         }
+    elif is_openai_optimization_review_payload(payload):
+        result = asyncio.run(stage_openai_optimization_review_draft(
+            payload,
+            draft_id=args.draft_id,
+            workspace=args.workspace,
+        ))
     else:
         result = asyncio.run(stage_policy_draft(
             payload,
