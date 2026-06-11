@@ -8293,6 +8293,21 @@ async def stats_openai_cache_replay_report(store_obj: Any, limit: int = 1000) ->
     return build_openai_cache_replay_report(store_obj, limit=limit)
 
 
+async def stats_repeated_scaffold_opportunity(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    min_repeated_rows: int = 2,
+) -> dict[str, Any]:
+    from agentflow_proxy.repeated_scaffold_report import build_repeated_scaffold_opportunity_report
+
+    return build_repeated_scaffold_opportunity_report(
+        store_obj,
+        limit=limit,
+        min_repeated_rows=min_repeated_rows,
+    )
+
+
 async def stats_openai_cache_replay_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 

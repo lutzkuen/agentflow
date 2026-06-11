@@ -3609,6 +3609,53 @@ def openai_cache_replay_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def repeated_scaffold_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure repeated provider-message scaffolding crunch opportunity")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--min-repeated-rows",
+        type=int,
+        default=2,
+        help="Minimum rows per hidden scaffold fingerprint before a group is considered repeated, default: 2",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.repeated_scaffold_report import build_repeated_scaffold_opportunity_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_repeated_scaffold_opportunity_report(
+            store,
+            limit=args.limit,
+            min_repeated_rows=args.min_repeated_rows,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def _attach_openai_cache_replay_lifecycle_feedback(result: dict[str, Any], *, db_path: str) -> None:
     from agentflow_proxy import recommendations
     from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_lifecycle_feedback
@@ -6391,6 +6438,10 @@ def openai_old_context_summary_report_main() -> None:
 
 def openai_cache_replay_report_main() -> None:
     raise SystemExit(openai_cache_replay_report_cli())
+
+
+def repeated_scaffold_opportunity_main() -> None:
+    raise SystemExit(repeated_scaffold_opportunity_cli())
 
 
 def openai_cache_replay_impact_main() -> None:
