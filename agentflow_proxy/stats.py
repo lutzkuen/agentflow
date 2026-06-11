@@ -6491,6 +6491,315 @@ def _finalize_openai_scoreboard_bucket(bucket: dict[str, Any]) -> dict[str, Any]
     return bucket
 
 
+OPENAI_GOVERNOR_SCHEMA = "agentflow.openai_optimization_governor.v1"
+OPENAI_GOVERNOR_FAMILIES = ("routing", "old_context_summary", "cache_replay")
+
+
+def _openai_governor_from_metadata(*metas: dict[str, Any]) -> dict[str, Any]:
+    for meta in metas:
+        if not isinstance(meta, dict):
+            continue
+        governor = meta.get("openai_optimization_governor")
+        if isinstance(governor, dict) and governor.get("schema") == OPENAI_GOVERNOR_SCHEMA:
+            return governor
+    return {}
+
+
+def _openai_dashboard_dimension(value: Any, *, default: str = "unknown") -> str:
+    if value in (None, ""):
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    lowered = text.lower()
+    unsafe_terms = {
+        "api_key",
+        "authorization",
+        "bearer",
+        "body",
+        "cache_key",
+        "content",
+        "file_path",
+        "payload",
+        "prompt",
+        "raw",
+        "request_id",
+        "secret",
+        "session_id",
+        "tenant",
+    }
+    if (
+        len(text) > 96
+        or any(char.isspace() for char in text)
+        or any(char in text for char in ("/", "\\", "{", "}", "[", "]", "\"", "'"))
+        or any(term in lowered for term in unsafe_terms)
+    ):
+        return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return text
+
+
+def _openai_dashboard_reason_codes(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    result: set[str] = set()
+    for value in values:
+        code = _openai_dashboard_dimension(value, default="")
+        if code:
+            result.add(code)
+    return sorted(result)
+
+
+def _openai_governor_endpoint(row: dict[str, Any], governor: dict[str, Any]) -> str:
+    endpoint = row.get("endpoint") or governor.get("endpoint")
+    if endpoint:
+        return _openai_dashboard_dimension(endpoint)
+    path = str(row.get("path") or "")
+    if "chat/completions" in path:
+        return "chat"
+    return "responses"
+
+
+async def stats_openai_optimization_readiness(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
+    conn = store_obj.conn
+    capped_limit = max(1, min(int(limit or 1000), 10_000))
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            select created_at, path, coalesce(provider, 'anthropic') as provider,
+                   source_surface, endpoint, requested_model, routed_model,
+                   requested_model_family, routed_model_family, category,
+                   routing_json, crunch_json, cache_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped_limit,),
+        ).fetchall()
+    ]
+
+    openai_rows = 0
+    governor_rows = 0
+    conflict_count = 0
+    selected_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    source_surface_counts: dict[str, int] = {}
+    requested_model_family_counts: dict[str, int] = {}
+    routed_model_family_counts: dict[str, int] = {}
+    suppression_reason_counts: dict[str, int] = {}
+    safety_reason_counts: dict[str, int] = {}
+    family_counts: dict[str, dict[str, Any]] = {
+        family: {
+            "family": family,
+            "eligible_count": 0,
+            "selected_count": 0,
+            "suppressed_count": 0,
+            "holdout_count": 0,
+            "safety_stop_count": 0,
+            "not_eligible_count": 0,
+            "status_counts": {},
+            "policy_source_counts": {},
+            "suppression_reason_counts": {},
+        }
+        for family in OPENAI_GOVERNOR_FAMILIES
+    }
+    recent_conflicts: list[dict[str, Any]] = []
+
+    for row in rows:
+        provider = str(row.get("provider") or "anthropic").lower()
+        if provider != "openai":
+            continue
+        openai_rows += 1
+        routing = _json_obj(row.get("routing_json"))
+        crunch = _json_obj(row.get("crunch_json"))
+        cache = _json_obj(row.get("cache_json"))
+        governor = _openai_governor_from_metadata(routing, crunch, cache)
+        if not governor:
+            continue
+
+        governor_rows += 1
+        selected = _openai_dashboard_dimension(governor.get("selected_action_family") or "none")
+        canary = governor.get("canary") if isinstance(governor.get("canary"), dict) else {}
+        cohort = _openai_dashboard_dimension(canary.get("cohort") or "unknown")
+        endpoint = _openai_governor_endpoint(row, governor)
+        category = _openai_dashboard_dimension(row.get("category") or routing.get("category"))
+        source_surface = _openai_dashboard_dimension(
+            row.get("source_surface") or _source_surface("openai", str(row.get("path") or ""))
+        )
+        requested_family = _openai_dashboard_dimension(
+            row.get("requested_model_family") or row.get("requested_model")
+        )
+        routed_family = _openai_dashboard_dimension(row.get("routed_model_family") or row.get("routed_model"))
+        eligible = [
+            _openai_dashboard_dimension(family)
+            for family in governor.get("eligible_action_families") or []
+            if family
+        ]
+        suppressed_items = [
+            item
+            for item in (governor.get("suppressed_families") or [])
+            if isinstance(item, dict)
+        ]
+        conflict_items = [
+            item
+            for item in suppressed_items
+            if "conflicts-with-selected-family" in _openai_dashboard_reason_codes(item.get("reason_codes"))
+        ]
+
+        _increment_count(selected_counts, selected)
+        _increment_count(cohort_counts, cohort)
+        _increment_count(endpoint_counts, endpoint)
+        _increment_count(category_counts, category)
+        _increment_count(source_surface_counts, source_surface)
+        _increment_count(requested_model_family_counts, requested_family)
+        _increment_count(routed_model_family_counts, routed_family)
+
+        family_status = governor.get("family_status") if isinstance(governor.get("family_status"), dict) else {}
+        suppressed_by_family: dict[str, list[str]] = {}
+        for item in suppressed_items:
+            family = _openai_dashboard_dimension(item.get("family"))
+            reasons = _openai_dashboard_reason_codes(item.get("reason_codes"))
+            if reasons:
+                suppressed_by_family.setdefault(family, []).extend(reasons)
+            for reason in reasons:
+                _increment_count(suppression_reason_counts, reason)
+
+        for family in OPENAI_GOVERNOR_FAMILIES:
+            status = family_status.get(family) if isinstance(family_status.get(family), dict) else {}
+            row_counts = family_counts[family]
+            family_selected = bool(status.get("selected")) or selected == family
+            family_eligible = bool(status.get("eligible"))
+            family_suppressed_reasons = sorted(set(suppressed_by_family.get(family, [])))
+            status_value = _openai_dashboard_dimension(status.get("status") or "unknown")
+            policy_source = _openai_dashboard_dimension(status.get("policy_source") or governor.get("policy_source"))
+            if family_eligible:
+                row_counts["eligible_count"] += 1
+            else:
+                row_counts["not_eligible_count"] += 1
+            if family_selected:
+                row_counts["selected_count"] += 1
+            if family_suppressed_reasons:
+                row_counts["suppressed_count"] += 1
+            if cohort in {"governor_holdout", "canary_holdout", "holdout"} or "missing-holdout" in family_suppressed_reasons:
+                row_counts["holdout_count"] += 1
+            if (
+                "safety" in status_value
+                or "stale-evidence" in family_suppressed_reasons
+                or any(reason.startswith("safety") for reason in family_suppressed_reasons)
+            ):
+                row_counts["safety_stop_count"] += 1
+                for reason in family_suppressed_reasons or [status_value]:
+                    _increment_count(safety_reason_counts, reason)
+            _increment_count(row_counts["status_counts"], status_value)
+            _increment_count(row_counts["policy_source_counts"], policy_source)
+            for reason in family_suppressed_reasons:
+                _increment_count(row_counts["suppression_reason_counts"], reason)
+
+        if len(eligible) > 1 and selected != "none" and conflict_items:
+            conflict_count += 1
+            if len(recent_conflicts) < 25:
+                recent_conflicts.append({
+                    "created_at": row.get("created_at"),
+                    "endpoint": endpoint,
+                    "source_surface": source_surface,
+                    "category": category,
+                    "requested_model_family": requested_family,
+                    "routed_model_family": routed_family,
+                    "governor_cohort": cohort,
+                    "selected_action_family": selected,
+                    "eligible_action_families": eligible,
+                    "suppressed_families": [
+                        {
+                            "family": _openai_dashboard_dimension(item.get("family")),
+                            "status": _openai_dashboard_dimension(item.get("status")),
+                            "reason_codes": _openai_dashboard_reason_codes(item.get("reason_codes")),
+                        }
+                        for item in conflict_items
+                    ],
+                })
+
+    family_rows: list[dict[str, Any]] = []
+    for family in OPENAI_GOVERNOR_FAMILIES:
+        row = dict(family_counts[family])
+        row["status_breakdown"] = _managed_breakdown(row.pop("status_counts", {}))
+        row["policy_source_breakdown"] = _managed_breakdown(row.pop("policy_source_counts", {}))
+        row["suppression_reason_breakdown"] = _managed_breakdown(row.pop("suppression_reason_counts", {}))
+        family_rows.append(row)
+
+    state = "no-openai-traffic"
+    reason = "no OpenAI calls were found in this local report window"
+    if openai_rows and not governor_rows:
+        state = "missing-governor-metadata"
+        reason = "OpenAI calls exist but have no unified optimization governor metadata yet"
+    elif conflict_count:
+        state = "conflicts-observed"
+        reason = "multiple OpenAI optimization families were eligible and the governor suppressed conflicts"
+    elif selected_counts.get("none", 0) < governor_rows:
+        state = "single-family-active"
+        reason = "the governor selected one OpenAI optimization family for at least one call"
+    elif cohort_counts.get("governor_holdout", 0):
+        state = "holdout"
+        reason = "governor holdout evidence is present but no family was selected"
+    elif governor_rows:
+        state = "collecting-evidence"
+        reason = "governor metadata exists but no family has been selected in this window"
+
+    return {
+        "schema": "agentflow.openai_optimization_readiness.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "state": state,
+        "state_reason": reason,
+        "summary": {
+            "openai_call_count": openai_rows,
+            "governor_metadata_row_count": governor_rows,
+            "missing_governor_metadata_count": max(0, openai_rows - governor_rows),
+            "conflicting_call_count": conflict_count,
+            "selected_call_count": max(0, governor_rows - selected_counts.get("none", 0)),
+            "suppressed_family_count": sum(_as_int(row.get("suppressed_count")) for row in family_rows),
+            "holdout_family_count": sum(_as_int(row.get("holdout_count")) for row in family_rows),
+            "safety_stop_family_count": sum(_as_int(row.get("safety_stop_count")) for row in family_rows),
+        },
+        "selected_family_breakdown": _managed_breakdown(selected_counts),
+        "governor_cohort_breakdown": _managed_breakdown(cohort_counts),
+        "suppression_reason_breakdown": _managed_breakdown(suppression_reason_counts),
+        "safety_stop_reason_breakdown": _managed_breakdown(safety_reason_counts),
+        "endpoint_breakdown": _managed_breakdown(endpoint_counts),
+        "category_breakdown": _managed_breakdown(category_counts),
+        "source_surface_breakdown": _managed_breakdown(source_surface_counts),
+        "requested_model_family_breakdown": _managed_breakdown(requested_model_family_counts),
+        "routed_model_family_breakdown": _managed_breakdown(routed_model_family_counts),
+        "families": family_rows,
+        "recent_conflicts": recent_conflicts,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": False,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_transcripts_included": False,
+            "tool_payloads_included": False,
+            "cache_keys_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "tenant_ids_included": False,
+            "api_keys_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "sanitized openai_optimization_governor metadata plus coarse local call dimensions only",
+        },
+    }
+
+
 async def stats_openai_scoreboard(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     conn = store_obj.conn
     capped_limit = max(1, min(int(limit or 1000), 10_000))
@@ -13791,6 +14100,33 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-openai">
 <div class="section">
+  <h2>OpenAI optimization readiness</h2>
+  <table data-table-id="openai-optimization-readiness-summary" data-filter-label="Filter OpenAI optimization readiness">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="number">OpenAI rows</th><th data-sort-type="number">Governor rows</th><th data-sort-type="number">Selected</th><th data-sort-type="number">Conflicts</th><th data-sort-type="number">Suppressed families</th><th data-sort-type="number">Holdout families</th><th data-sort-type="number">Safety stops</th><th data-sort-type="text">Selected families</th><th data-sort-type="text">Cohorts</th><th data-sort-type="text">Suppression reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="openai-optimization-readiness-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>OpenAI optimization family readiness</h2>
+  <table data-table-id="openai-optimization-readiness-families" data-filter-label="Filter OpenAI optimization families">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Selected</th><th data-sort-type="number">Suppressed</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Not eligible</th><th data-sort-type="text">Statuses</th><th data-sort-type="text">Policy sources</th><th data-sort-type="text">Suppression reasons</th>
+    </tr></thead>
+    <tbody id="openai-optimization-readiness-families-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Recent OpenAI optimization conflicts</h2>
+  <table class="activity-table" data-table-id="openai-optimization-readiness-conflicts" data-filter-label="Filter OpenAI optimization conflicts">
+    <thead><tr>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="text">Model family</th><th data-sort-type="text">Cohort</th><th data-sort-type="text">Selected</th><th data-sort-type="text">Eligible</th><th data-sort-type="text">Suppressed</th>
+    </tr></thead>
+    <tbody id="openai-optimization-readiness-conflicts-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>OpenAI local canary readiness</h2>
   <table data-table-id="openai-canary-readiness-summary" data-filter-label="Filter OpenAI canary readiness">
     <thead><tr>
@@ -15580,6 +15916,86 @@ function openaiSummaryReasonList(reasons,verdict){
   if(!reasons.length)return'<span class="badge hit">none</span>';
   return reasons.slice(0,5).map(reason=>`<span class="badge ${verdict==='rollback'?'err':'miss'}">${esc(reason)}</span>`).join(' ');
 }
+function openaiOptimizationReadinessBadge(state){
+  if(state==='single-family-active')return'hit';
+  if(state==='conflicts-observed'||state==='missing-governor-metadata')return'routed';
+  if(state==='holdout'||state==='collecting-evidence')return'miss';
+  if(state==='no-openai-traffic')return'miss';
+  return'provider';
+}
+function openaiFamilyBadge(family){
+  if(family==='routing')return'routed';
+  if(family==='old_context_summary')return'provider';
+  if(family==='cache_replay')return'hit';
+  if(family==='none')return'miss';
+  return'provider';
+}
+function openaiReasonBadgesFromRows(rows){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge hit">none</span>';
+  return rows.slice(0,5).map(row=>`<span class="badge ${String(row.value||'').includes('conflict')?'routed':'miss'}">${esc(row.value||'unknown')} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
+function openaiFamilyListBadges(families){
+  families=families||[];
+  if(!families.length)return'<span class="badge miss">none</span>';
+  return families.slice(0,5).map(family=>`<span class="badge ${openaiFamilyBadge(family)}">${esc(family)}</span>`).join(' ');
+}
+function openaiSuppressedConflictBadges(items){
+  items=items||[];
+  if(!items.length)return'<span class="badge hit">none</span>';
+  return items.slice(0,4).map(item=>{
+    const reasons=(item.reason_codes||[]).slice(0,3).join(', ')||item.status||'suppressed';
+    return `<span class="badge routed">${esc(item.family||'unknown')}: ${esc(reasons)}</span>`;
+  }).join(' ');
+}
+async function refreshOpenAIOptimizationReadiness(){
+  try{
+    const r=await fetch('/agentflow/stats/openai-optimization-readiness?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('openai-optimization-readiness-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${openaiOptimizationReadinessBadge(d.state)}">${esc(d.state||'unknown')}</span><div class="sub">${esc(d.state_reason||'')}</div></td>
+      <td class="tokens">${(s.openai_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.governor_metadata_row_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.selected_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.conflicting_call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.suppressed_family_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_family_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safety_stop_family_count||0).toLocaleString()}</td>
+      <td class="flags">${openaiBreakdownBadges(d.selected_family_breakdown,'state')}</td>
+      <td class="flags">${openaiBreakdownBadges(d.governor_cohort_breakdown,'reason')}</td>
+      <td class="flags">${openaiReasonBadgesFromRows(d.suppression_reason_breakdown)}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${privacy.provider_calls_made?'<span class="badge err">provider call</span>':'<span class="badge hit">offline</span>'} ${privacy.request_ids_included?'<span class="badge err">IDs</span>':'<span class="badge hit">IDs omitted</span>'} ${privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'}</td>
+    </tr>`;
+    const families=d.families||[];
+    document.getElementById('openai-optimization-readiness-families-tbody').innerHTML=families.map(row=>`<tr>
+      <td><span class="badge ${openaiFamilyBadge(row.family)}">${esc(row.family||'unknown')}</span></td>
+      <td class="tokens">${(row.eligible_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.selected_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.suppressed_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.not_eligible_count||0).toLocaleString()}</td>
+      <td class="flags">${openaiBreakdownBadges(row.status_breakdown,'state')}</td>
+      <td class="flags">${openaiBreakdownBadges(row.policy_source_breakdown,'reason')}</td>
+      <td class="flags">${openaiReasonBadgesFromRows(row.suppression_reason_breakdown)}</td>
+    </tr>`).join('')||'<tr><td colspan="10" style="color:#8b949e">No OpenAI governor family metadata in this local window</td></tr>';
+    const conflicts=d.recent_conflicts||[];
+    document.getElementById('openai-optimization-readiness-conflicts-tbody').innerHTML=conflicts.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge provider">${esc(row.endpoint||'unknown')}</span></td>
+      <td><span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td class="model">${esc(shortModel(row.requested_model_family||'unknown'))}<span class="arrow">→</span>${esc(shortModel(row.routed_model_family||'unknown'))}</td>
+      <td><span class="badge ${String(row.governor_cohort||'').includes('holdout')?'routed':'provider'}">${esc(row.governor_cohort||'unknown')}</span></td>
+      <td>${openaiFamilyListBadges([row.selected_action_family])}</td>
+      <td class="flags">${openaiFamilyListBadges(row.eligible_action_families)}</td>
+      <td class="flags">${openaiSuppressedConflictBadges(row.suppressed_families)}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No cross-family OpenAI conflicts in this local window</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshOpenAIOldContextSummary(){
   try{
     const r=await fetch('/agentflow/stats/openai-old-context-summary?limit=1000');
@@ -16517,6 +16933,7 @@ refreshErrors();
 refreshLimiter();
 refreshSafety();
 refreshPolicies();
+refreshOpenAIOptimizationReadiness();
 refreshOpenAICanaryReadiness();
 refreshOpenAIOldContextSummary();
 refreshOpenAIScoreboard();
@@ -16541,6 +16958,7 @@ setInterval(refreshOpenAICacheReplayReadiness,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
+setInterval(refreshOpenAIOptimizationReadiness,30000);
 setInterval(refreshOpenAICanaryReadiness,30000);
 setInterval(refreshOpenAIScoreboard,30000);
 setInterval(refreshShadowRoutingPromotionReadiness,30000);

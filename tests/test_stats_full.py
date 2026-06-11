@@ -1013,6 +1013,170 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(cli_payload["summary"]["openai_call_count"], 1)
         self.assertNotIn("hidden-session", output.getvalue())
 
+    def test_openai_optimization_readiness_reports_conflicts_without_raw_content(self):
+        from agentflow_proxy.openai_optimization_governor import attach_openai_optimization_governor
+
+        routing = {
+            "provider": "openai",
+            "enabled": True,
+            "requested_model": "gpt-5.4",
+            "routed_model": "gpt-5.4-mini",
+            "reason": "selected-canary",
+            "text_chars": 42000,
+            "has_tools": False,
+            "stream": False,
+            "category": "chat",
+            "policy_source": "local-manual",
+            "request_id": "req-unified-secret",
+            "prompt": "raw unified readiness prompt",
+            "openai_canary": {
+                "enabled": True,
+                "status": "applied",
+                "cohort": "canary_applied",
+                "reason": "selected-canary",
+                "requested_model": "gpt-5.4",
+                "actual_forwarded_model": "gpt-5.4-mini",
+                "policy_source": "local-manual",
+            },
+        }
+        summary = {
+            "schema": "agentflow.openai_old_context_summary.v1",
+            "enabled": True,
+            "status": "applied",
+            "applied": True,
+            "reason_codes": ["applied"],
+            "policy_source": "local-manual",
+            "summary": "raw unified summary text",
+        }
+        crunch = {
+            "changed": True,
+            "old_context_summarization": summary,
+            "messages": [{"content": "raw unified readiness prompt"}],
+        }
+        cache = {
+            "status": "hit",
+            "reason": "exact-hit",
+            "policy_source": "local-default",
+            "cache_key": "cache-unified-secret",
+            "cache_replay_canary": {
+                "status": "applied",
+                "reason": "dependency-stable",
+                "canary_cohort": "canary_applied",
+                "policy_source": "local-manual",
+            },
+        }
+        attach_openai_optimization_governor(
+            routing_meta=routing,
+            crunch_meta=crunch,
+            cache_meta=cache,
+            summary_meta=summary,
+            path="/v1/responses",
+            requested_model="gpt-5.4",
+            category="chat",
+            stream=False,
+            session_id="raw-unified-session",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/responses",
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4-mini",
+            stream=0,
+            cache_hit=1,
+            status_code=200,
+            latency_ms=80,
+            input_tokens_est=1000,
+            output_tokens_est=100,
+            actual_input_tokens=900,
+            actual_output_tokens=90,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json(crunch),
+            routing_json=stable_json(routing),
+            cache_json=stable_json(cache),
+            error=None,
+            request_json='{"input":"raw unified readiness prompt","request_id":"req-unified-secret","file_path":"/tmp/unified-secret.py"}',
+            response_json='{"output_text":"raw unified response"}',
+            session_id="raw-unified-session",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="openai",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5-mini",
+        )
+
+        result = asyncio.run(stats_views.stats_openai_optimization_readiness(server.store, limit=20))
+
+        self.assertEqual(result["schema"], "agentflow.openai_optimization_readiness.v1")
+        self.assertTrue(result["read_only"])
+        self.assertEqual(result["state"], "conflicts-observed")
+        self.assertEqual(result["summary"]["openai_call_count"], 1)
+        self.assertEqual(result["summary"]["governor_metadata_row_count"], 1)
+        self.assertEqual(result["summary"]["selected_call_count"], 1)
+        self.assertEqual(result["summary"]["conflicting_call_count"], 1)
+        self.assertEqual(result["summary"]["suppressed_family_count"], 2)
+        selected = {row["value"]: row["count"] for row in result["selected_family_breakdown"]}
+        self.assertEqual(selected["routing"], 1)
+        reasons = {row["value"]: row["count"] for row in result["suppression_reason_breakdown"]}
+        self.assertEqual(reasons["conflicts-with-selected-family"], 2)
+        family_rows = {row["family"]: row for row in result["families"]}
+        self.assertEqual(family_rows["routing"]["selected_count"], 1)
+        self.assertEqual(family_rows["old_context_summary"]["suppressed_count"], 1)
+        self.assertEqual(family_rows["cache_replay"]["suppressed_count"], 1)
+        self.assertEqual(result["recent_conflicts"][0]["selected_action_family"], "routing")
+        self.assertEqual(
+            {item["family"] for item in result["recent_conflicts"][0]["suppressed_families"]},
+            {"old_context_summary", "cache_replay"},
+        )
+        self.assertFalse(result["privacy"]["provider_calls_made"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+        self.assertFalse(result["privacy"]["raw_session_ids_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        rendered = json.dumps(result, sort_keys=True)
+        for forbidden in (
+            "raw unified readiness prompt",
+            "raw unified summary text",
+            "raw unified response",
+            "req-unified-secret",
+            "cache-unified-secret",
+            "/tmp/unified-secret.py",
+            "raw-unified-session",
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+            '"messages"',
+            '"prompt"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.openai.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        client = TestClient(app)
+        stats_response = client.get("/agentflow/stats/openai-optimization-readiness?limit=20")
+        self.assertEqual(stats_response.status_code, 200)
+        self.assertEqual(stats_response.json()["summary"]["conflicting_call_count"], 1)
+        html = client.get("/agentflow/dashboard")
+        self.assertEqual(html.status_code, 200)
+        self.assertIn("OpenAI optimization readiness", html.text)
+        self.assertIn("/agentflow/stats/openai-optimization-readiness", html.text)
+        self.assertIn("openai-optimization-readiness-summary-tbody", html.text)
+        self.assertIn("openai-optimization-readiness-families-tbody", html.text)
+        self.assertIn("openai-optimization-readiness-conflicts-tbody", html.text)
+        self.assertNotIn("raw-unified-session", html.text)
+
     def test_openai_canary_readiness_endpoint_uses_impact_fixture_metadata(self):
         def log_canary_call(call_id, *, cohort, created_at, status_code=200, latency_ms=100, actual=0.001, baseline=0.003):
             status = "applied" if cohort == "canary_applied" else "holdout"
