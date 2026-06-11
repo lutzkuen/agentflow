@@ -6380,6 +6380,351 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIn("raw_prompt", {error["path"].split(".")[-1] for error in payload["error"]["errors"]})
         self.assertNotIn("raw prompt must not leak", stdout.getvalue())
 
+    def test_openai_optimization_draft_apply_dry_run_write_and_rollback(self):
+        import hashlib
+
+        from agentflow_proxy.policy_workbench import rollback_policy_apply
+        from agentflow_proxy.store import Store
+
+        bundle = self._openai_review_bundle_for_draft()
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "drafts"
+            config_dir = root / "config"
+            config_dir.mkdir()
+            events_log = root / "policy_events.jsonl"
+            routing_path = config_dir / "routing_rules.yaml"
+            crunch_path = config_dir / "crunch_rules.yaml"
+            cache_path = config_dir / "cache_rules.yaml"
+            before_routing = "rules: []\n"
+            before_crunch = "enabled: true\n"
+            before_cache = "exact_cache:\n  enabled: true\n"
+            routing_path.write_text(before_routing, encoding="utf-8")
+            crunch_path.write_text(before_crunch, encoding="utf-8")
+            cache_path.write_text(before_cache, encoding="utf-8")
+
+            env = {
+                "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                "AGENTFLOW_POLICY_EVENTS_LOG": str(events_log),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                stage_stdout = io.StringIO()
+                stage_code = cli.policy_draft_stage_cli(
+                    ["--draft-id", "openai-review-apply", "--workspace", str(workspace), "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stage_stdout,
+                )
+            self.assertEqual(stage_code, 0, stage_stdout.getvalue())
+
+            db_path = str(root / "agentflow.sqlite3")
+            store = Store(db_path)
+            store.conn.close()
+
+            dry_stdout = io.StringIO()
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+                dry_code = cli.openai_optimization_draft_apply_cli(
+                    [
+                        "openai-review-apply",
+                        "--workspace",
+                        str(workspace),
+                        "--config-dir",
+                        str(config_dir),
+                        "--db",
+                        db_path,
+                        "--canary-fraction",
+                        "0.25",
+                        "--holdout-fraction",
+                        "0.15",
+                    ],
+                    stdout=dry_stdout,
+                )
+
+            dry_payload = json.loads(dry_stdout.getvalue())
+            self.assertEqual(dry_code, 0, dry_stdout.getvalue())
+            self.assertEqual(dry_payload["schema"], "agentflow.openai_optimization_draft_apply.v1")
+            self.assertTrue(dry_payload["dry_run"])
+            self.assertFalse(dry_payload["privacy"]["active_policy_files_written"])
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
+
+            apply_stdout = io.StringIO()
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+                apply_code = cli.openai_optimization_draft_apply_cli(
+                    [
+                        "openai-review-apply",
+                        "--workspace",
+                        str(workspace),
+                        "--config-dir",
+                        str(config_dir),
+                        "--db",
+                        db_path,
+                        "--write",
+                        "--canary-fraction",
+                        "0.25",
+                        "--holdout-fraction",
+                        "0.15",
+                        "--queue-feedback",
+                    ],
+                    stdout=apply_stdout,
+                )
+
+            payload = json.loads(apply_stdout.getvalue())
+            self.assertEqual(apply_code, 0, apply_stdout.getvalue())
+            self.assertEqual(payload["status"], "applied")
+            self.assertTrue(payload["privacy"]["active_policy_files_written"])
+            self.assertEqual(payload["changed_sections"], ["routing"])
+            self.assertIn("agentflow-policy-rollback", payload["rollback_command"])
+            self.assertTrue(Path(payload["backups"][0]["path"]).exists())
+            self.assertEqual(crunch_path.read_text(encoding="utf-8"), before_crunch)
+            self.assertEqual(cache_path.read_text(encoding="utf-8"), before_cache)
+
+            written = yaml.safe_load(routing_path.read_text(encoding="utf-8"))
+            canary = written["openai_canary"]
+            self.assertTrue(canary["enabled"])
+            self.assertEqual(canary["target_candidate_id"], "openai-routing-candidate")
+            self.assertEqual(canary["policy_source"], "managed-recommended")
+            self.assertEqual(canary["target_model"], "gpt-5-mini")
+            self.assertEqual(canary["canary_fraction"], 0.25)
+            self.assertEqual(canary["holdout_fraction"], 0.15)
+            self.assertEqual(canary["safety_stop"]["max_error_rate"], 0.03)
+
+            restored_sha = hashlib.sha256(before_routing.encode("utf-8")).hexdigest()
+
+            async def reload_state():
+                return {
+                    "ok": True,
+                    "policies": {
+                        "routing": {
+                            "file": {
+                                "loaded": {"sha256": restored_sha},
+                                "current": {"sha256": restored_sha},
+                                "reload_required": False,
+                            }
+                        }
+                    },
+                }
+
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+                rollback = asyncio.run(
+                    rollback_policy_apply(
+                        payload["apply_id"],
+                        config_dir=config_dir,
+                        sections=["routing"],
+                        reload_policy_state=reload_state,
+                        event_source="test",
+                    )
+                )
+
+            self.assertTrue(rollback["ok"], rollback)
+            self.assertEqual(rollback["status"], "rolled-back")
+            self.assertEqual(routing_path.read_text(encoding="utf-8"), before_routing)
+
+    def test_openai_optimization_draft_apply_blocks_unsafe_staged_edits(self):
+        from agentflow_proxy.store import Store
+
+        cases = [
+            (
+                lambda staged, manifest: staged["policies"]["routing"]["openai"]["canary"]["managed_recommendation"].update({"raw_prompt": "secret"}),
+                "raw_prompt",
+                False,
+            ),
+            (
+                lambda staged, manifest: staged["policies"]["routing"]["openai"]["canary"]["managed_recommendation"].update({"expires_at": "2000-01-01T00:00:00+00:00"}),
+                "expired",
+                False,
+            ),
+            (
+                lambda staged, manifest: staged["policies"]["routing"]["openai"]["canary"]["safety_stop"].update({"tripped": True}),
+                "safety_stop",
+                False,
+            ),
+            (
+                lambda staged, manifest: manifest["metadata"]["openai_optimization_review"]["selected_actions"][0].update({"action_family": "provider_body_rewrite"}),
+                "action_family",
+                False,
+            ),
+            (
+                lambda staged, manifest: None,
+                "provenance",
+                True,
+            ),
+        ]
+
+        for mutate, expected, require_verified in cases:
+            with TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace = root / "drafts"
+                config_dir = root / "config"
+                config_dir.mkdir()
+                events_log = root / "policy_events.jsonl"
+                routing_path = config_dir / "routing_rules.yaml"
+                routing_path.write_text("rules: []\n", encoding="utf-8")
+                db_path = str(root / "agentflow.sqlite3")
+                store = Store(db_path)
+                store.conn.close()
+
+                with patch.dict(
+                    os.environ,
+                    {
+                        "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                        "AGENTFLOW_POLICY_EVENTS_LOG": str(events_log),
+                    },
+                    clear=False,
+                ):
+                    stage_stdout = io.StringIO()
+                    stage_code = cli.policy_draft_stage_cli(
+                        ["--draft-id", "unsafe-apply", "--workspace", str(workspace), "-"],
+                        stdin=io.StringIO(json.dumps(self._openai_review_bundle_for_draft())),
+                        stdout=stage_stdout,
+                    )
+                self.assertEqual(stage_code, 0, stage_stdout.getvalue())
+
+                staged_path = workspace / "unsafe-apply" / "policy_bundle.json"
+                manifest_path = workspace / "unsafe-apply" / "draft.json"
+                staged = json.loads(staged_path.read_text(encoding="utf-8"))
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(staged, manifest)
+                staged_path.write_text(json.dumps(staged), encoding="utf-8")
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                env = {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}
+                if not require_verified:
+                    env["AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET"] = "openai-review-secret"
+                with patch.dict(os.environ, env, clear=True):
+                    code = cli.openai_optimization_draft_apply_cli(
+                        [
+                            "unsafe-apply",
+                            "--workspace",
+                            str(workspace),
+                            "--config-dir",
+                            str(config_dir),
+                            "--db",
+                            db_path,
+                            "--write",
+                        ]
+                        + (["--require-verified-provenance"] if require_verified else []),
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+
+                rendered = stdout.getvalue() + stderr.getvalue()
+                payload = json.loads(rendered)
+                self.assertEqual(code, 1, expected)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["type"], "validation_failed")
+                self.assertIn(expected, rendered)
+                self.assertEqual(routing_path.read_text(encoding="utf-8"), "rules: []\n")
+                self.assertNotIn("secret", rendered)
+
+    def test_openai_optimization_draft_apply_blocks_governor_conflicts(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        def select_all_actions(bundle):
+            selected = bundle["openai_optimization"]["selected_actions"][0]
+            summary = bundle["openai_optimization"]["suppressed_actions"][0]
+            cache = bundle["openai_optimization"]["omitted_actions"][0]
+            for action in (selected, summary, cache):
+                action["decision"] = "selected"
+                action["local_executor_compatibility"] = {
+                    "compatible": True,
+                    "supported_local_action_families": ["cache", "old_context_summarization", "routing"],
+                    "reason_codes": [],
+                }
+            bundle["openai_optimization"]["selected_actions"] = [selected, summary, cache]
+            bundle["openai_optimization"]["suppressed_actions"] = []
+            bundle["openai_optimization"]["omitted_actions"] = []
+            bundle["recommendation"]["candidate_ids"] = [
+                "openai-routing-candidate",
+                "openai-summary-candidate",
+                "openai-cache-candidate",
+            ]
+            bundle["recommendation"]["policy_sections"] = ["routing", "crunch", "cache"]
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "drafts"
+            config_dir = root / "config"
+            config_dir.mkdir()
+            (config_dir / "routing_rules.yaml").write_text("rules: []\n", encoding="utf-8")
+            events_log = root / "policy_events.jsonl"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "openai-review-secret",
+                    "AGENTFLOW_POLICY_EVENTS_LOG": str(events_log),
+                },
+                clear=False,
+            ):
+                stage_stdout = io.StringIO()
+                stage_code = cli.policy_draft_stage_cli(
+                    ["--draft-id", "conflict-apply", "--workspace", str(workspace), "-"],
+                    stdin=io.StringIO(json.dumps(self._openai_review_bundle_for_draft(mutate=select_all_actions))),
+                    stdout=stage_stdout,
+                )
+            self.assertEqual(stage_code, 0, stage_stdout.getvalue())
+
+            db_path = str(root / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="openai-conflict-row",
+                    created_at="2026-06-11T10:00:00+00:00",
+                    path="/v1/responses",
+                    requested_model="gpt-5",
+                    routed_model="gpt-5",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1000,
+                    input_tokens_est=1000,
+                    output_tokens_est=100,
+                    actual_input_tokens=1000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.004,
+                    cost_baseline_usd=0.004,
+                    routing_json=stable_json({"category": "chat", "text_chars": 4000, "has_tools": False}),
+                    crunch_json=stable_json({}),
+                    cache_json=stable_json({"status": "miss", "pattern_hash": "managed:openai-cache-candidate"}),
+                    retry_count=0,
+                    provider="openai",
+                    source_surface="openai_responses",
+                    endpoint="responses",
+                    requested_model_family="gpt-5",
+                    session_id="raw-session-id-must-not-leak",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with patch.dict(os.environ, {"AGENTFLOW_POLICY_EVENTS_LOG": str(events_log)}, clear=False):
+                code = cli.openai_optimization_draft_apply_cli(
+                    [
+                        "conflict-apply",
+                        "--workspace",
+                        str(workspace),
+                        "--config-dir",
+                        str(config_dir),
+                        "--db",
+                        db_path,
+                        "--write",
+                    ],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            rendered = stdout.getvalue() + stderr.getvalue()
+            payload = json.loads(rendered)
+            self.assertEqual(code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "validation_failed")
+            self.assertIn("local governor projection", rendered)
+            self.assertNotIn("raw-session-id-must-not-leak", rendered)
+            self.assertEqual((config_dir / "routing_rules.yaml").read_text(encoding="utf-8"), "rules: []\n")
+
     def test_codex_app_policy_dry_run_projects_synthetic_fixture_and_recent_rows_without_mutation(self):
         from agentflow_proxy.store import Store, stable_json, utc_now
 

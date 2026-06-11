@@ -1445,6 +1445,80 @@ def openai_optimization_draft_dry_run_cli(
     return 0 if result.get("ok") else 1
 
 
+def openai_optimization_draft_apply_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Apply a staged OpenAI optimization draft as bounded local canaries, with backups and rollback metadata"
+    )
+    parser.add_argument("draft", help="Staged OpenAI optimization draft ID, draft directory, draft.json path, or policy_bundle.json path.")
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local rule files, default: ~/.agentflow.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="Local SQLite DB path for metadata-only dry-run projection and lifecycle feedback.",
+    )
+    parser.add_argument("--section", action="append", choices=["routing", "crunch", "cache"], help="Apply only one policy section. Repeat to apply multiple sections.")
+    parser.add_argument("--dry-run", action="store_true", default=True, help="Preview canary policy edits without writing local YAML files.")
+    parser.add_argument("--write", dest="dry_run", action="store_false", help="Write canary edits to local YAML policy files.")
+    parser.add_argument("--canary-fraction", type=float, default=0.10, help="Deterministic applied canary fraction, default: 0.10.")
+    parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Deterministic holdout fraction, default: 0.10.")
+    parser.add_argument("--impact-limit", type=int, default=1000, help="Recent OpenAI metadata rows to inspect for governor conflicts, default: 1000.")
+    parser.add_argument(
+        "--require-verified-provenance",
+        action="store_true",
+        help="Require staged draft provenance to verify with the configured managed policy secret before applying.",
+    )
+    parser.add_argument("--queue-feedback", action="store_true", help="Queue sanitized apply lifecycle feedback in the local metadata queue.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print apply JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.openai_optimization_draft_apply import apply_openai_optimization_draft
+    from agentflow_proxy.store import Store
+
+    store = None
+    try:
+        db_path = Path(args.db).expanduser()
+        if db_path.exists():
+            store = Store(str(db_path))
+        result = asyncio.run(
+            apply_openai_optimization_draft(
+                args.draft,
+                workspace=args.workspace,
+                config_dir=args.config_dir,
+                store_obj=store,
+                dry_run=args.dry_run,
+                canary_fraction=args.canary_fraction,
+                holdout_fraction=args.holdout_fraction,
+                impact_limit=args.impact_limit,
+                sections=args.section,
+                require_verified_provenance=args.require_verified_provenance,
+                queue_feedback=args.queue_feedback,
+            )
+        )
+    finally:
+        if store is not None:
+            store.conn.close()
+
+    _write_policy_draft_apply_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
+    return 0 if result.get("ok") else 1
+
+
 async def _reload_policy_state_via_url(url: str, *, timeout: float) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(url)
@@ -6004,6 +6078,10 @@ def policy_draft_validate_main() -> None:
 
 def openai_optimization_draft_dry_run_main() -> None:
     raise SystemExit(openai_optimization_draft_dry_run_cli())
+
+
+def openai_optimization_draft_apply_main() -> None:
+    raise SystemExit(openai_optimization_draft_apply_cli())
 
 
 def policy_draft_apply_main() -> None:

@@ -516,11 +516,12 @@ def _backup_suffix() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
-def _write_policy_file(path: Path, text: str) -> str | None:
+def _write_policy_file(path: Path, text: str, *, backup_id: str | None = None) -> str | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     backup_path: str | None = None
     if path.exists():
-        backup = path.with_name(f"{path.name}.bak-{_backup_suffix()}")
+        suffix = backup_id if backup_id else _backup_suffix()
+        backup = path.with_name(f"{path.name}.bak-{suffix}")
         backup.write_bytes(path.read_bytes())
         backup_path = str(backup)
     tmp = path.with_name(f".{path.name}.tmp")
@@ -1114,6 +1115,7 @@ def apply_optimization_promotion_canaries(
     config_dir: str | Path,
     dry_run: bool = True,
     sections: list[str] | tuple[str, ...] | None = None,
+    backup_id: str | None = None,
 ) -> dict[str, Any]:
     config_path = Path(config_dir).expanduser()
     requested_sections = set(sections or _POLICY_SECTION_FILES)
@@ -1351,7 +1353,7 @@ def apply_optimization_promotion_canaries(
             changed = plan["old_text"] != text
             backup_path = None
             if changed and not dry_run:
-                backup_path = _write_policy_file(plan["path"], text)
+                backup_path = _write_policy_file(plan["path"], text, backup_id=backup_id)
             files.append({
                 "section": section,
                 "path": str(plan["path"]),
