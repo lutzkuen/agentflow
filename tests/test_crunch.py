@@ -1187,6 +1187,238 @@ old_context_summarization:
             self.assertEqual(holdout_meta["reason"], "canary_holdout")
             self.assertEqual(holdout_meta["canary"]["cohort"], "canary_holdout")
 
+    def test_old_context_summarization_tool_aware_canary_preserves_protocol_and_recent_turns(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  rule_id: test-tool-aware-summary
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 3
+  keep_recent_turns: 2
+  max_summary_chars: 1000
+  max_source_chars: 20000
+  excluded_categories: []
+  block_tool_protocol: false
+  canary:
+    enabled: true
+    fraction: 1.0
+    holdout_fraction: 0.0
+    salt: tool-aware-salt
+    unit: source_hash
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+                "messages": [
+                    {"role": "user", "content": "old planning detail " * 30},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "old-tool", "name": "read_file", "input": {"path": "a.py"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old-tool", "content": "old file contents"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "old assistant visible notes " * 30}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "recent-tool", "name": "read_file", "input": {"path": "b.py"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "recent-tool", "content": "recent file contents"}]},
+                ],
+            }
+            original_tool_blocks = [
+                json.dumps({"role": msg["role"], "block": block}, sort_keys=True)
+                for msg in body["messages"]
+                for block in (msg["content"] if isinstance(msg.get("content"), list) else [])
+                if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+            ]
+            original_recent_turns = [json.dumps(msg, sort_keys=True) for msg in body["messages"][-2:]]
+
+            async def fetch(_request):
+                return {
+                    "summary": "compact tool-aware summary",
+                    "summary_input_tokens": 20,
+                    "summary_output_tokens": 5,
+                    "summary_cost_est_usd": 0.0002,
+                    "summary_status_code": 200,
+                }
+
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=fetch,
+            ))
+
+            summarized_tool_blocks = [
+                json.dumps({"role": msg["role"], "block": block}, sort_keys=True)
+                for msg in summarized["messages"]
+                for block in (msg["content"] if isinstance(msg.get("content"), list) else [])
+                if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}
+            ]
+            summarized_recent_turns = [json.dumps(msg, sort_keys=True) for msg in summarized["messages"][-2:]]
+            self.assertEqual(meta["status"], "applied")
+            self.assertEqual(meta["canary"]["cohort"], "canary_applied")
+            self.assertEqual(meta["category"], "tool-result")
+            self.assertEqual(original_tool_blocks, summarized_tool_blocks)
+            self.assertEqual(original_recent_turns, summarized_recent_turns)
+            self.assertTrue(meta["preservation_check"]["ok"])
+            self.assertTrue(meta["tool_protocol_blocks_preserved"])
+            self.assertTrue(meta["recent_turns_preserved"])
+            self.assertIn("compact tool-aware summary", summarized["system"][0]["text"])
+
+    def test_old_context_summarization_tool_aware_holdout_forwards_unchanged(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  rule_id: test-tool-aware-summary
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 3
+  keep_recent_turns: 2
+  excluded_categories: []
+  block_tool_protocol: false
+  canary:
+    enabled: true
+    fraction: 0.0
+    holdout_fraction: 1.0
+    salt: tool-aware-salt
+    unit: source_hash
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": "old planning detail " * 30},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "old-tool", "name": "read_file", "input": {"path": "a.py"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old-tool", "content": "old file contents"}]},
+                    {"role": "assistant", "content": [{"type": "text", "text": "old assistant visible notes " * 30}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "recent-tool", "name": "read_file", "input": {"path": "b.py"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "recent-tool", "content": "recent file contents"}]},
+                ],
+            }
+
+            async def fail_fetch(_request):
+                raise AssertionError("holdout must not fetch summary")
+
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=fail_fetch,
+            ))
+
+            self.assertIs(summarized, body)
+            self.assertEqual(meta["status"], "skipped")
+            self.assertEqual(meta["reason"], "canary_holdout")
+            self.assertEqual(meta["canary"]["cohort"], "canary_holdout")
+            self.assertFalse(meta["changed"])
+            self.assertFalse(meta["applied"])
+
+    def test_old_context_summarization_thinking_history_skips_even_when_tool_aware(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  min_request_chars: 10
+  min_summarized_chars: 10
+  keep_recent_turns: 1
+  excluded_categories: []
+  block_tool_protocol: false
+  block_thinking: true
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "messages": [
+                    {"role": "assistant", "content": [{"type": "thinking", "thinking": "private chain"}, {"type": "text", "text": "old answer"}]},
+                    {"role": "user", "content": "old text " * 30},
+                    {"role": "user", "content": "recent"},
+                ]
+            }
+
+            plan, meta = manual.old_context_summary_plan(body, exact_cache_enabled=False)
+
+            self.assertIsNone(plan)
+            self.assertEqual(meta["status"], "skipped")
+            self.assertEqual(meta["reason"], "thinking-context-blocked")
+
+    def test_old_context_summarization_summary_fetch_failure_forwards_unchanged(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            secret = "raw old context should stay out of metadata"
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+old_context_summarization:
+  enabled: true
+  rule_id: test-summary-failure
+  min_request_chars: 10
+  min_summarized_chars: 10
+  max_turns: 2
+  keep_recent_turns: 1
+  canary:
+    enabled: true
+    fraction: 1.0
+    salt: failure-salt
+    unit: source_hash
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = {
+                "model": "claude-sonnet-4-6",
+                "messages": [
+                    {"role": "user", "content": (secret + " ") * 30},
+                    {"role": "assistant", "content": "old answer " * 30},
+                    {"role": "user", "content": "recent"},
+                ],
+            }
+
+            async def fetch(_request):
+                raise RuntimeError("provider unavailable")
+
+            summarized, meta = asyncio.run(manual.maybe_summarize_old_context(
+                body,
+                exact_cache_enabled=False,
+                get_cached_summary=lambda _key: None,
+                set_cached_summary=lambda _key, _value: None,
+                fetch_summary=fetch,
+            ))
+
+            rendered = json.dumps(meta, sort_keys=True)
+            self.assertIs(summarized, body)
+            self.assertEqual(meta["status"], "error")
+            self.assertEqual(meta["reason"], "summary-fetch-error")
+            self.assertEqual(meta["summary_error_type"], "RuntimeError")
+            self.assertFalse(meta["changed"])
+            self.assertFalse(meta["applied"])
+            self.assertNotIn(secret, rendered)
+
     def test_old_context_summarization_blocks_tool_protocol_context_by_default(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

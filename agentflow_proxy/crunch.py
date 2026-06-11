@@ -1937,6 +1937,7 @@ def old_context_summary_plan(
         "source_truncated": source_truncated,
         "before_chars": before_chars,
         "category": category,
+        "keep_recent_turns": keep_recent_turns,
         "summary_model": model,
         "max_summary_chars": max_summary_chars,
         "rule_id": rule_id,
@@ -2005,6 +2006,58 @@ def apply_old_context_summary(body: dict[str, Any], plan: dict[str, Any], summar
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _summary_tool_protocol_fingerprints(body: dict[str, Any]) -> list[str]:
+    messages = body.get("messages") or []
+    if not isinstance(messages, list):
+        return []
+    fingerprints: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}:
+                fingerprints.append(_canonical_json({
+                    "role": msg.get("role"),
+                    "block": block,
+                }))
+    return fingerprints
+
+
+def _summary_recent_turn_fingerprints(body: dict[str, Any], keep_recent_turns: int) -> list[str]:
+    if keep_recent_turns <= 0:
+        return []
+    messages = body.get("messages") or []
+    if not isinstance(messages, list):
+        return []
+    return [_canonical_json(msg) for msg in messages[-keep_recent_turns:]]
+
+
+def _old_context_summary_preservation_check(
+    original: dict[str, Any],
+    summarized: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    keep_recent_turns = int(plan.get("keep_recent_turns") or 0)
+    original_tool_protocol = _summary_tool_protocol_fingerprints(original)
+    summarized_tool_protocol = _summary_tool_protocol_fingerprints(summarized)
+    original_recent = _summary_recent_turn_fingerprints(original, keep_recent_turns)
+    summarized_recent = _summary_recent_turn_fingerprints(summarized, keep_recent_turns)
+    tool_protocol_preserved = original_tool_protocol == summarized_tool_protocol
+    recent_turns_preserved = original_recent == summarized_recent
+    return {
+        "schema": "agentflow.old_context_summary_preservation_check.v1",
+        "ok": tool_protocol_preserved and recent_turns_preserved,
+        "tool_protocol_blocks_preserved": tool_protocol_preserved,
+        "recent_turns_preserved": recent_turns_preserved,
+        "tool_protocol_block_count": len(original_tool_protocol),
+        "recent_turn_count": len(original_recent),
+        "raw_payload_included": False,
+    }
 
 
 def _summary_canary_decision(body: dict[str, Any], plan: dict[str, Any], *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2324,10 +2377,34 @@ async def maybe_summarize_old_context(
     summary_cache_hit = summary is not None
     fetch_result: Any = None
     if summary is None:
-        fetch_result = await fetch_summary(plan["summary_request"])
+        try:
+            fetch_result = await fetch_summary(plan["summary_request"])
+        except Exception as exc:
+            meta.update({
+                "status": "error",
+                "reason": "summary-fetch-error",
+                "changed": False,
+                "applied": False,
+                "enhanced_crunch_state": "bypassed",
+                "summary_error_type": type(exc).__name__,
+            })
+            return body, meta
         summary = _summary_text_from_result(fetch_result)
         if summary is None:
-            meta.update({"status": "skipped", "reason": "summary-empty"})
+            reason = "summary-empty"
+            if isinstance(fetch_result, dict):
+                try:
+                    if fetch_result.get("summary_status_code") is not None and int(fetch_result["summary_status_code"]) >= 400:
+                        reason = "summary-error"
+                except (TypeError, ValueError):
+                    pass
+            meta.update({
+                "status": "skipped",
+                "reason": reason,
+                "changed": False,
+                "applied": False,
+                "enhanced_crunch_state": "bypassed",
+            })
             if isinstance(fetch_result, dict):
                 for key in (
                     "summary_status_code",
@@ -2360,7 +2437,29 @@ async def maybe_summarize_old_context(
             "usage": fetch_result.get("usage") if isinstance(fetch_result, dict) else None,
         })
 
-    summarized = apply_old_context_summary(body, plan, summary)
+    try:
+        summarized = apply_old_context_summary(body, plan, summary)
+    except Exception as exc:
+        meta.update({
+            "status": "error",
+            "reason": "summary-apply-error",
+            "changed": False,
+            "applied": False,
+            "enhanced_crunch_state": "bypassed",
+            "summary_error_type": type(exc).__name__,
+        })
+        return body, meta
+    preservation_check = _old_context_summary_preservation_check(body, summarized, plan)
+    if not preservation_check["ok"]:
+        meta.update({
+            "status": "bypass",
+            "reason": "tool-protocol-reconstruction-mismatch",
+            "changed": False,
+            "applied": False,
+            "enhanced_crunch_state": "bypassed",
+            "preservation_check": preservation_check,
+        })
+        return body, meta
     after_chars = len(stable_json(summarized))
     tokens_saved_est = (plan["before_chars"] - after_chars) // TOKEN_CHARS
     summary_cost_est = 0.0
@@ -2383,6 +2482,9 @@ async def maybe_summarize_old_context(
         "estimated_net_savings_usd": round(estimated_gross_savings - summary_cost_est, 8),
         "summary_cache_hit": summary_cache_hit,
         "summary_chars": len(summary),
+        "preservation_check": preservation_check,
+        "tool_protocol_blocks_preserved": preservation_check["tool_protocol_blocks_preserved"],
+        "recent_turns_preserved": preservation_check["recent_turns_preserved"],
     })
     if isinstance(fetch_result, dict):
         for key in ("summary_input_tokens", "summary_output_tokens", "summary_cost_est_usd", "summary_status_code"):
