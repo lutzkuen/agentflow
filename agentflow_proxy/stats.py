@@ -12465,6 +12465,8 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "routing_experiment_daily_budget_exhausted": routing_experiment_report["policy"]["daily_budget_exhausted"],
             "routing_experiment_feedback_status_counts": routing_experiment_report_summary["feedback_status_counts"],
             "routing_experiment_sample_mode_counts": routing_experiment_report_summary["sample_mode_counts"],
+            "routing_experiment_decisions": routing_experiment_report_summary["decision_count"],
+            "routing_experiment_decision_status_counts": routing_experiment_report_summary["decision_status_counts"],
             "routing_experiment_applied_routed_down_samples": routing_experiment_report_summary["applied_routed_down_samples"],
             "routing_experiment_shadow_candidate_pass_through_samples": routing_experiment_report_summary["shadow_candidate_pass_through_samples"],
             "routing_experiment_promotion_verdict_counts": routing_experiment_report_summary["promotion_verdict_counts"],
@@ -13934,6 +13936,12 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Surface</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Category</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Pass rate</th><th data-sort-type="number">Similarity</th><th data-sort-type="money">Cost delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Budget</th><th data-sort-type="time">Last sample</th>
     </tr></thead>
     <tbody id="routing-experiments-tbody"></tbody>
+  </table>
+  <table class="activity-table" data-table-id="routing-experiment-decisions" data-filter-label="Filter routing A/B diagnostics">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="number">Observed</th>
+    </tr></thead>
+    <tbody id="routing-experiment-decisions-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -15923,6 +15931,13 @@ async function refreshPhaseRouting(){
       <td class="flags">${budgetBadge} <span class="badge provider">${fmt(experimentPolicy.today_shadow_spend_usd||0,6)} / ${fmt(experimentPolicy.daily_budget_usd||0,6)}</span> <span class="badge miss">${fmt(experimentPolicy.today_budget_remaining_usd||0,6)} left</span></td>
       <td class="ts">${ago(row.last_sample_at)}</td>
     </tr>`).join('')||`<tr><td colspan="11" style="color:#8b949e">No routing A/B samples recorded · ${experimentPolicy.enabled?'enabled':'disabled'} · ${budgetBadge}</td></tr>`;
+    const experimentDecisionRows=experimentReport.decision_reasons||[];
+    document.getElementById('routing-experiment-decisions-tbody').innerHTML=experimentDecisionRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge ${row.status==='selected'?'hit':'miss'}">${esc(row.status||'unknown')}</span></td>
+      <td class="flags">${esc(row.reason||'unknown')}</td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="4" style="color:#8b949e">No routing A/B decisions observed yet</td></tr>';
     const latestLifecycle=lifecycle.latest||{};
     document.getElementById('phase-routing-feedback-tbody').innerHTML=`<tr>
       <td class="tokens">${(queueSummary.queued||0).toLocaleString()}</td>

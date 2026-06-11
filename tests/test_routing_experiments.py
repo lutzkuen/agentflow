@@ -511,6 +511,53 @@ categories:
         self.assertEqual(report["decision_reasons"][0]["reason"], "streaming")
         self.assertEqual(report["decision_reasons"][0]["count"], 1)
 
+    def test_report_counts_codex_app_event_decision_reasons_without_sample_rows(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                store.log_codex_app_event(
+                    id="codex-start-skip",
+                    created_at=utc_now(),
+                    direction="client_to_server",
+                    method="turn/start",
+                    request_id="turn-secret",
+                    thread_id="thread-secret",
+                    message_chars=100,
+                    params_chars=80,
+                    input_items=1,
+                    input_text_chars=42,
+                    session_id="session-secret",
+                    routing_json=stable_json({
+                        "status": "skipped",
+                        "reason": "codex-turn-start-model-field-absent",
+                        "routing_experiment": {
+                            "schema": "agentflow.routing_experiment_decision.v1",
+                            "provider": "openai",
+                            "source_surface": "codex_turn",
+                            "status": "skipped",
+                            "reason": "missing-requested-model",
+                            "sampled": False,
+                        },
+                    }),
+                )
+                report = experiments.build_routing_experiment_report(store, limit=5)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["summary"]["sample_count"], 0)
+        self.assertEqual(report["summary"]["decision_count"], 1)
+        self.assertEqual(report["summary"]["decision_status_counts"], {"skipped": 1})
+        self.assertEqual(report["decision_surfaces"], [
+            {"provider": "openai", "source_surface": "codex_turn", "status": "skipped", "count": 1}
+        ])
+        self.assertEqual(report["decision_reasons"][0]["provider"], "openai")
+        self.assertEqual(report["decision_reasons"][0]["source_surface"], "codex_turn")
+        self.assertEqual(report["decision_reasons"][0]["reason"], "missing-requested-model")
+        rendered = stable_json(report)
+        self.assertNotIn("turn-secret", rendered)
+        self.assertNotIn("thread-secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+
     def test_report_groups_anthropic_openai_and_codex_samples_separately(self):
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))

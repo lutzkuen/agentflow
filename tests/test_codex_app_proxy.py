@@ -2439,6 +2439,76 @@ summary_model_hint:
 
             self.assertEqual(pending, {})
 
+    def test_codex_routing_experiment_skip_is_visible_without_sample_rows(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-diagnostic",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-routing-experiment-diagnostic",
+                "input": [{"type": "text", "text": "Summarize the run without exposing raw prompt text."}],
+            },
+        }
+        optimization_metadata = {
+            "routing": {
+                "status": "skipped",
+                "reason": "codex-turn-start-model-field-absent",
+                "workflow_phase": "unknown",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            test_store = Store(tmp.name)
+            try:
+                request_started = {}
+                pending = {}
+                with patch.object(codex_app_proxy, "store", test_store):
+                    start_event_id = codex_app_proxy._record_message(
+                        json.dumps(message),
+                        direction="client_to_server",
+                        session_id="session-routing-experiment-diagnostic",
+                        request_started=request_started,
+                        optimization_metadata=optimization_metadata,
+                    )
+                    codex_app_proxy._attach_codex_routing_experiment_pending(
+                        json.dumps(message),
+                        optimization_metadata=optimization_metadata,
+                        start_event_id=start_event_id,
+                        pending_routing_experiments=pending,
+                    )
+
+                self.assertEqual(pending, {})
+                self.assertEqual(
+                    test_store.conn.execute("select count(*) as c from routing_experiments").fetchone()["c"],
+                    0,
+                )
+                row = test_store.conn.execute(
+                    "select routing_json from codex_app_events where id = ?",
+                    (start_event_id,),
+                ).fetchone()
+                routing = json.loads(row["routing_json"])
+                experiment = routing["routing_experiment"]
+                self.assertEqual(experiment["source_surface"], "codex_turn")
+                self.assertEqual(experiment["status"], "skipped")
+                self.assertEqual(experiment["reason"], "missing-requested-model")
+                self.assertFalse(experiment["sampled"])
+
+                from agentflow_proxy.routing_experiments import build_routing_experiment_report
+
+                report = build_routing_experiment_report(test_store, limit=5)
+            finally:
+                test_store.conn.close()
+
+        self.assertEqual(report["summary"]["sample_count"], 0)
+        self.assertEqual(report["summary"]["decision_count"], 1)
+        self.assertEqual(report["summary"]["decision_status_counts"], {"skipped": 1})
+        self.assertEqual(report["decision_reasons"][0]["provider"], "openai")
+        self.assertEqual(report["decision_reasons"][0]["source_surface"], "codex_turn")
+        self.assertEqual(report["decision_reasons"][0]["status"], "skipped")
+        self.assertEqual(report["decision_reasons"][0]["reason"], "missing-requested-model")
+
 
 if __name__ == "__main__":
     unittest.main()

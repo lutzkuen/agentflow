@@ -2876,10 +2876,20 @@ def _attach_codex_routing_experiment_pending(
     if result is None:
         return
     experiment_meta, routing_meta = result
+    start_routing_meta = dict((optimization_metadata or {}).get("routing") or {})
+    if start_event_id:
+        routing_for_event = dict(start_routing_meta or routing_meta)
+        routing_for_event["routing_experiment"] = experiment_meta
+        try:
+            store.update_codex_app_event_routing_json(start_event_id, stable_json(routing_for_event))
+        except Exception as exc:
+            print(f"AgentFlow Codex routing experiment metadata update skipped: {exc}", file=sys.stderr)
+    if not experiment_meta.get("sampled"):
+        return
     pending_routing_experiments[request_id] = {
         "experiment_meta": experiment_meta,
         "routing_meta": routing_meta,
-        "start_routing_meta": dict((optimization_metadata or {}).get("routing") or {}),
+        "start_routing_meta": start_routing_meta,
         "input_text_chars": _input_text_chars(params.get("input")),
         "start_event_id": start_event_id or "",
     }
@@ -2889,11 +2899,10 @@ def _decide_codex_routing_experiment(
     params: dict[str, Any],
     optimization_metadata: dict[str, dict[str, Any]] | None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Return (experiment_meta, routing_meta) if sampled, else None."""
+    """Return metadata for sampled and skipped Codex routing experiment decisions."""
     _, requested_model = _model_field(params)
-    if not requested_model:
-        return None
     routing = (optimization_metadata or {}).get("routing") or {}
+    requested_model = str(requested_model or routing.get("requested_model") or "")
     routed_model = str(routing.get("routed_model") or requested_model)
     workflow_phase = str(routing.get("workflow_phase") or "unknown")
     text_chars = _input_text_chars(params.get("input"))
@@ -2915,8 +2924,6 @@ def _decide_codex_routing_experiment(
         )
     except Exception as exc:
         print(f"AgentFlow Codex routing experiment decision skipped: {exc}", file=sys.stderr)
-        return None
-    if not experiment_meta.get("sampled"):
         return None
     return experiment_meta, experiment_routing_meta
 

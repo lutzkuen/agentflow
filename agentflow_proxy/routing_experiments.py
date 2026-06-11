@@ -1043,6 +1043,31 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         sample_mode_counts[mode] = sample_mode_counts.get(mode, 0) + 1
 
     decision_reason_counts: dict[tuple[str, str, str, str], int] = {}
+    decision_status_counts: dict[str, int] = {}
+    decision_surface_counts: dict[tuple[str, str, str], int] = {}
+
+    def record_decision(provider_value: Any, source_surface_value: Any, routing_json: Any) -> None:
+        try:
+            routing = yaml.safe_load(routing_json) or {}
+        except Exception:
+            provider_label = _public_label(provider_value)
+            source_surface_label = _public_label(source_surface_value)
+            status = "unknown"
+            reason = "invalid-routing-json"
+        else:
+            experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
+            if not isinstance(experiment, dict):
+                return
+            provider_label = _public_label(experiment.get("provider") or provider_value)
+            source_surface_label = _public_label(experiment.get("source_surface") or source_surface_value)
+            reason = _public_label(experiment.get("reason"))
+            status = _public_label(experiment.get("status"))
+        key = (provider_label, source_surface_label, status, reason)
+        decision_reason_counts[key] = decision_reason_counts.get(key, 0) + 1
+        decision_status_counts[status] = decision_status_counts.get(status, 0) + 1
+        surface_key = (provider_label, source_surface_label, status)
+        decision_surface_counts[surface_key] = decision_surface_counts.get(surface_key, 0) + 1
+
     try:
         decision_rows = conn.execute(
             """
@@ -1059,19 +1084,26 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     except Exception:
         decision_rows = []
     for row in decision_rows:
-        try:
-            routing = yaml.safe_load(row["routing_json"]) or {}
-        except Exception:
-            reason = "invalid-routing-json"
-            status = "unknown"
-        else:
-            experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
-            if not isinstance(experiment, dict):
-                continue
-            reason = _public_label(experiment.get("reason"))
-            status = _public_label(experiment.get("status"))
-        key = (_public_label(row["provider"]), _public_label(row["source_surface"]), status, reason)
-        decision_reason_counts[key] = decision_reason_counts.get(key, 0) + 1
+        record_decision(row["provider"], row["source_surface"], row["routing_json"])
+    try:
+        codex_decision_rows = conn.execute(
+            """
+            select 'openai' as provider,
+                   'codex_turn' as source_surface,
+                   routing_json
+            from codex_app_events
+            where direction = 'client_to_server'
+              and method = 'turn/start'
+              and routing_json is not null
+              and routing_json like '%"routing_experiment"%'
+            order by created_at desc
+            limit 5000
+            """
+        ).fetchall()
+    except Exception:
+        codex_decision_rows = []
+    for row in codex_decision_rows:
+        record_decision(row["provider"], row["source_surface"], row["routing_json"])
     decision_reasons = [
         {
             "provider": provider,
@@ -1082,6 +1114,18 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         }
         for (provider, source_surface, status, reason), count in sorted(
             decision_reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+    decision_surfaces = [
+        {
+            "provider": provider,
+            "source_surface": source_surface,
+            "status": status,
+            "count": count,
+        }
+        for (provider, source_surface, status), count in sorted(
+            decision_surface_counts.items(),
             key=lambda item: (-item[1], item[0]),
         )
     ]
@@ -1123,6 +1167,8 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "avg_latency_delta_ms": (summary_row or {}).get("avg_latency_delta_ms"),
             "feedback_status_counts": feedback_status_counts,
             "sample_mode_counts": sample_mode_counts,
+            "decision_count": int(sum(decision_status_counts.values())),
+            "decision_status_counts": decision_status_counts,
             "applied_routed_down_samples": int(sample_mode_counts.get("applied_routed_down", 0)),
             "shadow_candidate_pass_through_samples": int(sample_mode_counts.get("shadow_candidate_pass_through", 0)),
             "promotion_verdict_counts": promotion_verdict_counts,
@@ -1130,6 +1176,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
             "promotion_ready_candidates": int(promotion_verdict_counts.get("promote", 0)),
         },
         "decision_reasons": decision_reasons,
+        "decision_surfaces": decision_surfaces,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,
