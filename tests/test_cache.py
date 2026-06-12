@@ -690,6 +690,38 @@ pattern_rules:
         self.assertEqual(audit["dependency_capture_reason"], "complete")
         self.assertTrue(audit["safe_invalidation_evidence"])
 
+    def test_file_dependency_capture_ignores_prose_slash_fragments_around_stable_files(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Read src/main.py. The answer should consider emotional/contextual "
+                            "preferences/facts and reminding/supporting notes, but those are prose."
+                        ),
+                    }
+                ],
+            }
+
+            snapshots = cache_module.cache_file_dependency_snapshots(body)
+            audit = cache_module.cache_file_dependency_audit(body)
+
+        self.assertEqual(audit["snapshot_count"], 1)
+        self.assertEqual(len(snapshots), 1)
+        self.assertIsNone(audit["invalidation_reason"])
+        self.assertTrue(audit["safe_invalidation_evidence"])
+        self.assertEqual(audit["candidate_path_count_bucket"], "1")
+        self.assertEqual(audit["raw_candidate_path_count_bucket"], "2_5")
+        rendered = json.dumps(audit, sort_keys=True)
+        self.assertNotIn("emotional/contextual", rendered)
+        self.assertNotIn("preferences/facts", rendered)
+        self.assertNotIn("src/main.py", rendered)
+
     def test_tool_result_dependency_capture_fails_closed_for_deleted_paths_without_leaking_names(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

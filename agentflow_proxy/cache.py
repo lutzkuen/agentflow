@@ -1061,6 +1061,98 @@ def _obvious_non_path_fragment(token: str) -> bool:
     return False
 
 
+_KNOWN_EXTENSIONLESS_FILE_NAMES = {
+    ".dockerignore",
+    ".env",
+    ".envrc",
+    ".gitignore",
+    "dockerfile",
+    "license",
+    "makefile",
+    "notice",
+    "procfile",
+    "readme",
+}
+
+_KNOWN_FILE_EXTENSIONS = {
+    "bash",
+    "c",
+    "cc",
+    "cfg",
+    "conf",
+    "cpp",
+    "cs",
+    "css",
+    "csv",
+    "db",
+    "env",
+    "fish",
+    "gif",
+    "go",
+    "h",
+    "hpp",
+    "html",
+    "ini",
+    "ipynb",
+    "java",
+    "jpeg",
+    "jpg",
+    "js",
+    "json",
+    "jsx",
+    "kt",
+    "kts",
+    "lock",
+    "log",
+    "lua",
+    "md",
+    "pdf",
+    "php",
+    "pl",
+    "pm",
+    "png",
+    "py",
+    "r",
+    "rb",
+    "rs",
+    "rst",
+    "scss",
+    "sh",
+    "sql",
+    "sqlite",
+    "sqlite3",
+    "svg",
+    "swift",
+    "toml",
+    "ts",
+    "tsx",
+    "txt",
+    "webp",
+    "xml",
+    "yaml",
+    "yml",
+    "zsh",
+}
+
+
+def _path_token_has_file_identity(token: str) -> bool:
+    normalized = token.replace("\\", "/")
+    if token.startswith(("/", "./", "../", "~/")) or _WINDOWS_DRIVE_RE.match(token):
+        return True
+    basename = normalized.rsplit("/", 1)[-1].strip()
+    if not basename or basename in {".", "..", "~"}:
+        return False
+    lowered = basename.lower()
+    if lowered in _KNOWN_EXTENSIONLESS_FILE_NAMES:
+        return True
+    if lowered.startswith(".") and lowered.count(".") == 1 and len(lowered) > 1:
+        return True
+    if "." not in basename or basename.endswith("."):
+        return False
+    extension = basename.rsplit(".", 1)[-1].lower()
+    return extension in _KNOWN_FILE_EXTENSIONS
+
+
 def _candidate_path_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     for raw in re.split(r"\s+", text):
@@ -1126,6 +1218,12 @@ def _cache_file_dependency_scan(
             raw_candidate_count += 1
             resolved = _resolve_under_root(token, watch_root)
             if resolved is None:
+                continue
+            try:
+                token_is_file = resolved.is_file()
+            except OSError:
+                token_is_file = False
+            if not token_is_file and not _path_token_has_file_identity(token):
                 continue
             resolved_key = str(resolved)
             if resolved_key in seen:

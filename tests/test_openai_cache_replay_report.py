@@ -15,6 +15,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from agentflow_proxy import cli
+from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
 from agentflow_proxy.dashboard_app import create_dashboard_app
 from agentflow_proxy.openai_cache_replay_apply import build_openai_cache_replay_apply_plan
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
@@ -240,6 +241,85 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_opportunity.v1")
         self.assertEqual(payload["summary"]["openai_call_count"], 2)
         self.assertNotIn("raw-cli-request-fingerprint", output.getvalue())
+
+    def test_openai_dependency_evidence_distinguishes_stable_files_from_missing_files(self) -> None:
+        from agentflow_proxy import cache as cache_module
+
+        old_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "stable.py").write_text("VALUE = 1\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            try:
+                stable_body = {
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Use src/stable.py while ignoring prose such as emotional/contextual "
+                                "and preferences/facts."
+                            ),
+                        }
+                    ]
+                }
+                missing_body = {"input": [{"role": "user", "content": "Use src/deleted.py"}]}
+                stable_audit = cache_module.cache_file_dependency_audit(stable_body)
+                missing_audit = cache_module.cache_file_dependency_audit(missing_body)
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertTrue(stable_audit["safe_invalidation_evidence"])
+        self.assertTrue(stable_audit["file_dependency_evidence_available"])
+        self.assertIsNone(stable_audit["invalidation_reason"])
+        self.assertEqual(stable_audit["snapshot_count"], 1)
+        self.assertEqual(stable_audit["raw_candidate_path_count_bucket"], "2_5")
+        self.assertFalse(missing_audit["safe_invalidation_evidence"])
+        self.assertEqual(missing_audit["invalidation_reason"], "dependency-missing")
+
+        self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            request_fingerprint="raw-stable-openai-dependency-fingerprint",
+            file_dependency_audit=stable_audit,
+            cache_extra={"cache_replay_blocker_reasons": ["tool-call-cache-disabled"]},
+            cost=0.04,
+        )
+        self._log_openai_call(
+            category="tool-light",
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            request_fingerprint="raw-missing-openai-dependency-fingerprint",
+            file_dependency_audit=missing_audit,
+            cache_extra={"cache_replay_blocker_reasons": ["dependency-missing", "tool-call-cache-disabled"]},
+            cost=0.05,
+        )
+
+        opportunity = build_openai_cache_replay_report(self.store, limit=20)
+        readiness = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        smoke = build_cache_smoke_diagnostic(self.store, scan_limit=20)
+
+        blocker_counts = {row["value"]: row["count"] for row in opportunity["blocker_reason_breakdown"]}
+        dependency_status = {row["value"]: row["count"] for row in opportunity["file_dependency_status_breakdown"]}
+        self.assertEqual(blocker_counts["file-dependency-missing"], 1)
+        self.assertEqual(dependency_status["stable"], 1)
+        self.assertEqual(dependency_status["missing"], 1)
+        self.assertEqual(readiness["summary"]["top_blockers"][0]["value"], "tool-call-cache-disabled")
+        self.assertEqual(
+            {row["value"]: row["count"] for row in readiness["blocker_reason_breakdown"]}["file-dependency-missing"],
+            1,
+        )
+        self.assertEqual(smoke["summary"]["file_dependency_blocked_count"], 1)
+
+        rendered = json.dumps([opportunity, readiness, smoke], sort_keys=True)
+        self.assertNotIn("raw-stable-openai-dependency-fingerprint", rendered)
+        self.assertNotIn("raw-missing-openai-dependency-fingerprint", rendered)
+        self.assertNotIn("src/stable.py", rendered)
+        self.assertNotIn("src/deleted.py", rendered)
+        self.assertNotIn("emotional/contextual", rendered)
 
     def test_openai_cache_replay_impact_quality_gates_and_lifecycle_are_metadata_only(self) -> None:
         def replay_meta(

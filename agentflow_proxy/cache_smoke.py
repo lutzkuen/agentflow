@@ -281,6 +281,12 @@ def build_cache_smoke_diagnostic(
         if status == "miss" and "semantic" in reason:
             semantic_misses += 1
         file_dependency_blocked = bool("file-dependency" in reason or "dependency-" in reason)
+        blocker_reasons = cache_meta.get("cache_replay_blocker_reasons")
+        if isinstance(blocker_reasons, list) and any(
+            "file-dependency" in str(item) or "dependency-" in str(item)
+            for item in blocker_reasons
+        ):
+            file_dependency_blocked = True
         if cache_meta.get("invalidated") or cache_meta.get("invalidation_reason"):
             invalidated_lookups += 1
             file_dependency_blocked = True
