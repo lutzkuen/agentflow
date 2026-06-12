@@ -197,6 +197,8 @@ class StreamingCacheTest(unittest.TestCase):
         self.old_cache_pattern_rules = cache_module.CACHE_PATTERN_RULES
         self.old_anthropic_cache_enabled = anthropic_proxy.CACHE_ENABLED
         self.old_anthropic_semantic_threshold = anthropic_proxy.SEMANTIC_CACHE_THRESHOLD
+        self.old_anthropic_cache_lookup_meta = anthropic_proxy.cache_lookup_meta
+        self.old_anthropic_cache_replay_canary_decision = anthropic_proxy.cache_replay_canary_decision
         self.old_anthropic_streaming_cache_lookup_meta = anthropic_proxy.streaming_cache_lookup_meta
         cache_module.CACHE_ENABLED = True
         cache_module.CACHE_TOOL_CALLS = False
@@ -204,6 +206,8 @@ class StreamingCacheTest(unittest.TestCase):
         cache_module.CACHE_PATTERN_RULES = ()
         anthropic_proxy.CACHE_ENABLED = True
         anthropic_proxy.SEMANTIC_CACHE_THRESHOLD = cache_module.SEMANTIC_CACHE_THRESHOLD
+        anthropic_proxy.cache_lookup_meta = cache_module.cache_lookup_meta
+        anthropic_proxy.cache_replay_canary_decision = cache_module.cache_replay_canary_decision
         anthropic_proxy.streaming_cache_lookup_meta = cache_module.streaming_cache_lookup_meta
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
@@ -224,6 +228,8 @@ class StreamingCacheTest(unittest.TestCase):
         cache_module.CACHE_PATTERN_RULES = self.old_cache_pattern_rules
         anthropic_proxy.CACHE_ENABLED = self.old_anthropic_cache_enabled
         anthropic_proxy.SEMANTIC_CACHE_THRESHOLD = self.old_anthropic_semantic_threshold
+        anthropic_proxy.cache_lookup_meta = self.old_anthropic_cache_lookup_meta
+        anthropic_proxy.cache_replay_canary_decision = self.old_anthropic_cache_replay_canary_decision
         anthropic_proxy.streaming_cache_lookup_meta = self.old_anthropic_streaming_cache_lookup_meta
         server.store = self.old_store
         server.configure_provider(

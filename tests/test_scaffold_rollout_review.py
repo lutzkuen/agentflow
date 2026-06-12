@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib
 import io
 import json
@@ -15,6 +16,7 @@ from agentflow_proxy import cli
 from agentflow_proxy.optimization_rollout_review import attach_optimization_rollout_provenance
 from agentflow_proxy.scaffold_rollout_review import (
     SCAFFOLD_CANARY_POLICY_FILE,
+    SCAFFOLD_LOCAL_CRUNCH_RULES_FILE,
     apply_scaffold_rollout_actions,
     review_scaffold_rollout_actions,
 )
@@ -165,6 +167,63 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             generated_at="2026-06-12T00:00:00+00:00",
         )
 
+    def _decision_bundle(self, decision: str, *, omitted: bool = False, canary_fraction: float = 0.5) -> dict:
+        bundle = self._bundle(canary_fraction=canary_fraction)
+        action = copy.deepcopy(bundle["actions"][0])
+        action["action_type"] = decision
+        action["action"]["next_action"] = decision
+        action["action"]["status"] = "review-local-repeated-scaffold-crunch-rule"
+        action["evidence_summary"]["rollout_gate"]["next_action"] = decision
+        action["evidence_summary"]["rollout_decision"] = {
+            "schema": "agentflow.repeated_scaffold_rollout_decision.v1",
+            "next_action": decision,
+            "reason_codes": [] if decision in {"widen", "promote"} else [f"fixture-{decision}"],
+            "privacy_summary": {
+                "metadata_only": True,
+                "feature_only": True,
+                "raw_payloads_returned": False,
+                "raw_prompts_returned": False,
+                "raw_responses_returned": False,
+                "provider_bodies_returned": False,
+                "request_ids_returned": False,
+                "cache_keys_returned": False,
+                "file_paths_returned": False,
+            },
+        }
+        if omitted:
+            omitted_action = {
+                "schema": "agentflow.repeated_scaffold_rollout_omitted_action.v1",
+                "target_candidate_id": action["target_candidate_id"],
+                "action_id": action["action_id"],
+                "action_family": "crunch",
+                "candidate_family": "repeated-scaffold-crunch-policy-rule",
+                "source_surface": "anthropic_messages",
+                "policy_section": "crunch",
+                "reason": f"fixture-{decision}",
+                "reason_codes": [f"fixture-{decision}"],
+                "next_action": decision,
+                "noop_action": {
+                    "status": decision,
+                    "local_action": "crunch",
+                    "locally_executable": False,
+                    "locally_executed": False,
+                    "requires_local_review": True,
+                    "managed_enforced": False,
+                    "provider_forwarding": False,
+                    "server_content_processing": False,
+                },
+                "evidence_summary": action["evidence_summary"],
+                "privacy_summary": action["privacy_summary"],
+            }
+            bundle["actions"] = []
+            bundle["omitted_actions"] = [omitted_action]
+            bundle["summary"]["action_count"] = 0
+            bundle["summary"]["omitted_count"] = 1
+        else:
+            bundle["actions"] = [action]
+            bundle["omitted_actions"] = []
+        return bundle
+
     def test_review_accepts_signed_repeated_scaffold_action_without_raw_payloads(self) -> None:
         signed = self._signed(self._bundle())
         with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
@@ -183,7 +242,7 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         self.assertFalse(result["privacy"]["raw_provider_bodies_included"])
 
     def test_apply_cli_writes_scaffold_canary_overlay_by_default(self) -> None:
-        signed = self._signed(self._bundle(canary_fraction=0.5))
+        signed = self._signed(self._decision_bundle("widen", canary_fraction=0.5))
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
             stdout = io.StringIO()
             code = cli.scaffold_rollout_actions_apply_cli(
@@ -204,6 +263,146 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             self.assertTrue(scaffold["enabled"])
             self.assertEqual(scaffold["rules"][0]["candidate_id"], "repeated-scaffold-candidate:test")
             self.assertEqual(scaffold["rules"][0]["rollout"]["canary_fraction"], 0.5)
+
+    def test_review_accepts_widen_promote_hold_rollback_and_suppress_actions(self) -> None:
+        cases = {
+            "widen": False,
+            "promote": False,
+            "hold": True,
+            "rollback": True,
+            "suppress": True,
+        }
+        with patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            for decision, omitted in cases.items():
+                with self.subTest(decision=decision):
+                    result = review_scaffold_rollout_actions(self._signed(self._decision_bundle(decision, omitted=omitted)))
+
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["accepted_action_count"], 1)
+                    self.assertEqual(result["actions"][0]["decision"], decision)
+                    rendered = stable_json(result)
+                    self.assertNotIn("raw prompt", rendered)
+                    self.assertFalse(result["privacy"]["raw_provider_bodies_included"])
+
+    def test_dry_run_outputs_are_metadata_only_for_lifecycle_decisions(self) -> None:
+        cases = {
+            "widen": False,
+            "promote": False,
+            "hold": True,
+            "rollback": True,
+            "suppress": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            for decision, omitted in cases.items():
+                with self.subTest(decision=decision):
+                    result = apply_scaffold_rollout_actions(
+                        self._signed(self._decision_bundle(decision, omitted=omitted)),
+                        config_dir=tmp,
+                        dry_run=True,
+                    )
+
+                    self.assertTrue(result["ok"])
+                    self.assertFalse(result["wrote_policy_files"])
+                    self.assertFalse((Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE).exists())
+                    self.assertFalse((Path(tmp) / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE).exists())
+                    self.assertNotIn("raw prompt", stable_json(result))
+
+    def test_promote_writes_durable_crunch_rule_with_backup(self) -> None:
+        signed = self._signed(self._decision_bundle("promote", canary_fraction=1.0))
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            crunch_path = Path(tmp) / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE
+            crunch_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "repeated_provider_scaffolding": {
+                            "enabled": True,
+                            "rules": [
+                                {
+                                    "id": "local-manual-unrelated",
+                                    "candidate_id": "manual-candidate",
+                                    "enabled": True,
+                                    "policy_source": "local-manual",
+                                    "match_any_repeated": True,
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = apply_scaffold_rollout_actions(signed, config_dir=tmp, dry_run=False)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["wrote_policy_files"])
+            crunch_file = next(file for file in result["files"] if file["path"].endswith(SCAFFOLD_LOCAL_CRUNCH_RULES_FILE))
+            self.assertTrue(crunch_file["changed"])
+            self.assertIsNotNone(crunch_file["backup_path"])
+            self.assertTrue(Path(crunch_file["backup_path"]).exists())
+            self.assertFalse((Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE).exists())
+            data = yaml.safe_load(crunch_path.read_text(encoding="utf-8"))
+            rules = data["repeated_provider_scaffolding"]["rules"]
+            promoted = next(rule for rule in rules if rule["candidate_id"] == "repeated-scaffold-candidate:test")
+            manual = next(rule for rule in rules if rule["id"] == "local-manual-unrelated")
+            self.assertTrue(promoted["enabled"])
+            self.assertEqual(promoted["policy_source"], "managed-recommended")
+            self.assertFalse(promoted["rollout"]["canary_enabled"])
+            self.assertEqual(promoted["rollout"]["canary_fraction"], 1.0)
+            self.assertEqual(promoted["rollout_action"]["next_action"], "promote")
+            self.assertTrue(manual["enabled"])
+            self.assertEqual(manual["policy_source"], "local-manual")
+
+    def test_rollback_disables_only_targeted_repeated_scaffold_rule(self) -> None:
+        signed = self._signed(self._decision_bundle("rollback", omitted=True))
+        target_rule = {
+            "id": "managed-repeated-scaffold-test",
+            "candidate_id": "repeated-scaffold-candidate:test",
+            "enabled": True,
+            "policy_source": "managed-recommended",
+            "match_any_repeated": True,
+            "rollout": {"canary_enabled": True, "canary_fraction": 0.5},
+        }
+        other_rule = {
+            "id": "local-manual-unrelated",
+            "candidate_id": "manual-candidate",
+            "enabled": True,
+            "policy_source": "local-manual",
+            "match_any_repeated": True,
+            "rollout": {"canary_enabled": True, "canary_fraction": 0.5},
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            for filename in (SCAFFOLD_CANARY_POLICY_FILE, SCAFFOLD_LOCAL_CRUNCH_RULES_FILE):
+                (Path(tmp) / filename).write_text(
+                    yaml.safe_dump(
+                        {
+                            "repeated_provider_scaffolding": {
+                                "enabled": True,
+                                "rules": [copy.deepcopy(target_rule), copy.deepcopy(other_rule)],
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            result = apply_scaffold_rollout_actions(signed, config_dir=tmp, dry_run=False)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["wrote_policy_files"])
+            changed_files = [file for file in result["files"] if file["changed"]]
+            self.assertEqual(len(changed_files), 2)
+            self.assertTrue(all(Path(file["backup_path"]).exists() for file in changed_files))
+            for filename in (SCAFFOLD_CANARY_POLICY_FILE, SCAFFOLD_LOCAL_CRUNCH_RULES_FILE):
+                data = yaml.safe_load((Path(tmp) / filename).read_text(encoding="utf-8"))
+                rules = data["repeated_provider_scaffolding"]["rules"]
+                rolled_back = next(rule for rule in rules if rule["candidate_id"] == "repeated-scaffold-candidate:test")
+                manual = next(rule for rule in rules if rule["id"] == "local-manual-unrelated")
+                self.assertFalse(rolled_back["enabled"])
+                self.assertFalse(rolled_back["rollout"]["canary_enabled"])
+                self.assertEqual(rolled_back["rollout"]["canary_fraction"], 0.0)
+                self.assertEqual(rolled_back["rollout_action"]["next_action"], "rollback")
+                self.assertEqual(rolled_back["rollout_action"]["rollback_reason_codes"], ["fixture-rollback"])
+                self.assertTrue(manual["enabled"])
+                self.assertEqual(manual["policy_source"], "local-manual")
 
     def test_crunch_loads_scaffold_overlay_and_applies_metadata_only_rule(self) -> None:
         signed = self._signed(self._bundle(canary_fraction=1.0))

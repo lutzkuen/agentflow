@@ -16,11 +16,14 @@ SCAFFOLD_ROLLOUT_ACTIONS_REVIEW_SCHEMA = "agentflow.scaffold_rollout_actions_fet
 SCAFFOLD_ROLLOUT_ACTIONS_APPLY_SCHEMA = "agentflow.scaffold_rollout_actions_apply.v1"
 SCAFFOLD_CANARY_POLICY_SCHEMA = "agentflow.scaffold_canary_policy.v1"
 SCAFFOLD_CANARY_POLICY_FILE = "scaffold_canary_policy.yaml"
+SCAFFOLD_LOCAL_CRUNCH_RULES_FILE = "crunch_rules.yaml"
 
 _REPEATED_SCAFFOLD_ACTION_TYPE = "review-local-repeated-scaffold-crunch-rule"
 _REPEATED_SCAFFOLD_CANDIDATE_FAMILY = "repeated-scaffold-crunch-policy-rule"
 _OPTIMIZATION_ROLLOUT_ACTIONS_SCHEMA = "agentflow.optimization_rollout_actions.v1"
 _OPTIMIZATION_ROLLOUT_ACTION_SCHEMA = "agentflow.optimization_rollout_action.v1"
+_REPEATED_SCAFFOLD_DECISIONS = {"widen", "promote", "hold", "rollback", "suppress"}
+_REPEATED_SCAFFOLD_ROLLBACK_DECISIONS = {"rollback", "suppress"}
 _RAW_LIKE_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -103,6 +106,112 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _nested_dict(source: Any, key: str) -> dict[str, Any]:
+    value = source.get(key) if isinstance(source, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _nested_value(source: Any, *path: str) -> Any:
+    value = source
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _scaffold_next_action(action: dict[str, Any]) -> str:
+    raw_values = [
+        _nested_value(action, "action", "next_action"),
+        action.get("next_action"),
+        _nested_value(action, "evidence_summary", "rollout_decision", "next_action"),
+        _nested_value(action, "evidence_summary", "rollout_gate", "next_action"),
+        _nested_value(action, "noop_action", "status"),
+        action.get("action_type"),
+        _nested_value(action, "action", "status"),
+    ]
+    for raw in raw_values:
+        value = str(raw or "").strip().lower().replace("_", "-")
+        if value in {"review-local-repeated-scaffold-crunch-rule", "canary", "apply"}:
+            return "widen"
+        if value in {"widen", "promote", "hold", "rollback", "suppress"}:
+            return value
+        if value in {"disable", "retire", "rejected", "safety-stop"}:
+            return "rollback"
+        if value in {"omitted", "unsupported", "blocked"}:
+            return "suppress"
+    return "widen"
+
+
+def _is_repeated_scaffold_action(action: dict[str, Any]) -> bool:
+    candidate_family = str(action.get("candidate_family") or "")
+    target = str(action.get("target_candidate_id") or action.get("candidate_id") or "")
+    return (
+        action.get("action_type") == _REPEATED_SCAFFOLD_ACTION_TYPE
+        or candidate_family == _REPEATED_SCAFFOLD_CANDIDATE_FAMILY
+        or target.startswith("repeated-scaffold-candidate:")
+    )
+
+
+def _target_identifiers(action: dict[str, Any], rule: dict[str, Any] | None = None) -> dict[str, str | None]:
+    nested = _nested_dict(action, "action")
+    proposed = _nested_dict(nested, "proposed_edit")
+    rule = rule or {}
+    rule_id = str(
+        rule.get("id")
+        or proposed.get("id")
+        or action.get("target_rule_id")
+        or nested.get("target_rule_id")
+        or ""
+    ).strip() or None
+    candidate_id = str(
+        rule.get("candidate_id")
+        or proposed.get("candidate_id")
+        or action.get("target_candidate_id")
+        or action.get("candidate_id")
+        or ""
+    ).strip() or None
+    action_id = str(action.get("action_id") or "").strip() or None
+    return {
+        "rule_id": rule_id,
+        "candidate_id": candidate_id,
+        "action_id": action_id,
+    }
+
+
+def _target_matches_rule(rule: Any, target: dict[str, str | None]) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    rule_ids = {
+        str(rule.get("id") or "").strip(),
+        str(rule.get("rule_id") or "").strip(),
+    }
+    candidate_ids = {
+        str(rule.get("candidate_id") or "").strip(),
+        str(_nested_value(rule, "rollout_action", "target_candidate_id") or "").strip(),
+    }
+    action_ids = {
+        str(_nested_value(rule, "rollout_action", "action_id") or "").strip(),
+    }
+    return bool(
+        (target.get("rule_id") and target["rule_id"] in rule_ids)
+        or (target.get("candidate_id") and target["candidate_id"] in candidate_ids)
+        or (target.get("action_id") and target["action_id"] in action_ids)
+    )
+
+
+def _safe_reason_codes(action: dict[str, Any]) -> list[str]:
+    raw = (
+        action.get("reason_codes")
+        or _nested_value(action, "evidence_summary", "rollout_decision", "reason_codes")
+        or _nested_value(action, "evidence_summary", "rollout_gate", "reason_codes")
+        or []
+    )
+    if not isinstance(raw, list):
+        raw = [raw]
+    return [str(item) for item in raw if isinstance(item, (str, int, float, bool))]
 
 
 def _safe_conditions(value: Any) -> dict[str, Any]:
@@ -249,19 +358,37 @@ def validate_scaffold_rollout_bundle(bundle: Any) -> dict[str, Any]:
     if not isinstance(actions, list):
         _add_error(errors, "$.actions", "expected list")
         actions = []
+    omitted_actions = bundle.get("omitted_actions")
+    if omitted_actions is None:
+        omitted_actions = []
+    if not isinstance(omitted_actions, list):
+        _add_error(errors, "$.omitted_actions", "expected list")
+        omitted_actions = []
     for index, action in enumerate(actions):
         if not isinstance(action, dict):
             _add_error(errors, f"$.actions[{index}]", "expected scaffold rollout action object")
             continue
         if action.get("schema") != _OPTIMIZATION_ROLLOUT_ACTION_SCHEMA:
             _add_error(errors, f"$.actions[{index}].schema", f"expected {_OPTIMIZATION_ROLLOUT_ACTION_SCHEMA}")
-        if action.get("action_type") == _REPEATED_SCAFFOLD_ACTION_TYPE or action.get("candidate_family") == _REPEATED_SCAFFOLD_CANDIDATE_FAMILY:
+        if _is_repeated_scaffold_action(action):
             _rule, action_errors = _repeated_scaffold_rule_from_action(action)
             for error in action_errors:
                 _add_error(
                     errors,
                     f"$.actions[{index}]{str(error.get('path') or '$')[1:]}",
                     str(error.get("message") or "invalid repeated-scaffold action"),
+                )
+    for index, action in enumerate(omitted_actions):
+        if not isinstance(action, dict):
+            _add_error(errors, f"$.omitted_actions[{index}]", "expected scaffold rollout omitted action object")
+            continue
+        if _is_repeated_scaffold_action(action):
+            _action, action_errors = _repeated_scaffold_lifecycle_action(action)
+            for error in action_errors:
+                _add_error(
+                    errors,
+                    f"$.omitted_actions[{index}]{str(error.get('path') or '$')[1:]}",
+                    str(error.get("message") or "invalid repeated-scaffold lifecycle action"),
                 )
 
     _scan_raw_like(bundle, "$", errors)
@@ -277,11 +404,59 @@ def validate_scaffold_rollout_bundle(bundle: Any) -> dict[str, Any]:
         "schema": "agentflow.scaffold_rollout_actions_validation.v1",
         "ok": not errors,
         "bundle_schema": bundle.get("schema"),
-        "action_count": len(actions),
+        "action_count": len(actions) + len(omitted_actions),
         "errors": errors,
         "warnings": warnings,
         "provenance": provenance,
     }
+
+
+def _repeated_scaffold_lifecycle_action(action: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    errors: list[dict[str, str]] = []
+    decision = _scaffold_next_action(action)
+    if decision not in _REPEATED_SCAFFOLD_DECISIONS:
+        errors.append({"path": "$.next_action", "message": "unsupported repeated-scaffold rollout decision"})
+    if action.get("candidate_family") not in (None, _REPEATED_SCAFFOLD_CANDIDATE_FAMILY):
+        errors.append({"path": "$.candidate_family", "message": "not a repeated-scaffold candidate"})
+    if action.get("policy_section") not in (None, "crunch") or action.get("action_family") not in (None, "crunch"):
+        errors.append({"path": "$.policy_section", "message": "repeated-scaffold actions must target crunch policy"})
+    target = _target_identifiers(action)
+    if not target.get("rule_id") and not target.get("candidate_id") and not target.get("action_id"):
+        errors.append({"path": "$.target_candidate_id", "message": "repeated-scaffold lifecycle action needs a target id"})
+    privacy = action.get("privacy_summary") if isinstance(action.get("privacy_summary"), dict) else {}
+    for key in (
+        "raw_payloads_returned",
+        "raw_prompts_returned",
+        "raw_responses_returned",
+        "provider_bodies_returned",
+        "request_ids_returned",
+        "tenant_ids_returned",
+        "cache_keys_returned",
+        "file_paths_returned",
+        "provider_forwarding",
+        "server_content_processing",
+        "managed_enforced",
+    ):
+        if bool(privacy.get(key)):
+            errors.append({"path": f"$.privacy_summary.{key}", "message": "scaffold rollout action is not metadata-only"})
+    if errors:
+        return None, errors
+    return {
+        "decision": decision,
+        "target": target,
+        "reason_codes": _safe_reason_codes(action),
+        "policy_source": "managed-recommended",
+        "rollout_action": {
+            "schema": "agentflow.repeated_scaffold_rollout_action.v1",
+            "action_id": action.get("action_id"),
+            "action_type": action.get("action_type") or decision,
+            "next_action": decision,
+            "target_candidate_id": action.get("target_candidate_id"),
+            "confidence": action.get("confidence"),
+            "reason_codes": _safe_reason_codes(action),
+            "reviewed_at": utc_now(),
+        },
+    }, []
 
 
 def _repeated_scaffold_rule_from_action(action: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -290,9 +465,12 @@ def _repeated_scaffold_rule_from_action(action: dict[str, Any]) -> tuple[dict[st
     proposed = nested.get("proposed_edit") if isinstance(nested.get("proposed_edit"), dict) else {}
     proposed_action = proposed.get("action") if isinstance(proposed.get("action"), dict) else {}
     thresholds = nested.get("thresholds") if isinstance(nested.get("thresholds"), dict) else {}
+    decision = _scaffold_next_action(action)
 
-    if action.get("action_type") != _REPEATED_SCAFFOLD_ACTION_TYPE:
-        errors.append({"path": "$.action_type", "message": "not a repeated-scaffold rollout action"})
+    if action.get("action_type") not in {_REPEATED_SCAFFOLD_ACTION_TYPE, *_REPEATED_SCAFFOLD_DECISIONS}:
+        errors.append({"path": "$.action_type", "message": "not a supported repeated-scaffold rollout action"})
+    if decision not in {"widen", "promote"}:
+        return _repeated_scaffold_lifecycle_action(action)
     if action.get("candidate_family") != _REPEATED_SCAFFOLD_CANDIDATE_FAMILY:
         errors.append({"path": "$.candidate_family", "message": "not a repeated-scaffold candidate"})
     if action.get("policy_section") != "crunch" or action.get("action_family") != "crunch":
@@ -380,10 +558,12 @@ def _repeated_scaffold_rule_from_action(action: dict[str, Any]) -> tuple[dict[st
             "schema": "agentflow.repeated_scaffold_rollout_action.v1",
             "action_id": action.get("action_id"),
             "action_type": action.get("action_type"),
+            "next_action": decision,
             "target_candidate_id": action.get("target_candidate_id"),
             "confidence": action.get("confidence"),
             "canary_fraction": canary_fraction,
             "holdout_fraction": holdout_fraction,
+            "reason_codes": _safe_reason_codes(action),
             "reviewed_at": utc_now(),
         },
     }
@@ -393,35 +573,65 @@ def _repeated_scaffold_rule_from_action(action: dict[str, Any]) -> tuple[dict[st
 def review_scaffold_rollout_actions(bundle: Any) -> dict[str, Any]:
     validation = validate_scaffold_rollout_bundle(bundle)
     actions = bundle.get("actions") if isinstance(bundle, dict) and isinstance(bundle.get("actions"), list) else []
+    omitted_actions = bundle.get("omitted_actions") if isinstance(bundle, dict) and isinstance(bundle.get("omitted_actions"), list) else []
     accepted_actions: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
     if validation.get("ok"):
-        for index, action in enumerate(actions):
+        review_inputs = [
+            ("actions", index, action)
+            for index, action in enumerate(actions)
+            if isinstance(action, dict)
+        ] + [
+            ("omitted_actions", index, action)
+            for index, action in enumerate(omitted_actions)
+            if isinstance(action, dict)
+        ]
+        for section, index, action in review_inputs:
             if not isinstance(action, dict):
                 continue
-            if action.get("action_type") != _REPEATED_SCAFFOLD_ACTION_TYPE and action.get("candidate_family") != _REPEATED_SCAFFOLD_CANDIDATE_FAMILY:
+            if not _is_repeated_scaffold_action(action):
                 continue
             rule, rule_errors = _repeated_scaffold_rule_from_action(action)
             if rule_errors:
                 for error in rule_errors:
                     errors.append({
-                        "path": f"$.actions[{index}]{error.get('path', '$')[1:]}",
+                        "path": f"$.{section}[{index}]{error.get('path', '$')[1:]}",
                         "message": str(error.get("message") or "invalid repeated-scaffold action"),
                     })
                 continue
-            if rule is not None:
+            decision = str((rule or {}).get("decision") or _nested_value(rule, "rollout_action", "next_action") or _scaffold_next_action(action))
+            target = _target_identifiers(action, rule)
+            if rule is not None and "id" in rule:
                 accepted_actions.append({
-                    "path": f"$.actions[{index}]",
+                    "path": f"$.{section}[{index}]",
                     "status": "accepted",
                     "action_id": action.get("action_id"),
+                    "decision": decision,
                     "target_candidate_id": action.get("target_candidate_id"),
                     "target_rule_id": rule.get("id"),
                     "policy_section": "crunch",
                     "policy_source": "managed-recommended",
+                    "target_local_policy": "crunch_rules" if decision == "promote" else "scaffold_canary",
                     "canary_fraction": (rule.get("rollout") or {}).get("canary_fraction"),
                     "holdout_fraction": (rule.get("rollout_action") or {}).get("holdout_fraction"),
+                    "reason_codes": (rule.get("rollout_action") or {}).get("reason_codes", []),
                     "proposed_rule": rule,
+                })
+            elif rule is not None:
+                accepted_actions.append({
+                    "path": f"$.{section}[{index}]",
+                    "status": "accepted",
+                    "action_id": action.get("action_id"),
+                    "decision": decision,
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": target.get("rule_id"),
+                    "target": target,
+                    "policy_section": "crunch",
+                    "policy_source": "managed-recommended",
+                    "target_local_policy": "none" if decision == "hold" else "repeated_provider_scaffolding",
+                    "reason_codes": rule.get("reason_codes", []),
+                    "rollout_action": rule.get("rollout_action"),
                 })
 
     validation_errors = validation.get("errors", []) if isinstance(validation.get("errors"), list) else []
@@ -438,6 +648,7 @@ def review_scaffold_rollout_actions(bundle: Any) -> dict[str, Any]:
         "validation": validation,
         "provenance": validation.get("provenance"),
         "action_count": len(actions),
+        "omitted_action_count": len(omitted_actions),
         "accepted_action_count": len(accepted_actions),
         "errors": [*validation_errors, *errors],
         "warnings": validation.get("warnings", []),
@@ -457,6 +668,131 @@ def review_scaffold_rollout_actions(bundle: Any) -> dict[str, Any]:
     }
 
 
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _provider_scaffolding_section(data: dict[str, Any]) -> dict[str, Any]:
+    section = data.get("repeated_provider_scaffolding")
+    if not isinstance(section, dict):
+        section = {}
+        data["repeated_provider_scaffolding"] = section
+    rules = section.get("rules")
+    if not isinstance(rules, list):
+        section["rules"] = []
+    return section
+
+
+def _promoted_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    promoted = {key: value for key, value in rule.items() if key != "decision"}
+    rollout = promoted.get("rollout") if isinstance(promoted.get("rollout"), dict) else {}
+    promoted["rollout"] = {
+        **rollout,
+        "schema": rollout.get("schema") or PATTERN_ROLLOUT_SCHEMA,
+        "recommendation_mode": "managed-repeated-scaffold-promoted",
+        "canary_enabled": False,
+        "canary_fraction": 1.0,
+    }
+    rollout_action = promoted.get("rollout_action") if isinstance(promoted.get("rollout_action"), dict) else {}
+    promoted["rollout_action"] = {
+        **rollout_action,
+        "next_action": "promote",
+        "promoted_at": utc_now(),
+    }
+    promoted["enabled"] = True
+    promoted["policy_source"] = "managed-recommended"
+    return promoted
+
+
+def _upsert_rule(rules: list[Any], rule: dict[str, Any]) -> bool:
+    target = _target_identifiers({}, rule)
+    for index, existing in enumerate(rules):
+        if _target_matches_rule(existing, target):
+            changed = existing != rule
+            rules[index] = rule
+            return changed
+    rules.append(rule)
+    return True
+
+
+def _disable_matching_rules(
+    rules: list[Any],
+    *,
+    target: dict[str, str | None],
+    decision: str,
+    reason_codes: list[str],
+) -> int:
+    changed = 0
+    for rule in rules:
+        if not _target_matches_rule(rule, target):
+            continue
+        if not isinstance(rule, dict):
+            continue
+        before = stable_json(rule)
+        rule["enabled"] = False
+        rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+        rule["rollout"] = {
+            **rollout,
+            "schema": rollout.get("schema") or PATTERN_ROLLOUT_SCHEMA,
+            "recommendation_mode": "managed-repeated-scaffold-rollback",
+            "canary_enabled": False,
+            "canary_fraction": 0.0,
+        }
+        rollout_action = rule.get("rollout_action") if isinstance(rule.get("rollout_action"), dict) else {}
+        rule["rollout_action"] = {
+            **rollout_action,
+            "next_action": decision,
+            "rollback_reason_codes": reason_codes,
+            "rolled_back_at": utc_now(),
+        }
+        if stable_json(rule) != before:
+            changed += 1
+    return changed
+
+
+def _dump_policy(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False)
+
+
+def _write_if_changed(path: Path, text: str, *, dry_run: bool) -> tuple[bool, str | None, str | None]:
+    old_text = path.read_text(encoding="utf-8") if path.exists() else None
+    changed = old_text != text
+    backup_path = None
+    if changed and not dry_run:
+        backup_path = _write_policy_file(path, text)
+    return changed, backup_path, old_text
+
+
+def _file_result(
+    *,
+    section: str,
+    path: Path,
+    changed: bool,
+    backup_path: str | None,
+    old_text: str | None,
+    new_text: str | None,
+    reason: str,
+    matched_rule_count: int | None = None,
+) -> dict[str, Any]:
+    result = {
+        "section": section,
+        "path": str(path),
+        "changed": bool(changed),
+        "backup_path": backup_path,
+        "sha256_before": _sha256_text(old_text) if old_text is not None else None,
+        "sha256_after": _sha256_text(new_text) if new_text is not None else None,
+        "bytes_after": len(new_text.encode("utf-8")) if new_text is not None else 0,
+        "reason": reason,
+    }
+    if matched_rule_count is not None:
+        result["matched_rule_count"] = matched_rule_count
+    return result
+
+
 def apply_scaffold_rollout_actions(
     bundle: Any,
     *,
@@ -465,22 +801,7 @@ def apply_scaffold_rollout_actions(
 ) -> dict[str, Any]:
     review = review_scaffold_rollout_actions(bundle)
     config_path = Path(config_dir).expanduser()
-    path = config_path / SCAFFOLD_CANARY_POLICY_FILE
     actions = [item for item in review.get("actions", []) if isinstance(item, dict)]
-    rules = [(item.get("proposed_rule") or {}) for item in actions if isinstance(item.get("proposed_rule"), dict)]
-    policy = {
-        "schema": SCAFFOLD_CANARY_POLICY_SCHEMA,
-        "generated_at": utc_now(),
-        "policy_source": "managed-recommended",
-        "repeated_provider_scaffolding": {
-            "enabled": bool(rules),
-            "rules": rules,
-        },
-    }
-    text = yaml.safe_dump(policy, sort_keys=False)
-    old_text = path.read_text(encoding="utf-8") if path.exists() else None
-    changed = old_text != text
-    backup_path = None
 
     result: dict[str, Any] = {
         "schema": SCAFFOLD_ROLLOUT_ACTIONS_APPLY_SCHEMA,
@@ -503,33 +824,143 @@ def apply_scaffold_rollout_actions(
     if not review.get("ok"):
         result["error"] = {"type": "validation_failed", "message": "scaffold rollout actions are invalid"}
         return result
-    if not rules:
+
+    promote_rules: list[dict[str, Any]] = []
+    canary_rules: list[dict[str, Any]] = []
+    rollback_actions: list[dict[str, Any]] = []
+    hold_count = 0
+    for action in actions:
+        decision = str(action.get("decision") or "")
+        rule = action.get("proposed_rule") if isinstance(action.get("proposed_rule"), dict) else None
+        if decision == "hold":
+            hold_count += 1
+            continue
+        if decision in _REPEATED_SCAFFOLD_ROLLBACK_DECISIONS:
+            rollback_actions.append(action)
+            continue
+        if rule is None:
+            continue
+        if decision == "promote":
+            promote_rules.append(_promoted_rule(rule))
+        else:
+            canary_rules.append(rule)
+
+    if not promote_rules and not canary_rules and not rollback_actions:
         result["ok"] = True
-        result["files"].append({
-            "section": "crunch",
-            "path": str(path),
-            "changed": False,
-            "backup_path": None,
-            "sha256_before": _sha256_text(old_text) if old_text is not None else None,
-            "sha256_after": None,
-            "bytes_after": 0,
-            "reason": "no-accepted-scaffold-actions",
-        })
+        result["files"].append(
+            _file_result(
+                section="crunch",
+                path=config_path / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE,
+                changed=False,
+                backup_path=None,
+                old_text=None,
+                new_text=None,
+                reason="hold-no-local-policy-change" if hold_count else "no-accepted-scaffold-actions",
+            )
+        )
         return result
 
-    if changed and not dry_run:
-        backup_path = _write_policy_file(path, text)
-    result["files"].append({
-        "section": "crunch",
-        "path": str(path),
-        "changed": bool(changed),
-        "backup_path": backup_path,
-        "sha256_before": _sha256_text(old_text) if old_text is not None else None,
-        "sha256_after": _sha256_text(text),
-        "bytes_after": len(text.encode("utf-8")),
-    })
+    if canary_rules:
+        path = config_path / SCAFFOLD_CANARY_POLICY_FILE
+        policy = {
+            "schema": SCAFFOLD_CANARY_POLICY_SCHEMA,
+            "generated_at": utc_now(),
+            "policy_source": "managed-recommended",
+            "repeated_provider_scaffolding": {
+                "enabled": True,
+                "rules": canary_rules,
+            },
+        }
+        text = _dump_policy(policy)
+        changed, backup_path, old_text = _write_if_changed(path, text, dry_run=dry_run)
+        result["files"].append(
+            _file_result(
+                section="scaffold_canary",
+                path=path,
+                changed=changed,
+                backup_path=backup_path,
+                old_text=old_text,
+                new_text=text,
+                reason="widen-scaffold-canary",
+            )
+        )
+
+    if promote_rules:
+        path = config_path / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE
+        data = _load_yaml_mapping(path)
+        section = _provider_scaffolding_section(data)
+        section["enabled"] = True
+        rules = section["rules"]
+        for rule in promote_rules:
+            _upsert_rule(rules, rule)
+        text = _dump_policy(data)
+        changed, backup_path, old_text = _write_if_changed(path, text, dry_run=dry_run)
+        result["files"].append(
+            _file_result(
+                section="crunch",
+                path=path,
+                changed=changed,
+                backup_path=backup_path,
+                old_text=old_text,
+                new_text=text,
+                reason="promote-repeated-scaffold-rule",
+            )
+        )
+
+    if rollback_actions:
+        for filename, section_name in (
+            (SCAFFOLD_CANARY_POLICY_FILE, "scaffold_canary"),
+            (SCAFFOLD_LOCAL_CRUNCH_RULES_FILE, "crunch"),
+        ):
+            path = config_path / filename
+            if not path.exists():
+                result["files"].append(
+                    _file_result(
+                        section=section_name,
+                        path=path,
+                        changed=False,
+                        backup_path=None,
+                        old_text=None,
+                        new_text=None,
+                        reason="rollback-target-file-missing",
+                        matched_rule_count=0,
+                    )
+                )
+                continue
+            data = _load_yaml_mapping(path)
+            section = _provider_scaffolding_section(data)
+            rules = section["rules"]
+            matched = 0
+            for action in rollback_actions:
+                target = action.get("target") if isinstance(action.get("target"), dict) else {
+                    "rule_id": action.get("target_rule_id"),
+                    "candidate_id": action.get("target_candidate_id"),
+                    "action_id": action.get("action_id"),
+                }
+                matched += _disable_matching_rules(
+                    rules,
+                    target=target,
+                    decision=str(action.get("decision") or "rollback"),
+                    reason_codes=[str(item) for item in action.get("reason_codes", [])],
+                )
+            section["enabled"] = any(isinstance(rule, dict) and _as_bool(rule.get("enabled"), True) for rule in rules)
+            text = _dump_policy(data)
+            changed, backup_path, old_text = _write_if_changed(path, text, dry_run=dry_run)
+            result["files"].append(
+                _file_result(
+                    section=section_name,
+                    path=path,
+                    changed=changed,
+                    backup_path=backup_path,
+                    old_text=old_text,
+                    new_text=text,
+                    reason="rollback-repeated-scaffold-rule" if matched else "rollback-target-not-found",
+                    matched_rule_count=matched,
+                )
+            )
+
     result["ok"] = True
-    result["wrote_policy_files"] = bool(changed and not dry_run)
+    result["wrote_policy_files"] = any(bool(file.get("changed")) for file in result["files"]) and not dry_run
     return result
 
 
