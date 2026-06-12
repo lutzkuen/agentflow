@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 SCHEMA = "agentflow.provider_adoption_regression_gate.v1"
 
-RISK_STATUSES = {"abandoned", "orphan-result", "unknown"}
+RISK_STATUSES = {"abandoned", "orphan-result", "orphan_result", "unknown"}
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -32,6 +32,13 @@ def _public_label(value: Any, fallback: str = "unknown") -> str:
     if text and text[0].isalnum() and len(text) <= 80 and all(ch.isalnum() or ch in ".:-" for ch in text):
         return text
     return fallback
+
+
+def _status_label(value: Any) -> str:
+    text = _public_label(value, "unknown")
+    if text == "orphan-result":
+        return "orphan_result"
+    return text
 
 
 def _rate(count: int, total: int) -> float:
@@ -133,7 +140,7 @@ def build_provider_adoption_gate(
         for window in windows:
             if not isinstance(window, dict):
                 continue
-            status = _public_label(window.get("status"), "unknown")
+            status = _status_label(window.get("status"))
             relationship = _public_label(window.get("relationship"), "unknown")
             bucket["window_count"] += 1
             bucket["tool_use_count"] += _as_int(window.get("tool_use_count"))
@@ -144,11 +151,11 @@ def build_provider_adoption_gate(
                 bucket["fulfilled_count"] += 1
             elif status == "abandoned":
                 bucket["abandoned_count"] += 1
-            elif status == "orphan-result":
+            elif status == "orphan_result":
                 bucket["orphan_result_count"] += 1
             elif status == "unknown":
                 bucket["unknown_count"] += 1
-            if status in RISK_STATUSES or status in {"orphan-result"}:
+            if status in RISK_STATUSES:
                 bucket["risk_window_count"] += 1
 
     finalized = {key: _finalize(value) for key, value in cohorts.items()}

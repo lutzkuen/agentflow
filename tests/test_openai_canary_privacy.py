@@ -99,6 +99,7 @@ class FakeQueuedFeedbackStore:
     def __init__(self) -> None:
         self.rows: list[dict[str, object]] = []
         self.updated: list[tuple[str, dict[str, object]]] = []
+        self.provider_adoption_by_call: dict[str, list[dict[str, object]]] = {}
 
     def enqueue_managed_outcome_feedback(self, **kwargs: object) -> None:
         self.rows.append(dict(kwargs))
@@ -111,6 +112,13 @@ class FakeQueuedFeedbackStore:
 
     def update_call_routing_json(self, call_id: str, routing_json: str) -> None:
         self.updated.append((call_id, json.loads(routing_json)))
+
+    def provider_tool_adoption_windows_for_call_ids(self, call_ids: list[str]) -> dict[str, list[dict[str, object]]]:
+        return {
+            call_id: self.provider_adoption_by_call[call_id]
+            for call_id in call_ids
+            if call_id in self.provider_adoption_by_call
+        }
 
 
 class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
@@ -540,6 +548,99 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         public_feedback_meta = store.updated[0][1]["managed_recommendation"]["outcome_feedback"]
         self.assertEqual(public_feedback_meta["status"], "queued")
         _assert_openai_canary_privacy_clean(self, public_feedback_meta)
+
+    def test_openai_managed_outcome_feedback_includes_provider_adoption_quality_without_raw_ids(self) -> None:
+        store = FakeQueuedFeedbackStore()
+        store.provider_adoption_by_call["call-openai-adoption-privacy"] = [
+            {
+                "status": "orphan_result",
+                "reason": "no-pending-tool-use-window",
+                "age_bucket": "0_1m",
+                "relationship": "fulfilled_tool_result",
+                "tool_use_count": 0,
+                "tool_result_count": 1,
+                "tool_id": "call_secret_456",
+                "session_id": "raw-openai-session-canary",
+                "correlation_digest": "sha256:raw-provider-adoption-tool-secret",
+                "tool_payload": "raw-canary-tool-payload-secret",
+                "file_path": "/home/lutz/private/canary_secret.py",
+            }
+        ]
+        routing_meta = {
+            "reason": "OpenAI canary selected local route",
+            "policy_source": "local-manual",
+            "category": "tool-result",
+            "managed_recommendation": {
+                "enabled": True,
+                "optimization_unit_id": 91,
+                "recommendation_id": "rec-openai-adoption-privacy",
+                "policy_id": "local-openai-canary-privacy",
+                "target_model": "gpt-5-mini",
+                "mode": "canary",
+                "status": "applied",
+                "lifecycle_event": "canary_applied",
+                "applied": True,
+                "changed_model": True,
+                "apply_reason": "canary-selected",
+                "canary": {"enabled": True, "cohort": "canary_applied"},
+                **_raw_like_extra_fields(),
+            },
+            "openai_canary": {
+                "enabled": True,
+                "policy_id": "local-openai-canary-privacy",
+                "candidate_id": "openai-canary-candidate-privacy",
+                "status": "applied",
+                "cohort": "canary_applied",
+                **_raw_like_extra_fields(),
+            },
+            **_raw_like_extra_fields(),
+        }
+
+        with patch.dict(os.environ, {"AGENTFLOW_RECOMMENDATION_ENABLED": "1"}):
+            asyncio.run(
+                record_managed_outcome_feedback(
+                    store=store,
+                    call_id="call-openai-adoption-privacy",
+                    path="/v1/responses",
+                    requested_model="gpt-5-codex",
+                    routed_model="gpt-5-mini",
+                    status_code=200,
+                    latency_ms=125,
+                    retry_count=0,
+                    input_tokens_est=300,
+                    output_tokens_est=40,
+                    actual_input_tokens=300,
+                    actual_output_tokens=40,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    thinking_output_tokens=0,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.003,
+                    cache_meta={"status": "miss", "reason": "exact-miss", **_raw_like_extra_fields()},
+                    crunch_meta={"changed": False, **_raw_like_extra_fields()},
+                    routing_meta=routing_meta,
+                    category="tool-result",
+                    session_id="raw-openai-session-canary",
+                    error=None,
+                )
+            )
+
+        self.assertEqual(len(store.rows), 1)
+        payload = json.loads(str(store.rows[0]["payload_json"]))
+        adoption = payload["quality_signals"]["provider_adoption"]
+        self.assertEqual(adoption["status_counts"], {"orphan_result": 1})
+        self.assertEqual(adoption["risk_window_count"], 1)
+        self.assertIn("orphan-tool-result", payload["quality_signals"]["signal_codes"])
+        self.assertNotIn("windows", payload["quality_signals"])
+        _assert_openai_canary_privacy_clean(self, payload)
+        for forbidden in (
+            "call_secret_456",
+            "raw-provider-adoption-tool-secret",
+            "raw-openai-session-canary",
+            "raw-canary-tool-payload-secret",
+            "/home/lutz/private/canary_secret.py",
+        ):
+            self.assertNotIn(forbidden, json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":

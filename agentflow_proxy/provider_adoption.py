@@ -237,7 +237,7 @@ def _openai_response_tool_uses(body: dict[str, Any] | None) -> tuple[list[str], 
         if not isinstance(value, dict):
             return
         kind = str(value.get("type") or "")
-        if kind in {"function_call", "tool_call"}:
+        if kind in {"function_call", "tool_call", "function"}:
             tool_id = value.get("call_id") or value.get("id")
             if tool_id:
                 ids.append(str(tool_id))
