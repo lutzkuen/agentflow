@@ -46,6 +46,7 @@ from agentflow_proxy.cache import (
     stream_cache_payload, validate_stream_cache_payload,
     streaming_cache_lookup_meta, cache_file_dependency_snapshots,
 )
+from agentflow_proxy.optimization_coordinator_enforcement import enforce_optimization_coordinator
 from agentflow_proxy.errors import (
     INTERNAL_PROXY_ERROR_MESSAGE,
     public_proxy_error_body,
@@ -1228,6 +1229,24 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 cache_meta=cache_meta,
                 current_thinking=_has_top_level_thinking(crunched),
             )
+            coordinator_enforcement = enforce_optimization_coordinator(
+                routing_meta=routing_meta,
+                crunch_meta=crunch_meta,
+                cache_meta=cache_meta,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint=path,
+                requested_model=str(resolved_requested_model),
+                routed_model=str(crunched.get("model") or routed_model),
+                input_tokens_est=input_tokens,
+                category=category,
+                stream=True,
+                session_id=session_id,
+                provider_body=crunched,
+                local_routed_model=str(routed_model),
+            )
+            if "cache_replay" in coordinator_enforcement.get("suppressed_managed_families", []):
+                can_stream_cache = False
             replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
             if replay_pattern_rule is not None:
                 cache_meta["replay_scope"] = replay_scope
@@ -1676,6 +1695,25 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cache_meta=cache_meta,
             current_thinking=_has_top_level_thinking(crunched),
         )
+        coordinator_enforcement = enforce_optimization_coordinator(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint=path,
+            requested_model=str(resolved_requested_model),
+            routed_model=str(crunched.get("model") or routed_model),
+            input_tokens_est=input_tokens,
+            category=category,
+            stream=False,
+            session_id=session_id,
+            provider_body=crunched,
+            local_routed_model=str(routed_model),
+        )
+        if "cache_replay" in coordinator_enforcement.get("suppressed_managed_families", []):
+            can_cache = False
+            can_semantic_cache = False
         replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
         if replay_pattern_rule is not None:
             cache_meta["replay_scope"] = replay_scope

@@ -59,6 +59,7 @@ class OpenAILocalPolicyStage:
     stage: str
     provider_body: dict[str, Any]
     resolved_requested_model: str
+    local_routed_model: str
     routed_model: str
     input_tokens_est: int
     crunch_meta: dict[str, Any]
@@ -163,6 +164,7 @@ def execute_openai_local_policy(
 
     routed_model, routing_meta = router(provider_body)
     resolved_requested_model = str(provider_body.get("model") or requested_model)
+    local_routed_model = str(routed_model)
     provider_body["model"] = routed_model
     input_tokens = estimate_tokens_from_text(extract_text(provider_body))
     cache_meta = cache_decision_meta("skipped", "not-evaluated")
@@ -202,6 +204,7 @@ def execute_openai_local_policy(
         stage="execute_local_policy",
         provider_body=provider_body,
         resolved_requested_model=resolved_requested_model,
+        local_routed_model=local_routed_model,
         routed_model=str(provider_body.get("model") or routed_model),
         input_tokens_est=input_tokens,
         crunch_meta=crunch_meta,

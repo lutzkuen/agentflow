@@ -766,6 +766,9 @@ def attach_openai_optimization_governor(
 def selected_openai_governor_family(meta: dict[str, Any] | None) -> str:
     if not isinstance(meta, dict):
         return "none"
+    enforcement = meta.get("optimization_coordinator_enforcement")
+    if isinstance(enforcement, dict) and enforcement.get("enabled") and enforcement.get("status") == "applied":
+        return str(enforcement.get("selected_family") or "none")
     governor = meta.get("openai_optimization_governor")
     if not isinstance(governor, dict):
         return "none"

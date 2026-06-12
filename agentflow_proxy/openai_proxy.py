@@ -52,6 +52,7 @@ from agentflow_proxy.openai_optimization_governor import (
     attach_openai_optimization_governor,
     selected_openai_governor_family,
 )
+from agentflow_proxy.optimization_coordinator_enforcement import enforce_optimization_coordinator
 from agentflow_proxy.provider_adoption import capture_provider_tool_adoption, openai_stream_tool_use_ids
 from agentflow_proxy.optimization.openai_features import (
     openai_call_store_fields,
@@ -625,6 +626,22 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             stream=stream,
             session_id=session_id,
         )
+        enforce_optimization_coordinator(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            provider="openai",
+            source_surface=str(routing_meta.get("source_surface") or "openai_responses"),
+            endpoint=str(routing_meta.get("endpoint") or path),
+            requested_model=requested_model,
+            routed_model=str(crunched.get("model")),
+            input_tokens_est=input_tokens,
+            category=category,
+            stream=stream,
+            session_id=session_id,
+            provider_body=crunched,
+            local_routed_model=local_policy.local_routed_model,
+        )
         if selected_openai_governor_family(routing_meta) == "routing":
             summary_meta = {
                 "schema": "agentflow.openai_old_context_summary.v1",
@@ -823,6 +840,22 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         stream=True,
                         session_id=session_id,
                     )
+                    enforce_optimization_coordinator(
+                        routing_meta=routing_meta,
+                        crunch_meta=crunch_meta,
+                        cache_meta=stream_cache_meta,
+                        provider="openai",
+                        source_surface=str(routing_meta.get("source_surface") or "openai_responses"),
+                        endpoint=str(routing_meta.get("endpoint") or path),
+                        requested_model=requested_model,
+                        routed_model=str(crunched.get("model")),
+                        input_tokens_est=input_tokens,
+                        category=category,
+                        stream=True,
+                        session_id=session_id,
+                        provider_body=crunched,
+                        local_routed_model=local_policy.local_routed_model,
+                    )
                     attach_openai_outcome_summary(
                         path=path,
                         requested_model=requested_model,
@@ -952,6 +985,25 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             stream=False,
             session_id=session_id,
         )
+        coordinator_enforcement = enforce_optimization_coordinator(
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            provider="openai",
+            source_surface=str(routing_meta.get("source_surface") or "openai_responses"),
+            endpoint=str(routing_meta.get("endpoint") or path),
+            requested_model=requested_model,
+            routed_model=str(crunched.get("model")),
+            input_tokens_est=input_tokens,
+            category=category,
+            stream=False,
+            session_id=session_id,
+            provider_body=crunched,
+            local_routed_model=local_policy.local_routed_model,
+        )
+        if "cache_replay" in coordinator_enforcement.get("suppressed_managed_families", []):
+            can_cache = False
+            can_semantic_cache = False
         replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
         if replay_pattern_rule is not None:
             cache_meta["replay_scope"] = replay_scope
