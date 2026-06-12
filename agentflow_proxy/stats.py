@@ -4224,6 +4224,11 @@ async def stats_cache_replay_readiness(store_obj: Any, limit: int = 1000) -> dic
 
     confidence_summary = confidence.get("summary") if isinstance(confidence.get("summary"), dict) else {}
     replay_summary = replayability.get("summary") if isinstance(replayability.get("summary"), dict) else {}
+    session_memory_proposals = (
+        replayability.get("session_memory_replay_proposals")
+        if isinstance(replayability.get("session_memory_replay_proposals"), list)
+        else []
+    )
     active = sum(1 for row in rows if row.get("readiness") in {"ready", "active-no-holdout"})
     blocked = sum(1 for row in rows if row.get("readiness") in {"blocked", "safety-stopped", "disabled"})
     if confidence_summary.get("safety_stop_active"):
@@ -4259,6 +4264,9 @@ async def stats_cache_replay_readiness(store_obj: Any, limit: int = 1000) -> dic
             "estimated_saved_cost_usd": _as_float(confidence_summary.get("estimated_saved_cost_usd")),
             "repeated_shape_groups": _as_int(replay_summary.get("repeated_shape_groups")),
             "repeated_shape_exists_but_cache_is_unsafe": bool(replay_summary.get("repeated_shape_exists_but_cache_is_unsafe")),
+            "session_memory_replay_proposal_count": _as_int(replay_summary.get("session_memory_replay_proposal_count")),
+            "session_memory_replay_eligible_count": _as_int(replay_summary.get("session_memory_replay_eligible_count")),
+            "session_memory_replay_blocked_count": _as_int(replay_summary.get("session_memory_replay_blocked_count")),
             "policy_source": cache_policy.get("policy_source") or "unknown",
             "cache_enabled": bool(cache_policy.get("enabled")),
             "exact_cache_enabled": bool(((cache_policy.get("exact_cache") or {}) if isinstance(cache_policy.get("exact_cache"), dict) else {}).get("enabled")),
@@ -4271,6 +4279,7 @@ async def stats_cache_replay_readiness(store_obj: Any, limit: int = 1000) -> dic
         "stale_risk_breakdown": confidence.get("stale_risk_breakdown") or [],
         "safety_stop_breakdown": confidence.get("safety_stop_breakdown") or [],
         "blocker_breakdown": replayability.get("blocker_breakdown") or [],
+        "session_memory_replay_proposals": session_memory_proposals[: max(1, min(int(limit or 50), 1000))],
         "rules": rows[: max(1, min(int(limit or 50), 1000))],
         "privacy": {
             "metadata_only": True,
@@ -5286,6 +5295,12 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
     file_dependency_audit = _cache_file_dependency_audit_from_cache(cache)
     file_dependency_count = _as_int(file_dependency_audit.get("snapshot_count"))
     file_dependency_evidence_available = bool(file_dependency_audit.get("file_dependency_evidence_available"))
+    session_memory_hints = cache.get("session_memory_hints") if isinstance(cache.get("session_memory_hints"), dict) else {}
+    session_memory_proposal = (
+        session_memory_hints.get("dry_run_replay_proposal")
+        if isinstance(session_memory_hints.get("dry_run_replay_proposal"), dict)
+        else None
+    )
     unit = {
         "source_surface": canonical_source_surface(source_surface),
         "granularity": granularity,
@@ -5311,6 +5326,7 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "file_dependency_count": file_dependency_count,
         "safe_invalidation_evidence": bool(file_dependency_audit.get("safe_invalidation_evidence")),
         "file_dependency_audit": file_dependency_audit,
+        "session_memory_replay_proposal": session_memory_proposal,
         "text_size_bucket": _size_bucket(text_chars),
         "input_items_bucket": _size_bucket(row.get("input_items")),
         "cost_est_usd": _as_float(row.get("cost_est_usd")),
@@ -5374,6 +5390,141 @@ def _cache_replayability_fingerprint(unit: dict[str, Any]) -> tuple[str, dict[st
     basis = _cache_replayability_fingerprint_basis(unit)
     raw = json.dumps(basis, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16], basis
+
+
+def _public_session_memory_replay_proposal(proposal: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(proposal, dict):
+        return None
+    fingerprint = str(proposal.get("proposal_fingerprint") or "")
+    if not fingerprint.startswith("sha256:"):
+        return None
+    blockers = [str(item) for item in proposal.get("blockers") or [] if isinstance(item, (str, int, float, bool))]
+    review_steps = [
+        str(item)
+        for item in proposal.get("review_steps") or []
+        if isinstance(item, (str, int, float, bool))
+    ][:8]
+    families = proposal.get("blocker_families") if isinstance(proposal.get("blocker_families"), dict) else {}
+    privacy = proposal.get("privacy") if isinstance(proposal.get("privacy"), dict) else {}
+    return {
+        "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+        "status": str(proposal.get("status") or "unknown"),
+        "reason": str(proposal.get("reason") or "unknown"),
+        "proposal_id": str(proposal.get("proposal_id") or f"session-memory-cache-replay:{fingerprint.removeprefix('sha256:')}"),
+        "proposal_fingerprint": fingerprint,
+        "rule_id": str(proposal.get("rule_id") or "local-session-plateau-cache-hint"),
+        "policy_source": str(proposal.get("policy_source") or "unknown"),
+        "policy_rule_path_included": False,
+        "phase": str(proposal.get("phase") or "unknown"),
+        "category": str(proposal.get("category") or "unknown"),
+        "stream": bool(proposal.get("stream")),
+        "has_tool_blocks": bool(proposal.get("has_tool_blocks")),
+        "thinking_present": bool(proposal.get("thinking_present")),
+        "text_size_bucket": str(proposal.get("text_size_bucket") or "unknown"),
+        "projected_tokens_saved_est": _as_int(proposal.get("projected_tokens_saved_est")),
+        "projected_savings_bucket": str(proposal.get("projected_savings_bucket") or "none"),
+        "projected_cost_savings_bucket": str(proposal.get("projected_cost_savings_bucket") or "none"),
+        "blockers": sorted(set(blockers)),
+        "blocker_families": {
+            key: bool(families.get(key))
+            for key in (
+                "streaming",
+                "tool",
+                "thinking",
+                "safe_invalidation",
+                "reviewed_pattern_rule",
+                "session_memory",
+                "quality",
+            )
+        },
+        "review_steps": review_steps,
+        "mutation_applied": False,
+        "cache_mutation": False,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
+        "provider_calls_made": 0,
+        "managed_server_calls_made": 0,
+        "dry_run": True,
+        "privacy": {
+            "metadata_only": bool(privacy.get("metadata_only", True)),
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
+            "pattern_hashes_included": False,
+        },
+    }
+
+
+def _session_memory_replay_proposal_rows(units: list[dict[str, Any]], *, limit: int = 25) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for unit in units:
+        proposal = _public_session_memory_replay_proposal(
+            unit.get("session_memory_replay_proposal")
+            if isinstance(unit.get("session_memory_replay_proposal"), dict)
+            else {}
+        )
+        if proposal is None:
+            continue
+        key = (
+            str(proposal.get("proposal_fingerprint")),
+            str(proposal.get("status")),
+            str(proposal.get("rule_id")),
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                **proposal,
+                "count": 0,
+                "estimated_cost_usd": 0.0,
+                "baseline_cost_usd": 0.0,
+                "projected_repeated_call_cost_usd": 0.0,
+                "first_seen_at": unit.get("created_at"),
+                "last_seen_at": unit.get("created_at"),
+                "_blockers": set(proposal.get("blockers") or []),
+                "_review_steps": list(proposal.get("review_steps") or []),
+            },
+        )
+        bucket["count"] += 1
+        bucket["estimated_cost_usd"] += _as_float(unit.get("cost_est_usd"))
+        bucket["baseline_cost_usd"] += _as_float(unit.get("baseline_cost_usd"))
+        for blocker in proposal.get("blockers") or []:
+            bucket["_blockers"].add(str(blocker))
+        for step in proposal.get("review_steps") or []:
+            if step not in bucket["_review_steps"] and len(bucket["_review_steps"]) < 8:
+                bucket["_review_steps"].append(step)
+        if str(unit.get("created_at") or "") < str(bucket.get("first_seen_at") or unit.get("created_at") or ""):
+            bucket["first_seen_at"] = unit.get("created_at")
+        if str(unit.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+            bucket["last_seen_at"] = unit.get("created_at")
+
+    rows: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        count = _as_int(bucket.get("count"))
+        if count > 1:
+            avg_cost = float(bucket["estimated_cost_usd"]) / count
+            bucket["projected_repeated_call_cost_usd"] = max(0.0, float(bucket["estimated_cost_usd"]) - avg_cost)
+        bucket["blockers"] = sorted(bucket.pop("_blockers"))
+        bucket["review_steps"] = bucket.pop("_review_steps")
+        bucket["estimated_cost_usd"] = round(float(bucket["estimated_cost_usd"]), 6)
+        bucket["baseline_cost_usd"] = round(float(bucket["baseline_cost_usd"]), 6)
+        bucket["projected_repeated_call_cost_usd"] = round(float(bucket["projected_repeated_call_cost_usd"]), 6)
+        rows.append(bucket)
+    rows.sort(
+        key=lambda row: (
+            row.get("status") == "session-plateau-dry-run-eligible",
+            _as_float(row.get("projected_repeated_call_cost_usd")),
+            _as_int(row.get("count")),
+            _as_float(row.get("estimated_cost_usd")),
+        ),
+        reverse=True,
+    )
+    return rows[: max(1, int(limit or 25))]
 
 
 def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit: int = 25) -> dict[str, Any]:
@@ -5559,6 +5710,11 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
         for row in blocker_counts.values()
     ]
     blocker_rows.sort(key=lambda row: (row["calls"], row["projected_repeated_call_cost_usd"], row["estimated_cost_usd"]), reverse=True)
+    session_memory_proposals = _session_memory_replay_proposal_rows(units, limit=limit)
+    session_memory_status_counts: dict[str, int] = {}
+    for row in session_memory_proposals:
+        status = str(row.get("status") or "unknown")
+        session_memory_status_counts[status] = session_memory_status_counts.get(status, 0) + _as_int(row.get("count"))
     return {
         "schema": "agentflow.cache_replayability.v1",
         "generated_at": utc_now(),
@@ -5587,8 +5743,21 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             "unsafe_repeated_estimated_cost_usd": round(unsafe_repeated_cost, 6),
             "no_repeated_shape_exists": repeated_groups == 0,
             "repeated_shape_exists_but_cache_is_unsafe": unsafe_repeated_rows > 0,
+            "session_memory_replay_proposal_count": sum(_as_int(row.get("count")) for row in session_memory_proposals),
+            "session_memory_replay_eligible_count": sum(
+                _as_int(row.get("count"))
+                for row in session_memory_proposals
+                if row.get("status") == "session-plateau-dry-run-eligible"
+            ),
+            "session_memory_replay_blocked_count": sum(
+                _as_int(row.get("count"))
+                for row in session_memory_proposals
+                if row.get("status") != "session-plateau-dry-run-eligible"
+            ),
         },
         "blocker_breakdown": blocker_rows,
+        "session_memory_replay_proposal_breakdown": _breakdown_from_counts(session_memory_status_counts),
+        "session_memory_replay_proposals": session_memory_proposals,
         "groups": groups[: max(1, int(limit or 25))],
     }
 
@@ -5907,6 +6076,7 @@ def _cache_replay_dry_run_from_units(
     status_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     blocker_counts: dict[str, int] = {}
+    session_memory_proposals = _session_memory_replay_proposal_rows(units, limit=limit)
     for unit in units:
         decision = _cache_replay_dry_run_decision(unit, rules)
         status = str(decision.get("status") or "unknown")
@@ -6037,10 +6207,17 @@ def _cache_replay_dry_run_from_units(
             "cache_table_mutated": cache_rows_before != cache_rows_after,
             "provider_calls_made": 0,
             "cache_entries_written": 0,
+            "session_memory_replay_proposal_count": sum(_as_int(row.get("count")) for row in session_memory_proposals),
+            "session_memory_replay_eligible_count": sum(
+                _as_int(row.get("count"))
+                for row in session_memory_proposals
+                if row.get("status") == "session-plateau-dry-run-eligible"
+            ),
         },
         "status_breakdown": _breakdown_from_counts(status_counts),
         "reason_breakdown": _breakdown_from_counts(reason_counts),
         "blocker_breakdown": _breakdown_from_counts(blocker_counts),
+        "session_memory_replay_proposals": session_memory_proposals,
         "rows": rows[: max(1, int(limit or 50))],
         "privacy": {
             "metadata_only": True,

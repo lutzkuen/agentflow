@@ -179,6 +179,17 @@ class SessionMemoryHintTests(unittest.TestCase):
         self.assertEqual(cache["replayability_level"], "local-exact-response-dry-run")
         self.assertFalse(cache["cache_mutation"])
         self.assertTrue(cache["dry_run_projection"]["exact_replay_grouping_candidate"])
+        proposal = cache["dry_run_replay_proposal"]
+        self.assertEqual(proposal["schema"], "agentflow.session_memory_cache_replay_proposal.v1")
+        self.assertEqual(proposal["status"], "session-plateau-dry-run-eligible")
+        self.assertEqual(proposal["rule_id"], "test-plateau-cache")
+        self.assertTrue(proposal["proposal_fingerprint"].startswith("sha256:"))
+        self.assertIn("confirm exact replay", " ".join(proposal["review_steps"]))
+        self.assertNotEqual(proposal["projected_savings_bucket"], "none")
+        self.assertFalse(proposal["mutation_applied"])
+        self.assertFalse(proposal["cache_mutation"])
+        self.assertFalse(proposal["policy_files_written"])
+        self.assertFalse(proposal["policy_rule_path_included"])
 
         rendered = json.dumps(hints, sort_keys=True)
         self.assertIn("sha256:", rendered)
@@ -219,6 +230,8 @@ class SessionMemoryHintTests(unittest.TestCase):
         self.assertEqual(hints["cache"]["status"], "blocked")
         self.assertIn("no_session_memory", hints["cache"]["blockers"])
         self.assertFalse(hints["cache"]["cache_mutation"])
+        self.assertEqual(hints["cache"]["dry_run_replay_proposal"]["status"], "blocked")
+        self.assertIn("no_session_memory", hints["cache"]["dry_run_replay_proposal"]["blockers"])
         self.assertNotIn("secret-session-missing", json.dumps(hints, sort_keys=True))
         self.assertEqual(managed_egress_violations(hints), [])
 
@@ -350,6 +363,17 @@ class SessionMemoryHintTests(unittest.TestCase):
         self.assertIn("missing_invalidation_evidence", cache_blockers)
         self.assertIn("reviewed_pattern_rule_required", cache_blockers)
         self.assertFalse(hints["cache"]["dry_run_projection"]["eligible"])
+        proposal = hints["cache"]["dry_run_replay_proposal"]
+        self.assertEqual(proposal["status"], "blocked")
+        self.assertIn("streaming_replay_reviewed_rule_required", proposal["blockers"])
+        self.assertIn("tool_call_cache_disabled", proposal["blockers"])
+        self.assertIn("missing_invalidation_evidence", proposal["blockers"])
+        self.assertTrue(proposal["blocker_families"]["streaming"])
+        self.assertTrue(proposal["blocker_families"]["tool"])
+        self.assertTrue(proposal["blocker_families"]["thinking"])
+        self.assertTrue(proposal["blocker_families"]["safe_invalidation"])
+        self.assertTrue(proposal["blocker_families"]["reviewed_pattern_rule"])
+        self.assertFalse(proposal["cache_mutation"])
 
 
 if __name__ == "__main__":

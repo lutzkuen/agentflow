@@ -483,7 +483,41 @@ class PolicyReloadCliTests(unittest.TestCase):
                             },
                         }),
                         routing_json=stable_json({"category": "chat", "has_tools": False, "text_chars": 1200}),
-                        cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                        cache_json=stable_json({
+                            "status": "skipped",
+                            "reason": "streaming",
+                            "policy_source": "local-default",
+                            "session_memory_hints": {
+                                "dry_run_replay_proposal": {
+                                    "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+                                    "status": "session-plateau-dry-run-eligible",
+                                    "reason": "session-plateau-dry-run-eligible",
+                                    "proposal_id": "session-memory-cache-replay:cli123",
+                                    "proposal_fingerprint": "sha256:" + "b" * 16,
+                                    "rule_id": "cli-session-memory-cache",
+                                    "policy_source": "local-manual",
+                                    "phase": "summary",
+                                    "category": "chat",
+                                    "stream": True,
+                                    "has_tool_blocks": False,
+                                    "thinking_present": False,
+                                    "text_size_bucket": "8k_32k_chars",
+                                    "projected_tokens_saved_est": 1200,
+                                    "projected_savings_bucket": "1k_10k_tokens",
+                                    "projected_cost_savings_bucket": "lt_1c",
+                                    "blockers": [],
+                                    "blocker_families": {},
+                                    "review_steps": ["review metadata-only session plateau shape"],
+                                    "mutation_applied": False,
+                                    "cache_mutation": False,
+                                    "cache_entries_written": 0,
+                                    "policy_files_written": False,
+                                    "provider_calls_made": 0,
+                                    "managed_server_calls_made": 0,
+                                    "privacy": {"metadata_only": True},
+                                },
+                            },
+                        }),
                         request_json=stable_json({"messages": [{"content": "private cli cache prompt"}]}),
                         session_id="cli-cache-session-secret",
                         category="chat",
@@ -503,6 +537,9 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertAlmostEqual(payload["summary"]["projected_repeated_call_cost_usd"], 0.015)
         self.assertEqual(payload["groups"][0]["replay_candidate_class"], "streaming-non-tool-exact-candidate")
         self.assertEqual(payload["groups"][0]["cacheability_bucket"], "high")
+        self.assertEqual(payload["summary"]["session_memory_replay_eligible_count"], 2)
+        self.assertEqual(payload["session_memory_replay_proposals"][0]["status"], "session-plateau-dry-run-eligible")
+        self.assertEqual(payload["session_memory_replay_proposals"][0]["rule_id"], "cli-session-memory-cache")
         encoded = json.dumps(payload, sort_keys=True)
         self.assertNotIn("private cli cache prompt", encoded)
         self.assertNotIn("cli-cache-session-secret", encoded)

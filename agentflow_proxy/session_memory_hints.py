@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from agentflow_proxy.session_phase_memory import build_session_phase_memory_for_session
@@ -62,6 +64,35 @@ def _savings_bucket(tokens: int) -> str:
     return "gte_100k_tokens"
 
 
+def _cost_bucket(cost: float) -> str:
+    if cost <= 0:
+        return "none"
+    if cost < 0.01:
+        return "lt_1c"
+    if cost < 0.10:
+        return "1c_10c"
+    if cost < 1.0:
+        return "10c_1usd"
+    return "gte_1usd"
+
+
+def _text_bucket(chars: int) -> str:
+    if chars < 2_000:
+        return "lt_2k_chars"
+    if chars < 8_000:
+        return "2k_8k_chars"
+    if chars < 32_000:
+        return "8k_32k_chars"
+    if chars < 128_000:
+        return "32k_128k_chars"
+    return "gte_128k_chars"
+
+
+def _stable_hash(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
 def _memory_public_view(memory: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(memory, dict):
         return {
@@ -100,6 +131,159 @@ def _current_thinking_present(*, current_thinking: bool, routing_meta: dict[str,
     routing = routing_meta if isinstance(routing_meta, dict) else {}
     text = " ".join(str(routing.get(key) or "") for key in ("reason", "workflow_phase", "category"))
     return "thinking" in text.lower()
+
+
+def _cache_replay_review_steps(blockers: list[str]) -> list[str]:
+    steps = [
+        "review metadata-only session plateau shape",
+        "confirm exact replay is acceptable for this phase and category",
+    ]
+    blocker_set = set(blockers)
+    if "missing_invalidation_evidence" in blocker_set:
+        steps.append("capture safe local invalidation evidence before replay")
+    if "reviewed_pattern_rule_required" in blocker_set:
+        steps.append("stage a reviewed local cache pattern rule before replay")
+    if "streaming_replay_reviewed_rule_required" in blocker_set:
+        steps.append("review streaming replay behavior before enabling streamed hits")
+    if "tool_call_cache_disabled" in blocker_set or "tool_result_state_dependence" in blocker_set:
+        steps.append("prove tool-result state dependencies are stable or keep pass-through")
+    if "thinking_blocks_present" in blocker_set:
+        steps.append("keep thinking-session traffic pass-through until replay safety is proven")
+    steps.append("run cache replay dry-run and inspect holdout/invalidation plan")
+    return steps
+
+
+def _cache_replay_blocker_families(
+    *,
+    blockers: list[str],
+    stream: bool,
+    has_tool_blocks: bool,
+    current_thinking: bool,
+) -> dict[str, Any]:
+    blocker_set = set(blockers)
+    return {
+        "streaming": bool(stream or "streaming_replay_reviewed_rule_required" in blocker_set),
+        "tool": bool(
+            has_tool_blocks
+            or "tool_call_cache_disabled" in blocker_set
+            or "tool_result_state_dependence" in blocker_set
+        ),
+        "thinking": bool(current_thinking or "thinking_blocks_present" in blocker_set),
+        "safe_invalidation": "missing_invalidation_evidence" in blocker_set,
+        "reviewed_pattern_rule": "reviewed_pattern_rule_required" in blocker_set,
+        "session_memory": bool(
+            {
+                "no_session_memory",
+                "no_context_plateau",
+                "plateau_count_below_threshold",
+                "recent_call_count_below_threshold",
+                "request_too_small",
+                "phase_not_allowed",
+            }
+            & blocker_set
+        ),
+        "quality": bool(
+            {
+                "recent_error_rate_exceeded",
+                "recent_errors",
+                "recent_retries",
+                "recent_routing_fallback",
+                "small_sample",
+            }
+            & blocker_set
+        ),
+    }
+
+
+def _cache_replay_proposal(
+    *,
+    cache_hint_policy: dict[str, Any],
+    cache_enabled: bool,
+    cache_status: str,
+    cache_reason: str,
+    cache_blockers: list[str],
+    cache_tokens: int,
+    memory_view: dict[str, Any],
+    category: str | None,
+    stream: bool,
+    has_tool_blocks: bool,
+    current_thinking: bool,
+    text_chars: int,
+    policy_source: str,
+) -> dict[str, Any]:
+    phase = str(memory_view.get("dominant_phase") or "unknown")
+    rule_id = str(cache_hint_policy.get("rule_id") or "local-session-plateau-cache-hint")
+    eligible = bool(cache_enabled and cache_status == "eligible" and not cache_blockers)
+    status = "session-plateau-dry-run-eligible" if eligible else cache_status
+    fingerprint_basis = {
+        "rule_id": rule_id,
+        "session_key": memory_view.get("session_key"),
+        "phase": phase,
+        "category": str(category or "unknown"),
+        "stream": bool(stream),
+        "has_tool_blocks": bool(has_tool_blocks),
+        "thinking": bool(current_thinking),
+        "text_bucket": _text_bucket(text_chars),
+        "projected_savings_bucket": _savings_bucket(cache_tokens if eligible else 0),
+    }
+    fingerprint = _stable_hash(fingerprint_basis)
+    # Cost is a coarse bucket only. The report layer can add observed-cost aggregates from local metadata.
+    projected_cost = (cache_tokens if eligible else 0) * 0.000003
+    return {
+        "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+        "status": status,
+        "reason": cache_reason,
+        "proposal_id": f"session-memory-cache-replay:{fingerprint.removeprefix('sha256:')}",
+        "proposal_fingerprint": fingerprint,
+        "fingerprint_basis": {
+            **fingerprint_basis,
+            "session_key_included": bool(memory_view.get("session_key")),
+            "raw_session_id_included": False,
+        },
+        "rule_id": rule_id,
+        "policy_source": policy_source,
+        "policy_rule_path_included": False,
+        "phase": phase,
+        "category": str(category or "unknown"),
+        "stream": bool(stream),
+        "has_tool_blocks": bool(has_tool_blocks),
+        "thinking_present": bool(current_thinking),
+        "text_size_bucket": _text_bucket(text_chars),
+        "blockers": cache_blockers,
+        "blocker_families": _cache_replay_blocker_families(
+            blockers=cache_blockers,
+            stream=stream,
+            has_tool_blocks=has_tool_blocks,
+            current_thinking=current_thinking,
+        ),
+        "projected_tokens_saved_est": cache_tokens if eligible else 0,
+        "projected_savings_bucket": _savings_bucket(cache_tokens if eligible else 0),
+        "projected_cost_savings_bucket": _cost_bucket(projected_cost),
+        "review_steps": _cache_replay_review_steps(cache_blockers),
+        "mutation_applied": False,
+        "cache_mutation": False,
+        "cache_entries_written": 0,
+        "policy_files_written": False,
+        "provider_calls_made": 0,
+        "managed_server_calls_made": 0,
+        "dry_run": True,
+        "dry_run_projection": {
+            "eligible": eligible,
+            "exact_replay_grouping_candidate": eligible,
+            "requires_review_before_mutation": True,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+            "raw_session_ids_included": False,
+            "session_ids_hashed": True,
+        },
+    }
 
 
 def _base_blockers(
@@ -279,6 +463,26 @@ def build_session_memory_optimization_hints(
             "requires_safe_invalidation": _as_bool(cache_hint_policy.get("require_safe_invalidation"), True),
         },
     }
+    cache_tokens = _projected_tokens(
+        text_chars,
+        plateau_pairs,
+        _as_float(cache_hint_policy.get("projected_savings_ratio"), 0.10),
+    )
+    cache_hint["dry_run_replay_proposal"] = _cache_replay_proposal(
+        cache_hint_policy=cache_hint_policy,
+        cache_enabled=cache_enabled,
+        cache_status=cache_status,
+        cache_reason=cache_reason,
+        cache_blockers=cache_blockers,
+        cache_tokens=cache_tokens,
+        memory_view=memory_view,
+        category=category,
+        stream=stream,
+        has_tool_blocks=has_tool_blocks,
+        current_thinking=current_thinking,
+        text_chars=text_chars,
+        policy_source=cache_policy_source,
+    )
 
     return {
         "schema": SCHEMA,

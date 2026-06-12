@@ -4937,6 +4937,186 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("Skipped cache replayability", html)
             self.assertIn("cache-replayability-tbody", html)
 
+    def test_cache_replayability_reports_session_memory_dry_run_proposals_metadata_only(self):
+        from agentflow_proxy.session_memory_hints import build_session_memory_optimization_hints
+
+        def log_plateau_call(suffix, *, session_id, cache_json=None, text_chars=40_000, cost=0.02):
+            server.store.log_call(
+                id=f"session-memory-proposal-{suffix}",
+                created_at=f"2026-06-10T11:{int(suffix):02d}:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=100,
+                input_tokens_est=text_chars // 4,
+                output_tokens_est=50,
+                actual_input_tokens=text_chars // 4,
+                actual_output_tokens=50,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({
+                    "text_chars": text_chars,
+                    "category": "summary",
+                    "workflow_phase": "summary",
+                    "has_tools": False,
+                }),
+                cache_json=stable_json(cache_json or {"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "private session memory prompt /tmp/proposal.py"}]}),
+                response_json=stable_json({"content": [{"text": "private session memory response"}]}),
+                session_id=session_id,
+                category="summary",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        crunch_policy = {
+            "session_memory_hints": {
+                "enabled": True,
+                "rule_id": "stats-session-crunch",
+                "crunch_profile": "stats-profile",
+                "min_call_count": 4,
+                "min_plateau_pairs": 3,
+                "min_text_chars": 8000,
+                "allowed_phases": ["summary"],
+                "projected_savings_ratio": 0.20,
+            }
+        }
+        cache_policy = {
+            "session_memory_hints": {
+                "enabled": True,
+                "rule_id": "stats-session-cache",
+                "min_call_count": 4,
+                "min_plateau_pairs": 3,
+                "min_text_chars": 8000,
+                "allowed_phases": ["summary"],
+                "require_safe_invalidation": False,
+                "require_reviewed_pattern_rule": False,
+                "allow_tool_calls": False,
+                "allow_streaming_replay": False,
+                "projected_savings_ratio": 0.20,
+            }
+        }
+        default_blocking_cache_policy = {
+            "session_memory_hints": {
+                **cache_policy["session_memory_hints"],
+                "rule_id": "stats-session-cache-default-blocked",
+                "require_safe_invalidation": True,
+                "require_reviewed_pattern_rule": True,
+            }
+        }
+
+        for index, chars in enumerate((40_000, 40_500, 39_800, 40_100), start=1):
+            log_plateau_call(index, session_id="raw-session-memory-proposal-secret", text_chars=chars)
+        eligible_hints = build_session_memory_optimization_hints(
+            store_obj=server.store,
+            session_id="raw-session-memory-proposal-secret",
+            stream=False,
+            has_tool_blocks=False,
+            category="summary",
+            text_chars=41_000,
+            routing_meta={"workflow_phase": "summary"},
+            crunch_policy=crunch_policy,
+            crunch_policy_source="local-manual",
+            crunch_rule_path="/tmp/crunch_rules.yaml",
+            cache_policy=cache_policy,
+            cache_policy_source="local-manual",
+            cache_rule_path="/tmp/cache_rules.yaml",
+            safe_invalidation_evidence=False,
+            reviewed_cache_pattern_rule=False,
+        )
+        blocked_hints = build_session_memory_optimization_hints(
+            store_obj=server.store,
+            session_id="raw-session-memory-proposal-secret",
+            stream=False,
+            has_tool_blocks=False,
+            category="summary",
+            text_chars=41_000,
+            routing_meta={"workflow_phase": "summary"},
+            crunch_policy=crunch_policy,
+            crunch_policy_source="local-manual",
+            crunch_rule_path="/tmp/crunch_rules.yaml",
+            cache_policy=default_blocking_cache_policy,
+            cache_policy_source="local-default",
+            cache_rule_path="/tmp/cache_rules.yaml",
+            safe_invalidation_evidence=False,
+            reviewed_cache_pattern_rule=False,
+        )
+        log_plateau_call(
+            5,
+            session_id="raw-session-memory-proposal-secret",
+            cache_json={
+                "status": "miss",
+                "reason": "exact-miss",
+                "policy_source": "local-default",
+                "session_memory_hints": eligible_hints["cache"],
+            },
+            text_chars=41_000,
+            cost=0.05,
+        )
+        log_plateau_call(
+            6,
+            session_id="raw-session-memory-proposal-secret",
+            cache_json={
+                "status": "miss",
+                "reason": "exact-miss",
+                "policy_source": "local-default",
+                "session_memory_hints": blocked_hints["cache"],
+            },
+            text_chars=41_200,
+            cost=0.07,
+        )
+
+        result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
+        proposals = result["session_memory_replay_proposals"]
+        eligible = next(row for row in proposals if row["status"] == "session-plateau-dry-run-eligible")
+        blocked = next(row for row in proposals if row["rule_id"] == "stats-session-cache-default-blocked")
+
+        self.assertEqual(result["summary"]["session_memory_replay_proposal_count"], 2)
+        self.assertEqual(result["summary"]["session_memory_replay_eligible_count"], 1)
+        self.assertEqual(eligible["rule_id"], "stats-session-cache")
+        self.assertEqual(eligible["phase"], "summary")
+        self.assertEqual(eligible["category"], "summary")
+        self.assertFalse(eligible["mutation_applied"])
+        self.assertFalse(eligible["cache_mutation"])
+        self.assertFalse(eligible["policy_files_written"])
+        self.assertFalse(eligible["privacy"]["raw_request_bodies_included"])
+        self.assertIn("missing_invalidation_evidence", blocked["blockers"])
+        self.assertIn("reviewed_pattern_rule_required", blocked["blockers"])
+        self.assertTrue(blocked["blocker_families"]["safe_invalidation"])
+        self.assertTrue(blocked["blocker_families"]["reviewed_pattern_rule"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            payload = client.get("/agentflow/stats/cache-replayability?limit=10").json()
+            readiness = client.get("/agentflow/stats/cache-replay-readiness?limit=10").json()
+
+        self.assertEqual(payload["session_memory_replay_proposals"][0]["schema"], "agentflow.session_memory_cache_replay_proposal.v1")
+        self.assertEqual(readiness["summary"]["session_memory_replay_proposal_count"], 2)
+        rendered = json.dumps({"payload": payload, "readiness": readiness}, sort_keys=True)
+        for forbidden in (
+            "private session memory prompt",
+            "private session memory response",
+            "raw-session-memory-proposal-secret",
+            "/tmp/proposal.py",
+            "/tmp/cache_rules.yaml",
+            "/tmp/crunch_rules.yaml",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cache_replay_confidence_endpoint_and_dashboard_are_read_only_metadata(self):
         base_rule = {
             "rule_id": "static-chat-cache",
