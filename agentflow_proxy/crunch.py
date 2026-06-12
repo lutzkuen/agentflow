@@ -122,6 +122,44 @@ def _default_crunch_policy() -> dict[str, Any]:
             "similarity_threshold": 0.95,
             "skip_latest_assistant": True,
         },
+        "instruction_section_deduplication": {
+            "enabled": False,
+            "policy_source": "local-default",
+            "rules": [],
+            "source_surfaces": [
+                "anthropic_messages",
+                "openai_responses",
+                "openai_chat_completions",
+                "codex_turn",
+            ],
+            "categories": [],
+            "workflow_phases": [],
+            "min_section_chars": 700,
+            "min_repeated_count": 2,
+            "keep_recent_sections": 1,
+            "replacement_notice": "[repeated instruction section omitted by AgentFlow]",
+            "max_replacements": 0,
+            "block_tool_protocol": True,
+            "block_tool_payloads": True,
+            "block_responses": True,
+            "block_thinking": True,
+            "canary": {
+                "enabled": True,
+                "fraction": 0.0,
+                "holdout_fraction": 1.0,
+                "salt": "",
+                "unit": "instruction_section_fingerprint",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 5,
+                "window": 500,
+                "max_error_rate": 0.1,
+                "max_retry_rate": 0.25,
+                "max_negative_savings_rate": 0.25,
+                "max_error_rate_delta": 0.05,
+            },
+        },
         "terminal_log_boilerplate": {
             "enabled": True,
             "min_lines": 8,
@@ -289,6 +327,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            instruction_dedup = data.get("instruction_section_deduplication") or {}
+            if isinstance(instruction_dedup, dict):
+                _apply_instruction_dedup_policy_yaml(
+                    policy,
+                    instruction_dedup,
+                    default_policy_source="local-manual",
+                )
             terminal_log = data.get("terminal_log_boilerplate") or {}
             if isinstance(terminal_log, dict):
                 _apply_terminal_log_policy_yaml(policy, terminal_log)
@@ -344,6 +389,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            instruction_dedup = data.get("instruction_section_deduplication") or {}
+            if isinstance(instruction_dedup, dict):
+                _apply_instruction_dedup_policy_yaml(
+                    policy,
+                    instruction_dedup,
+                    default_policy_source="local-default",
+                )
             terminal_log = data.get("terminal_log_boilerplate") or {}
             if isinstance(terminal_log, dict):
                 _apply_terminal_log_policy_yaml(policy, terminal_log)
@@ -524,6 +576,160 @@ def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: di
         thinking_dedup.get("skip_latest_assistant"),
         target["skip_latest_assistant"],
     )
+
+
+def _list_of_strings(value: Any) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _apply_fraction_canary_yaml(target_canary: dict[str, Any], raw_canary: Any) -> None:
+    if not isinstance(raw_canary, dict):
+        return
+    target_canary["enabled"] = _as_bool(raw_canary.get("enabled"), target_canary["enabled"])
+    for source_key, target_key in (
+        ("fraction", "fraction"),
+        ("canary_fraction", "fraction"),
+        ("rollout_fraction", "fraction"),
+        ("holdout_fraction", "holdout_fraction"),
+    ):
+        if raw_canary.get(source_key) is not None:
+            target_canary[target_key] = max(0.0, min(1.0, float(raw_canary[source_key])))
+    if raw_canary.get("salt") is not None:
+        target_canary["salt"] = str(raw_canary["salt"])
+    if raw_canary.get("canary_salt") is not None:
+        target_canary["salt"] = str(raw_canary["canary_salt"])
+    if raw_canary.get("unit") is not None:
+        target_canary["unit"] = str(raw_canary["unit"])
+    if raw_canary.get("canary_unit") is not None:
+        target_canary["unit"] = str(raw_canary["canary_unit"])
+
+
+def _apply_instruction_dedup_safety_yaml(target_safety: dict[str, Any], raw_safety: Any) -> None:
+    if not isinstance(raw_safety, dict):
+        return
+    target_safety["enabled"] = _as_bool(raw_safety.get("enabled"), target_safety["enabled"])
+    for key in ("min_outcome_samples", "window"):
+        if raw_safety.get(key) is not None:
+            target_safety[key] = int(raw_safety[key])
+    for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
+        if raw_safety.get(key) is not None:
+            target_safety[key] = max(0.0, float(raw_safety[key]))
+
+
+def _parse_instruction_dedup_rule_yaml(
+    item: dict[str, Any],
+    *,
+    index: int,
+    base_policy: dict[str, Any],
+    default_policy_source: str,
+) -> dict[str, Any] | None:
+    conditions = item.get("conditions") if isinstance(item.get("conditions"), dict) else {}
+    action = item.get("action") if isinstance(item.get("action"), dict) else {}
+    hashes = _parse_pattern_hashes(
+        item.get("instruction_section_fingerprints")
+        or item.get("instruction_section_fingerprint")
+        or item.get("instruction_fingerprint_hashes")
+        or item.get("instruction_fingerprint_hash")
+        or conditions.get("instruction_section_fingerprints")
+        or conditions.get("instruction_section_fingerprint")
+        or conditions.get("instruction_fingerprint_hashes")
+        or conditions.get("instruction_fingerprint_hash")
+    )
+    if not hashes:
+        return None
+    rule = {
+        "id": str(item.get("id") or item.get("rule_id") or item.get("candidate_id") or f"instruction-dedup-rule-{index + 1}"),
+        "candidate_id": item.get("candidate_id"),
+        "enabled": _as_bool(item.get("enabled"), True),
+        "policy_source": str(item.get("policy_source") or base_policy.get("policy_source") or default_policy_source),
+        "instruction_section_fingerprints": hashes,
+        "source_surfaces": _list_of_strings(
+            item.get("source_surfaces")
+            or item.get("source_surface")
+            or conditions.get("source_surfaces")
+            or conditions.get("source_surface")
+        ),
+        "categories": _list_of_strings(item.get("categories") or item.get("category") or conditions.get("categories") or conditions.get("category")),
+        "workflow_phases": _list_of_strings(
+            item.get("workflow_phases")
+            or item.get("workflow_phase")
+            or item.get("phases")
+            or item.get("phase")
+            or conditions.get("workflow_phases")
+            or conditions.get("workflow_phase")
+            or conditions.get("phases")
+            or conditions.get("phase")
+        ),
+        "min_section_chars": int(conditions.get("min_section_chars", item.get("min_section_chars", base_policy["min_section_chars"]))),
+        "min_repeated_count": int(conditions.get("min_repeated_count", item.get("min_repeated_count", base_policy["min_repeated_count"]))),
+        "keep_recent_sections": int(item.get("keep_recent_sections", item.get("keep_recent_matches", base_policy["keep_recent_sections"]))),
+        "replacement_notice": str(item.get("replacement_notice") or action.get("replacement_notice") or base_policy["replacement_notice"]),
+        "max_replacements": int(item.get("max_replacements", action.get("max_replacements", base_policy["max_replacements"]))),
+        "block_tool_protocol": _as_bool(item.get("block_tool_protocol"), bool(base_policy["block_tool_protocol"])),
+        "block_tool_payloads": _as_bool(item.get("block_tool_payloads"), bool(base_policy["block_tool_payloads"])),
+        "block_responses": _as_bool(item.get("block_responses"), bool(base_policy["block_responses"])),
+        "block_thinking": _as_bool(item.get("block_thinking"), bool(base_policy["block_thinking"])),
+        "action": {
+            "type": str(action.get("type") or "omit_instruction_section"),
+        },
+        "canary": copy.deepcopy(base_policy["canary"]),
+        "safety_stop": copy.deepcopy(base_policy["safety_stop"]),
+    }
+    _apply_fraction_canary_yaml(rule["canary"], item.get("canary") or item.get("rollout"))
+    _apply_instruction_dedup_safety_yaml(rule["safety_stop"], item.get("safety_stop"))
+    if item.get("description") is not None:
+        rule["description"] = str(item["description"])
+    return rule
+
+
+def _apply_instruction_dedup_policy_yaml(
+    policy: dict[str, Any],
+    instruction_dedup: dict[str, Any],
+    *,
+    default_policy_source: str,
+) -> None:
+    target = policy["instruction_section_deduplication"]
+    target["enabled"] = _as_bool(instruction_dedup.get("enabled"), target["enabled"])
+    target["policy_source"] = str(instruction_dedup.get("policy_source") or default_policy_source)
+    for key in ("source_surfaces", "categories", "workflow_phases"):
+        if instruction_dedup.get(key) is not None:
+            target[key] = _list_of_strings(instruction_dedup[key])
+    for key in ("min_section_chars", "min_repeated_count", "keep_recent_sections", "max_replacements"):
+        if instruction_dedup.get(key) is not None:
+            target[key] = int(instruction_dedup[key])
+    if instruction_dedup.get("replacement_notice") is not None:
+        target["replacement_notice"] = str(instruction_dedup["replacement_notice"])
+    for key in ("block_tool_protocol", "block_tool_payloads", "block_responses", "block_thinking"):
+        if instruction_dedup.get(key) is not None:
+            target[key] = _as_bool(instruction_dedup[key], bool(target[key]))
+    _apply_fraction_canary_yaml(target["canary"], instruction_dedup.get("canary") or instruction_dedup.get("rollout"))
+    _apply_instruction_dedup_safety_yaml(target["safety_stop"], instruction_dedup.get("safety_stop"))
+    rules = instruction_dedup.get("rules")
+    if rules is None and (
+        instruction_dedup.get("instruction_section_fingerprint")
+        or instruction_dedup.get("instruction_section_fingerprints")
+        or instruction_dedup.get("instruction_fingerprint_hash")
+        or instruction_dedup.get("instruction_fingerprint_hashes")
+    ):
+        rules = [instruction_dedup]
+    if isinstance(rules, list):
+        parsed = [
+            rule
+            for index, item in enumerate(rules)
+            if isinstance(item, dict)
+            for rule in [_parse_instruction_dedup_rule_yaml(
+                item,
+                index=index,
+                base_policy=target,
+                default_policy_source=target["policy_source"],
+            )]
+            if rule is not None
+        ]
+        if parsed:
+            target["rules"] = parsed
 
 
 def _apply_terminal_log_policy_yaml(policy: dict[str, Any], terminal_log: dict[str, Any]) -> None:
@@ -1036,6 +1242,7 @@ THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
 THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
 THINKING_DEDUP_SIMILARITY_THRESHOLD = float(THINKING_DEDUP_POLICY["similarity_threshold"])
 THINKING_DEDUP_SKIP_LATEST_ASSISTANT = bool(THINKING_DEDUP_POLICY["skip_latest_assistant"])
+INSTRUCTION_SECTION_DEDUP_POLICY = CRUNCH_POLICY["instruction_section_deduplication"]
 TERMINAL_LOG_POLICY = CRUNCH_POLICY["terminal_log_boilerplate"]
 TERMINAL_LOG_ENABLED = bool(TERMINAL_LOG_POLICY["enabled"])
 TERMINAL_LOG_MIN_LINES = int(TERMINAL_LOG_POLICY["min_lines"])

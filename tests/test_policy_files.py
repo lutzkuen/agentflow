@@ -103,6 +103,12 @@ class PolicyFileStatusTest(unittest.TestCase):
         self.assertFalse(bundle["policies"]["codex_app"]["review_only"])
         self.assertEqual(bundle["policies"]["codex_app"]["policy_source"], "local-default")
         self.assertIn("file", bundle["policies"]["codex_app"])
+        instruction_dedup = bundle["policies"]["crunch"]["instruction_section_deduplication"]
+        self.assertFalse(instruction_dedup["enabled"])
+        self.assertEqual(instruction_dedup["policy_source"], "local-default")
+        self.assertEqual(instruction_dedup["canary"]["fraction"], 0.0)
+        self.assertEqual(instruction_dedup["canary"]["holdout_fraction"], 1.0)
+        self.assertEqual(instruction_dedup["rules"], [])
 
     def test_policy_bundle_validation_accepts_exported_bundle(self):
         bundle = asyncio.run(build_policy_bundle())
@@ -181,6 +187,168 @@ class PolicyFileStatusTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["errors"], [])
+
+    def test_policy_bundle_validation_accepts_instruction_section_dedup_rules(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["crunch"]["instruction_section_deduplication"] = {
+            "enabled": True,
+            "policy_source": "local-manual",
+            "source_surfaces": ["anthropic_messages", "openai_responses", "codex_turn"],
+            "categories": ["chat", "long-context"],
+            "workflow_phases": ["planning", "verification"],
+            "min_section_chars": 900,
+            "min_repeated_count": 3,
+            "keep_recent_sections": 1,
+            "replacement_notice": "[repeated instruction section omitted by AgentFlow]",
+            "max_replacements": 4,
+            "block_tool_protocol": True,
+            "block_tool_payloads": True,
+            "block_responses": True,
+            "block_thinking": True,
+            "canary": {
+                "enabled": True,
+                "canary_fraction": 0.1,
+                "holdout_fraction": 0.9,
+                "canary_salt": "local-test",
+                "canary_unit": "instruction_section_fingerprint",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 5,
+                "window": 500,
+                "max_error_rate": 0.1,
+                "max_retry_rate": 0.25,
+                "max_negative_savings_rate": 0.25,
+                "max_error_rate_delta": 0.05,
+            },
+            "rules": [
+                {
+                    "id": "synthetic-instruction-dedup",
+                    "enabled": True,
+                    "policy_source": "local-manual",
+                    "instruction_section_fingerprints": [
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ],
+                    "source_surfaces": ["anthropic_messages"],
+                    "categories": ["chat"],
+                    "workflow_phases": ["planning"],
+                    "min_section_chars": 900,
+                    "min_repeated_count": 3,
+                    "keep_recent_sections": 1,
+                    "replacement_notice": "[repeated instruction section omitted by AgentFlow]",
+                    "max_replacements": 2,
+                    "block_tool_protocol": True,
+                    "block_tool_payloads": True,
+                    "block_responses": True,
+                    "block_thinking": True,
+                    "action": {"type": "omit_instruction_section"},
+                    "canary": {"enabled": True, "canary_fraction": 0.1, "holdout_fraction": 0.9},
+                }
+            ],
+        }
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+
+    def test_manual_crunch_rules_export_instruction_section_dedup_rule(self):
+        with TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "crunch_rules.yaml"
+            rules_path.write_text(
+                """
+enabled: true
+instruction_section_deduplication:
+  enabled: true
+  source_surfaces:
+    - anthropic_messages
+  categories:
+    - chat
+  workflow_phases:
+    - planning
+  min_section_chars: 900
+  min_repeated_count: 3
+  keep_recent_sections: 1
+  replacement_notice: "[repeated instruction section omitted by AgentFlow]"
+  max_replacements: 2
+  canary:
+    enabled: true
+    canary_fraction: 0.10
+    holdout_fraction: 0.90
+    canary_salt: synthetic
+  safety_stop:
+    enabled: true
+    min_outcome_samples: 5
+    window: 500
+  rules:
+    - id: synthetic-instruction-dedup
+      enabled: true
+      instruction_section_fingerprints:
+        - sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      conditions:
+        source_surface: anthropic_messages
+        category: chat
+        workflow_phase: planning
+        min_section_chars: 900
+        min_repeated_count: 3
+      action:
+        type: omit_instruction_section
+""",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"AGENTFLOW_CRUNCH_RULES": str(rules_path)}, clear=False):
+                asyncio.run(reload_policy_modules())
+                try:
+                    bundle = asyncio.run(build_policy_bundle())
+                finally:
+                    asyncio.run(reload_policy_modules())
+
+        instruction_dedup = bundle["policies"]["crunch"]["instruction_section_deduplication"]
+        self.assertTrue(instruction_dedup["enabled"])
+        self.assertEqual(instruction_dedup["policy_source"], "local-manual")
+        self.assertEqual(instruction_dedup["rules"][0]["id"], "synthetic-instruction-dedup")
+        self.assertEqual(
+            instruction_dedup["rules"][0]["instruction_section_fingerprints"],
+            ["sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        )
+        self.assertEqual(instruction_dedup["rules"][0]["source_surfaces"], ["anthropic_messages"])
+        self.assertEqual(instruction_dedup["rules"][0]["canary"]["fraction"], 0.1)
+        result = validate_policy_bundle(bundle)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+
+    def test_policy_bundle_validation_rejects_unsafe_instruction_section_dedup_rules(self):
+        bundle = asyncio.run(build_policy_bundle())
+        bundle["policies"]["crunch"]["instruction_section_deduplication"] = {
+            "enabled": True,
+            "policy_source": "managed-enforced",
+            "canary": {"canary_fraction": 0.8, "holdout_fraction": 0.4},
+            "rules": [
+                {
+                    "id": "unsafe-instruction-dedup",
+                    "enabled": True,
+                    "policy_source": "managed-enforced",
+                    "instruction_section_fingerprints": ["not-a-sha"],
+                    "raw_instruction_text": "raw prompt fixture must not leak",
+                    "block_tool_payloads": False,
+                    "action": {"type": "omit_instruction_section", "target": "tool_payload"},
+                    "canary": {"canary_fraction": 1.2},
+                }
+            ],
+        }
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertFalse(result["ok"])
+        paths = {error["path"] for error in result["errors"]}
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.policy_source", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.canary", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].policy_source", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].instruction_section_fingerprints[0]", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].raw_instruction_text", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].block_tool_payloads", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].action", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].canary.canary_fraction", paths)
 
     def _managed_policy_bundle(self):
         bundle = asyncio.run(build_policy_bundle())

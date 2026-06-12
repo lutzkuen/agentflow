@@ -853,6 +853,7 @@ async def stats_policies() -> dict[str, Any]:
             },
             "old_context_summarization": _copy_policy(crunch.OLD_CONTEXT_SUMMARY_POLICY),
             "thinking_deduplication": _copy_policy(crunch.THINKING_DEDUP_POLICY),
+            "instruction_section_deduplication": _copy_policy(crunch.INSTRUCTION_SECTION_DEDUP_POLICY),
             "pattern_rules": _copy_policy(crunch.PATTERN_RULES),
             "repeated_provider_scaffolding": _copy_policy(crunch.REPEATED_PROVIDER_SCAFFOLDING_POLICY),
             "codex_repeated_scaffolding": _copy_policy(crunch.CODEX_REPEATED_SCAFFOLDING_POLICY),
@@ -19830,7 +19831,8 @@ async function refreshPolicies(){
           'threshold '+fmtTok(d.crunch&&d.crunch.threshold_chars),
           d.crunch&&d.crunch.prompt_cache&&d.crunch.prompt_cache.enabled?'prompt cache on':'prompt cache off',
           d.crunch&&d.crunch.old_context_summarization&&d.crunch.old_context_summarization.enabled?'old-context summary on':'old-context summary off',
-          d.crunch&&d.crunch.thinking_deduplication&&d.crunch.thinking_deduplication.enabled?'thinking dedupe on':'thinking dedupe off'
+          d.crunch&&d.crunch.thinking_deduplication&&d.crunch.thinking_deduplication.enabled?'thinking dedupe on':'thinking dedupe off',
+          d.crunch&&d.crunch.instruction_section_deduplication&&d.crunch.instruction_section_deduplication.enabled?'instruction dedupe on':'instruction dedupe off'
         ])
       },
       {

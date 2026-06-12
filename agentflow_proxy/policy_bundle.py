@@ -408,6 +408,16 @@ def _validate_non_empty_string(errors: list[dict[str, str]], path: str, value: A
         _add_error(errors, path, "expected non-empty string")
 
 
+def _is_sha256_fingerprint(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text.startswith("sha256:"):
+        return False
+    digest = text[len("sha256:"):]
+    return len(digest) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in digest)
+
+
 _SUMMARY_SAFE_RAW_FLAG_KEYS = {
     "raw_body_storage",
     "raw_bodies_read",
@@ -435,6 +445,9 @@ _SUMMARY_RAW_EXACT_KEYS = {
     "raw_messages",
     "raw_old_context",
     "raw_prompt",
+    "raw_instruction_text",
+    "raw_instruction_section",
+    "raw_instruction_sections",
     "raw_request",
     "raw_response",
     "request",
@@ -826,9 +839,190 @@ def _validate_crunch_policy(policy: dict[str, Any], errors: list[dict[str, str]]
             f"{base}.thinking_deduplication.skip_latest_assistant",
             thinking_dedup["skip_latest_assistant"],
         )
+    _validate_instruction_section_deduplication(policy.get("instruction_section_deduplication"), errors, base=base)
     _validate_repeated_provider_scaffolding(policy.get("repeated_provider_scaffolding"), errors, base=base)
     _validate_crunch_pattern_rules(policy.get("pattern_rules"), errors, base=base)
     _validate_pattern_recommendation(policy, errors, base=base, expected_section="crunch")
+
+
+def _validate_string_or_string_list(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if isinstance(value, str):
+        _validate_non_empty_string(errors, path, value)
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_non_empty_string(errors, f"{path}[{index}]", item)
+        return
+    _add_error(errors, path, "expected string or list of strings")
+
+
+def _validate_instruction_dedup_canary(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected object")
+        return
+    if "enabled" in value:
+        _validate_boolish(errors, f"{path}.enabled", value["enabled"])
+    for key in ("fraction", "rollout_fraction", "canary_fraction", "holdout_fraction"):
+        if key in value:
+            _validate_floatish(errors, f"{path}.{key}", value[key], min_value=0.0, max_value=1.0)
+    fraction = value.get("fraction", value.get("canary_fraction", value.get("rollout_fraction", 0.0)))
+    holdout_fraction = value.get("holdout_fraction", 0.0)
+    if _is_floatish(fraction) and _is_floatish(holdout_fraction):
+        if _float_value(fraction) + _float_value(holdout_fraction) > 1.0:
+            _add_error(errors, path, "canary fraction plus holdout_fraction must be <= 1.0")
+    for key in ("salt", "canary_salt", "unit", "canary_unit"):
+        if key in value and value[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"{path}.{key}", value[key])
+
+
+def _validate_instruction_dedup_safety_stop(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected object")
+        return
+    if "enabled" in value:
+        _validate_boolish(errors, f"{path}.enabled", value["enabled"])
+    for key in ("min_outcome_samples", "window"):
+        if key in value:
+            _validate_intish(errors, f"{path}.{key}", value[key], min_value=0)
+    for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
+        if key in value:
+            _validate_floatish(errors, f"{path}.{key}", value[key], min_value=0.0)
+
+
+def _validate_instruction_dedup_hashes(value: Any, errors: list[dict[str, str]], path: str) -> None:
+    if isinstance(value, str):
+        if not _is_sha256_fingerprint(value):
+            _add_error(errors, path, "expected sha256:<64 hex chars> public instruction fingerprint")
+        return
+    if not isinstance(value, list) or not value:
+        _add_error(errors, path, "expected non-empty instruction fingerprint string or list")
+        return
+    for index, item in enumerate(value):
+        if not _is_sha256_fingerprint(item):
+            _add_error(errors, f"{path}[{index}]", "expected sha256:<64 hex chars> public instruction fingerprint")
+
+
+def _validate_instruction_dedup_safety_flags(value: dict[str, Any], errors: list[dict[str, str]], path: str) -> None:
+    for key in ("block_tool_protocol", "block_tool_payloads", "block_responses", "block_thinking"):
+        if key in value:
+            _validate_boolish(errors, f"{path}.{key}", value[key])
+            if _is_boolish(value[key]) and not bool(_float_value(value[key]) if isinstance(value[key], (int, float)) else str(value[key]).strip().lower() not in {"0", "false", "no", "off"}):
+                _add_error(errors, f"{path}.{key}", "instruction-section dedup rules must keep this safety blocker enabled")
+
+
+def _instruction_dedup_action_touches_tools(action: dict[str, Any]) -> bool:
+    unsafe_values = {
+        "tool",
+        "tools",
+        "tool_payload",
+        "tool_payloads",
+        "tool_protocol",
+        "tool_result",
+        "tool_use",
+        "response",
+        "responses",
+        "assistant_response",
+        "thinking",
+    }
+    for key, value in action.items():
+        key_text = str(key).strip().lower()
+        if key_text in {"target", "targets", "scope", "scopes", "touches", "mutates", "payload"}:
+            values = value if isinstance(value, list) else [value]
+            if any(str(item).strip().lower() in unsafe_values for item in values):
+                return True
+        if key_text in {"touch_tool_payloads", "mutate_tool_payloads", "touch_responses", "mutate_responses"}:
+            return True
+    return False
+
+
+def _validate_instruction_section_deduplication(value: Any, errors: list[dict[str, str]], *, base: str) -> None:
+    if value is None:
+        return
+    path = f"{base}.instruction_section_deduplication"
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected object")
+        return
+    _reject_raw_payload_fields(value, errors, path)
+    if "enabled" in value:
+        _validate_boolish(errors, f"{path}.enabled", value["enabled"])
+    if "policy_source" in value:
+        if value["policy_source"] not in {"local-default", "local-manual", "managed-recommended"}:
+            _add_error(errors, f"{path}.policy_source", "expected local-default, local-manual, or managed-recommended")
+    for key in ("source_surfaces", "source_surface", "categories", "category", "workflow_phases", "workflow_phase", "phases", "phase"):
+        if key in value:
+            _validate_string_or_string_list(value[key], errors, f"{path}.{key}")
+    for key in ("min_section_chars", "min_repeated_count", "keep_recent_sections", "keep_recent_matches", "max_replacements"):
+        if key in value:
+            _validate_intish(errors, f"{path}.{key}", value[key], min_value=0)
+    if "replacement_notice" in value:
+        _validate_non_empty_string(errors, f"{path}.replacement_notice", value["replacement_notice"])
+    _validate_instruction_dedup_safety_flags(value, errors, path)
+    _validate_instruction_dedup_canary(value.get("canary", value.get("rollout")), errors, f"{path}.canary")
+    _validate_instruction_dedup_safety_stop(value.get("safety_stop"), errors, f"{path}.safety_stop")
+    rules = value.get("rules")
+    if rules is None:
+        return
+    if not isinstance(rules, list):
+        _add_error(errors, f"{path}.rules", "expected list")
+        return
+    for index, rule in enumerate(rules):
+        rule_path = f"{path}.rules[{index}]"
+        if not isinstance(rule, dict):
+            _add_error(errors, rule_path, "expected object")
+            continue
+        _reject_raw_payload_fields(rule, errors, rule_path)
+        if "id" in rule:
+            _validate_non_empty_string(errors, f"{rule_path}.id", rule["id"])
+        if "rule_id" in rule:
+            _validate_non_empty_string(errors, f"{rule_path}.rule_id", rule["rule_id"])
+        if "candidate_id" in rule and rule["candidate_id"] not in (None, ""):
+            _validate_non_empty_string(errors, f"{rule_path}.candidate_id", rule["candidate_id"])
+        if "enabled" in rule:
+            _validate_boolish(errors, f"{rule_path}.enabled", rule["enabled"])
+        if "policy_source" in rule and rule["policy_source"] not in {"local-default", "local-manual", "managed-recommended"}:
+            _add_error(errors, f"{rule_path}.policy_source", "expected local-default, local-manual, or managed-recommended")
+        hashes = (
+            rule.get("instruction_section_fingerprints")
+            or rule.get("instruction_section_fingerprint")
+            or rule.get("instruction_fingerprint_hashes")
+            or rule.get("instruction_fingerprint_hash")
+        )
+        conditions = rule.get("conditions")
+        if isinstance(conditions, dict):
+            hashes = hashes or conditions.get("instruction_section_fingerprints") or conditions.get("instruction_section_fingerprint")
+        _validate_instruction_dedup_hashes(hashes, errors, f"{rule_path}.instruction_section_fingerprints")
+        for key in ("source_surfaces", "source_surface", "categories", "category", "workflow_phases", "workflow_phase", "phases", "phase"):
+            if key in rule:
+                _validate_string_or_string_list(rule[key], errors, f"{rule_path}.{key}")
+        if isinstance(conditions, dict):
+            for key in ("source_surfaces", "source_surface", "categories", "category", "workflow_phases", "workflow_phase", "phases", "phase"):
+                if key in conditions:
+                    _validate_string_or_string_list(conditions[key], errors, f"{rule_path}.conditions.{key}")
+        elif conditions is not None:
+            _add_error(errors, f"{rule_path}.conditions", "expected object")
+        for key in ("min_section_chars", "min_repeated_count", "keep_recent_sections", "keep_recent_matches", "max_replacements"):
+            if key in rule:
+                _validate_intish(errors, f"{rule_path}.{key}", rule[key], min_value=0)
+            if isinstance(conditions, dict) and key in conditions:
+                _validate_intish(errors, f"{rule_path}.conditions.{key}", conditions[key], min_value=0)
+        if "replacement_notice" in rule:
+            _validate_non_empty_string(errors, f"{rule_path}.replacement_notice", rule["replacement_notice"])
+        _validate_instruction_dedup_safety_flags(rule, errors, rule_path)
+        _validate_instruction_dedup_canary(rule.get("canary", rule.get("rollout")), errors, f"{rule_path}.canary")
+        _validate_instruction_dedup_safety_stop(rule.get("safety_stop"), errors, f"{rule_path}.safety_stop")
+        action = rule.get("action")
+        if action is not None:
+            if not isinstance(action, dict):
+                _add_error(errors, f"{rule_path}.action", "expected object")
+            else:
+                if "type" in action and action["type"] not in {"omit_instruction_section"}:
+                    _add_error(errors, f"{rule_path}.action.type", "expected omit_instruction_section")
+                if _instruction_dedup_action_touches_tools(action):
+                    _add_error(errors, f"{rule_path}.action", "instruction-section dedup rules must not touch tool payloads, responses, or thinking blocks")
 
 
 def _validate_repeated_provider_scaffolding(value: Any, errors: list[dict[str, str]], *, base: str) -> None:
@@ -3795,7 +3989,7 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
         if "threshold_chars" in policy:
             payload["threshold_chars"] = policy.get("threshold_chars")
         local_summary_rule, _summary_meta = _managed_old_context_summary_local_rule(policy)
-        for key in ("prompt_cache", "thinking_deduplication"):
+        for key in ("prompt_cache", "thinking_deduplication", "instruction_section_deduplication"):
             if isinstance(policy.get(key), dict):
                 payload[key] = policy[key]
         if local_summary_rule is not None:
