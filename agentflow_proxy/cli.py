@@ -3899,6 +3899,17 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
         help="Applied non-positive savings rate hold threshold, default: 0.0.",
     )
     parser.add_argument("--rollback-error-rate", type=float, default=0.20, help="Absolute applied error rate rollback threshold, default: 0.20.")
+    parser.add_argument(
+        "--flush-feedback",
+        action="store_true",
+        help="Flush due repeated-scaffold lifecycle feedback after queueing, bounded by --feedback-limit.",
+    )
+    parser.add_argument(
+        "--feedback-dry-run",
+        action="store_true",
+        help="Preview due repeated-scaffold lifecycle feedback flush rows without claiming or sending.",
+    )
+    parser.add_argument("--feedback-limit", type=int, default=5, help="Maximum repeated-scaffold feedback rows to flush or sample, default: 5, max: 100.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
 
@@ -3906,6 +3917,10 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
 
     from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
     from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
+    from agentflow_proxy.repeated_scaffold_feedback import (
+        build_repeated_scaffold_lifecycle_feedback_status,
+        flush_repeated_scaffold_lifecycle_feedback,
+    )
 
     store = open_store_for_db(str(args.db))
     try:
@@ -3924,6 +3939,19 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
             rollback_error_rate=args.rollback_error_rate,
         )
         _attach_repeated_scaffold_lifecycle_feedback(result, store)
+        feedback_limit = max(1, min(int(args.feedback_limit or 5), 100))
+        if args.flush_feedback or args.feedback_dry_run:
+            result["managed_lifecycle_feedback_flush"] = asyncio.run(
+                flush_repeated_scaffold_lifecycle_feedback(
+                    store,
+                    limit=feedback_limit,
+                    dry_run=bool(args.feedback_dry_run),
+                )
+            )
+        result["managed_lifecycle_feedback_queue"] = build_repeated_scaffold_lifecycle_feedback_status(
+            store,
+            sample_limit=feedback_limit,
+        )
     finally:
         store.conn.close()
     if args.pretty:

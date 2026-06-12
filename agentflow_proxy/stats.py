@@ -15153,6 +15153,13 @@ def dashboard_html() -> str:
     </tr></thead>
     <tbody id="repeated-scaffold-impact-summary-tbody"></tbody>
   </table>
+  <h2>Repeated-scaffold lifecycle feedback</h2>
+  <table data-table-id="repeated-scaffold-feedback-queue" data-filter-label="Filter repeated-scaffold lifecycle feedback">
+    <thead><tr>
+      <th data-sort-type="number">Queued</th><th data-sort-type="number">Due</th><th data-sort-type="number">Sent</th><th data-sort-type="number">Retryable errors</th><th data-sort-type="number">Dropped</th><th data-sort-type="text">Last success</th><th data-sort-type="text">Last error class</th><th data-sort-type="text">Status</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-feedback-queue-tbody"></tbody>
+  </table>
 </div>
 <div class="section">
   <h2>Repeated-scaffold promotion gates</h2>
@@ -16752,6 +16759,20 @@ async function refreshRepeatedScaffold(){
       <td class="flags">${repeatedScaffoldBreakdownBadges(is.verdict_counts,'none','provider')}</td>
       <td class="flags">${repeatedScaffoldBreakdownBadges(is.reason_code_counts,'none','miss')}</td>
       <td class="flags">${repeatedScaffoldPrivacyBadges(ip)}</td>
+    </tr>`;
+    const iq=impact.managed_lifecycle_feedback_queue||{};
+    const iqs=iq.summary||{};
+    const iqp=iq.privacy||{};
+    document.getElementById('repeated-scaffold-feedback-queue-tbody').innerHTML=`<tr>
+      <td class="tokens">${(iqs.queued||0).toLocaleString()}</td>
+      <td class="tokens">${(iqs.due||0).toLocaleString()}</td>
+      <td class="tokens">${(iqs.sent||0).toLocaleString()}</td>
+      <td class="tokens">${(iqs.retryable_error||0).toLocaleString()}</td>
+      <td class="tokens">${(iqs.dropped_after_limit||0).toLocaleString()}</td>
+      <td>${esc(iqs.last_success_at||'never')}</td>
+      <td><span class="badge ${iqs.last_error_class?'miss':'hit'}">${esc(iqs.last_error_class||'none')}</span></td>
+      <td class="flags">${repeatedScaffoldBreakdownBadges(iq.status_breakdown,'none','provider')}</td>
+      <td class="flags">${repeatedScaffoldPrivacyBadges(iqp)} <span class="badge hit">payloads omitted</span></td>
     </tr>`;
     const impactRows=impact.candidates||[];
     document.getElementById('repeated-scaffold-impact-candidates-tbody').innerHTML=impactRows.map(row=>{

@@ -8,6 +8,9 @@ import unittest
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
+
+import httpx
 
 from agentflow_proxy import cli
 from agentflow_proxy.managed_egress import ManagedEgressBlocked, assert_managed_egress_safe
@@ -19,6 +22,29 @@ from agentflow_proxy.repeated_scaffold_feedback import (
 from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
 from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
 from agentflow_proxy.store import SQLiteStore, stable_json
+
+
+class RepeatedScaffoldFeedbackClient:
+    calls: list[dict] = []
+    status_code = 200
+    text = '{"ok":true}'
+
+    def __init__(self, *, timeout=None):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
+        return httpx.Response(self.status_code, text=self.text)
+
+    async def patch(self, url, json, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": self.timeout, "headers": dict(headers or {})})
+        return httpx.Response(self.status_code, text=self.text)
 
 
 class RepeatedScaffoldImpactTests(unittest.TestCase):
@@ -33,6 +59,9 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         }
         for key in self.saved_env:
             os.environ.pop(key, None)
+        RepeatedScaffoldFeedbackClient.calls = []
+        RepeatedScaffoldFeedbackClient.status_code = 200
+        RepeatedScaffoldFeedbackClient.text = '{"ok":true}'
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
         self.store = SQLiteStore(self.db_path)
@@ -524,6 +553,139 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.assertNotIn("prompt must not leak", queued_text)
         self.assertNotIn("raw response must not leak", queued_text)
         self.assertNotIn("raw-session-must-not-leak", queued_text)
+
+    def test_cli_flushes_repeated_scaffold_lifecycle_feedback_with_redacted_queue_audit(self) -> None:
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        self._log_call(cohort="canary_applied", tokens_saved=1000)
+        self._log_call(cohort="canary_applied", tokens_saved=1200)
+        self._log_call(cohort="canary_holdout", tokens_saved=0)
+        self.store.enqueue_managed_outcome_feedback(
+            id="sent-public-row",
+            created_at="2026-06-12T01:00:00+00:00",
+            updated_at="2026-06-12T01:01:00+00:00",
+            source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+            endpoint="/v1/policy-events",
+            optimization_unit_id=0,
+            payload_json=stable_json({"raw_prompt": "sent payload must not leak", "file_path": "/tmp/sent-secret.py"}),
+            status="sent",
+            attempts=1,
+            next_attempt_at="2026-06-12T01:00:00+00:00",
+            sent_at="2026-06-12T01:02:00+00:00",
+        )
+        self.store.enqueue_managed_outcome_feedback(
+            id="retry-public-row",
+            created_at="2026-06-12T01:03:00+00:00",
+            updated_at="2026-06-12T01:04:00+00:00",
+            source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+            endpoint="/v1/policy-events",
+            optimization_unit_id=0,
+            payload_json=stable_json({"raw_messages": "retry payload must not leak", "path": "/tmp/retry-secret.py"}),
+            status="retryable-error",
+            attempts=1,
+            next_attempt_at="2030-01-01T00:00:00+00:00",
+            last_error="ConnectError: managed feedback down with retry secret /tmp/retry-secret.py",
+        )
+        self.store.enqueue_managed_outcome_feedback(
+            id="dropped-public-row",
+            created_at="2026-06-12T01:05:00+00:00",
+            updated_at="2026-06-12T01:06:00+00:00",
+            source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+            endpoint="/v1/policy-events",
+            optimization_unit_id=0,
+            payload_json=stable_json({"raw_response": "dropped payload must not leak", "path": "/tmp/drop-secret.py"}),
+            status="dropped-after-limit",
+            attempts=3,
+            next_attempt_at="2026-06-12T01:05:00+00:00",
+            last_error="HTTP 500: dropped payload body must not leak",
+            last_status_code=500,
+        )
+        self.store.enqueue_managed_outcome_feedback(
+            id="other-source-row",
+            source_surface="codex_turn",
+            endpoint="/v1/optimization-units/7/outcome",
+            optimization_unit_id=7,
+            payload_json=stable_json({"raw_prompt": "other source must not flush"}),
+            status="queued",
+            next_attempt_at="2026-06-12T01:00:00+00:00",
+        )
+
+        output = io.StringIO()
+        with patch("agentflow_proxy.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
+            exit_code = cli.repeated_scaffold_impact_cli(
+                ["--db", self.db_path, "--limit", "20", "--flush-feedback", "--feedback-limit", "10"],
+                stdout=output,
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        flush = payload["managed_lifecycle_feedback_flush"]
+        self.assertEqual(flush["schema"], "agentflow.repeated_scaffold_lifecycle_feedback_flush.v1")
+        self.assertEqual(flush["flush"]["sent"], 1)
+        self.assertEqual(flush["before"]["queued"], 1)
+        self.assertEqual(flush["before"]["due"], 1)
+        self.assertEqual(flush["before"]["sent"], 1)
+        self.assertEqual(flush["before"]["retryable_error"], 1)
+        self.assertEqual(flush["before"]["dropped_after_limit"], 1)
+        self.assertEqual(flush["after"]["queued"], 0)
+        self.assertEqual(flush["after"]["sent"], 2)
+        self.assertEqual(flush["after"]["retryable_error"], 1)
+        self.assertEqual(flush["after"]["dropped_after_limit"], 1)
+        self.assertEqual(flush["after"]["last_error_class"], "http-5xx")
+        queue = payload["managed_lifecycle_feedback_queue"]
+        self.assertEqual(queue["summary"]["sent"], 2)
+        self.assertEqual(queue["summary"]["retryable_error"], 1)
+        self.assertEqual(queue["summary"]["dropped_after_limit"], 1)
+        error_classes = {row["value"]: row["count"] for row in queue["last_error_class_breakdown"]}
+        self.assertEqual(error_classes["ConnectError"], 1)
+        self.assertEqual(error_classes["http-5xx"], 1)
+        self.assertEqual(len(RepeatedScaffoldFeedbackClient.calls), 1)
+        self.assertEqual(RepeatedScaffoldFeedbackClient.calls[0]["url"], "http://managed.test/v1/policy-events")
+
+        rendered = output.getvalue()
+        for forbidden in (
+            "sent payload must not leak",
+            "retry payload must not leak",
+            "dropped payload must not leak",
+            "other source must not flush",
+            "managed feedback down with retry secret",
+            "dropped payload body must not leak",
+            "/tmp/sent-secret.py",
+            "/tmp/retry-secret.py",
+            "/tmp/drop-secret.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(queue["privacy"]["payload_json_included"])
+        self.assertFalse(flush["privacy"]["payload_json_included"])
+
+    def test_cli_feedback_dry_run_reports_due_repeated_scaffold_rows_without_claiming(self) -> None:
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        self._log_call(cohort="canary_applied", tokens_saved=1000)
+        self._log_call(cohort="canary_applied", tokens_saved=1200)
+        self._log_call(cohort="canary_holdout", tokens_saved=0)
+
+        output = io.StringIO()
+        with patch("agentflow_proxy.recommendations.httpx.AsyncClient", RepeatedScaffoldFeedbackClient):
+            exit_code = cli.repeated_scaffold_impact_cli(
+                ["--db", self.db_path, "--limit", "20", "--feedback-dry-run"],
+                stdout=output,
+            )
+        row = self.store.conn.execute(
+            "select status, attempts from managed_outcome_feedback_queue "
+            "where source_surface = ?",
+            (REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,),
+        ).fetchone()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(RepeatedScaffoldFeedbackClient.calls, [])
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["attempts"], 0)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["managed_lifecycle_feedback_flush"]["dry_run"])
+        self.assertEqual(payload["managed_lifecycle_feedback_flush"]["flush"]["would_attempt"], 1)
+        self.assertEqual(payload["managed_lifecycle_feedback_queue"]["summary"]["queued"], 1)
 
     def test_need_more_samples_when_holdout_is_missing(self) -> None:
         self._log_call(cohort="canary_applied", tokens_saved=1000)

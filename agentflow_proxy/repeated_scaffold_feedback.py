@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import datetime, timezone
 from typing import Any
 
 from agentflow_proxy.managed_egress import assert_managed_egress_safe
@@ -10,6 +12,10 @@ from agentflow_proxy.store import utc_now
 
 FEEDBACK_SCHEMA = "agentflow.repeated_scaffold_lifecycle_feedback.v1"
 SOURCE_SURFACE = "repeated_scaffold_lifecycle"
+STATUS_SCHEMA = "agentflow.repeated_scaffold_lifecycle_feedback_queue_status.v1"
+FLUSH_SCHEMA = "agentflow.repeated_scaffold_lifecycle_feedback_flush.v1"
+
+_ERROR_CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -32,6 +38,35 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_utc_iso(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        value = str(raw)
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _seconds_since(raw: Any, now: datetime) -> int | None:
+    parsed = _parse_utc_iso(raw)
+    if parsed is None:
+        return None
+    return max(0, int((now - parsed).total_seconds()))
+
+
+def _breakdown_from_counts(counts: dict[str, int]) -> list[dict[str, Any]]:
+    return [
+        {"value": key, "count": value}
+        for key, value in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
 
 
 def _breakdown_counts(rows: Any) -> dict[str, int]:
@@ -104,6 +139,53 @@ def _retry_bucket(rate: Any) -> str:
     return "gt_20pct"
 
 
+def _error_class(row: dict[str, Any]) -> str | None:
+    status_code = _as_int(row.get("last_status_code"), -1)
+    if status_code >= 500:
+        return "http-5xx"
+    if status_code >= 400:
+        return "http-4xx"
+    if status_code >= 300:
+        return "http-3xx"
+    error = str(row.get("last_error") or "").strip()
+    if not error:
+        return None
+    candidate = error.split(":", 1)[0].split("(", 1)[0].strip()
+    if _ERROR_CLASS_RE.match(candidate):
+        return candidate
+    return "error"
+
+
+def _queue_state(status: Any) -> str:
+    raw_status = str(status or "unknown")
+    if raw_status == "sent":
+        return "sent"
+    if raw_status in {"queued", "sending", "retryable-error"}:
+        return "pending"
+    if raw_status in {"error", "dropped-after-limit"}:
+        return "error"
+    return raw_status
+
+
+def _public_queue_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    return {
+        "queue_id": row.get("id"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "source_surface": row.get("source_surface"),
+        "endpoint": row.get("endpoint"),
+        "status": row.get("status"),
+        "queue_state": _queue_state(row.get("status")),
+        "attempts": _as_int(row.get("attempts")),
+        "next_attempt_at": row.get("next_attempt_at"),
+        "last_status_code": row.get("last_status_code"),
+        "last_error_class": _error_class(row),
+        "sent_at": row.get("sent_at"),
+        "age_seconds": _seconds_since(row.get("created_at"), now),
+        "payload_included": False,
+    }
+
+
 def _privacy_summary() -> dict[str, Any]:
     return {
         "metadata_only": True,
@@ -125,6 +207,181 @@ def _privacy_summary() -> dict[str, Any]:
         "pattern_hashes_included": False,
         "request_fingerprints_included": False,
         "payload_json_included": False,
+    }
+
+
+def build_repeated_scaffold_lifecycle_feedback_status(
+    store_obj: Any,
+    *,
+    sample_limit: int = 20,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    sample_cap = max(0, min(_as_int(sample_limit, 20), 100))
+    rows = (
+        store_obj.managed_outcome_feedback_rows(source_surface=SOURCE_SURFACE, limit=10000)
+        if hasattr(store_obj, "managed_outcome_feedback_rows")
+        else []
+    )
+    due_rows = (
+        store_obj.due_managed_outcome_feedback(limit=max(1, sample_cap or 1), source_surface=SOURCE_SURFACE)
+        if hasattr(store_obj, "due_managed_outcome_feedback")
+        else []
+    )
+    status_counts: dict[str, int] = {}
+    queue_state_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    endpoint_counts: dict[str, int] = {}
+    error_class_counts: dict[str, int] = {}
+    last_success_at: str | None = None
+    last_error_at: str | None = None
+    last_error_class: str | None = None
+    pending_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        state = _queue_state(status)
+        queue_state_counts[state] = queue_state_counts.get(state, 0) + 1
+        source = str(row.get("source_surface") or "unknown")
+        endpoint = str(row.get("endpoint") or "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        endpoint_counts[endpoint] = endpoint_counts.get(endpoint, 0) + 1
+        if status in {"queued", "retryable-error"}:
+            pending_rows.append(row)
+        if status == "sent" and row.get("sent_at"):
+            sent_at = str(row.get("sent_at"))
+            if last_success_at is None or sent_at > last_success_at:
+                last_success_at = sent_at
+        klass = _error_class(row)
+        if klass:
+            error_class_counts[klass] = error_class_counts.get(klass, 0) + 1
+            updated_at = str(row.get("updated_at") or row.get("created_at") or "")
+            if last_error_at is None or updated_at > last_error_at:
+                last_error_at = updated_at
+                last_error_class = klass
+
+    oldest_pending = min(
+        pending_rows,
+        key=lambda row: _parse_utc_iso(row.get("created_at")) or now,
+        default=None,
+    )
+    summary = {
+        "total": sum(status_counts.values()),
+        "queued": status_counts.get("queued", 0),
+        "due": len(due_rows),
+        "sent": status_counts.get("sent", 0),
+        "retryable_error": status_counts.get("retryable-error", 0),
+        "sending": status_counts.get("sending", 0),
+        "error": status_counts.get("error", 0),
+        "dropped_after_limit": status_counts.get("dropped-after-limit", 0),
+        "pending": queue_state_counts.get("pending", 0),
+        "last_success_at": last_success_at,
+        "last_error_at": last_error_at,
+        "last_error_class": last_error_class,
+        "oldest_pending_age_seconds": _seconds_since(oldest_pending.get("created_at"), now) if oldest_pending else None,
+    }
+    return {
+        "schema": STATUS_SCHEMA,
+        "source_surface": SOURCE_SURFACE,
+        "generated_at": now.isoformat(),
+        "summary": summary,
+        "status_breakdown": _breakdown_from_counts(status_counts),
+        "queue_state_breakdown": _breakdown_from_counts(queue_state_counts),
+        "source_surface_breakdown": _breakdown_from_counts(source_counts),
+        "endpoint_breakdown": _breakdown_from_counts(endpoint_counts),
+        "last_error_class_breakdown": _breakdown_from_counts(error_class_counts),
+        "oldest_pending": _public_queue_row(oldest_pending, now=now) if oldest_pending else None,
+        "due_samples": [
+            _public_queue_row(row, now=now)
+            for row in due_rows[:sample_cap]
+        ],
+        "privacy": _privacy_summary(),
+    }
+
+
+async def flush_repeated_scaffold_lifecycle_feedback(
+    store_obj: Any,
+    *,
+    limit: int = 5,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    capped = max(1, min(_as_int(limit, 5), 100))
+    before = build_repeated_scaffold_lifecycle_feedback_status(store_obj, sample_limit=capped)
+    if dry_run:
+        results = [
+            {**row, "status": "would-send"}
+            for row in before.get("due_samples", [])
+            if isinstance(row, dict)
+        ]
+        flush_status = "dry-run"
+        reason = "dry-run"
+    else:
+        from agentflow_proxy import recommendations
+
+        if recommendations.recommendations_enabled():
+            raw_results = await recommendations.flush_queued_outcome_feedback(
+                store_obj,
+                limit=capped,
+                source_surface=SOURCE_SURFACE,
+            )
+            results = [_public_flush_result(item) for item in raw_results]
+            flush_status = "completed"
+            reason = "ok"
+        else:
+            results = []
+            flush_status = "skipped"
+            reason = "managed-feedback-disabled"
+    after = build_repeated_scaffold_lifecycle_feedback_status(store_obj, sample_limit=capped)
+
+    result_counts: dict[str, int] = {}
+    for item in results:
+        status = str(item.get("status") or "unknown")
+        result_counts[status] = result_counts.get(status, 0) + 1
+    return {
+        "schema": FLUSH_SCHEMA,
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "source_surface": SOURCE_SURFACE,
+        "limit": capped,
+        "flush": {
+            "status": flush_status,
+            "reason": reason,
+            "attempted": len(results) if not dry_run else 0,
+            "would_attempt": len(results) if dry_run else 0,
+            "sent": result_counts.get("sent", 0),
+            "retryable_error": result_counts.get("retryable-error", 0),
+            "dropped_after_limit": result_counts.get("dropped-after-limit", 0),
+        },
+        "before": before["summary"],
+        "after": after["summary"],
+        "result_breakdown": _breakdown_from_counts(result_counts),
+        "results": results,
+        "privacy": _privacy_summary(),
+    }
+
+
+def _public_flush_result(item: dict[str, Any]) -> dict[str, Any]:
+    row = {
+        "id": item.get("queue_id"),
+        "source_surface": SOURCE_SURFACE,
+        "endpoint": item.get("endpoint"),
+        "status": item.get("status"),
+        "attempts": item.get("attempts"),
+        "last_status_code": item.get("status_code"),
+        "last_error": item.get("error"),
+    }
+    return {
+        "queue_id": item.get("queue_id"),
+        "source_surface": SOURCE_SURFACE,
+        "endpoint": item.get("endpoint"),
+        "status": item.get("status"),
+        "queue_state": _queue_state(item.get("status")),
+        "reason": item.get("reason"),
+        "attempts": _as_int(item.get("attempts")),
+        "last_status_code": item.get("status_code"),
+        "last_error_class": _error_class(row),
+        "payload_included": False,
+        "server_url_included": False,
     }
 
 

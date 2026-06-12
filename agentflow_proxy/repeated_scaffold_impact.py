@@ -534,6 +534,8 @@ def build_repeated_scaffold_impact_report(
     rollback_error_rate: float = 0.20,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    from agentflow_proxy.repeated_scaffold_feedback import build_repeated_scaffold_lifecycle_feedback_status
+
     lookback_limit = max(1, min(int(limit or 500), 10_000))
     thresholds = {
         "min_applied_samples": max(0, _as_int(min_applied_samples)),
@@ -616,6 +618,10 @@ def build_repeated_scaffold_impact_report(
             "verdict_counts": _counter_rows(verdict_counts),
             "reason_code_counts": _counter_rows(reason_counts),
         },
+        "managed_lifecycle_feedback_queue": build_repeated_scaffold_lifecycle_feedback_status(
+            store_obj,
+            sample_limit=20,
+        ),
         "candidates": candidates,
         "privacy": _privacy_summary(),
     }

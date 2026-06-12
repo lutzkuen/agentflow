@@ -174,11 +174,16 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(repeated_scaffold_impact.status_code, 200)
             self.assertEqual(repeated_scaffold_impact.json()["schema"], "agentflow.repeated_scaffold_impact.v1")
             self.assertEqual(repeated_scaffold_impact.json()["status"], "no-repeated-scaffold-canary-metadata")
+            self.assertEqual(
+                repeated_scaffold_impact.json()["managed_lifecycle_feedback_queue"]["schema"],
+                "agentflow.repeated_scaffold_lifecycle_feedback_queue_status.v1",
+            )
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["provider_calls_made"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["request_ids_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["session_ids_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["cache_keys_included"])
+            self.assertFalse(repeated_scaffold_impact.json()["managed_lifecycle_feedback_queue"]["privacy"]["payload_json_included"])
             self.assertEqual(repeated_scaffold_activation.status_code, 200)
             self.assertEqual(repeated_scaffold_activation.json()["schema"], "agentflow.repeated_scaffold_activation.v1")
             self.assertEqual(repeated_scaffold_activation.json()["status"], "no-activation-metadata")
@@ -334,6 +339,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("No repeated-scaffold opportunity candidates yet", dashboard.text)
             self.assertIn("Repeated-scaffold canary impact", dashboard.text)
             self.assertIn("repeated-scaffold-impact-summary-tbody", dashboard.text)
+            self.assertIn("repeated-scaffold-feedback-queue-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold promotion gates", dashboard.text)
             self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
             self.assertIn("No repeated-scaffold canary impact metadata yet", dashboard.text)
