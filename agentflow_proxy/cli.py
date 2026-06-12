@@ -3933,6 +3933,44 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
     return 0
 
 
+def repeated_scaffold_activation_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report Anthropic repeated-scaffold policy-decision activation coverage")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent Anthropic provider calls to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument("--since", help="Only inspect calls at or after this ISO timestamp.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+    from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_repeated_scaffold_activation_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def _attach_repeated_scaffold_lifecycle_feedback(result: dict[str, Any], store: Any) -> None:
     from agentflow_proxy import recommendations
     from agentflow_proxy.repeated_scaffold_feedback import (
@@ -6990,6 +7028,10 @@ def repeated_scaffold_opportunity_main() -> None:
 
 def repeated_scaffold_impact_main() -> None:
     raise SystemExit(repeated_scaffold_impact_cli())
+
+
+def repeated_scaffold_activation_main() -> None:
+    raise SystemExit(repeated_scaffold_activation_cli())
 
 
 def openai_cache_replay_impact_main() -> None:

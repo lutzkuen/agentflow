@@ -90,6 +90,7 @@ class DashboardImportTests(unittest.TestCase):
             openai_cache_replay_readiness = client.get("/agentflow/stats/openai-cache-replay-readiness")
             repeated_scaffold_opportunity = client.get("/agentflow/stats/repeated-scaffold-opportunity")
             repeated_scaffold_impact = client.get("/agentflow/stats/repeated-scaffold-impact")
+            repeated_scaffold_activation = client.get("/agentflow/stats/repeated-scaffold-activation")
             scaffold_rollout_health = client.get("/agentflow/stats/scaffold-rollout-health")
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
@@ -178,6 +179,13 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["request_ids_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["session_ids_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["cache_keys_included"])
+            self.assertEqual(repeated_scaffold_activation.status_code, 200)
+            self.assertEqual(repeated_scaffold_activation.json()["schema"], "agentflow.repeated_scaffold_activation.v1")
+            self.assertEqual(repeated_scaffold_activation.json()["status"], "no-activation-metadata")
+            self.assertFalse(repeated_scaffold_activation.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(repeated_scaffold_activation.json()["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(repeated_scaffold_activation.json()["privacy"]["optimization_unit_ids_included"])
+            self.assertFalse(repeated_scaffold_activation.json()["privacy"]["feedback_payloads_included"])
             self.assertEqual(scaffold_rollout_health.status_code, 200)
             self.assertEqual(scaffold_rollout_health.json()["schema"], "agentflow.scaffold_rollout_health.v1")
             self.assertTrue(scaffold_rollout_health.json()["read_only"])
@@ -310,12 +318,17 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/repeated-scaffold-opportunity", dashboard.text)
             self.assertIn("/agentflow/stats/repeated-scaffold-impact", dashboard.text)
+            self.assertIn("/agentflow/stats/repeated-scaffold-activation", dashboard.text)
             self.assertIn("/agentflow/stats/scaffold-rollout-health", dashboard.text)
             self.assertIn("Scaffold crunch", dashboard.text)
             self.assertIn("Managed scaffold rollout", dashboard.text)
             self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
             self.assertIn("repeated-scaffold-readiness-tbody", dashboard.text)
+            self.assertIn("Repeated-scaffold policy-decision activation", dashboard.text)
+            self.assertIn("repeated-scaffold-activation-tbody", dashboard.text)
+            self.assertIn("Repeated-scaffold activation groups", dashboard.text)
+            self.assertIn("repeated-scaffold-activation-groups-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold opportunity candidates", dashboard.text)
             self.assertIn("repeated-scaffold-opportunities-tbody", dashboard.text)
             self.assertIn("No repeated-scaffold opportunity candidates yet", dashboard.text)
@@ -452,9 +465,45 @@ class DashboardImportTests(unittest.TestCase):
                 },
             }
 
-        log_call(crunch_json=repeated_scaffold_crunch("canary_applied", 1100), created_at="2026-06-12T00:01:00+00:00")
-        log_call(crunch_json=repeated_scaffold_crunch("canary_applied", 1200), created_at="2026-06-12T00:02:00+00:00")
-        log_call(crunch_json=repeated_scaffold_crunch("canary_holdout", 0), created_at="2026-06-12T00:03:00+00:00")
+        managed_repeated_scaffold = {
+            "managed_recommendation": {
+                "enabled": True,
+                "status": "received",
+                "reason": "managed repeated scaffold canary",
+                "policy_id": "managed-scaffold-dashboard",
+                "optimization_unit_id": 77,
+                "applied": False,
+                "apply_reason": "missing-target-model",
+                "crunch": {
+                    "profile": "managed",
+                    "repeated_provider_scaffolding": {
+                        "enabled": True,
+                        "rules": [{"id": "managed-dashboard-rule-must-not-leak"}],
+                    },
+                },
+                "outcome_feedback": {
+                    "enabled": True,
+                    "status": "sent",
+                    "reason": "accepted",
+                    "optimization_unit_id": 77,
+                },
+            }
+        }
+        log_call(
+            crunch_json=repeated_scaffold_crunch("canary_applied", 1100),
+            routing_extra=managed_repeated_scaffold,
+            created_at="2026-06-12T00:01:00+00:00",
+        )
+        log_call(
+            crunch_json=repeated_scaffold_crunch("canary_applied", 1200),
+            routing_extra=managed_repeated_scaffold,
+            created_at="2026-06-12T00:02:00+00:00",
+        )
+        log_call(
+            crunch_json=repeated_scaffold_crunch("canary_holdout", 0),
+            routing_extra=managed_repeated_scaffold,
+            created_at="2026-06-12T00:03:00+00:00",
+        )
         Path(os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"]).write_text(
             "\n".join([
                 "schema: agentflow.scaffold_canary_policy.v1",
@@ -498,6 +547,7 @@ class DashboardImportTests(unittest.TestCase):
 
             opportunity_response = client.get("/agentflow/stats/repeated-scaffold-opportunity?limit=20")
             impact_response = client.get("/agentflow/stats/repeated-scaffold-impact?limit=20")
+            activation_response = client.get("/agentflow/stats/repeated-scaffold-activation?limit=20")
             rollout_health_response = client.get("/agentflow/stats/scaffold-rollout-health?limit=20")
             dashboard = client.get("/agentflow/dashboard")
 
@@ -525,6 +575,17 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(impact["privacy"]["session_ids_included"])
             self.assertFalse(impact["privacy"]["cache_keys_included"])
 
+            self.assertEqual(activation_response.status_code, 200)
+            activation = activation_response.json()
+            self.assertEqual(activation["schema"], "agentflow.repeated_scaffold_activation.v1")
+            self.assertEqual(activation["summary"]["repeated_scaffold_recommended_count"], 3)
+            self.assertEqual(activation["summary"]["applied_count"], 2)
+            self.assertEqual(activation["summary"]["holdout_count"], 1)
+            self.assertEqual(activation["summary"]["feedback_sent_count"], 3)
+            self.assertFalse(activation["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(activation["privacy"]["optimization_unit_ids_included"])
+            self.assertFalse(activation["privacy"]["feedback_payloads_included"])
+
             self.assertEqual(rollout_health_response.status_code, 200)
             rollout = rollout_health_response.json()
             self.assertEqual(rollout["schema"], "agentflow.scaffold_rollout_health.v1")
@@ -544,11 +605,15 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("Managed scaffold rollout", dashboard.text)
             self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
+            self.assertIn("Repeated-scaffold policy-decision activation", dashboard.text)
+            self.assertIn("repeated-scaffold-activation-tbody", dashboard.text)
+            self.assertIn("repeated-scaffold-activation-groups-tbody", dashboard.text)
             self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
 
             rendered = (
                 json.dumps(opportunity, sort_keys=True)
                 + json.dumps(impact, sort_keys=True)
+                + json.dumps(activation, sort_keys=True)
                 + json.dumps(rollout, sort_keys=True)
                 + dashboard.text
             )
@@ -560,6 +625,7 @@ class DashboardImportTests(unittest.TestCase):
                 "raw-session-must-not-leak",
                 "raw response must not leak",
                 "reviewed-provider-scaffold-second",
+                "managed-dashboard-rule-must-not-leak",
             ):
                 self.assertNotIn(forbidden, rendered)
         finally:

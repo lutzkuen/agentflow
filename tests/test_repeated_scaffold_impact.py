@@ -16,6 +16,7 @@ from agentflow_proxy.repeated_scaffold_feedback import (
     SOURCE_SURFACE as REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
     build_repeated_scaffold_lifecycle_feedback,
 )
+from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
 from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
 from agentflow_proxy.store import SQLiteStore, stable_json
 
@@ -154,6 +155,102 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
             routed_model_family=model_family,
         )
 
+    def _log_activation_call(
+        self,
+        *,
+        managed: dict | None,
+        repeated_status: str | None = None,
+        repeated_reason: str | None = None,
+        cohort: str | None = None,
+        tokens_saved: int = 0,
+        created_at: str = "2026-06-12T01:00:00+00:00",
+        status_code: int = 200,
+        category: str = "tool-result",
+    ) -> None:
+        routing = {
+            "provider": "anthropic",
+            "source_surface": "anthropic_messages",
+            "endpoint": "messages",
+            "category": category,
+            "workflow_phase": "tool-execution",
+            "text_chars": 48_000,
+            "has_tools": True,
+        }
+        if managed is not None:
+            routing["managed_recommendation"] = managed
+        provider_meta = None
+        if repeated_status is not None:
+            canary = {
+                "enabled": True,
+                "selected": cohort == "canary_applied",
+                "cohort": cohort or "none",
+                "fraction": 0.25,
+                "unit": "request_fingerprint",
+            }
+            rule = {
+                "rule_id": "activation-rule-must-not-leak",
+                "candidate_id": "activation-candidate-must-not-leak",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "applied_count": 1 if repeated_status == "applied" else 0,
+                "holdout_count": 1 if cohort == "canary_holdout" else 0,
+                "saved_chars": tokens_saved * 4 if repeated_status == "applied" else 0,
+                "canary": canary,
+                "skip_reasons": [],
+            }
+            if repeated_status == "safety_stop":
+                rule["skip_reasons"] = [{"reason": "safety_stop_error_rate", "count": 1}]
+            provider_meta = {
+                "schema": "agentflow.repeated_provider_scaffolding.v1",
+                "enabled": True,
+                "status": repeated_status,
+                "reason": repeated_reason or repeated_status,
+                "policy_source": "managed-recommended",
+                "category": category,
+                "saved_chars": tokens_saved * 4 if repeated_status == "applied" else 0,
+                "tokens_saved_est": tokens_saved if repeated_status == "applied" else 0,
+                "rules": [rule],
+                "raw_text_included": False,
+                "raw_hashes_included": False,
+            }
+        crunch = {"changed": repeated_status == "applied", "tokens_saved_est": tokens_saved}
+        if provider_meta is not None:
+            crunch["repeated_provider_scaffolding"] = provider_meta
+        self.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=created_at,
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=100,
+            input_tokens_est=12_000,
+            output_tokens_est=100,
+            actual_input_tokens=12_000,
+            actual_output_tokens=100,
+            cost_est_usd=0.04,
+            cost_baseline_usd=0.04,
+            crunch_json=stable_json(crunch),
+            routing_json=stable_json(routing),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            error="raw activation error must not leak" if status_code >= 400 else None,
+            request_json=stable_json({"raw": "activation prompt must not leak", "path": "/tmp/activation-secret.py"}),
+            response_json=stable_json({"text": "activation response must not leak"}),
+            session_id="activation-session-must-not-leak",
+            category=category,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            requested_model_family="sonnet",
+            routed_model_family="sonnet",
+        )
+
     def test_promote_verdict_and_cli_are_metadata_only(self) -> None:
         self._log_call(cohort="canary_applied", tokens_saved=1000)
         self._log_call(cohort="canary_applied", tokens_saved=1200)
@@ -189,6 +286,163 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
             self.store.conn.execute("select count(*) from managed_outcome_feedback_queue").fetchone()[0],
             0,
         )
+
+    def test_policy_decision_activation_report_covers_repeated_scaffold_states(self) -> None:
+        repeated_crunch = {
+            "profile": "managed",
+            "repeated_provider_scaffolding": {
+                "enabled": True,
+                "rules": [{"id": "managed-rule-secret", "candidate_id": "managed-candidate-secret"}],
+            },
+        }
+        self._log_activation_call(
+            managed={
+                "enabled": False,
+                "status": "skipped",
+                "reason": "disabled",
+                "applied": False,
+            },
+            created_at="2026-06-12T01:00:00+00:00",
+        )
+        self._log_activation_call(
+            managed={
+                "enabled": True,
+                "status": "received",
+                "reason": "No learned policy is active yet.",
+                "policy_id": "baseline-pass-through",
+                "optimization_unit_id": 101,
+                "applied": False,
+                "apply_reason": "missing-target-model",
+                "crunch": {"profile": "baseline"},
+            },
+            created_at="2026-06-12T01:01:00+00:00",
+        )
+        self._log_activation_call(
+            managed={
+                "enabled": True,
+                "status": "received",
+                "reason": "repeated scaffold canary",
+                "policy_id": "managed-scaffold",
+                "optimization_unit_id": 102,
+                "applied": False,
+                "apply_reason": "missing-target-model",
+                "crunch": repeated_crunch,
+            },
+            repeated_status="skipped",
+            repeated_reason="canary_holdout",
+            cohort="canary_holdout",
+            created_at="2026-06-12T01:02:00+00:00",
+        )
+        self._log_activation_call(
+            managed={
+                "enabled": True,
+                "status": "received",
+                "reason": "repeated scaffold canary",
+                "policy_id": "managed-scaffold",
+                "optimization_unit_id": 103,
+                "applied": False,
+                "apply_reason": "missing-target-model",
+                "crunch": repeated_crunch,
+                "outcome_feedback": {
+                    "enabled": True,
+                    "status": "sent",
+                    "reason": "accepted",
+                    "optimization_unit_id": 103,
+                },
+            },
+            repeated_status="applied",
+            repeated_reason="repeated-provider-scaffolding-crunched",
+            cohort="canary_applied",
+            tokens_saved=900,
+            created_at="2026-06-12T01:03:00+00:00",
+        )
+        self._log_activation_call(
+            managed={
+                "enabled": True,
+                "status": "received",
+                "reason": "repeated scaffold canary",
+                "policy_id": "managed-scaffold",
+                "optimization_unit_id": 104,
+                "applied": False,
+                "apply_reason": "missing-target-model",
+                "crunch": repeated_crunch,
+            },
+            repeated_status="safety_stop",
+            repeated_reason="safety_stop_error_rate",
+            cohort="safety_stop",
+            created_at="2026-06-12T01:04:00+00:00",
+        )
+        self._log_activation_call(
+            managed={
+                "enabled": True,
+                "status": "error",
+                "reason": "server-error",
+                "fallback": "local-policy",
+                "applied": False,
+                "error": "raw managed error must not leak",
+            },
+            created_at="2026-06-12T01:05:00+00:00",
+            status_code=502,
+        )
+        self.store.enqueue_managed_outcome_feedback(
+            id="feedback-row-secret",
+            source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+            endpoint="/v1/policy-feedback",
+            optimization_unit_id=103,
+            payload_json=stable_json({"raw_prompt": "feedback payload must not leak"}),
+            status="sent",
+            sent_at="2026-06-12T01:06:00+00:00",
+        )
+
+        report = build_repeated_scaffold_activation_report(self.store, limit=20)
+
+        self.assertEqual(report["schema"], "agentflow.repeated_scaffold_activation.v1")
+        self.assertEqual(report["status"], "matched")
+        summary = report["summary"]
+        self.assertEqual(summary["sampled_call_count"], 6)
+        self.assertEqual(summary["managed_recommendation_rows"], 6)
+        self.assertEqual(summary["preflight_disabled_count"], 1)
+        self.assertEqual(summary["baseline_count"], 1)
+        self.assertEqual(summary["repeated_scaffold_recommended_count"], 3)
+        self.assertEqual(summary["holdout_count"], 1)
+        self.assertEqual(summary["applied_count"], 1)
+        self.assertEqual(summary["safety_stop_count"], 1)
+        self.assertEqual(summary["server_error_count"], 1)
+        self.assertEqual(summary["optimization_unit_present_count"], 4)
+        self.assertEqual(summary["feedback_sent_count"], 2)
+        self.assertEqual(summary["estimated_saved_tokens"], 900)
+        states = {row["value"]: row["count"] for row in report["activation_state_counts"]}
+        self.assertEqual(states["preflight-disabled"], 1)
+        self.assertEqual(states["baseline-no-repeated-scaffold-policy"], 1)
+        self.assertEqual(states["recommended-holdout"], 1)
+        self.assertEqual(states["applied-repeated-scaffold-profile"], 1)
+        self.assertEqual(states["safety-stopped"], 1)
+        self.assertEqual(states["server-error"], 1)
+        queue = {row["value"]: row["count"] for row in report["feedback_queue_status_counts"]}
+        self.assertEqual(queue["sent"], 1)
+        self.assertFalse(report["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(report["privacy"]["optimization_unit_ids_included"])
+        self.assertFalse(report["privacy"]["feedback_payloads_included"])
+
+        output = io.StringIO()
+        exit_code = cli.repeated_scaffold_activation_cli(["--db", self.db_path, "--limit", "20"], stdout=output)
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["summary"]["applied_count"], 1)
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "activation prompt must not leak",
+            "activation response must not leak",
+            "activation-session-must-not-leak",
+            "/tmp/activation-secret.py",
+            "activation-rule-must-not-leak",
+            "activation-candidate-must-not-leak",
+            "managed-rule-secret",
+            "managed-candidate-secret",
+            "feedback payload must not leak",
+            "raw managed error must not leak",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_lifecycle_feedback_payload_is_metadata_only_and_egress_safe(self) -> None:
         self._log_call(cohort="canary_applied", tokens_saved=1000)

@@ -227,6 +227,10 @@ def create_dashboard_router(
     async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/repeated-scaffold-activation")
+    async def stats_repeated_scaffold_activation(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_repeated_scaffold_activation(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/scaffold-rollout-health")
     async def stats_scaffold_rollout_health(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_scaffold_rollout_health(_store(store_obj), limit=limit)

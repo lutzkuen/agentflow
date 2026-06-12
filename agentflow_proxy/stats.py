@@ -8451,6 +8451,16 @@ async def stats_repeated_scaffold_impact(store_obj: Any, limit: int = 500) -> di
     return build_repeated_scaffold_impact_report(store_obj, limit=limit)
 
 
+async def stats_repeated_scaffold_activation(
+    store_obj: Any,
+    limit: int = 500,
+    since: str | None = None,
+) -> dict[str, Any]:
+    from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
+
+    return build_repeated_scaffold_activation_report(store_obj, limit=limit, since=since)
+
+
 async def stats_scaffold_rollout_health(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.policy_events import recent_policy_events
 
@@ -15109,6 +15119,24 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Repeated-scaffold policy-decision activation</h2>
+  <table data-table-id="repeated-scaffold-activation" data-filter-label="Filter repeated-scaffold activation coverage">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Managed rows</th><th data-sort-type="number">Recommended</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Server errors</th><th data-sort-type="number">Feedback sent</th><th data-sort-type="number">Feedback queued</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="text">States</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-activation-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Repeated-scaffold activation groups</h2>
+  <table class="activity-table" data-table-id="repeated-scaffold-activation-groups" data-filter-label="Filter repeated-scaffold activation groups">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Tier</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Errors</th><th data-sort-type="percent">Error rate</th><th data-sort-type="number">Saved tokens</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-activation-groups-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Repeated-scaffold opportunity candidates</h2>
   <table class="activity-table" data-table-id="repeated-scaffold-opportunities" data-filter-label="Filter repeated-scaffold opportunity candidates">
     <thead><tr>
@@ -16622,14 +16650,16 @@ function repeatedScaffoldReasonBadges(values,verdict){
 }
 async function refreshRepeatedScaffold(){
   try{
-    const [hr,or,ir]=await Promise.all([
+    const [hr,or,ir,ar]=await Promise.all([
       fetch('/agentflow/stats/scaffold-rollout-health?limit=500'),
       fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=1000&min_repeated_rows=2'),
-      fetch('/agentflow/stats/repeated-scaffold-impact?limit=500')
+      fetch('/agentflow/stats/repeated-scaffold-impact?limit=500'),
+      fetch('/agentflow/stats/repeated-scaffold-activation?limit=500')
     ]);
     const health=await hr.json();
     const opportunity=await or.json();
     const impact=await ir.json();
+    const activation=await ar.json();
     const hs=health.summary||{};
     const hp=health.privacy||{};
     const fetchStatus=hs.last_fetch_status||((health.latest_fetch||{}).ok===false?'failed':(hs.last_fetch_at?'ok':'none'));
@@ -16660,6 +16690,35 @@ async function refreshRepeatedScaffold(){
       <td class="flags">${repeatedScaffoldBreakdownBadges(opportunity.blocker_reason_breakdown,'none','miss')}</td>
       <td class="flags">${repeatedScaffoldPrivacyBadges(op)}</td>
     </tr>`;
+    const as=activation.summary||{};
+    const ap=activation.privacy||{};
+    const serverErrors=(as.server_error_count||0)+(as.server_unreachable_count||0);
+    document.getElementById('repeated-scaffold-activation-tbody').innerHTML=`<tr>
+      <td><span class="badge ${scaffoldStatusBadge(activation.status)}">${esc(activation.status||'unknown')}</span><div class="sub">${esc(as.explanation||'')}</div></td>
+      <td class="tokens">${(as.managed_recommendation_rows||0).toLocaleString()} <span class="badge miss">sampled ${(as.sampled_call_count||0).toLocaleString()}</span></td>
+      <td class="tokens">${(as.repeated_scaffold_recommended_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.safety_stop_count||0).toLocaleString()}</td>
+      <td class="tokens">${serverErrors.toLocaleString()}</td>
+      <td class="tokens">${(as.feedback_sent_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.feedback_queued_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(as.estimated_saved_tokens||0)}</td>
+      <td class="flags">${repeatedScaffoldBreakdownBadges(activation.activation_state_counts,'none','provider')}</td>
+      <td class="flags">${repeatedScaffoldPrivacyBadges(ap)} <span class="badge hit">feedback payloads omitted</span></td>
+    </tr>`;
+    const activationGroups=activation.activation_groups||[];
+    document.getElementById('repeated-scaffold-activation-groups-tbody').innerHTML=activationGroups.slice(0,30).map(row=>`<tr>
+      <td><span class="badge ${scaffoldStatusBadge(row.activation_state)}">${esc(row.activation_state||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge provider">${esc(row.requested_model_tier||'unknown')}&rarr;${esc(row.routed_model_tier||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.workflow_phase||'unknown')}</span></td>
+      <td class="tokens">${(row.call_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.error_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(row.error_rate||0)}</td>
+      <td class="tokens">${fmtTok(row.estimated_saved_tokens||0)}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No repeated-scaffold activation groups yet</td></tr>';
     const opportunities=opportunity.candidates||[];
     document.getElementById('repeated-scaffold-opportunities-tbody').innerHTML=opportunities.slice(0,20).map(row=>`<tr>
       <td class="model">${esc(row.candidate_id||'unknown')}</td>
