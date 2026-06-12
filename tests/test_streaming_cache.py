@@ -188,9 +188,29 @@ class FakeEmptyErrorClient:
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class StreamingCacheTest(unittest.TestCase):
+    ENV_KEYS = (
+        "AGENTFLOW_CACHE",
+        "AGENTFLOW_CACHE_TOOL_CALLS",
+        "AGENTFLOW_SEMANTIC_CACHE",
+        "AGENTFLOW_SEMANTIC_THRESHOLD",
+        "AGENTFLOW_CACHE_RULES",
+        "AGENTFLOW_CACHE_CANARY_POLICY",
+        "AGENTFLOW_CACHE_FILE_WATCH",
+        "AGENTFLOW_CACHE_WATCH_ROOT",
+        "AGENTFLOW_CACHE_WATCH_MAX_PATHS",
+        "AGENTFLOW_CACHE_CAPTURE_CANDIDATES",
+        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP",
+        "AGENTFLOW_PATTERN_CANARY_SAFETY_STOP_WINDOW",
+        "AGENTFLOW_POLICY_EVENTS",
+        "AGENTFLOW_POLICY_EVENTS_LOG",
+    )
+
     def setUp(self):
         global categorize_request, extract_text, route_model
 
+        self.saved_env = {key: os.environ.get(key) for key in self.ENV_KEYS}
+        for key in self.ENV_KEYS:
+            os.environ.pop(key, None)
         self.old_store = server.store
         self.old_provider = server.PROVIDER
         self.old_upstream = server.ANTHROPIC_UPSTREAM
@@ -225,6 +245,7 @@ class StreamingCacheTest(unittest.TestCase):
         self.old_anthropic_routing_experiment_decision = anthropic_proxy.routing_experiment_decision
         importlib.reload(router_module)
         importlib.reload(routing_experiments)
+        importlib.reload(anthropic_proxy)
         categorize_request = router_module.categorize_request
         extract_text = router_module.extract_text
         route_model = router_module.route_model
@@ -301,11 +322,16 @@ class StreamingCacheTest(unittest.TestCase):
             anthropic_upstream=self.old_upstream,
             openai_upstream=self.old_openai_upstream,
         )
+        for key, value in self.saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
-    def _pattern_features_for_request(self, request_body):
+    def _pattern_features_for_request(self, request_body, *, session_id="streaming-cache-test"):
         category = categorize_request(request_body)
         crunched, crunch_meta = crunch_body(request_body)
-        routed_model, routing_meta = route_model(crunched)
+        routed_model, routing_meta = route_model(crunched, session_id=session_id)
         input_tokens = estimate_tokens_from_text(extract_text(crunched))
         unit = build_optimization_unit(
             provider="anthropic",
@@ -318,27 +344,39 @@ class StreamingCacheTest(unittest.TestCase):
             category=category,
             stream=True,
             input_tokens_est=input_tokens,
-            session_id="streaming-cache-test",
+            session_id=session_id,
         )
         return pattern_feature_diagnostics(unit)
 
-    def _streaming_cache_rule_for_request(self, request_body, *, canary_fraction=1.0, safe_invalidation=False):
-        features = self._pattern_features_for_request(request_body)
-        return cache_module.normalize_cache_pattern_rules([{
-            "id": "reviewed-static-streaming-cache",
-            "policy_source": "managed-recommended",
-            "candidate_id": "streaming-static-candidate",
-            "conditions": {
-                "pattern_hashes": features["pattern_hashes"],
-                "source_surface": "anthropic_messages",
-                "app_family": "claude_code",
-                "category": features["category"],
-                "stream": True,
+    def _streaming_cache_rule_for_request(
+        self,
+        request_body,
+        *,
+        canary_fraction=1.0,
+        safe_invalidation=False,
+        allow_tool_calls=False,
+        session_id="streaming-cache-test",
+    ):
+        features = self._pattern_features_for_request(request_body, session_id=session_id)
+        conditions = {
+            "pattern_hashes": ["sha256:*"],
+            "source_surface": "anthropic_messages",
+            "app_family": "claude_code",
+            "category": features["category"],
+            "stream": True,
+        }
+        if not allow_tool_calls and not features.get("has_tools"):
+            conditions.update({
                 "cacheability_bucket": "high",
                 "static_information_hint": True,
                 "time_sensitive_hint": False,
                 "user_specific_hint": False,
-            },
+            })
+        return cache_module.normalize_cache_pattern_rules([{
+            "id": "reviewed-static-streaming-cache",
+            "policy_source": "managed-recommended",
+            "candidate_id": "streaming-static-candidate",
+            "conditions": conditions,
             "rollout": {
                 "schema": "agentflow.pattern_policy_rollout.v1",
                 "recommendation_mode": "canary-only",
@@ -350,10 +388,34 @@ class StreamingCacheTest(unittest.TestCase):
             "action": {
                 "type": "exact_cache_pattern",
                 "streaming": True,
-                "allow_tool_calls": False,
+                "allow_tool_calls": allow_tool_calls,
                 "safe_invalidation": safe_invalidation,
             },
         }])[0]
+
+    def _stream_cache_keys_for_request(self, request_body, *, session_id):
+        crunched, _crunch_meta = crunch_body(json.loads(json.dumps(request_body)))
+        routed_model, _routing_meta = route_model(crunched, session_id=session_id)
+        models = [str(routed_model)]
+        requested = str(crunched.get("model") or "")
+        if requested and requested not in models:
+            models.append(requested)
+        keys = []
+        for model in models:
+            variant = json.loads(json.dumps(crunched))
+            variant["model"] = model
+            keys.append((
+                cache_module.cache_key_for(
+                    variant,
+                    "/v1/messages",
+                    provider="anthropic",
+                    upstream=server.ANTHROPIC_UPSTREAM,
+                    replay_scope="session",
+                    replay_scope_id=session_id,
+                ),
+                variant,
+            ))
+        return keys
 
     def _streaming_experiment_decision(self, *, random_value):
         def decide(body, routing_meta, **kwargs):
@@ -884,12 +946,251 @@ class StreamingCacheTest(unittest.TestCase):
             cache_meta = json.loads(row["cache_json"])
             self.assertEqual(cache_meta["status"], "skipped")
             self.assertEqual(cache_meta["reason"], "streaming-tools-disabled")
-            self.assertEqual(
-                cache_meta["pattern_rules"]["skip_reasons"][-1]["reason"],
-                "streaming-tools-disabled",
-            )
+            self.assertEqual(cache_meta["pattern_rules"]["matched_count"], 0)
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_tool_result_dependency_canary_replays_seeded_stable_cache(self):
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        old_cwd = os.getcwd()
+        session_id = "streaming-tool-result-cache-test"
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                os.makedirs("src")
+                with open("src/example.py", "w", encoding="utf-8") as f:
+                    f.write("print('stable')\n")
+                request_body = {
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 32,
+                    "stream": True,
+                    "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_1",
+                                    "content": "Read src/example.py\nprint('stable')",
+                                }
+                            ],
+                        }
+                    ],
+                }
+                cache_module.CACHE_PATTERN_RULES = (
+                    self._streaming_cache_rule_for_request(
+                        request_body,
+                        safe_invalidation=True,
+                        allow_tool_calls=True,
+                        session_id=session_id,
+                    ),
+                )
+                seeded_keys = self._stream_cache_keys_for_request(request_body, session_id=session_id)
+                key = seeded_keys[0][0]
+                for seed_key, seed_body in seeded_keys:
+                    server.store.set_cache(
+                        seed_key,
+                        str(seed_body.get("model")),
+                        len(json.dumps(seed_body)),
+                        cache_module.stream_cache_payload(
+                            STREAM_FRAMES,
+                            provider="anthropic",
+                            usage={"input_tokens": 5, "output_tokens": 2},
+                            output_text="Hello",
+                        ),
+                        file_deps=cache_module.cache_file_dependency_snapshots(seed_body),
+                    )
+
+                with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                    client = TestClient(server.app)
+                    with client.stream(
+                        "POST",
+                        "/v1/messages",
+                        json=request_body,
+                        headers={"x-session-id": session_id},
+                    ) as response:
+                        body = b"".join(response.iter_bytes())
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["x-agentflow-cache"], "hit")
+                self.assertEqual(body, b"".join(STREAM_FRAMES))
+                self.assertEqual(FakeAsyncClient.calls, 0)
+                [row] = server.store.conn.execute(
+                    "select stream, cache_hit, cache_json from calls"
+                ).fetchall()
+                self.assertEqual(row["stream"], 1)
+                self.assertEqual(row["cache_hit"], 1)
+                cache_meta = json.loads(row["cache_json"])
+                self.assertEqual(cache_meta["status"], "hit")
+                self.assertEqual(cache_meta["reason"], "streaming-exact-match")
+                self.assertEqual(cache_meta["hit_type"], "streaming-exact")
+                self.assertEqual(cache_meta["pattern_rule"]["canary"]["status"], "applied")
+                self.assertEqual(cache_meta["cache_replay_canary"]["status"], "applied")
+                self.assertEqual(cache_meta["cache_replay_canary"]["reason"], "dependency-stable")
+                self.assertEqual(cache_meta["cache_replay_canary"]["canary_cohort"], "canary_applied")
+                self.assertFalse(cache_meta["cache_replay_canary"]["dependency_audit"]["paths_included"])
+                serialized = json.dumps(cache_meta, sort_keys=True)
+                self.assertNotIn("src/example.py", serialized)
+                self.assertNotIn("print('stable')", serialized)
+                self.assertNotIn(key, serialized)
+                assert_managed_egress_safe(cache_meta)
+            finally:
+                os.chdir(old_cwd)
+                cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_tool_result_dependency_canary_holdout_records_cohort(self):
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        old_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                os.makedirs("src")
+                with open("src/example.py", "w", encoding="utf-8") as f:
+                    f.write("print('stable')\n")
+                request_body = {
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 32,
+                    "stream": True,
+                    "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_1",
+                                    "content": "Read src/example.py\nprint('stable')",
+                                }
+                            ],
+                        }
+                    ],
+                }
+                cache_module.CACHE_PATTERN_RULES = (
+                    self._streaming_cache_rule_for_request(
+                        request_body,
+                        canary_fraction=0.0,
+                        safe_invalidation=True,
+                        allow_tool_calls=True,
+                        session_id="streaming-tool-result-holdout",
+                    ),
+                )
+
+                with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                    client = TestClient(server.app)
+                    with client.stream(
+                        "POST",
+                        "/v1/messages",
+                        json=request_body,
+                        headers={"x-session-id": "streaming-tool-result-holdout"},
+                    ) as response:
+                        body = b"".join(response.iter_bytes())
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+                self.assertEqual(body, b"".join(STREAM_FRAMES))
+                self.assertEqual(FakeAsyncClient.calls, 1)
+                [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
+                self.assertEqual(row["cache_hit"], 0)
+                cache_meta = json.loads(row["cache_json"])
+                self.assertEqual(cache_meta["status"], "skipped")
+                self.assertEqual(cache_meta["reason"], "canary_holdout")
+                self.assertEqual(cache_meta["canary_cohort"], "canary_holdout")
+                self.assertEqual(cache_meta["cache_replay_canary"]["status"], "holdout")
+                self.assertEqual(cache_meta["cache_replay_canary"]["canary_cohort"], "canary_holdout")
+                self.assertEqual(cache_meta["pattern_rule"]["canary"]["status"], "holdout")
+                self.assertNotIn("src/example.py", json.dumps(cache_meta, sort_keys=True))
+                assert_managed_egress_safe(cache_meta)
+            finally:
+                os.chdir(old_cwd)
+                cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_tool_result_dependency_canary_invalidates_stale_seed(self):
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        old_cwd = os.getcwd()
+        session_id = "streaming-tool-result-stale"
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                os.chdir(tmp)
+                os.makedirs("src")
+                with open("src/example.py", "w", encoding="utf-8") as f:
+                    f.write("print('old')\n")
+                request_body = {
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 32,
+                    "stream": True,
+                    "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_1",
+                                    "content": "Read src/example.py\nprint('old')",
+                                }
+                            ],
+                        }
+                    ],
+                }
+                cache_module.CACHE_PATTERN_RULES = (
+                    self._streaming_cache_rule_for_request(
+                        request_body,
+                        safe_invalidation=True,
+                        allow_tool_calls=True,
+                        session_id=session_id,
+                    ),
+                )
+                seeded_keys = self._stream_cache_keys_for_request(request_body, session_id=session_id)
+                key = seeded_keys[0][0]
+                for seed_key, seed_body in seeded_keys:
+                    server.store.set_cache(
+                        seed_key,
+                        str(seed_body.get("model")),
+                        len(json.dumps(seed_body)),
+                        cache_module.stream_cache_payload(
+                            STREAM_FRAMES,
+                            provider="anthropic",
+                            usage={"input_tokens": 5, "output_tokens": 2},
+                            output_text="Hello",
+                        ),
+                        file_deps=cache_module.cache_file_dependency_snapshots(seed_body),
+                    )
+                with open("src/example.py", "w", encoding="utf-8") as f:
+                    f.write("print('newer content')\n")
+
+                with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                    client = TestClient(server.app)
+                    with client.stream(
+                        "POST",
+                        "/v1/messages",
+                        json=request_body,
+                        headers={"x-session-id": session_id},
+                    ) as response:
+                        body = b"".join(response.iter_bytes())
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+                self.assertEqual(body, b"".join(STREAM_FRAMES))
+                self.assertEqual(FakeAsyncClient.calls, 1)
+                [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
+                self.assertEqual(row["cache_hit"], 0)
+                cache_meta = json.loads(row["cache_json"])
+                self.assertEqual(cache_meta["status"], "invalidated")
+                self.assertEqual(cache_meta["reason"], "dependency-changed")
+                self.assertTrue(cache_meta["invalidated"])
+                self.assertEqual(cache_meta["cache_replay_canary"]["status"], "invalidated")
+                self.assertEqual(cache_meta["cache_replay_canary"]["reason"], "dependency-changed")
+                self.assertFalse(cache_meta["cache_replay_canary"]["dependency_audit"]["paths_included"])
+                serialized = json.dumps(cache_meta, sort_keys=True)
+                self.assertNotIn("src/example.py", serialized)
+                self.assertNotIn("print('old')", serialized)
+                self.assertNotIn("print('newer content')", serialized)
+                self.assertNotIn(key, serialized)
+                assert_managed_egress_safe(cache_meta)
+            finally:
+                os.chdir(old_cwd)
+                cache_module.CACHE_PATTERN_RULES = old_rules
 
     def test_streamed_dependency_required_rule_fails_closed_without_evidence(self):
         request_body = {
@@ -940,30 +1241,22 @@ class StreamingCacheTest(unittest.TestCase):
         session_id = "streaming-cache-test"
         try:
             cache_module.CACHE_PATTERN_RULES = (self._streaming_cache_rule_for_request(request_body),)
-            crunched, _crunch_meta = crunch_body(json.loads(json.dumps(request_body)))
-            routed_model, _routing_meta = route_model(crunched, session_id=session_id)
-            crunched["model"] = routed_model
-            key = cache_module.cache_key_for(
-                crunched,
-                "/v1/messages",
-                provider="anthropic",
-                upstream=server.ANTHROPIC_UPSTREAM,
-                replay_scope="session",
-                replay_scope_id=session_id,
-            )
-            server.store.set_cache(
-                key,
-                str(crunched.get("model")),
-                len(json.dumps(crunched)),
-                {
-                    "agentflow_cache_type": "sse-stream",
-                    "version": 1,
-                    "provider": "anthropic",
-                    "frames_b64": [base64.b64encode(b"cached garbage\n\n").decode("ascii")],
-                    "usage": {"input_tokens": 5, "output_tokens": 2},
-                    "output_text": "cached garbage",
-                },
-            )
+            seeded_keys = self._stream_cache_keys_for_request(request_body, session_id=session_id)
+            key = seeded_keys[0][0]
+            for seed_key, seed_body in seeded_keys:
+                server.store.set_cache(
+                    seed_key,
+                    str(seed_body.get("model")),
+                    len(json.dumps(seed_body)),
+                    {
+                        "agentflow_cache_type": "sse-stream",
+                        "version": 1,
+                        "provider": "anthropic",
+                        "frames_b64": [base64.b64encode(b"cached garbage\n\n").decode("ascii")],
+                        "usage": {"input_tokens": 5, "output_tokens": 2},
+                        "output_text": "cached garbage",
+                    },
+                )
 
             with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
                 client = TestClient(server.app)

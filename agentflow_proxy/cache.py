@@ -179,6 +179,8 @@ def _normalize_pattern_hash(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     text = value.strip().lower()
+    if text in {"*", "sha256:*"}:
+        return "sha256:*"
     digest = text.removeprefix("sha256:") if text.startswith("sha256:") else text
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         return None
@@ -469,13 +471,19 @@ def _streaming_static_replay_blocker(
     has_thinking_blocks: bool = False,
     pattern_features: dict[str, Any] | None,
     rule: dict[str, Any],
+    action: dict[str, Any],
 ) -> str | None:
-    if has_tool_blocks:
-        return "streaming-tools-disabled"
     if has_thinking_blocks:
         return "streaming-thinking-disabled"
     if str(rule.get("policy_source") or "").lower() == "local-default":
         return "streaming-rule-source-not-reviewed"
+    if has_tool_blocks:
+        if not (action.get("allow_tool_calls") and action.get("safe_invalidation")):
+            return "streaming-tools-disabled"
+        features = pattern_features if isinstance(pattern_features, dict) else {}
+        if str(features.get("category") or "").lower() != "tool-result":
+            return "streaming-tool-result-required"
+        return None
     cacheability = _cacheability_from_pattern_features(pattern_features)
     if not cacheability:
         return "cacheability-features-missing"
@@ -515,7 +523,7 @@ def _cache_pattern_rule_match(
             continue
         conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
         rule_hashes = set(_parse_pattern_hashes(conditions.get("pattern_hashes")))
-        matched_hashes = sorted(feature_hashes.intersection(rule_hashes))
+        matched_hashes = sorted(feature_hashes) if "sha256:*" in rule_hashes else sorted(feature_hashes.intersection(rule_hashes))
         if not matched_hashes:
             skip_reasons.append({"rule_id": rule_id, "reason": "pattern-hash-mismatch"})
             continue
@@ -524,9 +532,6 @@ def _cache_pattern_rule_match(
             continue
         if "stream" in conditions and _as_bool(conditions.get("stream"), False) != bool(stream):
             skip_reasons.append({"rule_id": rule_id, "reason": "stream-mismatch"})
-            continue
-        if stream and has_tool_blocks:
-            skip_reasons.append({"rule_id": rule_id, "reason": "streaming-tools-disabled"})
             continue
         model_pattern = conditions.get("model_pattern")
         if isinstance(model_pattern, str) and model_pattern.strip():
@@ -585,6 +590,7 @@ def _cache_pattern_rule_match(
                     has_thinking_blocks=has_thinking_blocks,
                     pattern_features=pattern_features,
                     rule=rule,
+                    action=action,
                 )
                 if blocker:
                     skip_reasons.append({"rule_id": rule_id, "reason": blocker})
@@ -683,6 +689,48 @@ def _attach_cache_pattern_meta(
     if skip_reasons:
         meta["pattern_rules"]["skip_reasons"] = skip_reasons[:20]
     return meta
+
+
+def _attach_skipped_cache_replay_canary(meta: dict[str, Any], selected_skip: dict[str, Any]) -> None:
+    reason = str(selected_skip.get("reason") or "")
+    if reason not in {"canary_holdout", LOCAL_CANARY_SAFETY_STOP_REASON}:
+        return
+    meta["pattern_rule"] = {
+        key: selected_skip.get(key)
+        for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop")
+        if selected_skip.get(key) is not None
+    }
+    canary = selected_skip.get("canary") if isinstance(selected_skip.get("canary"), dict) else {}
+    if isinstance(selected_skip.get("canary"), dict):
+        meta["canary"] = selected_skip["canary"]
+        meta["canary_cohort"] = selected_skip["canary"].get("cohort")
+    if reason == "canary_holdout":
+        meta["cache_replay_canary"] = {
+            "schema": "agentflow.cache_replay_canary_decision.v1",
+            "rule_id": selected_skip.get("rule_id"),
+            "candidate_id": selected_skip.get("candidate_id"),
+            "policy_source": selected_skip.get("policy_source"),
+            "scope": selected_skip.get("scope") or "session",
+            "canary": canary,
+            "canary_cohort": canary.get("cohort"),
+            "status": "holdout",
+            "reason": "canary_holdout",
+            "dependency_audit": None,
+        }
+        return
+    meta["cache_replay_canary"] = {
+        "schema": "agentflow.cache_replay_canary_decision.v1",
+        "rule_id": selected_skip.get("rule_id"),
+        "candidate_id": selected_skip.get("candidate_id"),
+        "policy_source": selected_skip.get("policy_source"),
+        "scope": selected_skip.get("scope") or "session",
+        "canary": canary,
+        "canary_cohort": canary.get("cohort"),
+        "status": "safety_stopped",
+        "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+        "dependency_audit": None,
+        "safety_stop": selected_skip.get("safety_stop"),
+    }
 
 
 def cache_hit_decision_meta(
@@ -1528,15 +1576,7 @@ def cache_lookup_meta(
             meta["semantic_threshold"] = float(managed_profile["semantic_threshold"])
     if pattern_skip_reasons:
         selected_skip = pattern_skip_reasons[-1]
-        if selected_skip.get("reason") in {"canary_holdout", LOCAL_CANARY_SAFETY_STOP_REASON}:
-            meta["pattern_rule"] = {
-                key: selected_skip.get(key)
-                for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop")
-                if selected_skip.get(key) is not None
-            }
-            if isinstance(selected_skip.get("canary"), dict):
-                meta["canary"] = selected_skip["canary"]
-                meta["canary_cohort"] = selected_skip["canary"].get("cohort")
+        _attach_skipped_cache_replay_canary(meta, selected_skip)
     return exact_enabled, semantic_enabled, meta
 
 
@@ -1566,6 +1606,12 @@ def streaming_cache_lookup_meta(
     if exact_enabled:
         status = "miss"
         reason = "streaming-exact-pattern-miss"
+    elif pattern_skip_reasons and str(pattern_skip_reasons[-1].get("reason") or "") in {
+        "canary_holdout",
+        LOCAL_CANARY_SAFETY_STOP_REASON,
+    }:
+        status = "skipped"
+        reason = str(pattern_skip_reasons[-1].get("reason"))
     elif has_tool_blocks and CACHE_ENABLED:
         status = "skipped"
         reason = "streaming-tools-disabled"
@@ -1593,15 +1639,7 @@ def streaming_cache_lookup_meta(
         meta["managed_profile"] = managed_profile
     if pattern_skip_reasons:
         selected_skip = pattern_skip_reasons[-1]
-        if selected_skip.get("reason") in {"canary_holdout", LOCAL_CANARY_SAFETY_STOP_REASON}:
-            meta["pattern_rule"] = {
-                key: selected_skip.get(key)
-                for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop")
-                if selected_skip.get(key) is not None
-            }
-            if isinstance(selected_skip.get("canary"), dict):
-                meta["canary"] = selected_skip["canary"]
-                meta["canary_cohort"] = selected_skip["canary"].get("cohort")
+        _attach_skipped_cache_replay_canary(meta, selected_skip)
     return exact_enabled, meta
 
 
