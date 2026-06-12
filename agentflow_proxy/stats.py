@@ -4297,6 +4297,342 @@ async def stats_cache_replay_readiness(store_obj: Any, limit: int = 1000) -> dic
     }
 
 
+def _cache_replay_activation_provider_gate(cache: dict[str, Any], rule: dict[str, Any] | None) -> dict[str, Any]:
+    candidates = [
+        cache.get("provider_adoption_gate"),
+        cache.get("provider_adoption_health"),
+        cache.get("provider_adoption"),
+        (rule or {}).get("provider_adoption_gate") if isinstance(rule, dict) else None,
+        (rule or {}).get("provider_adoption_health") if isinstance(rule, dict) else None,
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        status = public_label(candidate.get("status") or candidate.get("readiness") or "unknown", "unknown")
+        reason_codes = [
+            public_label(item, "unknown")
+            for item in candidate.get("reason_codes") or candidate.get("blockers") or []
+            if isinstance(item, (str, int, float, bool))
+        ]
+        blocking = bool(candidate.get("blocking")) or status in {"blocked", "failed", "regressed"}
+        if blocking:
+            return {"status": "blocked", "reason_codes": sorted(set(reason_codes or ["provider-adoption-regression"]))}
+        if status in {"ready", "pass", "healthy"} or candidate.get("blocking") is False:
+            return {"status": "ready", "reason_codes": sorted(set(reason_codes))}
+        return {"status": status, "reason_codes": sorted(set(reason_codes))}
+    return {"status": "not-observed", "reason_codes": []}
+
+
+def _cache_replay_activation_projected_hits(*values: Any) -> int:
+    for value in values:
+        if isinstance(value, dict):
+            for key in ("projected_hits", "projected_hit_count", "expected_hits", "expected_hit_count"):
+                if value.get(key) is not None:
+                    return _as_int(value.get(key))
+    return 0
+
+
+def _cache_replay_activation_projected_savings(*values: Any) -> float:
+    for value in values:
+        if isinstance(value, dict):
+            for key in (
+                "projected_saved_cost_usd",
+                "projected_savings_usd",
+                "projected_estimated_saved_cost_usd",
+                "expected_saved_cost_usd",
+            ):
+                if value.get(key) is not None:
+                    return _as_float(value.get(key))
+    return 0.0
+
+
+def _cache_replay_activation_state(bucket: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons = set(str(item) for item in bucket.get("_reason_codes", set()) if item)
+    provider = bucket.get("provider_adoption_gate") if isinstance(bucket.get("provider_adoption_gate"), dict) else {}
+    if _as_int(bucket.get("safety_stop_count")):
+        reasons.add(_CACHE_REPLAY_SAFETY_STOP_REASON)
+        return "rollback recommended", sorted(reasons)
+    replayed = _as_int(bucket.get("hit_count"))
+    replayed_errors = _as_int(bucket.get("replayed_error_count"))
+    if replayed and replayed_errors:
+        reasons.add("replayed-errors-observed")
+        return "rollback recommended", sorted(reasons)
+    if (
+        _as_int(bucket.get("invalidation_count"))
+        or _as_int(bucket.get("bypass_count"))
+        or str(provider.get("status") or "") == "blocked"
+    ):
+        if str(provider.get("status") or "") == "blocked":
+            reasons.update(provider.get("reason_codes") or ["provider-adoption-regression"])
+        return "hold", sorted(reasons or {"activation-blocked"})
+    applied = _as_int(bucket.get("applied_count"))
+    holdout = _as_int(bucket.get("holdout_count"))
+    misses = _as_int(bucket.get("miss_count"))
+    if replayed and holdout and not replayed_errors:
+        reasons.add("replay-and-holdout-observed")
+        return "widen candidate", sorted(reasons)
+    if applied or replayed or misses:
+        reasons.add("collect-hit-recovery-evidence" if not replayed else "canary-replay-observed")
+        return "canary active", sorted(reasons)
+    if holdout:
+        reasons.add("holdout-only")
+        return "hold", sorted(reasons)
+    reasons.add("no-cache-replay-canary-evidence")
+    return "needs evidence", sorted(reasons)
+
+
+async def stats_cache_replay_activation_health(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    scan_limit: int = 1000,
+) -> dict[str, Any]:
+    capped_scan = max(1, min(_as_int(scan_limit) or 1000, 10000))
+    output_limit = max(1, min(_as_int(limit) or 50, 1000))
+    rows = _cache_replay_confidence_rows_from_store(store_obj, limit=capped_scan)
+    grouped: dict[tuple[str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    state_counts: dict[str, int] = {}
+    provider_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+
+    for row in rows:
+        cache = _json_obj(row.get("cache_json"))
+        if not cache:
+            continue
+        routing = _json_obj(row.get("routing_json"))
+        decision = _cache_decision_for_breakdown(row)
+        source_surface = canonical_source_surface(
+            decision.get("source_surface") or row.get("source_surface") or "unknown"
+        )
+        category = public_label(row.get("category") or routing.get("category") or cache.get("category") or "unknown", "unknown")
+        stream = bool(_as_int(row.get("stream")) or cache.get("stream"))
+        has_tools = bool(routing.get("has_tools") or category.startswith("tool") or cache.get("has_tools"))
+        workflow_phase = public_label(
+            routing.get("workflow_phase")
+            or cache.get("workflow_phase")
+            or cache.get("phase")
+            or "unknown",
+            "unknown",
+        )
+        app_family = public_label(
+            cache.get("app_family")
+            or routing.get("app_family")
+            or _app_family_for_call(row.get("provider"), row.get("requested_model"), row.get("path")),
+            "unknown",
+        )
+        rules = _cache_pattern_rules_from_meta(cache)
+        replay_canary = cache.get("cache_replay_canary") if isinstance(cache.get("cache_replay_canary"), dict) else {}
+        if not rules and replay_canary:
+            rules = [{
+                "rule_id": replay_canary.get("rule_id"),
+                "candidate_id": replay_canary.get("candidate_id"),
+                "policy_source": replay_canary.get("policy_source"),
+                "scope": replay_canary.get("scope"),
+                "canary": replay_canary.get("canary"),
+            }]
+        if not rules:
+            continue
+
+        for rule in rules:
+            identity = _cache_rule_identity(
+                cache=cache,
+                rule=rule,
+                source_surface=source_surface,
+                category=category,
+                stream=stream,
+                has_tools=has_tools,
+            )
+            replay_scope = public_label(
+                (rule or {}).get("scope")
+                or replay_canary.get("scope")
+                or cache.get("replay_scope")
+                or "unknown",
+                "unknown",
+            )
+            provider_gate = _cache_replay_activation_provider_gate(cache, rule)
+            key = (
+                identity["rule_id"],
+                str(identity.get("candidate_id") or ""),
+                identity["policy_source"],
+                identity["source_surface"],
+                app_family,
+                identity["category"],
+                workflow_phase,
+                replay_scope,
+            )
+            bucket = grouped.setdefault(
+                key,
+                {
+                    **identity,
+                    "app_family": app_family,
+                    "workflow_phase": workflow_phase,
+                    "replay_scope_class": replay_scope,
+                    "granularities": set(),
+                    "sample_count": 0,
+                    "applied_count": 0,
+                    "holdout_count": 0,
+                    "hit_count": 0,
+                    "miss_count": 0,
+                    "bypass_count": 0,
+                    "invalidation_count": 0,
+                    "safety_stop_count": 0,
+                    "replayed_error_count": 0,
+                    "estimated_saved_cost_usd": 0.0,
+                    "projected_saved_cost_usd": 0.0,
+                    "projected_hits": 0,
+                    "canary_fraction": None,
+                    "holdout_fraction": None,
+                    "provider_adoption_gate": provider_gate,
+                    "first_seen_at": row.get("created_at"),
+                    "last_seen_at": row.get("created_at"),
+                    "_reason_codes": set(),
+                },
+            )
+            bucket["sample_count"] += 1
+            bucket["granularities"].add(str(row.get("granularity") or "provider_request"))
+            if str(provider_gate.get("status") or "") == "blocked":
+                bucket["provider_adoption_gate"] = provider_gate
+            elif str((bucket.get("provider_adoption_gate") or {}).get("status") or "") == "not-observed":
+                bucket["provider_adoption_gate"] = provider_gate
+
+            outcome = _cache_confidence_outcome(cache, decision, rule)
+            if outcome == "hit":
+                bucket["hit_count"] += 1
+                bucket["applied_count"] += 1
+            elif outcome == "miss":
+                bucket["miss_count"] += 1
+                bucket["applied_count"] += 1
+            elif outcome == "holdout":
+                bucket["holdout_count"] += 1
+            elif outcome == "safety_stop":
+                bucket["safety_stop_count"] += 1
+            else:
+                bucket["bypass_count"] += 1
+
+            status_code = _as_int(row.get("status_code")) if row.get("status_code") is not None else None
+            if outcome == "hit" and status_code is not None and status_code >= 400:
+                bucket["replayed_error_count"] += 1
+
+            invalidation, stale, safety = _cache_confidence_reason_counts(cache=cache, decision=decision, rule=rule)
+            bucket["invalidation_count"] += sum(invalidation.values())
+            bucket["safety_stop_count"] += sum(safety.values())
+            for reason, count in {**invalidation, **stale, **safety}.items():
+                if count:
+                    bucket["_reason_codes"].add(str(reason))
+
+            saved = _as_float(cache.get("estimated_saved_cost_usd"))
+            if not saved and outcome == "hit":
+                saved = max(_as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")), 0.0)
+            bucket["estimated_saved_cost_usd"] += saved
+            bucket["projected_saved_cost_usd"] += _cache_replay_activation_projected_savings(cache, replay_canary, rule)
+            bucket["projected_hits"] += _cache_replay_activation_projected_hits(cache, replay_canary, rule)
+
+            canary = (rule or {}).get("canary") if isinstance(rule, dict) else None
+            if not isinstance(canary, dict):
+                canary = replay_canary.get("canary") if isinstance(replay_canary.get("canary"), dict) else cache.get("canary")
+            rollout = (rule or {}).get("rollout") if isinstance(rule, dict) else cache.get("rollout")
+            if isinstance(canary, dict):
+                if bucket["canary_fraction"] is None and canary.get("fraction") is not None:
+                    bucket["canary_fraction"] = canary.get("fraction")
+                if bucket["holdout_fraction"] is None and canary.get("holdout_fraction") is not None:
+                    bucket["holdout_fraction"] = canary.get("holdout_fraction")
+            if isinstance(rollout, dict):
+                if bucket["canary_fraction"] is None:
+                    bucket["canary_fraction"] = rollout.get("canary_fraction") or rollout.get("rollout_fraction")
+                if bucket["holdout_fraction"] is None:
+                    bucket["holdout_fraction"] = rollout.get("holdout_fraction")
+            if replay_canary.get("status") == "applied" or (isinstance(canary, dict) and canary.get("cohort") == "canary_applied"):
+                if outcome not in {"hit", "miss"}:
+                    bucket["applied_count"] += 1
+            if replay_canary.get("reason"):
+                bucket["_reason_codes"].add(public_label(replay_canary.get("reason"), "unknown"))
+            if str(row.get("created_at") or "") < str(bucket.get("first_seen_at") or row.get("created_at") or ""):
+                bucket["first_seen_at"] = row.get("created_at")
+            if str(row.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+                bucket["last_seen_at"] = row.get("created_at")
+
+    cohorts: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        state, reason_codes = _cache_replay_activation_state(bucket)
+        bucket["state"] = state
+        bucket["reason_codes"] = reason_codes
+        bucket["granularities"] = sorted(bucket["granularities"])
+        bucket["estimated_saved_cost_usd"] = round(_as_float(bucket.get("estimated_saved_cost_usd")), 8)
+        bucket["projected_saved_cost_usd"] = round(_as_float(bucket.get("projected_saved_cost_usd")), 8)
+        bucket["actual_hits"] = _as_int(bucket.get("hit_count"))
+        bucket["actual_hit_recovery_rate"] = (
+            round(_as_int(bucket.get("hit_count")) / max(_as_int(bucket.get("applied_count")), 1), 4)
+            if _as_int(bucket.get("applied_count"))
+            else 0.0
+        )
+        bucket["pattern_hashes_included"] = False
+        bucket["cache_keys_included"] = False
+        for key in list(bucket.keys()):
+            if key.startswith("_"):
+                bucket.pop(key, None)
+        state_counts[state] = state_counts.get(state, 0) + 1
+        provider_status = str((bucket.get("provider_adoption_gate") or {}).get("status") or "unknown")
+        provider_counts[provider_status] = provider_counts.get(provider_status, 0) + 1
+        for reason in reason_codes:
+            blocker_counts[reason] = blocker_counts.get(reason, 0) + 1
+        cohorts.append(bucket)
+
+    cohorts.sort(
+        key=lambda row: (
+            row.get("state") == "rollback recommended",
+            row.get("state") == "hold",
+            row.get("state") == "widen candidate",
+            _as_float(row.get("estimated_saved_cost_usd")),
+            _as_int(row.get("sample_count")),
+        ),
+        reverse=True,
+    )
+
+    return {
+        "schema": "agentflow.cache_replay_activation_health.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "status": "observed" if cohorts else "needs evidence",
+        "summary": {
+            "rows_considered": len(rows),
+            "cohort_count": len(cohorts),
+            "healthy_canary_count": state_counts.get("canary active", 0) + state_counts.get("widen candidate", 0),
+            "blocked_or_hold_count": state_counts.get("hold", 0) + state_counts.get("rollback recommended", 0),
+            "needs_evidence_count": state_counts.get("needs evidence", 0),
+            "canary_active_count": state_counts.get("canary active", 0),
+            "widen_candidate_count": state_counts.get("widen candidate", 0),
+            "rollback_recommended_count": state_counts.get("rollback recommended", 0),
+            "actual_hits": sum(_as_int(row.get("actual_hits")) for row in cohorts),
+            "projected_hits": sum(_as_int(row.get("projected_hits")) for row in cohorts),
+            "estimated_saved_cost_usd": round(sum(_as_float(row.get("estimated_saved_cost_usd")) for row in cohorts), 8),
+            "projected_saved_cost_usd": round(sum(_as_float(row.get("projected_saved_cost_usd")) for row in cohorts), 8),
+        },
+        "state_breakdown": _breakdown_from_counts(state_counts),
+        "provider_adoption_breakdown": _breakdown_from_counts(provider_counts),
+        "blocker_breakdown": _breakdown_from_counts(blocker_counts),
+        "cohorts": cohorts[:output_limit],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "provider_bodies_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "cache_keys_included": False,
+            "pattern_hashes_included": False,
+            "policy_file_contents_included": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "dashboard_read_only": True,
+            "basis": "stored cache replay canary metadata, aggregate outcomes, dependency blocker codes, provider adoption gate summaries, and cost estimates only",
+        },
+    }
+
+
 async def stats_cache_effectiveness(store_obj: Any, *, limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
     return build_cache_smoke_diagnostic(store_obj, limit=limit, scan_limit=scan_limit)
 
@@ -14853,6 +15189,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
     cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
     cache_replay_readiness = await stats_cache_replay_readiness(store_obj, limit=50)
+    cache_replay_activation_health = await stats_cache_replay_activation_health(store_obj, limit=50, scan_limit=1000)
     cache_effectiveness = await stats_cache_effectiveness(store_obj, limit=5, scan_limit=5000)
     pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows)
     today_pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows, today_only=True)
@@ -15011,6 +15348,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_replayability": cache_replayability,
         "cache_replay_confidence": cache_replay_confidence,
         "cache_replay_readiness": cache_replay_readiness,
+        "cache_replay_activation_health": cache_replay_activation_health,
         "old_context_summary_opportunity": old_context_summary_opportunity,
         "pattern_decision_breakdown": pattern_decision_breakdown,
         "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
@@ -16082,6 +16420,15 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Status</th><th data-sort-type="number">Configured rules</th><th data-sort-type="number">Active rules</th><th data-sort-type="number">Ready rules</th><th data-sort-type="number">Hits</th><th data-sort-type="number">Holdouts</th><th data-sort-type="number">Invalidations</th><th data-sort-type="number">Safety stops</th><th data-sort-type="text">Policy</th>
     </tr></thead>
     <tbody id="cache-canary-cohorts-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Cache replay activation health</h2>
+  <table data-table-id="cache-replay-activation-health" data-filter-label="Filter cache replay activation health">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Canary</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Hits</th><th data-sort-type="number">Misses</th><th data-sort-type="number">Bypass</th><th data-sort-type="number">Invalidated</th><th data-sort-type="number">Safety</th><th data-sort-type="number">Projected hits</th><th data-sort-type="money">Actual savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Provider gate</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="cache-replay-activation-health-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -17572,6 +17919,15 @@ function openaiCacheReplayPrivacyBadges(privacy){
   privacy=privacy||{};
   return `${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>'} ${privacy.raw_request_bodies_included?'<span class="badge err">raw bodies</span>':'<span class="badge hit">raw bodies omitted</span>'} ${privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'} ${privacy.session_ids_included?'<span class="badge err">session ids</span>':'<span class="badge hit">IDs omitted</span>'}`;
 }
+function cacheReplayActivationStateBadge(state){
+  if(state==='widen candidate')return'hit';
+  if(state==='canary active')return'routed';
+  if(state==='hold')return'miss';
+  if(state==='rollback recommended')return'err';
+  if(state==='needs evidence')return'provider';
+  return'provider';
+}
+const cacheReplayActivationHealthEndpoint='/agentflow/stats/cache-replay-activation-health';
 async function refreshOpenAICacheReplayReadiness(){
   try{
     const r=await fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=1000&impact_limit=500');
@@ -17669,6 +18025,50 @@ async function refreshCache(){
       <td class="tokens">${(rsum.safety_stop_rows||0).toLocaleString()}</td>
       <td class="flags"><span class="badge provider">${esc(rsum.policy_source||'unknown')}</span> ${rsum.policy_reload_required?'<span class="badge miss">reload required</span>':'<span class="badge hit">loaded</span>'}</td>
     </tr>`;
+    const activation=d.cache_replay_activation_health||{};
+    const activationRows=activation.cohorts||[];
+    document.getElementById('cache-replay-activation-health-tbody').innerHTML=activationRows.map(row=>{
+      const state=row.state||'needs evidence';
+      const rule=row.candidate_id?`${row.rule_id||'unknown'} / ${row.candidate_id}`:(row.rule_id||'unknown');
+      const surface=[
+        shortSurface(row.source_surface||'unknown'),
+        row.app_family||'unknown',
+        row.workflow_phase||'unknown',
+        row.category||'unknown',
+        row.replay_scope_class||'unknown',
+        row.stream?'stream':'non-stream',
+        row.has_tools?'tools':'no tools'
+      ].join(' · ');
+      const canary=[
+        row.canary_fraction!=null?'canary '+fmtPctValue(Number(row.canary_fraction)||0):null,
+        row.holdout_fraction!=null?'holdout '+fmtPctValue(Number(row.holdout_fraction)||0):null,
+        row.actual_hit_recovery_rate!=null?'hit recovery '+fmtPctValue(Number(row.actual_hit_recovery_rate)||0):null
+      ].filter(Boolean).map(item=>`<span class="badge provider">${esc(item)}</span>`).join(' ')||'<span class="badge miss">no canary fraction</span>';
+      const provider=row.provider_adoption_gate||{};
+      const providerCls=provider.status==='ready'?'hit':provider.status==='blocked'?'err':'miss';
+      const providerReasons=(provider.reason_codes||[]).slice(0,4).map(reason=>`<span class="badge miss">${esc(reason)}</span>`).join(' ');
+      const reasons=(row.reason_codes||[]).slice(0,6).map(reason=>`<span class="badge ${String(reason).includes('safety')||String(reason).includes('error')?'err':'miss'}">${esc(reason)}</span>`).join(' ')||'<span class="badge hit">none</span>';
+      const privacy=(row.cache_keys_included||row.pattern_hashes_included)?'<span class="badge err">private ids included</span>':'<span class="badge hit">metadata only</span>';
+      return `<tr>
+        <td><span class="badge ${cacheReplayActivationStateBadge(state)}">${esc(state)}</span></td>
+        <td class="model">${esc(rule)}</td>
+        <td><span class="badge provider">${esc(surface)}</span></td>
+        <td class="flags">${canary}</td>
+        <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.hit_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.miss_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.bypass_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.invalidation_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.projected_hits||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.estimated_saved_cost_usd||0,6)}</td>
+        <td class="savings">${fmt(row.projected_saved_cost_usd||0,6)}</td>
+        <td class="flags"><span class="badge ${providerCls}">${esc(provider.status||'not-observed')}</span> ${providerReasons}</td>
+        <td class="flags">${reasons}</td>
+        <td class="flags">${privacy}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="17" style="color:#8b949e">No cache replay activation health metadata recorded yet</td></tr>';
     const readinessRows=readiness.rules||[];
     document.getElementById('cache-replay-readiness-tbody').innerHTML=readinessRows.map(row=>{
       const state=row.readiness||'unknown';

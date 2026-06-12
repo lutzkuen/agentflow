@@ -5694,6 +5694,256 @@ class StatsFullTest(unittest.TestCase):
         finally:
             cache_module.CACHE_PATTERN_RULES = original_rules
 
+    def test_cache_replay_activation_health_shows_canary_recovery_and_blockers(self):
+        healthy_rule = {
+            "rule_id": "healthy-cache-replay",
+            "candidate_id": "candidate-healthy-cache-replay",
+            "policy_source": "managed-recommended",
+            "scope": "session",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "rollout": {
+                "canary_enabled": True,
+                "canary_fraction": 0.25,
+                "holdout_fraction": 0.75,
+                "canary_unit": "request_fingerprint",
+            },
+            "canary": {
+                "enabled": True,
+                "selected": True,
+                "cohort": "canary_applied",
+                "fraction": 0.25,
+                "holdout_fraction": 0.75,
+                "pattern_hashes": ["sha256:" + "f" * 64],
+            },
+        }
+        holdout_rule = {
+            **healthy_rule,
+            "reason": "canary_holdout",
+            "canary": {
+                **healthy_rule["canary"],
+                "selected": False,
+                "cohort": "canary_holdout",
+                "pattern_hashes": ["sha256:" + "1" * 64],
+            },
+        }
+        blocked_rule = {
+            "rule_id": "blocked-tool-cache-replay",
+            "candidate_id": "candidate-blocked-cache-replay",
+            "policy_source": "managed-recommended",
+            "scope": "session",
+            "allow_tool_calls": True,
+            "safe_invalidation": True,
+            "canary": {
+                "enabled": True,
+                "selected": True,
+                "cohort": "canary_applied",
+                "fraction": 0.1,
+                "pattern_hashes": ["sha256:" + "2" * 64],
+            },
+            "provider_adoption_gate": {
+                "status": "blocked",
+                "blocking": True,
+                "reason_codes": ["provider-adoption-regression"],
+            },
+        }
+
+        def log_cache_row(
+            *,
+            cache_json,
+            status_code=200,
+            stream=0,
+            category="summary",
+            workflow_phase="summary",
+            has_tools=False,
+            cost=0.01,
+            baseline=0.02,
+            latency=4,
+        ):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=stream,
+                cache_hit=1 if cache_json.get("status") == "hit" else 0,
+                status_code=status_code,
+                latency_ms=latency,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({
+                    "text_chars": 12_000,
+                    "category": category,
+                    "workflow_phase": workflow_phase,
+                    "has_tools": has_tools,
+                }),
+                cache_json=stable_json(cache_json),
+                error=None,
+                request_json=stable_json({
+                    "messages": [{"content": "private activation prompt /tmp/activation-secret.py cache-key-secret"}],
+                    "request_id": "req-activation-secret",
+                }),
+                response_json=stable_json({"content": [{"text": "private activation response"}]}),
+                session_id="raw-activation-session-secret",
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        log_cache_row(
+            cache_json={
+                "status": "hit",
+                "reason": "exact-match",
+                "policy_source": "managed-recommended",
+                "estimated_saved_cost_usd": 0.012,
+                "projected_hits": 3,
+                "projected_saved_cost_usd": 0.03,
+                "pattern_rule": healthy_rule,
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": "healthy-cache-replay",
+                    "candidate_id": "candidate-healthy-cache-replay",
+                    "policy_source": "managed-recommended",
+                    "scope": "session",
+                    "canary": healthy_rule["canary"],
+                    "canary_cohort": "canary_applied",
+                    "status": "applied",
+                    "reason": "dependency-stable",
+                },
+                "provider_adoption_gate": {"status": "ready", "blocking": False},
+            },
+            cost=0.001,
+            baseline=0.013,
+        )
+        log_cache_row(
+            cache_json={
+                "status": "miss",
+                "reason": "exact-miss",
+                "policy_source": "managed-recommended",
+                "projected_hits": 2,
+                "projected_saved_cost_usd": 0.02,
+                "pattern_rule": healthy_rule,
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": "healthy-cache-replay",
+                    "candidate_id": "candidate-healthy-cache-replay",
+                    "policy_source": "managed-recommended",
+                    "scope": "session",
+                    "canary": healthy_rule["canary"],
+                    "canary_cohort": "canary_applied",
+                    "status": "applied",
+                    "reason": "dependency-stable",
+                },
+                "provider_adoption_gate": {"status": "ready", "blocking": False},
+            },
+        )
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "canary_holdout",
+                "policy_source": "managed-recommended",
+                "pattern_rules": {"skip_reasons": [holdout_rule]},
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": "healthy-cache-replay",
+                    "candidate_id": "candidate-healthy-cache-replay",
+                    "policy_source": "managed-recommended",
+                    "scope": "session",
+                    "canary": holdout_rule["canary"],
+                    "canary_cohort": "canary_holdout",
+                    "status": "holdout",
+                    "reason": "canary_holdout",
+                },
+                "provider_adoption_gate": {"status": "ready", "blocking": False},
+            },
+            baseline=0.02,
+        )
+        log_cache_row(
+            cache_json={
+                "status": "skipped",
+                "reason": "dependency-changed",
+                "policy_source": "managed-recommended",
+                "pattern_rule": blocked_rule,
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": "blocked-tool-cache-replay",
+                    "candidate_id": "candidate-blocked-cache-replay",
+                    "policy_source": "managed-recommended",
+                    "scope": "session",
+                    "canary": blocked_rule["canary"],
+                    "canary_cohort": "canary_applied",
+                    "status": "invalidated",
+                    "reason": "dependency-changed",
+                },
+                "file_dependency_audit": {
+                    "invalidation_reason": "dependency-changed",
+                    "changed_path_count": 1,
+                    "paths": ["/tmp/activation-secret.py"],
+                    "paths_included": True,
+                },
+                "provider_adoption_gate": blocked_rule["provider_adoption_gate"],
+            },
+            category="tool-result",
+            workflow_phase="tool-execution",
+            has_tools=True,
+        )
+
+        result = asyncio.run(stats_views.stats_cache_replay_activation_health(server.store, limit=20, scan_limit=20))
+        self.assertEqual(result["schema"], "agentflow.cache_replay_activation_health.v1")
+        self.assertTrue(result["read_only"])
+        self.assertGreaterEqual(result["summary"]["healthy_canary_count"], 1)
+        self.assertGreaterEqual(result["summary"]["blocked_or_hold_count"], 1)
+        by_rule = {row["rule_id"]: row for row in result["cohorts"]}
+        self.assertEqual(by_rule["healthy-cache-replay"]["state"], "widen candidate")
+        self.assertEqual(by_rule["healthy-cache-replay"]["hit_count"], 1)
+        self.assertEqual(by_rule["healthy-cache-replay"]["holdout_count"], 1)
+        self.assertEqual(by_rule["healthy-cache-replay"]["projected_hits"], 5)
+        self.assertEqual(by_rule["blocked-tool-cache-replay"]["state"], "hold")
+        self.assertEqual(by_rule["blocked-tool-cache-replay"]["provider_adoption_gate"]["status"], "blocked")
+        self.assertIn("provider-adoption-regression", by_rule["blocked-tool-cache-replay"]["reason_codes"])
+        rendered = json.dumps(result, sort_keys=True)
+        for forbidden in (
+            "private activation prompt",
+            "private activation response",
+            "/tmp/activation-secret.py",
+            "cache-key-secret",
+            "req-activation-secret",
+            "raw-activation-session-secret",
+            "sha256:" + "f" * 64,
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["pattern_hashes_included"])
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/cache-replay-activation-health?limit=20&scan_limit=20")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["summary"]["widen_candidate_count"], 1)
+            dashboard = client.get("/agentflow/dashboard")
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Cache replay activation health", dashboard.text)
+            self.assertIn("cache-replay-activation-health-tbody", dashboard.text)
+            self.assertNotIn("private activation prompt", dashboard.text)
+
     def test_cache_replayability_report_surfaces_file_dependency_audit_reasons_without_paths(self):
         def log_tool_candidate(name, audit):
             server.store.log_call(

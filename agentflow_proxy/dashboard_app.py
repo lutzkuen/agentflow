@@ -141,6 +141,14 @@ def create_dashboard_router(
     async def stats_cache_replay_readiness(limit: int = 1000) -> dict[str, Any]:
         return await stats_views.stats_cache_replay_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/cache-replay-activation-health")
+    async def stats_cache_replay_activation_health(limit: int = 1000, scan_limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_cache_replay_activation_health(
+            _store(store_obj),
+            limit=limit,
+            scan_limit=scan_limit,
+        )
+
     @router.get("/agentflow/stats/cache-effectiveness")
     async def stats_cache_effectiveness(limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
         return await stats_views.stats_cache_effectiveness(_store(store_obj), limit=limit, scan_limit=scan_limit)
