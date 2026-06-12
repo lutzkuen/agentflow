@@ -2429,6 +2429,7 @@ def scaffold_rollout_actions_review_cli(
             "source": "cli",
             "path": None if args.url else args.path,
             "url": _redact_url(args.url),
+            "fetch_status": fetch.get("status") if isinstance(fetch, dict) else ("skipped" if not args.url else None),
             "action_count": review.get("action_count", 0),
             "accepted_action_count": review.get("accepted_action_count", 0),
             "provenance_status": (review.get("provenance") or {}).get("status"),
@@ -2536,6 +2537,7 @@ def scaffold_rollout_actions_apply_cli(
             "url": _redact_url(fetch_url),
             "config_dir": args.config_dir,
             "dry_run": args.dry_run,
+            "fetch_status": fetch.get("status") if isinstance(fetch, dict) else ("skipped" if not fetch_url else None),
             "action_count": result.get("action_count", 0),
             "accepted_action_count": result.get("accepted_action_count", 0),
             "changed_files": [

@@ -90,6 +90,7 @@ class DashboardImportTests(unittest.TestCase):
             openai_cache_replay_readiness = client.get("/agentflow/stats/openai-cache-replay-readiness")
             repeated_scaffold_opportunity = client.get("/agentflow/stats/repeated-scaffold-opportunity")
             repeated_scaffold_impact = client.get("/agentflow/stats/repeated-scaffold-impact")
+            scaffold_rollout_health = client.get("/agentflow/stats/scaffold-rollout-health")
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
@@ -177,6 +178,12 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["request_ids_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["session_ids_included"])
             self.assertFalse(repeated_scaffold_impact.json()["privacy"]["cache_keys_included"])
+            self.assertEqual(scaffold_rollout_health.status_code, 200)
+            self.assertEqual(scaffold_rollout_health.json()["schema"], "agentflow.scaffold_rollout_health.v1")
+            self.assertTrue(scaffold_rollout_health.json()["read_only"])
+            self.assertFalse(scaffold_rollout_health.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(scaffold_rollout_health.json()["privacy"]["raw_action_payloads_included"])
+            self.assertFalse(scaffold_rollout_health.json()["privacy"]["yaml_contents_included"])
             self.assertEqual(optimization_eval_queue.status_code, 200)
             self.assertEqual(optimization_eval_queue.json()["schema"], "agentflow.optimization_eval_queue.v1")
             self.assertFalse(optimization_eval_queue.json()["privacy"]["provider_calls_made"])
@@ -303,7 +310,10 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/repeated-scaffold-opportunity", dashboard.text)
             self.assertIn("/agentflow/stats/repeated-scaffold-impact", dashboard.text)
+            self.assertIn("/agentflow/stats/scaffold-rollout-health", dashboard.text)
             self.assertIn("Scaffold crunch", dashboard.text)
+            self.assertIn("Managed scaffold rollout", dashboard.text)
+            self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
             self.assertIn("repeated-scaffold-readiness-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold opportunity candidates", dashboard.text)
@@ -325,6 +335,12 @@ class DashboardImportTests(unittest.TestCase):
 
     def test_repeated_scaffold_dashboard_endpoints_are_content_free(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        event_tmp = tempfile.TemporaryDirectory()
+        policy_tmp = tempfile.TemporaryDirectory()
+        old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        old_canary_policy = os.environ.get("AGENTFLOW_SCAFFOLD_CANARY_POLICY")
+        os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"] = str(Path(policy_tmp.name) / "scaffold_canary_policy.yaml")
         store = Store(tmp.name)
 
         def log_call(
@@ -439,6 +455,35 @@ class DashboardImportTests(unittest.TestCase):
         log_call(crunch_json=repeated_scaffold_crunch("canary_applied", 1100), created_at="2026-06-12T00:01:00+00:00")
         log_call(crunch_json=repeated_scaffold_crunch("canary_applied", 1200), created_at="2026-06-12T00:02:00+00:00")
         log_call(crunch_json=repeated_scaffold_crunch("canary_holdout", 0), created_at="2026-06-12T00:03:00+00:00")
+        Path(os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"]).write_text(
+            "\n".join([
+                "schema: agentflow.scaffold_canary_policy.v1",
+                "policy_source: managed-recommended",
+                "repeated_provider_scaffolding:",
+                "  enabled: true",
+                "  rules:",
+                "    - id: reviewed-provider-scaffold",
+                "      enabled: true",
+                "    - id: reviewed-provider-scaffold-second",
+                "      enabled: true",
+            ]),
+            encoding="utf-8",
+        )
+        from agentflow_proxy.policy_events import log_policy_event
+
+        log_policy_event(
+            "scaffold-rollout-actions-review",
+            ok=True,
+            details={
+                "source": "cli",
+                "url": "https://managed.example/scaffold-rollout-actions",
+                "fetch_status": "ok",
+                "action_count": 3,
+                "accepted_action_count": 2,
+                "provenance_status": "verified",
+                "exit_code": 0,
+            },
+        )
 
         try:
             app = create_dashboard_app(
@@ -453,6 +498,7 @@ class DashboardImportTests(unittest.TestCase):
 
             opportunity_response = client.get("/agentflow/stats/repeated-scaffold-opportunity?limit=20")
             impact_response = client.get("/agentflow/stats/repeated-scaffold-impact?limit=20")
+            rollout_health_response = client.get("/agentflow/stats/scaffold-rollout-health?limit=20")
             dashboard = client.get("/agentflow/dashboard")
 
             self.assertEqual(opportunity_response.status_code, 200)
@@ -479,11 +525,33 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(impact["privacy"]["session_ids_included"])
             self.assertFalse(impact["privacy"]["cache_keys_included"])
 
+            self.assertEqual(rollout_health_response.status_code, 200)
+            rollout = rollout_health_response.json()
+            self.assertEqual(rollout["schema"], "agentflow.scaffold_rollout_health.v1")
+            self.assertEqual(rollout["status"], "canary-active")
+            self.assertEqual(rollout["summary"]["last_fetch_status"], "ok")
+            self.assertEqual(rollout["summary"]["action_count"], 3)
+            self.assertEqual(rollout["summary"]["accepted_action_count"], 2)
+            self.assertEqual(rollout["summary"]["active_rule_count"], 2)
+            self.assertEqual(rollout["summary"]["applied_count"], 2)
+            self.assertEqual(rollout["summary"]["holdout_count"], 1)
+            self.assertEqual(rollout["summary"]["safety_stop_count"], 0)
+            self.assertFalse(rollout["privacy"]["raw_action_payloads_included"])
+            self.assertFalse(rollout["privacy"]["yaml_contents_included"])
+            self.assertFalse(rollout["active_policy"]["rule_path_included"])
+
             self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Managed scaffold rollout", dashboard.text)
+            self.assertIn("scaffold-rollout-health-tbody", dashboard.text)
             self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
             self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
 
-            rendered = json.dumps(opportunity, sort_keys=True) + json.dumps(impact, sort_keys=True) + dashboard.text
+            rendered = (
+                json.dumps(opportunity, sort_keys=True)
+                + json.dumps(impact, sort_keys=True)
+                + json.dumps(rollout, sort_keys=True)
+                + dashboard.text
+            )
             for forbidden in (
                 "raw secret one",
                 "raw secret two",
@@ -491,11 +559,22 @@ class DashboardImportTests(unittest.TestCase):
                 "raw-cache-key-must-not-leak",
                 "raw-session-must-not-leak",
                 "raw response must not leak",
+                "reviewed-provider-scaffold-second",
             ):
                 self.assertNotIn(forbidden, rendered)
         finally:
+            if old_event_log is None:
+                os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+            else:
+                os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+            if old_canary_policy is None:
+                os.environ.pop("AGENTFLOW_SCAFFOLD_CANARY_POLICY", None)
+            else:
+                os.environ["AGENTFLOW_SCAFFOLD_CANARY_POLICY"] = old_canary_policy
             store.conn.close()
             tmp.close()
+            event_tmp.cleanup()
+            policy_tmp.cleanup()
 
     def test_managed_openai_activation_dashboard_uses_metadata_only_sources(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+import yaml
+
 from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
 from agentflow_proxy.codex_app_policy import (
     CODEX_APP_SOURCE_SURFACE,
@@ -942,6 +944,12 @@ MANAGED_OPENAI_ACTIVATION_ACTIONS = {
 }
 MANAGED_OPENAI_SUPPORTED_ACTION_FAMILIES = ("routing", "old_context_summarization", "cache")
 
+SCAFFOLD_ROLLOUT_ACTIONS = {
+    "scaffold-rollout-actions-review",
+    "scaffold-rollout-actions-apply",
+}
+SCAFFOLD_CANARY_POLICY_FILENAME = "scaffold_canary_policy.yaml"
+
 
 def _openai_activation_counts_by_family(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, dict):
@@ -1134,6 +1142,115 @@ def _managed_openai_activation_status(
     if latest_fetch and latest_fetch.get("ok"):
         return "bundle-reviewed", "managed OpenAI bundle was fetched and reviewed"
     return "local-only", "no managed OpenAI activation metadata found"
+
+
+def _scaffold_canary_policy_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_path = os.getenv("AGENTFLOW_SCAFFOLD_CANARY_POLICY")
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.append(Path.cwd() / "config" / SCAFFOLD_CANARY_POLICY_FILENAME)
+    candidates.append(Path.home() / ".agentflow" / SCAFFOLD_CANARY_POLICY_FILENAME)
+    return candidates
+
+
+def _scaffold_canary_policy_health() -> dict[str, Any]:
+    selected = next((path for path in _scaffold_canary_policy_candidates() if path.exists()), None)
+    if selected is None:
+        return {
+            "available": False,
+            "status": "missing",
+            "enabled": False,
+            "active_rule_count": 0,
+            "policy_source": None,
+            "rule_path_included": False,
+            "rule_path_class": _local_path_class(os.getenv("AGENTFLOW_SCAFFOLD_CANARY_POLICY") or "~/.agentflow/scaffold_canary_policy.yaml"),
+            "yaml_contents_included": False,
+        }
+
+    try:
+        raw = yaml.safe_load(selected.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {
+            "available": True,
+            "status": "unreadable",
+            "enabled": False,
+            "active_rule_count": 0,
+            "policy_source": None,
+            "rule_path_included": False,
+            "rule_path_class": _local_path_class(str(selected)),
+            "yaml_contents_included": False,
+        }
+
+    if not isinstance(raw, dict):
+        raw = {}
+    provider = raw.get("repeated_provider_scaffolding") if isinstance(raw.get("repeated_provider_scaffolding"), dict) else {}
+    rules = provider.get("rules") if isinstance(provider.get("rules"), list) else []
+    enabled = bool(provider.get("enabled") and rules)
+    active_rule_count = sum(
+        1
+        for rule in rules
+        if isinstance(rule, dict) and rule.get("enabled", True) is not False
+    ) if enabled else 0
+    return {
+        "available": True,
+        "status": "active" if active_rule_count else "empty",
+        "enabled": enabled,
+        "active_rule_count": active_rule_count,
+        "policy_source": raw.get("policy_source") or provider.get("policy_source"),
+        "rule_path_included": False,
+        "rule_path_class": _local_path_class(str(selected)),
+        "yaml_contents_included": False,
+    }
+
+
+def _public_scaffold_rollout_event(event: dict[str, Any] | None, *, now: datetime) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    action = str(event.get("action") or "")
+    fetch_status = details.get("fetch_status")
+    if not fetch_status:
+        fetch_status = "ok" if event.get("ok") else "failed"
+    return {
+        "created_at": event.get("created_at"),
+        "age_seconds": _seconds_since_iso(event.get("created_at"), now),
+        "action": action,
+        "ok": bool(event.get("ok")),
+        "source": details.get("source"),
+        "fetch_status": fetch_status,
+        "dry_run": bool(details.get("dry_run")),
+        "action_count": _as_int(details.get("action_count")),
+        "accepted_action_count": _as_int(details.get("accepted_action_count")),
+        "changed_file_count": len(details.get("changed_files") if isinstance(details.get("changed_files"), list) else []),
+        "error_type": details.get("error_type"),
+        "exit_code": details.get("exit_code"),
+        "managed_server_calls_made": details.get("url") not in (None, ""),
+        "payload_included": False,
+        "raw_payload_included": False,
+        "file_paths_included": False,
+        "yaml_contents_included": False,
+    }
+
+
+def _scaffold_rollout_status(
+    *,
+    latest_fetch: dict[str, Any] | None,
+    latest_apply: dict[str, Any] | None,
+    active_rule_count: int,
+    safety_stop_count: int,
+) -> tuple[str, str]:
+    if latest_fetch and latest_fetch.get("ok") is False:
+        return "fetch-blocked", "latest scaffold rollout fetch/review failed"
+    if latest_apply and latest_apply.get("ok") is False:
+        return "apply-blocked", "latest scaffold rollout apply failed"
+    if safety_stop_count > 0:
+        return "safety-stop", "recent scaffold canary evidence has safety-stop rows"
+    if active_rule_count > 0:
+        return "canary-active", "local scaffold canary overlay has active rules"
+    if latest_fetch and latest_fetch.get("ok"):
+        return "bundle-reviewed", "managed scaffold rollout actions were fetched and reviewed"
+    return "local-only", "no scaffold rollout metadata found"
 
 
 async def stats_managed_openai_activation(store_obj: Any, limit: int = 500) -> dict[str, Any]:
@@ -8334,6 +8451,106 @@ async def stats_repeated_scaffold_impact(store_obj: Any, limit: int = 500) -> di
     return build_repeated_scaffold_impact_report(store_obj, limit=limit)
 
 
+async def stats_scaffold_rollout_health(store_obj: Any, limit: int = 500) -> dict[str, Any]:
+    from agentflow_proxy.policy_events import recent_policy_events
+
+    capped_limit = max(1, min(int(limit or 500), 5000))
+    now = datetime.now(timezone.utc)
+    events = [
+        event
+        for event in recent_policy_events(limit=500).get("events", [])
+        if isinstance(event, dict) and str(event.get("action") or "") in SCAFFOLD_ROLLOUT_ACTIONS
+    ]
+    latest_fetch = _public_scaffold_rollout_event(
+        _latest_policy_event(events, "scaffold-rollout-actions-review", "scaffold-rollout-actions-apply"),
+        now=now,
+    )
+    latest_apply = _public_scaffold_rollout_event(
+        _latest_policy_event(events, "scaffold-rollout-actions-apply"),
+        now=now,
+    )
+    public_events = [
+        item
+        for item in (_public_scaffold_rollout_event(event, now=now) for event in events)
+        if item is not None
+    ]
+    policy = _scaffold_canary_policy_health()
+    impact: dict[str, Any] = {}
+    try:
+        impact = await stats_repeated_scaffold_impact(store_obj, limit=capped_limit)
+    except Exception:
+        impact = {}
+    impact_summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    applied_count = _as_int(impact_summary.get("applied_count"))
+    holdout_count = _as_int(impact_summary.get("holdout_count"))
+    safety_stop_count = _as_int(impact_summary.get("safety_stop_count"))
+    active_rule_count = _as_int(policy.get("active_rule_count"))
+    status, status_reason = _scaffold_rollout_status(
+        latest_fetch=latest_fetch,
+        latest_apply=latest_apply,
+        active_rule_count=active_rule_count,
+        safety_stop_count=safety_stop_count,
+    )
+    summary = {
+        "policy_event_count": len(public_events),
+        "last_fetch_at": (latest_fetch or {}).get("created_at"),
+        "last_fetch_status": (latest_fetch or {}).get("fetch_status"),
+        "action_count": _as_int((latest_fetch or {}).get("action_count")),
+        "accepted_action_count": _as_int((latest_fetch or {}).get("accepted_action_count")),
+        "active_rule_count": active_rule_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "safety_stop_count": safety_stop_count,
+        "observed_repeated_scaffold_metadata_row_count": _as_int(impact_summary.get("observed_repeated_scaffold_metadata_row_count")),
+        "candidate_group_count": _as_int(impact_summary.get("candidate_group_count")),
+        "estimated_saved_tokens": _as_int(impact_summary.get("estimated_saved_tokens")),
+        "estimated_savings_usd": _as_float(impact_summary.get("estimated_savings_usd")),
+    }
+    return {
+        "schema": "agentflow.scaffold_rollout_health.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "status_reason": status_reason,
+        "read_only": True,
+        "limit": capped_limit,
+        "summary": summary,
+        "latest_fetch": latest_fetch,
+        "latest_apply": latest_apply,
+        "active_policy": policy,
+        "canary_health": {
+            "impact_status": impact.get("status"),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "safety_stop_count": safety_stop_count,
+            "verdict_counts": impact_summary.get("verdict_counts") if isinstance(impact_summary.get("verdict_counts"), list) else [],
+            "reason_code_counts": impact_summary.get("reason_code_counts") if isinstance(impact_summary.get("reason_code_counts"), list) else [],
+        },
+        "recent_events": public_events[:25],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "dashboard_read_only": True,
+            "raw_action_payloads_included": False,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "local_session_ids_included": False,
+            "payload_json_included": False,
+            "yaml_contents_included": False,
+            "policy_file_contents_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "local scaffold policy-event metadata, local canary policy file status, and repeated-scaffold impact aggregates only",
+        },
+    }
+
+
 async def stats_openai_cache_replay_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 
@@ -14874,6 +15091,15 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-scaffold">
 <div class="section">
+  <h2>Managed scaffold rollout</h2>
+  <table data-table-id="scaffold-rollout-health" data-filter-label="Filter managed scaffold rollout health">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="time">Latest fetch</th><th data-sort-type="text">Fetch status</th><th data-sort-type="number">Actions</th><th data-sort-type="number">Accepted</th><th data-sort-type="number">Active rules</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="scaffold-rollout-health-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Repeated-scaffold crunch readiness</h2>
   <table data-table-id="repeated-scaffold-readiness" data-filter-label="Filter repeated-scaffold readiness">
     <thead><tr>
@@ -16396,12 +16622,29 @@ function repeatedScaffoldReasonBadges(values,verdict){
 }
 async function refreshRepeatedScaffold(){
   try{
-    const [or,ir]=await Promise.all([
+    const [hr,or,ir]=await Promise.all([
+      fetch('/agentflow/stats/scaffold-rollout-health?limit=500'),
       fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=1000&min_repeated_rows=2'),
       fetch('/agentflow/stats/repeated-scaffold-impact?limit=500')
     ]);
+    const health=await hr.json();
     const opportunity=await or.json();
     const impact=await ir.json();
+    const hs=health.summary||{};
+    const hp=health.privacy||{};
+    const fetchStatus=hs.last_fetch_status||((health.latest_fetch||{}).ok===false?'failed':(hs.last_fetch_at?'ok':'none'));
+    document.getElementById('scaffold-rollout-health-tbody').innerHTML=`<tr>
+      <td><span class="badge ${scaffoldStatusBadge(health.status)}">${esc(health.status||'unknown')}</span><div class="sub">${esc(health.status_reason||'')}</div></td>
+      <td class="ts">${hs.last_fetch_at?ago(hs.last_fetch_at):'—'}</td>
+      <td><span class="badge ${fetchStatus==='failed'?'err':fetchStatus==='none'?'miss':'hit'}">${esc(fetchStatus)}</span></td>
+      <td class="tokens">${(hs.action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(hs.accepted_action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(hs.active_rule_count||0).toLocaleString()}</td>
+      <td class="tokens">${(hs.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(hs.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(hs.safety_stop_count||0).toLocaleString()}</td>
+      <td class="flags">${repeatedScaffoldPrivacyBadges(hp)}</td>
+    </tr>`;
     const os=opportunity.summary||{};
     const op=opportunity.privacy||{};
     const oppStatus=os.candidate_count?'matched':'no-candidates';
