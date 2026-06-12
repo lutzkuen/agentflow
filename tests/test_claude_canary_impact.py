@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import importlib
 import importlib.util
 import io
 import json
@@ -13,6 +14,7 @@ import yaml
 from agentflow_proxy import cli
 from agentflow_proxy.claude_canary_actions import apply_claude_canary_actions, build_claude_canary_actions
 from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+from agentflow_proxy.routing_canary_promote import build_routing_canary_promotion_plan
 from agentflow_proxy.store import Store, stable_json
 
 
@@ -420,6 +422,99 @@ class ClaudeCanaryActionTests(unittest.TestCase):
             self.assertEqual(written["rules"][0]["action"]["reason"], "fixture")
             event = json.loads(event_log.read_text(encoding="utf-8").splitlines()[-1])
             self.assertEqual(event["action"], "claude-canary-actions-apply")
+            self.assertTrue(event["ok"])
+            self.assertFalse(event["details"]["dry_run"])
+            _assert_privacy_clean(self, result)
+
+    def test_routing_canary_promote_apply_writes_permanent_rule_and_bypasses_holdout(self) -> None:
+        impact = self._impact([
+            self._candidate(
+                verdict="promote",
+                candidate_id="candidate-promote",
+                canary_fraction=0.9,
+                holdout_fraction=0.1,
+                reason_codes=["target-savings-met", "canary-full-coverage"],
+            )
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            event_log = tmp_path / "policy_events.jsonl"
+            routing_file = tmp_path / "routing_rules.yaml"
+            routing_file.write_text(
+                yaml.safe_dump({
+                    "phase_canary": {
+                        "enabled": True,
+                        "policy_id": "test-claude-phase-canary",
+                        "target_candidate_id": "candidate-promote",
+                        "canary_fraction": 0.9,
+                        "holdout_fraction": 0.1,
+                    },
+                    "rules": [],
+                }, sort_keys=False),
+                encoding="utf-8",
+            )
+            plan = build_routing_canary_promotion_plan(impact, config_dir=tmp_path)
+            self.assertTrue(plan["ok"])
+            self.assertEqual(plan["summary"]["promotion_action_count"], 1)
+            self.assertEqual(plan["actions"][0]["permanent_rule"]["metadata"]["target_candidate_id"], "candidate-promote")
+
+            old_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+            os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(event_log)
+            try:
+                output = io.StringIO()
+                code = cli.routing_canary_promote_cli(
+                    ["-", "--config-dir", str(tmp_path), "--apply"],
+                    stdin=io.StringIO(json.dumps(impact)),
+                    stdout=output,
+                )
+            finally:
+                if old_log is None:
+                    os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
+                else:
+                    os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_log
+
+            self.assertEqual(code, 0)
+            result = json.loads(output.getvalue())
+            self.assertTrue(result["wrote_policy_files"])
+            written = yaml.safe_load(routing_file.read_text(encoding="utf-8"))
+            self.assertFalse(written["phase_canary"]["enabled"])
+            self.assertEqual(written["phase_canary"]["canary_fraction"], 0.0)
+            self.assertEqual(written["rules"][0]["metadata"]["source"], "claude-canary-promote")
+            self.assertTrue(written["rules"][0]["metadata"]["promoted_from_canary"])
+            self.assertNotIn("canary", written["rules"][0])
+
+            old_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
+            os.environ["AGENTFLOW_ROUTING_RULES"] = str(routing_file)
+            try:
+                import agentflow_proxy.router as router_module
+
+                manual_router = importlib.reload(router_module)
+                body = {
+                    "model": manual_router.SONNET_DEFAULT,
+                    "stream": True,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+                        }
+                    ],
+                }
+                routed, meta = manual_router.route_model(body)
+            finally:
+                if old_rules is None:
+                    os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
+                else:
+                    os.environ["AGENTFLOW_ROUTING_RULES"] = old_rules
+                import agentflow_proxy.router as router_module
+
+                importlib.reload(router_module)
+
+            self.assertEqual(routed, "claude-haiku-4-5-20251001")
+            self.assertNotIn("phase_canary", meta)
+            self.assertIsNone(meta["canary_cohort"])
+            self.assertTrue(meta["routing_rule"]["promoted_from_canary"])
+            event = json.loads(event_log.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(event["action"], "routing-canary-promote")
             self.assertTrue(event["ok"])
             self.assertFalse(event["details"]["dry_run"])
             _assert_privacy_clean(self, result)

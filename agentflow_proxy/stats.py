@@ -7833,11 +7833,26 @@ def _claude_route_finalize_candidate(candidate: dict[str, Any], *, now: datetime
 
 async def stats_claude_routing_promotion_funnel(store_obj: Any, limit: int = 1000) -> dict[str, Any]:
     from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+    from agentflow_proxy.policy_events import recent_policy_events
+    from agentflow_proxy.router import ROUTING_RULES
 
     capped_limit = max(1, min(int(limit or 1000), 10_000))
     candidates: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
     now = datetime.now(timezone.utc)
     observed_rows = 0
+    permanent_rule_count = sum(1 for rule in ROUTING_RULES if isinstance(rule, dict))
+    promoted_permanent_rule_count = 0
+    for rule in ROUTING_RULES:
+        if not isinstance(rule, dict):
+            continue
+        metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+        if metadata.get("promoted_from_canary") or metadata.get("source") == "claude-canary-promote":
+            promoted_permanent_rule_count += 1
+    promotion_events = [
+        _public_rollout_policy_event(event, now=now)
+        for event in recent_policy_events(limit=100).get("events", [])
+        if isinstance(event, dict) and event.get("action") == "routing-canary-promote"
+    ][:10]
 
     call_rows = store_obj.conn.execute(
         """
@@ -8056,11 +8071,15 @@ async def stats_claude_routing_promotion_funnel(store_obj: Any, limit: int = 100
             "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in rows), 8),
             "comparison_cost_delta_usd": round(sum(_as_float(row.get("comparison_cost_delta_usd")) for row in rows), 8),
             "last_evidence_at": max((str(row.get("latest_evidence_at")) for row in rows if row.get("latest_evidence_at")), default=None),
+            "permanent_rule_count": permanent_rule_count,
+            "promoted_permanent_rule_count": promoted_permanent_rule_count,
+            "promotion_event_count": len(promotion_events),
         },
         "stage_counts": _count_breakdown(stage_counts),
         "verdict_counts": _count_breakdown(verdict_counts),
         "blocker_counts": _count_breakdown(blocker_counts),
         "candidates": rows,
+        "promotion_events": promotion_events,
         "source_reports": {
             "claude_canary_impact_schema": canary_impact.get("schema") if isinstance(canary_impact, dict) else None,
         },
@@ -15302,7 +15321,7 @@ def dashboard_html() -> str:
   <h2>Claude routing promotion funnel</h2>
   <table class="activity-table" data-table-id="claude-routing-funnel-summary" data-filter-label="Filter Claude routing funnel summary">
     <thead><tr>
-      <th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Eligible unsampled</th><th data-sort-type="number">Sampled</th><th data-sort-type="number">Compared</th><th data-sort-type="number">Promoted</th><th data-sort-type="number">Canary applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Widened</th><th data-sort-type="number">Held</th><th data-sort-type="number">Rolled back</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+      <th data-sort-type="number">Observed</th><th data-sort-type="number">Eligible</th><th data-sort-type="number">Eligible unsampled</th><th data-sort-type="number">Sampled</th><th data-sort-type="number">Compared</th><th data-sort-type="number">Promoted</th><th data-sort-type="number">Permanent rules</th><th data-sort-type="number">Promotion events</th><th data-sort-type="number">Canary applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Widened</th><th data-sort-type="number">Held</th><th data-sort-type="number">Rolled back</th><th data-sort-type="money">Savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
     </tr></thead>
     <tbody id="claude-routing-funnel-summary-tbody"></tbody>
   </table>
@@ -17316,6 +17335,8 @@ async function refreshClaudeRoutingPromotionFunnel(){
       <td class="tokens">${(s.sampled_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.compared_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.promoted_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.promoted_permanent_rule_count||0).toLocaleString()} / ${(s.permanent_rule_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.promotion_event_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.canary_applied_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
       <td class="tokens">${(s.widened_count||0).toLocaleString()}</td>

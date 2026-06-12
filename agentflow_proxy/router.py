@@ -466,25 +466,49 @@ def _apply_openai_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, An
     return policy
 
 
-def _load_routing_rules() -> tuple[list[dict], dict[str, Any], dict[str, Any], str, str]:
-    p = Path(ROUTING_RULES_PATH)
-    if p.exists():
-        with open(p) as f:
-            data = yaml.safe_load(f)
-        if isinstance(data, list):
-            return data, _default_phase_canary_policy(), _default_openai_canary_policy(), "local-manual", str(p)
-        if isinstance(data, dict) and "rules" in data:
-            canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), data.get("phase_canary"))
-            openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))
-            return list(data["rules"]), canary, openai_canary, "local-manual", str(p)
-    defaults = Path(__file__).parent / "routing_rules.yaml"
-    with open(defaults) as f:
+def _load_routing_yaml(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    with open(path) as f:
         data = yaml.safe_load(f)
     if isinstance(data, list):
-        return data, _default_phase_canary_policy(), _default_openai_canary_policy(), "local-default", str(defaults)
-    canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), data.get("phase_canary"))
-    openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))
-    return list(data.get("rules", [])), canary, openai_canary, "local-default", str(defaults)
+        return {"rules": data}
+    if isinstance(data, dict):
+        return data
+    return {"rules": []}
+
+
+def _rules_list(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    rules = data.get("rules")
+    if not isinstance(rules, list):
+        return []
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def _load_routing_rules() -> tuple[list[dict], dict[str, Any], dict[str, Any], str, str]:
+    defaults_path = Path(__file__).parent / "routing_rules.yaml"
+    defaults = _load_routing_yaml(defaults_path) or {"rules": []}
+    env_path = os.getenv("AGENTFLOW_ROUTING_RULES")
+    if env_path:
+        p = Path(env_path).expanduser()
+        data = _load_routing_yaml(p)
+        if data is not None:
+            canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), data.get("phase_canary"))
+            openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))
+            return _rules_list(data), canary, openai_canary, "local-manual", str(p)
+
+    local_path = Path.home() / ".agentflow" / "routing_rules.yaml"
+    local = _load_routing_yaml(local_path)
+    if local is not None:
+        canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), local.get("phase_canary"))
+        openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), local.get("openai_canary"))
+        return _rules_list(local) + _rules_list(defaults), canary, openai_canary, "local-manual", str(local_path)
+
+    canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), defaults.get("phase_canary"))
+    openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), defaults.get("openai_canary"))
+    return _rules_list(defaults), canary, openai_canary, "local-default", str(defaults_path)
 
 
 ROUTING_RULES, ROUTING_PHASE_CANARY, ROUTING_OPENAI_CANARY, ROUTING_RULES_SOURCE, ROUTING_RULES_PATH = _load_routing_rules()
@@ -1314,6 +1338,118 @@ def openai_canary_decision(
     return requested, meta
 
 
+def _is_promoted_permanent_rule(rule: dict[str, Any]) -> bool:
+    metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+    if metadata.get("promoted_from_canary"):
+        return True
+    if metadata.get("source") == "claude-canary-promote":
+        return True
+    return str(rule.get("policy_source") or metadata.get("policy_source") or "") == "local-promoted"
+
+
+def _rule_matches(
+    rule: dict[str, Any],
+    *,
+    requested_l: str,
+    text_chars: int,
+    tools: bool,
+    max_tokens: Any,
+    category: str,
+    phase_meta: dict[str, str],
+    stream: bool,
+    session_id: str | None,
+    requested_model: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    cond = rule.get("conditions") or {}
+    if "model_pattern" in cond and str(cond["model_pattern"]).lower() not in requested_l:
+        return False, None
+    if "text_chars_lt" in cond and not (text_chars < int(cond["text_chars_lt"])):
+        return False, None
+    if "text_chars_gt" in cond and not (text_chars > int(cond["text_chars_gt"])):
+        return False, None
+    if "text_chars_lte" in cond and not (text_chars <= int(cond["text_chars_lte"])):
+        return False, None
+    if "text_chars_gte" in cond and not (text_chars >= int(cond["text_chars_gte"])):
+        return False, None
+    if "has_tools" in cond and bool(cond["has_tools"]) != tools:
+        return False, None
+    if "stream" in cond and bool(cond["stream"]) != stream:
+        return False, None
+    if "env_flag" in cond and not _env_flag_enabled(str(cond["env_flag"])):
+        return False, None
+    # A missing max_tokens value is unknown, not safely bounded.
+    if "max_tokens_lte" in cond:
+        if max_tokens is None or not (int(max_tokens) <= int(cond["max_tokens_lte"])):
+            return False, None
+    if "category" in cond and cond["category"] != category:
+        return False, None
+    if "category_not_in" in cond:
+        excluded = cond["category_not_in"]
+        if isinstance(excluded, str):
+            excluded = [excluded]
+        if category in set(excluded):
+            return False, None
+    if "workflow_phase" in cond and cond["workflow_phase"] != phase_meta.get("workflow_phase"):
+        return False, None
+    if "workflow_phase_confidence_gte" in cond:
+        confidence = str(phase_meta.get("workflow_phase_confidence") or "low")
+        required = str(cond.get("workflow_phase_confidence_gte") or "medium")
+        if _CONFIDENCE_ORDER.get(confidence, 0) < _CONFIDENCE_ORDER.get(required, 1):
+            return False, None
+    session_memory_meta: dict[str, Any] | None = None
+    if "session_memory" in cond:
+        matched_memory, session_memory_meta = _matches_session_memory_condition(
+            cond.get("session_memory"),
+            session_id=session_id,
+            requested_model=requested_model,
+            current_phase=str(phase_meta.get("workflow_phase") or "unknown"),
+        )
+        if not matched_memory:
+            return False, session_memory_meta
+    return True, session_memory_meta
+
+
+def _route_from_rule(
+    rule: dict[str, Any],
+    *,
+    requested: str,
+    text_chars: int,
+    tools: bool,
+    category: str,
+    phase_meta: dict[str, str],
+    session_memory_meta: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    action = rule.get("action") or {}
+    route_key = str(action.get("route_to", ""))
+    routed = _TIER_MAP.get(route_key, route_key) if route_key else requested
+    reason = str(action.get("reason", "matched routing rule"))
+    meta = {
+        "enabled": True,
+        "requested_model": requested,
+        "routed_model": routed,
+        "reason": reason,
+        "text_chars": text_chars,
+        "has_tools": tools,
+        "category": category,
+        **phase_meta,
+        "policy_source": str(rule.get("policy_source") or ROUTING_RULES_SOURCE),
+    }
+    metadata = rule.get("metadata") if isinstance(rule.get("metadata"), dict) else {}
+    if metadata.get("promoted_from_canary"):
+        meta["canary_cohort"] = None
+        meta["routing_rule"] = {
+            "status": "applied",
+            "source": metadata.get("source") or "claude-canary-promote",
+            "promoted_from_canary": True,
+            "rule_id": rule.get("id") or metadata.get("rule_id"),
+            "target_candidate_id": metadata.get("target_candidate_id"),
+            "promotion_source_policy_id": metadata.get("promotion_source_policy_id"),
+        }
+    if session_memory_meta:
+        meta["session_phase_memory"] = session_memory_meta
+    return routed, meta
+
+
 def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple[str, dict[str, Any]]:
     requested = str(body.get("model") or SONNET_DEFAULT)
     text_chars = len(extract_text(body))
@@ -1336,6 +1472,37 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
         }
 
     requested_l = requested.lower()
+
+    last_session_memory_meta: dict[str, Any] | None = None
+    matched_promoted_rules: set[int] = set()
+    for index, rule in enumerate(ROUTING_RULES):
+        if not _is_promoted_permanent_rule(rule):
+            continue
+        matched, session_memory_meta = _rule_matches(
+            rule,
+            requested_l=requested_l,
+            text_chars=text_chars,
+            tools=tools,
+            max_tokens=max_tokens,
+            category=category,
+            phase_meta=phase_meta,
+            stream=stream,
+            session_id=session_id,
+            requested_model=requested,
+        )
+        if session_memory_meta:
+            last_session_memory_meta = session_memory_meta
+        if matched:
+            matched_promoted_rules.add(index)
+            return _route_from_rule(
+                rule,
+                requested=requested,
+                text_chars=text_chars,
+                tools=tools,
+                category=category,
+                phase_meta=phase_meta,
+                session_memory_meta=session_memory_meta,
+            )
 
     if ROUTING_PHASE_CANARY.get("enabled"):
         canary_routed, canary_meta = phase_canary_decision(
@@ -1384,67 +1551,33 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             "policy_source": ROUTING_RULES_SOURCE,
         }
 
-    last_session_memory_meta: dict[str, Any] | None = None
-    for rule in ROUTING_RULES:
-        cond = rule.get("conditions") or {}
-        if "model_pattern" in cond and str(cond["model_pattern"]).lower() not in requested_l:
+    for index, rule in enumerate(ROUTING_RULES):
+        if index in matched_promoted_rules:
             continue
-        if "text_chars_lt" in cond and not (text_chars < int(cond["text_chars_lt"])):
-            continue
-        if "text_chars_gt" in cond and not (text_chars > int(cond["text_chars_gt"])):
-            continue
-        if "text_chars_lte" in cond and not (text_chars <= int(cond["text_chars_lte"])):
-            continue
-        if "text_chars_gte" in cond and not (text_chars >= int(cond["text_chars_gte"])):
-            continue
-        if "has_tools" in cond and bool(cond["has_tools"]) != tools:
-            continue
-        if "env_flag" in cond and not _env_flag_enabled(str(cond["env_flag"])):
-            continue
-        # A missing max_tokens value is unknown, not safely bounded.
-        if "max_tokens_lte" in cond:
-            if max_tokens is None or not (int(max_tokens) <= int(cond["max_tokens_lte"])):
-                continue
-        if "category" in cond and cond["category"] != category:
-            continue
-        if "category_not_in" in cond:
-            excluded = cond["category_not_in"]
-            if isinstance(excluded, str):
-                excluded = [excluded]
-            if category in set(excluded):
-                continue
-        if "workflow_phase" in cond and cond["workflow_phase"] != phase_meta.get("workflow_phase"):
-            continue
-        session_memory_meta: dict[str, Any] | None = None
-        if "session_memory" in cond:
-            matched_memory, session_memory_meta = _matches_session_memory_condition(
-                cond.get("session_memory"),
-                session_id=session_id,
-                requested_model=requested,
-                current_phase=str(phase_meta.get("workflow_phase") or "unknown"),
-            )
-            last_session_memory_meta = session_memory_meta
-            if not matched_memory:
-                continue
-
-        action = rule.get("action") or {}
-        route_key = str(action.get("route_to", ""))
-        routed = _TIER_MAP.get(route_key, route_key) if route_key else requested
-        reason = str(action.get("reason", "matched routing rule"))
-        meta = {
-            "enabled": True,
-            "requested_model": requested,
-            "routed_model": routed,
-            "reason": reason,
-            "text_chars": text_chars,
-            "has_tools": tools,
-            "category": category,
-            **phase_meta,
-            "policy_source": ROUTING_RULES_SOURCE,
-        }
+        matched, session_memory_meta = _rule_matches(
+            rule,
+            requested_l=requested_l,
+            text_chars=text_chars,
+            tools=tools,
+            max_tokens=max_tokens,
+            category=category,
+            phase_meta=phase_meta,
+            stream=stream,
+            session_id=session_id,
+            requested_model=requested,
+        )
         if session_memory_meta:
-            meta["session_phase_memory"] = session_memory_meta
-        return routed, meta
+            last_session_memory_meta = session_memory_meta
+        if matched:
+            return _route_from_rule(
+                rule,
+                requested=requested,
+                text_chars=text_chars,
+                tools=tools,
+                category=category,
+                phase_meta=phase_meta,
+                session_memory_meta=session_memory_meta,
+            )
 
     meta = {
         "enabled": True,

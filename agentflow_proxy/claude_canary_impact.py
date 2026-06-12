@@ -432,6 +432,14 @@ def _finalize_candidate(
         "max_evidence_age_hours": round(float(max_evidence_age_hours), 3),
     }
     decision = _decide_verdict(cohorts=cohorts, deltas=deltas, stale=stale, thresholds=thresholds)
+    canary_fraction = _as_float(aggregate.get("canary_fraction"))
+    holdout_fraction = _as_float(aggregate.get("holdout_fraction"))
+    if decision.get("verdict") == "widen" and canary_fraction + holdout_fraction >= 1.0:
+        decision = {
+            "verdict": "promote",
+            "reason_codes": ["target-savings-met", "canary-full-coverage"],
+            "warning_codes": decision.get("warning_codes", []),
+        }
     observed_total = _as_float(applied.get("observed_savings_usd"))
     return {
         "schema": VERDICT_SCHEMA,
@@ -481,6 +489,7 @@ def _finalize_candidate(
         "reason_codes": decision["reason_codes"],
         "warning_codes": decision["warning_codes"],
         "next_action": {
+            "promote": "promote_claude_canary_to_permanent_local_rule",
             "widen": "widen_local_claude_canary",
             "hold": "keep_current_claude_canary_fraction",
             "rollback": "rollback_or_disable_claude_canary",
