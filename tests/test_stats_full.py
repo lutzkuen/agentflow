@@ -7113,7 +7113,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
+        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
 
     def test_dashboard_exposes_codex_quota_token_usage_panel(self):
         html = stats_views.dashboard_html()

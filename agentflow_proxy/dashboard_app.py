@@ -212,6 +212,21 @@ def create_dashboard_router(
             impact_limit=impact_limit,
         )
 
+    @router.get("/agentflow/stats/repeated-scaffold-opportunity")
+    async def stats_repeated_scaffold_opportunity(
+        limit: int = 1000,
+        min_repeated_rows: int = 2,
+    ) -> dict[str, Any]:
+        return await stats_views.stats_repeated_scaffold_opportunity(
+            _store(store_obj),
+            limit=limit,
+            min_repeated_rows=min_repeated_rows,
+        )
+
+    @router.get("/agentflow/stats/repeated-scaffold-impact")
+    async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
+        return await stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/shadow-routing-promotion-readiness")
     async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_shadow_routing_promotion_readiness(_store(store_obj), limit=limit)

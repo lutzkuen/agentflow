@@ -4,6 +4,7 @@ import importlib.util
 import os
 import json
 import time
+import uuid
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,6 +88,8 @@ class DashboardImportTests(unittest.TestCase):
             claude_routing_funnel = client.get("/agentflow/stats/claude-routing-promotion-funnel")
             openai_old_context_summary = client.get("/agentflow/stats/openai-old-context-summary")
             openai_cache_replay_readiness = client.get("/agentflow/stats/openai-cache-replay-readiness")
+            repeated_scaffold_opportunity = client.get("/agentflow/stats/repeated-scaffold-opportunity")
+            repeated_scaffold_impact = client.get("/agentflow/stats/repeated-scaffold-impact")
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
@@ -159,6 +162,21 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(openai_cache_replay_readiness.json()["privacy"]["provider_calls_made"])
             self.assertFalse(openai_cache_replay_readiness.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(openai_cache_replay_readiness.json()["privacy"]["cache_keys_included"])
+            self.assertEqual(repeated_scaffold_opportunity.status_code, 200)
+            self.assertEqual(repeated_scaffold_opportunity.json()["schema"], "agentflow.repeated_scaffold_opportunity.v1")
+            self.assertEqual(repeated_scaffold_opportunity.json()["summary"]["candidate_count"], 0)
+            self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["request_ids_included"])
+            self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["session_ids_included"])
+            self.assertFalse(repeated_scaffold_opportunity.json()["privacy"]["cache_keys_included"])
+            self.assertEqual(repeated_scaffold_impact.status_code, 200)
+            self.assertEqual(repeated_scaffold_impact.json()["schema"], "agentflow.repeated_scaffold_impact.v1")
+            self.assertEqual(repeated_scaffold_impact.json()["status"], "no-repeated-scaffold-canary-metadata")
+            self.assertFalse(repeated_scaffold_impact.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(repeated_scaffold_impact.json()["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(repeated_scaffold_impact.json()["privacy"]["request_ids_included"])
+            self.assertFalse(repeated_scaffold_impact.json()["privacy"]["session_ids_included"])
+            self.assertFalse(repeated_scaffold_impact.json()["privacy"]["cache_keys_included"])
             self.assertEqual(optimization_eval_queue.status_code, 200)
             self.assertEqual(optimization_eval_queue.json()["schema"], "agentflow.optimization_eval_queue.v1")
             self.assertFalse(optimization_eval_queue.json()["privacy"]["provider_calls_made"])
@@ -283,6 +301,19 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("openai-cache-replay-readiness-tbody", dashboard.text)
             self.assertIn("OpenAI cache replay impact gates", dashboard.text)
             self.assertIn("openai-cache-replay-impact-gates-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/repeated-scaffold-opportunity", dashboard.text)
+            self.assertIn("/agentflow/stats/repeated-scaffold-impact", dashboard.text)
+            self.assertIn("Scaffold crunch", dashboard.text)
+            self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
+            self.assertIn("repeated-scaffold-readiness-tbody", dashboard.text)
+            self.assertIn("Repeated-scaffold opportunity candidates", dashboard.text)
+            self.assertIn("repeated-scaffold-opportunities-tbody", dashboard.text)
+            self.assertIn("No repeated-scaffold opportunity candidates yet", dashboard.text)
+            self.assertIn("Repeated-scaffold canary impact", dashboard.text)
+            self.assertIn("repeated-scaffold-impact-summary-tbody", dashboard.text)
+            self.assertIn("Repeated-scaffold promotion gates", dashboard.text)
+            self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
+            self.assertIn("No repeated-scaffold canary impact metadata yet", dashboard.text)
         finally:
             if old_event_log is None:
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
@@ -291,6 +322,180 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_repeated_scaffold_dashboard_endpoints_are_content_free(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+
+        def log_call(
+            *,
+            request_json=None,
+            crunch_json=None,
+            routing_extra=None,
+            category="tool-result",
+            created_at="2026-06-12T00:00:00+00:00",
+        ):
+            routing = {
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": category,
+                "workflow_phase": "tool-execution",
+                "text_chars": 48000,
+                "has_tools": category.startswith("tool"),
+            }
+            if routing_extra:
+                routing.update(routing_extra)
+            store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=created_at,
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=100,
+                input_tokens_est=12000,
+                output_tokens_est=100,
+                actual_input_tokens=12000,
+                actual_output_tokens=100,
+                cost_est_usd=0.04,
+                cost_baseline_usd=0.04,
+                crunch_json=stable_json(crunch_json or {"changed": False, "tokens_saved_est": 0}),
+                routing_json=stable_json(routing),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                error=None,
+                request_json=stable_json(request_json) if request_json is not None else None,
+                response_json=stable_json({"text": "raw response must not leak"}),
+                session_id="raw-session-must-not-leak",
+                category=category,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                thinking_output_tokens=0,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                requested_model_family="sonnet",
+                routed_model_family="sonnet",
+            )
+
+        repeated_text = (
+            "Repeated provider scaffold line with stable tool framing and operational instructions "
+            "that should be counted but never displayed as raw dashboard content."
+        )
+        raw_body = {
+            "model": "claude-sonnet-4-6",
+            "system": repeated_text,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": repeated_text + " raw secret one"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": repeated_text + " raw secret two"}]},
+            ],
+            "request_id": "raw-request-id-must-not-leak",
+            "cache_key": "raw-cache-key-must-not-leak",
+        }
+        log_call(request_json=raw_body)
+        log_call(request_json=raw_body)
+
+        def repeated_scaffold_crunch(cohort, tokens_saved=1000):
+            applied = cohort == "canary_applied"
+            holdout = cohort == "canary_holdout"
+            canary = {
+                "enabled": True,
+                "selected": applied,
+                "cohort": cohort,
+                "fraction": 0.10,
+                "unit": "request_fingerprint",
+            }
+            rule = {
+                "rule_id": "reviewed-provider-scaffold",
+                "candidate_id": "candidate-provider-123",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "applied_count": 1 if applied else 0,
+                "holdout_count": 1 if holdout else 0,
+                "saved_chars": tokens_saved * 4 if applied else 0,
+                "canary": canary,
+                "skip_reasons": [{"reason": "canary_holdout", "count": 1, "canary": canary}] if holdout else [],
+            }
+            return {
+                "changed": applied,
+                "repeated_provider_scaffolding": {
+                    "schema": "agentflow.repeated_provider_scaffolding.v1",
+                    "enabled": True,
+                    "status": "applied" if applied else "skipped",
+                    "reason": "repeated-provider-scaffolding-crunched" if applied else "canary_holdout",
+                    "policy_source": "managed-recommended",
+                    "category": "tool-result",
+                    "saved_chars": tokens_saved * 4 if applied else 0,
+                    "tokens_saved_est": tokens_saved if applied else 0,
+                    "rules": [rule],
+                    "raw_text_included": False,
+                    "raw_hashes_included": False,
+                },
+            }
+
+        log_call(crunch_json=repeated_scaffold_crunch("canary_applied", 1100), created_at="2026-06-12T00:01:00+00:00")
+        log_call(crunch_json=repeated_scaffold_crunch("canary_applied", 1200), created_at="2026-06-12T00:02:00+00:00")
+        log_call(crunch_json=repeated_scaffold_crunch("canary_holdout", 0), created_at="2026-06-12T00:03:00+00:00")
+
+        try:
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+
+            opportunity_response = client.get("/agentflow/stats/repeated-scaffold-opportunity?limit=20")
+            impact_response = client.get("/agentflow/stats/repeated-scaffold-impact?limit=20")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(opportunity_response.status_code, 200)
+            opportunity = opportunity_response.json()
+            self.assertEqual(opportunity["schema"], "agentflow.repeated_scaffold_opportunity.v1")
+            self.assertGreaterEqual(opportunity["summary"]["candidate_count"], 1)
+            self.assertGreater(opportunity["summary"]["projected_saved_tokens"], 0)
+            self.assertGreaterEqual(opportunity["candidates"][0]["matched_count"], 2)
+            self.assertFalse(opportunity["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(opportunity["privacy"]["request_ids_included"])
+            self.assertFalse(opportunity["privacy"]["session_ids_included"])
+            self.assertFalse(opportunity["privacy"]["cache_keys_included"])
+
+            self.assertEqual(impact_response.status_code, 200)
+            impact = impact_response.json()
+            self.assertEqual(impact["schema"], "agentflow.repeated_scaffold_impact.v1")
+            self.assertEqual(impact["status"], "matched")
+            self.assertEqual(impact["summary"]["applied_count"], 2)
+            self.assertEqual(impact["summary"]["holdout_count"], 1)
+            self.assertEqual(impact["candidates"][0]["verdict"], "promote")
+            self.assertEqual(impact["candidates"][0]["next_action"], "widen_repeated_scaffold_crunch_canary")
+            self.assertFalse(impact["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(impact["privacy"]["request_ids_included"])
+            self.assertFalse(impact["privacy"]["session_ids_included"])
+            self.assertFalse(impact["privacy"]["cache_keys_included"])
+
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Repeated-scaffold crunch readiness", dashboard.text)
+            self.assertIn("repeated-scaffold-impact-candidates-tbody", dashboard.text)
+
+            rendered = json.dumps(opportunity, sort_keys=True) + json.dumps(impact, sort_keys=True) + dashboard.text
+            for forbidden in (
+                "raw secret one",
+                "raw secret two",
+                "raw-request-id-must-not-leak",
+                "raw-cache-key-must-not-leak",
+                "raw-session-must-not-leak",
+                "raw response must not leak",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            store.conn.close()
+            tmp.close()
 
     def test_managed_openai_activation_dashboard_uses_metadata_only_sources(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

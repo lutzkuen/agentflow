@@ -14572,6 +14572,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
+  <button class="tab-btn" onclick="showTab('scaffold')">Scaffold crunch</button>
   <button class="tab-btn" onclick="showTab('errors')">Errors</button>
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
@@ -14839,6 +14840,45 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Hit type</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Calls</th>
     </tr></thead>
     <tbody id="cache-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-scaffold">
+<div class="section">
+  <h2>Repeated-scaffold crunch readiness</h2>
+  <table data-table-id="repeated-scaffold-readiness" data-filter-label="Filter repeated-scaffold readiness">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Scanned</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Body rows</th><th data-sort-type="number">Metadata rows</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-readiness-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Repeated-scaffold opportunity candidates</h2>
+  <table class="activity-table" data-table-id="repeated-scaffold-opportunities" data-filter-label="Filter repeated-scaffold opportunity candidates">
+    <thead><tr>
+      <th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Model</th><th data-sort-type="number">Rows</th><th data-sort-type="number">Repeated rows</th><th data-sort-type="number">Body rows</th><th data-sort-type="number">Pattern rows</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-opportunities-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Repeated-scaffold canary impact</h2>
+  <table data-table-id="repeated-scaffold-impact-summary" data-filter-label="Filter repeated-scaffold canary impact">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Saved chars</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Observed savings</th><th data-sort-type="text">Verdicts</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-impact-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Repeated-scaffold promotion gates</h2>
+  <table class="activity-table" data-table-id="repeated-scaffold-impact-candidates" data-filter-label="Filter repeated-scaffold promotion gates">
+    <thead><tr>
+      <th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Savings</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Reasons</th><th data-sort-type="time">Latest evidence</th>
+    </tr></thead>
+    <tbody id="repeated-scaffold-impact-candidates-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -15704,7 +15744,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
+  const tabs=['safety','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -16289,6 +16329,110 @@ async function refreshCache(){
     document.getElementById('pattern-decisions-tbody').innerHTML=renderPatternRows(d.pattern_decision_breakdown||[]);
     document.getElementById('cache-today-tbody').innerHTML=renderRows(d.today_cache_decision_breakdown||[]);
     document.getElementById('cache-tbody').innerHTML=renderRows(d.cache_decision_breakdown||[]);
+    applyAllDataTables();
+  }catch(e){}
+}
+
+function scaffoldStatusBadge(status){
+  if(status==='matched'||status==='ready'||status==='promote')return'hit';
+  if(status==='hold'||status==='need-more-samples'||status==='no-repeated-scaffold-canary-metadata')return'routed';
+  if(status==='rollback'||status==='blocked'||status==='safety-stop')return'err';
+  return'miss';
+}
+function repeatedScaffoldPrivacyBadges(privacy){
+  privacy=privacy||{};
+  return `${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} ${privacy.raw_prompts_included?'<span class="badge err">raw prompts</span>':'<span class="badge hit">raw prompts omitted</span>'} ${privacy.raw_request_bodies_included?'<span class="badge err">raw bodies</span>':'<span class="badge hit">raw bodies omitted</span>'} ${privacy.request_ids_included?'<span class="badge err">request IDs</span>':'<span class="badge hit">IDs omitted</span>'} ${privacy.session_ids_included||privacy.raw_session_ids_included?'<span class="badge err">session IDs</span>':'<span class="badge hit">session IDs omitted</span>'} ${privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'}`;
+}
+function repeatedScaffoldBreakdownBadges(rows,emptyLabel,cls='miss'){
+  rows=rows||[];
+  if(!rows.length)return`<span class="badge ${cls}">${esc(emptyLabel||'none')}</span>`;
+  return rows.slice(0,5).map(row=>`<span class="badge ${cls}">${esc(row.value||'unknown')} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
+function repeatedScaffoldReasonBadges(values,verdict){
+  values=values||[];
+  if(!values.length)return'<span class="badge hit">none</span>';
+  return values.slice(0,5).map(value=>`<span class="badge ${verdict==='rollback'?'err':'miss'}">${esc(value)}</span>`).join(' ');
+}
+async function refreshRepeatedScaffold(){
+  try{
+    const [or,ir]=await Promise.all([
+      fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=1000&min_repeated_rows=2'),
+      fetch('/agentflow/stats/repeated-scaffold-impact?limit=500')
+    ]);
+    const opportunity=await or.json();
+    const impact=await ir.json();
+    const os=opportunity.summary||{};
+    const op=opportunity.privacy||{};
+    const oppStatus=os.candidate_count?'matched':'no-candidates';
+    document.getElementById('repeated-scaffold-readiness-tbody').innerHTML=`<tr>
+      <td><span class="badge ${scaffoldStatusBadge(oppStatus)}">${esc(oppStatus)}</span></td>
+      <td class="tokens">${(os.provider_call_count||0).toLocaleString()} <span class="badge miss">scanned ${(os.scanned_call_count||0).toLocaleString()}</span></td>
+      <td class="tokens">${(os.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(os.body_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(os.body_logging_off_rows||0).toLocaleString()} <span class="badge miss">patterns ${(os.metadata_pattern_hash_rows||0).toLocaleString()}</span></td>
+      <td class="tokens">${fmtTok(os.projected_saved_chars||0)}</td>
+      <td class="tokens">${fmtTok(os.projected_saved_tokens||0)}</td>
+      <td class="savings">${fmt(os.projected_saved_usd||0,6)}</td>
+      <td class="flags">${repeatedScaffoldBreakdownBadges(opportunity.blocker_reason_breakdown,'none','miss')}</td>
+      <td class="flags">${repeatedScaffoldPrivacyBadges(op)}</td>
+    </tr>`;
+    const opportunities=opportunity.candidates||[];
+    document.getElementById('repeated-scaffold-opportunities-tbody').innerHTML=opportunities.slice(0,20).map(row=>`<tr>
+      <td class="model">${esc(row.candidate_id||'unknown')}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.workflow_phase||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(row.requested_model_family||row.routed_model_tier||'unknown')}</span></td>
+      <td class="tokens">${(row.matched_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.repeated_fingerprint_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.body_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.pattern_hash_rows||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.projected_saved_chars||0)}</td>
+      <td class="tokens">${fmtTok(row.projected_saved_tokens||0)}</td>
+      <td class="savings">${fmt(row.projected_saved_usd||0,6)}</td>
+      <td class="flags">${repeatedScaffoldBreakdownBadges(row.blocker_reason_breakdown,'none','miss')}</td>
+      <td class="flags">${repeatedScaffoldPrivacyBadges(row.privacy||{})}</td>
+    </tr>`).join('')||'<tr><td colspan="14" style="color:#8b949e">No repeated-scaffold opportunity candidates yet</td></tr>';
+
+    const is=impact.summary||{};
+    const ip=impact.privacy||{};
+    document.getElementById('repeated-scaffold-impact-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${scaffoldStatusBadge(impact.status)}">${esc(impact.status||'unknown')}</span></td>
+      <td class="tokens">${(is.observed_repeated_scaffold_metadata_row_count||0).toLocaleString()} <span class="badge miss">sampled ${(is.sampled_call_count||0).toLocaleString()}</span></td>
+      <td class="tokens">${(is.candidate_group_count||0).toLocaleString()}</td>
+      <td class="tokens">${(is.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(is.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(is.safety_stop_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(is.estimated_saved_chars||0)}</td>
+      <td class="tokens">${fmtTok(is.estimated_saved_tokens||0)}</td>
+      <td class="savings">${fmt(is.estimated_savings_usd||0,6)}</td>
+      <td class="flags">${repeatedScaffoldBreakdownBadges(is.verdict_counts,'none','provider')}</td>
+      <td class="flags">${repeatedScaffoldBreakdownBadges(is.reason_code_counts,'none','miss')}</td>
+      <td class="flags">${repeatedScaffoldPrivacyBadges(ip)}</td>
+    </tr>`;
+    const impactRows=impact.candidates||[];
+    document.getElementById('repeated-scaffold-impact-candidates-tbody').innerHTML=impactRows.map(row=>{
+      const counts=row.cohort_counts||{};
+      const deltas=row.applied_vs_holdout_deltas||{};
+      return `<tr>
+        <td><span class="badge ${scaffoldStatusBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.candidate_id||'unknown')}</td>
+        <td class="model">${esc(row.rule_id||'unknown')}</td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+        <td class="tokens">${(counts.applied||0).toLocaleString()}</td>
+        <td class="tokens">${(counts.holdout||0).toLocaleString()}</td>
+        <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+        <td class="savings">${fmt(row.estimated_savings_usd||0,6)}</td>
+        <td class="tokens">${fmtPctValue(deltas.applied_minus_holdout_error_rate||0)}</td>
+        <td class="tokens">${fmtPctValue(deltas.applied_minus_holdout_retry_rate||0)}</td>
+        <td class="latency">${deltas.applied_minus_holdout_latency_avg_ms==null?'—':fmtMs(deltas.applied_minus_holdout_latency_avg_ms)}</td>
+        <td class="model">${esc(row.next_action||'—')}</td>
+        <td class="flags">${repeatedScaffoldReasonBadges(row.reason_codes,row.verdict)}</td>
+        <td class="ts">${row.latest_observed_at?ago(row.latest_observed_at):'—'}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="16" style="color:#8b949e">No repeated-scaffold canary impact metadata yet</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -17926,6 +18070,7 @@ refreshWeekly();
 refreshCategories();
 refreshCache();
 refreshOpenAICacheReplayReadiness();
+refreshRepeatedScaffold();
 refreshErrors();
 refreshLimiter();
 refreshSafety();
@@ -17954,6 +18099,7 @@ setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
 setInterval(refreshOpenAICacheReplayReadiness,30000);
+setInterval(refreshRepeatedScaffold,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
 setInterval(refreshPolicies,30000);
