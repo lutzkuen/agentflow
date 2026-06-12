@@ -271,6 +271,81 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
                     self.assertGreater(candidate["requested_model_fallback_cost_usd"], 0)
                 _assert_privacy_clean(self, report)
 
+    def test_claude_canary_impact_holds_on_provider_adoption_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                self._log_claude_canary_call(store, cohort="canary_applied", suffix="a1")
+                self._log_claude_canary_call(store, cohort="canary_holdout", suffix="h1", cost_est=0.003, cost_baseline=0.003)
+                store.log_provider_tool_adoption_window(
+                    id="claude-adoption-applied-risk",
+                    created_at="2026-06-10T04:00:05+00:00",
+                    updated_at="2026-06-10T05:00:05+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    app_family="claude_code",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    workflow_phase="tool-execution",
+                    policy_source="local-manual",
+                    policy_ids_json=stable_json(["test-claude-phase-canary"]),
+                    call_id="claude-canary-impact-canary_applied-a1",
+                    fulfilled_call_id=None,
+                    session_digest="sha256:secret-session",
+                    correlation_digest="sha256:secret-tool",
+                    status="abandoned",
+                    reason="ttl-expired-without-tool-result",
+                    age_bucket="1_6h",
+                    tool_use_count=1,
+                    tool_result_count=0,
+                    metadata_json=stable_json({"metadata_only": True}),
+                )
+                store.log_provider_tool_adoption_window(
+                    id="claude-adoption-holdout-fulfilled",
+                    created_at="2026-06-10T04:00:07+00:00",
+                    updated_at="2026-06-10T04:00:17+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    app_family="claude_code",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    workflow_phase="tool-execution",
+                    policy_source="local-manual",
+                    policy_ids_json=stable_json(["test-claude-phase-canary"]),
+                    call_id="claude-canary-impact-canary_holdout-h1",
+                    fulfilled_call_id="claude-canary-impact-canary_holdout-h1",
+                    session_digest="sha256:secret-session",
+                    correlation_digest="sha256:secret-tool-holdout",
+                    status="fulfilled",
+                    reason="matched-subsequent-tool-result",
+                    age_bucket="0_1m",
+                    tool_use_count=1,
+                    tool_result_count=1,
+                    metadata_json=stable_json({"metadata_only": True}),
+                )
+                impact = build_claude_canary_impact_report(
+                    store,
+                    limit=10,
+                    min_applied_samples=1,
+                    min_holdout_samples=1,
+                    now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+        candidate = impact["candidates"][0]
+        self.assertEqual(candidate["verdict"], "hold")
+        self.assertIn("provider-adoption-regression", candidate["reason_codes"])
+        self.assertTrue(candidate["provider_adoption_gate"]["blocking"])
+        self.assertEqual(candidate["provider_adoption_gate"]["cohorts"]["applied"]["abandoned_count"], 1)
+        rendered = stable_json(impact)
+        self.assertNotIn("secret-tool", rendered)
+        self.assertNotIn("secret-session", rendered)
+
 
 class ClaudeCanaryActionTests(unittest.TestCase):
     def _candidate(self, *, verdict: str, candidate_id: str = "claude-action-candidate", canary_fraction: float = 0.5, holdout_fraction: float = 0.25, reason_codes: list[str] | None = None) -> dict:

@@ -7,6 +7,11 @@ from typing import Any
 
 from agentflow_proxy.optimization_promotion_actions import SCHEMA as PROMOTION_ACTIONS_SCHEMA
 from agentflow_proxy.optimization_promotion_canary import normalize_promotion_canary_bundle
+from agentflow_proxy.provider_adoption_gate import (
+    build_provider_adoption_gate,
+    provider_adoption_thresholds,
+    provider_adoption_windows_by_call,
+)
 from agentflow_proxy.store import utc_now
 
 
@@ -251,6 +256,7 @@ def _observation_from_meta(row: dict[str, Any], meta: dict[str, Any], *, policy_
     reason = str(meta.get("reason") or (meta.get("canary") if isinstance(meta.get("canary"), dict) else {}).get("reason") or "unknown")
     return {
         "created_at": row.get("created_at"),
+        "call_id": row.get("id"),
         "policy_section": policy_section,
         "action_id": action_id or None,
         "target_candidate_id": candidate_id or None,
@@ -266,6 +272,7 @@ def _observation_from_meta(row: dict[str, Any], meta: dict[str, Any], *, policy_
         "savings_usd": _row_savings(row, meta) if cohort == "canary_applied" else 0.0,
         "error_bucket": _error_bucket(row.get("error"), row.get("status_code")),
         "safety_stop": meta.get("safety_stop") if isinstance(meta.get("safety_stop"), dict) else {},
+        "provider_adoption_windows": row.get("provider_adoption_windows") if isinstance(row.get("provider_adoption_windows"), list) else [],
     }
 
 
@@ -274,7 +281,7 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
     if since:
         rows = store_obj.conn.execute(
             """
-            select created_at, path, coalesce(provider, 'anthropic') as provider,
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
                    source_surface, requested_model, routed_model, stream, status_code,
                    latency_ms, retry_count, cost_est_usd, cost_baseline_usd,
                    error, routing_json, crunch_json, cache_json, category
@@ -288,7 +295,7 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
     else:
         rows = store_obj.conn.execute(
             """
-            select created_at, path, coalesce(provider, 'anthropic') as provider,
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
                    source_surface, requested_model, routed_model, stream, status_code,
                    latency_ms, retry_count, cost_est_usd, cost_baseline_usd,
                    error, routing_json, crunch_json, cache_json, category
@@ -304,9 +311,12 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
     return result
 
 
-def _observations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _observations(rows: list[dict[str, Any]], adoption_by_call: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
     observations: list[dict[str, Any]] = []
     for row in rows:
+        call_id = str(row.get("id") or "")
+        if adoption_by_call and call_id:
+            row = {**row, "provider_adoption_windows": adoption_by_call.get(call_id, [])}
         routing = _json_obj(row.get("routing_json"))
         routing_meta = _promotion_meta_from_decision(routing)
         if routing_meta:
@@ -440,7 +450,7 @@ def _projected(action: dict[str, Any]) -> dict[str, Any]:
 def _thresholds(action: dict[str, Any], *, min_applied_samples: int, min_holdout_samples: int, max_evidence_age_hours: float) -> dict[str, Any]:
     local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
     safety = local_update.get("safety_stop") if isinstance(local_update.get("safety_stop"), dict) else {}
-    return {
+    thresholds = {
         "min_canary_applied_samples": max(0, _as_int(safety.get("min_applied_samples"), min_applied_samples)),
         "min_canary_holdout_samples": max(0, _as_int(safety.get("min_holdout_samples"), min_holdout_samples)),
         "max_error_rate": round(_as_float(safety.get("max_error_rate"), 0.05), 6),
@@ -451,6 +461,14 @@ def _thresholds(action: dict[str, Any], *, min_applied_samples: int, min_holdout
         "min_projection_realization_ratio": round(_as_float(safety.get("min_projection_realization_ratio"), 0.50), 6),
         "max_evidence_age_hours": round(float(max_evidence_age_hours), 3),
     }
+    thresholds.update(provider_adoption_thresholds(
+        min_fulfilled_samples=_as_int(safety.get("min_provider_adoption_fulfilled_samples"), 1),
+        max_applied_abandonment_rate=_as_float(safety.get("max_provider_adoption_abandonment_rate"), 0.02),
+        max_applied_orphan_result_rate=_as_float(safety.get("max_provider_adoption_orphan_result_rate"), 0.02),
+        max_applied_risk_rate=_as_float(safety.get("max_provider_adoption_risk_rate"), 0.05),
+        max_applied_vs_holdout_risk_rate_delta=_as_float(safety.get("max_provider_adoption_risk_rate_delta"), 0.02),
+    ))
+    return thresholds
 
 
 def _stale_evidence(actual: dict[str, Any], *, now: datetime, max_age_hours: float) -> dict[str, Any]:
@@ -461,7 +479,15 @@ def _stale_evidence(actual: dict[str, Any], *, now: datetime, max_age_hours: flo
     return {"stale": age_hours > max_age_hours, "age_hours": round(age_hours, 3), "max_age_hours": round(float(max_age_hours), 3)}
 
 
-def _next_step(*, action: dict[str, Any], actual: dict[str, Any], projection: dict[str, Any], thresholds: dict[str, Any], stale: dict[str, Any]) -> dict[str, Any]:
+def _next_step(
+    *,
+    action: dict[str, Any],
+    actual: dict[str, Any],
+    projection: dict[str, Any],
+    thresholds: dict[str, Any],
+    stale: dict[str, Any],
+    provider_adoption_gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     applied = actual["cohorts"]["canary_applied"]
     holdout = actual["cohorts"]["canary_holdout"]
     projected_savings = _as_float(projection.get("projected_savings_usd"))
@@ -500,6 +526,11 @@ def _next_step(*, action: dict[str, Any], actual: dict[str, Any], projection: di
             if projection_ratio is not None and projection_ratio < _as_float(thresholds.get("min_projection_realization_ratio")):
                 warning_codes.append("observed-savings-below-projection")
                 reason_codes.append("projection-realization-below-threshold")
+            gate = provider_adoption_gate or {}
+            if gate.get("blocking"):
+                reason_codes.extend(str(code) for code in gate.get("reason_codes") or [])
+            else:
+                warning_codes.extend(str(code) for code in gate.get("warning_codes") or [])
             verdict = "hold" if reason_codes else "widen"
             if not reason_codes:
                 reason_codes = ["promotion-impact-positive"]
@@ -578,7 +609,8 @@ def measure_optimization_promotion_impact(
 
     now_dt = now or datetime.now(timezone.utc)
     rows = _call_rows(store_obj, limit=lookback_limit, since=since_value)
-    observed = _observations(rows)
+    adoption_by_call = provider_adoption_windows_by_call(store_obj, [row.get("id") for row in rows])
+    observed = _observations(rows, adoption_by_call)
     action_results: list[dict[str, Any]] = []
     for index, action in enumerate(actions):
         if not isinstance(action, dict):
@@ -592,8 +624,23 @@ def measure_optimization_promotion_impact(
             min_holdout_samples=min_holdout_samples,
             max_evidence_age_hours=max_evidence_age_hours,
         )
+        provider_adoption_gate = build_provider_adoption_gate(
+            matched,
+            thresholds={
+                key: value
+                for key, value in thresholds.items()
+                if key.startswith("min_provider_adoption") or key.startswith("max_applied")
+            },
+        )
         stale = _stale_evidence(actual, now=now_dt, max_age_hours=max_evidence_age_hours)
-        next_step = _next_step(action=action, actual=actual, projection=projection, thresholds=thresholds, stale=stale)
+        next_step = _next_step(
+            action=action,
+            actual=actual,
+            projection=projection,
+            thresholds=thresholds,
+            stale=stale,
+            provider_adoption_gate=provider_adoption_gate,
+        )
         action_results.append({
             "path": f"$.actions[{index}]",
             "action_id": action.get("action_id"),
@@ -605,6 +652,7 @@ def measure_optimization_promotion_impact(
             "actual": actual,
             "stale_evidence": stale,
             "thresholds": thresholds,
+            "provider_adoption_gate": provider_adoption_gate,
             "next_step": next_step,
             "status": "matched" if matched else "no-post-apply-matches",
             "read_only": True,

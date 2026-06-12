@@ -974,6 +974,87 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(blocked_report["privacy"]["raw_prompts_included"])
         self.assertNotIn("raw promotion impact secret", stable_json(blocked_report))
 
+    def test_optimization_promotion_impact_blocks_provider_adoption_regression(self):
+        action = self._promotion_impact_action("routing", "routing-adoption-regression", projected_savings=0.001)
+        bundle = self._promotion_impact_bundle(action)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                self._log_promotion_impact_call(store, action, cohort="canary_applied", suffix="a1")
+                self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h1")
+                store.log_provider_tool_adoption_window(
+                    id="provider-adoption-applied-risk",
+                    created_at="2026-06-10T00:10:05+00:00",
+                    updated_at="2026-06-10T01:10:05+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    app_family="claude",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    workflow_phase="tool-execution",
+                    policy_source="managed-recommended",
+                    policy_ids_json=stable_json(["promotion-routing-adoption-regression"]),
+                    call_id="promotion-impact-routing-canary_applied-a1",
+                    fulfilled_call_id=None,
+                    session_digest="sha256:session-secret",
+                    correlation_digest="sha256:tool-secret-applied",
+                    status="abandoned",
+                    reason="ttl-expired-without-tool-result",
+                    age_bucket="1_6h",
+                    tool_use_count=1,
+                    tool_result_count=0,
+                    metadata_json=stable_json({"metadata_only": True}),
+                )
+                store.log_provider_tool_adoption_window(
+                    id="provider-adoption-holdout-fulfilled",
+                    created_at="2026-06-10T00:10:06+00:00",
+                    updated_at="2026-06-10T00:10:20+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    app_family="claude",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    category="tool-result",
+                    workflow_phase="tool-execution",
+                    policy_source="managed-recommended",
+                    policy_ids_json=stable_json(["promotion-routing-adoption-regression"]),
+                    call_id="promotion-impact-routing-canary_holdout-h1",
+                    fulfilled_call_id="promotion-impact-routing-canary_holdout-h1",
+                    session_digest="sha256:session-secret",
+                    correlation_digest="sha256:tool-secret-holdout",
+                    status="fulfilled",
+                    reason="matched-subsequent-tool-result",
+                    age_bucket="0_1m",
+                    tool_use_count=1,
+                    tool_result_count=1,
+                    metadata_json=stable_json({"metadata_only": True}),
+                )
+                report = measure_optimization_promotion_impact(
+                    bundle,
+                    store_obj=store,
+                    limit=10,
+                    since="2026-06-10T00:00:00+00:00",
+                    min_applied_samples=1,
+                    min_holdout_samples=1,
+                    now=datetime(2026, 6, 10, 1, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+        step = report["actions"][0]["next_step"]
+        gate = report["actions"][0]["provider_adoption_gate"]
+        self.assertEqual(step["verdict"], "hold")
+        self.assertIn("provider-adoption-regression", step["reason_codes"])
+        self.assertTrue(gate["blocking"])
+        self.assertEqual(gate["cohorts"]["applied"]["abandoned_count"], 1)
+        self.assertEqual(gate["cohorts"]["holdout"]["fulfilled_count"], 1)
+        rendered = stable_json(report)
+        self.assertNotIn("tool-secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+
     def _optimization_rollout_bundle(self):
         return {
             "schema": "agentflow.optimization_rollout_actions.v1",

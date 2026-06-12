@@ -5,6 +5,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agentflow_proxy.old_context_summary_dry_run import OLD_CONTEXT_SUMMARY_DRY_RUN_SCHEMA
+from agentflow_proxy.provider_adoption_gate import (
+    build_provider_adoption_gate,
+    provider_adoption_thresholds,
+    provider_adoption_windows_by_call,
+)
 from agentflow_proxy.store import utc_now
 
 
@@ -201,7 +206,7 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
         params = (max(1, int(limit)),)
     sql = f"""
         select created_at, provider, path, requested_model, routed_model, stream,
-               status_code, latency_ms, actual_input_tokens, actual_output_tokens,
+               id, status_code, latency_ms, actual_input_tokens, actual_output_tokens,
                cost_est_usd, cost_baseline_usd, crunch_json, routing_json, cache_json,
                category, retry_count
         from calls
@@ -220,6 +225,7 @@ def _row_summary(row: dict[str, Any]) -> dict[str, Any] | None:
     routing = _json_obj(row.get("routing_json"))
     return {
         "source_surface": _source_surface(row.get("provider"), row.get("path")),
+        "call_id": row.get("id"),
         "category": str(summary.get("category") or row.get("category") or routing.get("category") or "unknown"),
         "model_tier": _model_tier(row.get("requested_model")),
         "stream": bool(row.get("stream")),
@@ -227,6 +233,7 @@ def _row_summary(row: dict[str, Any]) -> dict[str, Any] | None:
         "latency_ms": row.get("latency_ms"),
         "retry_count": row.get("retry_count"),
         "summary": summary,
+        "provider_adoption_windows": row.get("provider_adoption_windows") if isinstance(row.get("provider_adoption_windows"), list) else [],
     }
 
 
@@ -426,7 +433,7 @@ def _quality_gate_thresholds(policy: dict[str, Any], projection: dict[str, Any])
         min_applied = max(1, min_samples // 2)
     if not min_holdout:
         min_holdout = max(1, min_samples // 4) if bool(canary.get("enabled")) else 0
-    return {
+    thresholds = {
         "schema": "agentflow.old_context_summary_quality_gate_thresholds.v1",
         "min_matched_samples": min_samples,
         "min_canary_applied_samples": min_applied,
@@ -447,6 +454,14 @@ def _quality_gate_thresholds(policy: dict[str, Any], projection: dict[str, Any])
         "rollback_safety_stop_count": _as_int(raw_safety_gates.get("rollback_safety_stop_count"), 1),
         "rollback_negative_net_savings_usd": round(_as_float(raw_safety_gates.get("rollback_negative_net_savings_usd"), 0.0), 8),
     }
+    thresholds.update(provider_adoption_thresholds(
+        min_fulfilled_samples=_as_int(raw_safety_gates.get("min_provider_adoption_fulfilled_samples"), 1),
+        max_applied_abandonment_rate=_as_float(raw_safety_gates.get("max_provider_adoption_abandonment_rate"), 0.02),
+        max_applied_orphan_result_rate=_as_float(raw_safety_gates.get("max_provider_adoption_orphan_result_rate"), 0.02),
+        max_applied_risk_rate=_as_float(raw_safety_gates.get("max_provider_adoption_risk_rate"), 0.05),
+        max_applied_vs_holdout_risk_rate_delta=_as_float(raw_safety_gates.get("max_provider_adoption_risk_rate_delta"), 0.02),
+    ))
+    return thresholds
 
 
 def decide_old_context_summary_quality_gate(
@@ -477,6 +492,20 @@ def decide_old_context_summary_quality_gate(
         latency_delta = round(_as_float(applied.get("latency_avg_ms")) - _as_float(holdout.get("latency_avg_ms")), 2)
     error_rate_delta = round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6)
     retry_rate_delta = round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6)
+    provider_adoption_gate = build_provider_adoption_gate(
+        (
+            {
+                "cohort": _cohort(item["summary"]),
+                "provider_adoption_windows": item.get("provider_adoption_windows") or [],
+            }
+            for item in matched
+        ),
+        thresholds={
+            key: value
+            for key, value in thresholds.items()
+            if key.startswith("min_provider_adoption") or key.startswith("max_applied")
+        },
+    )
 
     blockers: list[str] = []
     warnings: list[str] = []
@@ -509,6 +538,10 @@ def decide_old_context_summary_quality_gate(
         blockers.append("safety-stop-events-present")
     if latency_delta is not None and latency_delta > _as_int(thresholds["max_latency_regression_ms"]):
         warnings.append("latency-regression-above-threshold")
+    if provider_adoption_gate.get("blocking"):
+        blockers.extend(str(code) for code in provider_adoption_gate.get("reason_codes") or [])
+    else:
+        warnings.extend(str(code) for code in provider_adoption_gate.get("warning_codes") or [])
 
     if _as_float(applied.get("error_rate")) >= _as_float(thresholds["rollback_error_rate"]):
         rollback_reasons.append("rollback-error-rate")
@@ -553,6 +586,7 @@ def decide_old_context_summary_quality_gate(
             "applied_minus_holdout_retry_rate": retry_rate_delta,
             "applied_minus_holdout_latency_avg_ms": latency_delta,
         },
+        "provider_adoption_gate": provider_adoption_gate,
         "cohorts": cohorts,
         "read_only": True,
         "wrote_policy_files": False,
@@ -667,6 +701,7 @@ def build_old_context_summary_quality_gate(
             "thresholds": gate.get("thresholds") if isinstance(gate.get("thresholds"), dict) else {},
             "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
             "cohorts": gate.get("cohorts") if isinstance(gate.get("cohorts"), dict) else {},
+            "provider_adoption_gate": gate.get("provider_adoption_gate") if isinstance(gate.get("provider_adoption_gate"), dict) else {},
             "quality_gate": {
                 "schema": gate.get("schema"),
                 "verdict": gate.get("verdict"),
@@ -675,6 +710,7 @@ def build_old_context_summary_quality_gate(
                 "thresholds": gate.get("thresholds") if isinstance(gate.get("thresholds"), dict) else {},
                 "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
                 "cohorts": gate.get("cohorts") if isinstance(gate.get("cohorts"), dict) else {},
+                "provider_adoption_gate": gate.get("provider_adoption_gate") if isinstance(gate.get("provider_adoption_gate"), dict) else {},
                 "privacy": result["privacy"],
             },
         })
@@ -763,7 +799,12 @@ def measure_old_context_summary_impact(
     filters = _eligible_group_filters(dry_run)
     projection = _projection(dry_run)
     rows = _call_rows(store_obj, limit=lookback_limit, since=since_value)
-    summaries = [summary for row in rows if (summary := _row_summary(row)) is not None]
+    adoption_by_call = provider_adoption_windows_by_call(store_obj, [row.get("id") for row in rows])
+    enriched_rows = [
+        {**row, "provider_adoption_windows": adoption_by_call.get(str(row.get("id") or ""), [])}
+        for row in rows
+    ]
+    summaries = [summary for row in enriched_rows if (summary := _row_summary(row)) is not None]
     matched = [summary for summary in summaries if _matches(summary, policy=policy, filters=filters)]
     actual = _actual(matched)
     quality_gate = decide_old_context_summary_quality_gate(

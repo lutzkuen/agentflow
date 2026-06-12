@@ -6,6 +6,11 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
+from agentflow_proxy.provider_adoption_gate import (
+    build_provider_adoption_gate,
+    provider_adoption_thresholds,
+    provider_adoption_windows_by_call,
+)
 from agentflow_proxy.store import utc_now
 
 
@@ -162,7 +167,7 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
     if since:
         rows = store_obj.conn.execute(
             """
-            select created_at, coalesce(provider, 'anthropic') as provider, source_surface,
+            select id, created_at, coalesce(provider, 'anthropic') as provider, source_surface,
                    endpoint, requested_model, routed_model, stream, status_code, latency_ms,
                    retry_count, cost_est_usd, cost_baseline_usd, routing_json, crunch_json,
                    cache_json, category
@@ -178,7 +183,7 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
     else:
         rows = store_obj.conn.execute(
             """
-            select created_at, coalesce(provider, 'anthropic') as provider, source_surface,
+            select id, created_at, coalesce(provider, 'anthropic') as provider, source_surface,
                    endpoint, requested_model, routed_model, stream, status_code, latency_ms,
                    retry_count, cost_est_usd, cost_baseline_usd, routing_json, crunch_json,
                    cache_json, category
@@ -232,12 +237,18 @@ def _new_aggregate(candidate_id: str, canary: dict[str, Any]) -> dict[str, Any]:
         "endpoint_buckets": Counter(),
         "cache_interactions": Counter(),
         "crunch_interactions": Counter(),
+        "provider_adoption_observations": [],
         "latest_observed_at": None,
         "oldest_observed_at": None,
     }
 
 
-def _add_row(aggregate: dict[str, Any], row: dict[str, Any], canary: dict[str, Any]) -> None:
+def _add_row(
+    aggregate: dict[str, Any],
+    row: dict[str, Any],
+    canary: dict[str, Any],
+    provider_adoption_windows: list[dict[str, Any]] | None = None,
+) -> None:
     cohort = _cohort_name(canary)
     bucket = aggregate["cohorts"].get(cohort, aggregate["cohorts"]["unknown"])
     bucket["count"] += 1
@@ -273,6 +284,10 @@ def _add_row(aggregate: dict[str, Any], row: dict[str, Any], canary: dict[str, A
             aggregate["latest_observed_at"] = str(created_at)
         if aggregate["oldest_observed_at"] is None or str(created_at) < str(aggregate["oldest_observed_at"]):
             aggregate["oldest_observed_at"] = str(created_at)
+    aggregate["provider_adoption_observations"].append({
+        "cohort": cohort,
+        "provider_adoption_windows": provider_adoption_windows or [],
+    })
 
 
 def _stale_evidence(latest_observed_at: str | None, *, now: datetime, max_age_hours: float) -> dict[str, Any]:
@@ -289,6 +304,7 @@ def _decide_verdict(
     deltas: dict[str, Any],
     stale: dict[str, Any],
     thresholds: dict[str, Any],
+    provider_adoption_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     applied = cohorts["canary_applied"]
     holdout = cohorts["canary_holdout"]
@@ -327,6 +343,11 @@ def _decide_verdict(
     latency_delta = deltas.get("applied_minus_holdout_latency_avg_ms")
     if latency_delta is not None and _as_float(latency_delta) > _as_float(thresholds["max_latency_regression_ms"]):
         reason_codes.append("latency-regression")
+    gate = provider_adoption_gate or {}
+    if gate.get("blocking"):
+        reason_codes.extend(str(code) for code in gate.get("reason_codes") or [])
+    else:
+        warning_codes.extend(str(code) for code in gate.get("warning_codes") or [])
     if projected_savings > 0:
         ratio = observed_savings / projected_savings
         if ratio < _as_float(thresholds["min_projection_realization_ratio"]):
@@ -339,7 +360,7 @@ def _decide_verdict(
     verdict = "hold" if reason_codes else "widen"
     if not reason_codes:
         reason_codes = ["target-savings-met"]
-    return {"verdict": verdict, "reason_codes": reason_codes, "warning_codes": warning_codes}
+    return {"verdict": verdict, "reason_codes": sorted(set(reason_codes)), "warning_codes": sorted(set(warning_codes))}
 
 
 def _finalize_candidate(
@@ -386,7 +407,22 @@ def _finalize_candidate(
         "min_projection_realization_ratio": round(float(min_projection_realization_ratio), 6),
         "max_evidence_age_hours": round(float(max_evidence_age_hours), 3),
     }
-    decision = _decide_verdict(cohorts=cohorts, deltas=deltas, stale=stale, thresholds=thresholds)
+    thresholds.update(provider_adoption_thresholds())
+    provider_adoption_gate = build_provider_adoption_gate(
+        aggregate.get("provider_adoption_observations") or [],
+        thresholds={
+            key: value
+            for key, value in thresholds.items()
+            if key.startswith("min_provider_adoption") or key.startswith("max_applied")
+        },
+    )
+    decision = _decide_verdict(
+        cohorts=cohorts,
+        deltas=deltas,
+        stale=stale,
+        thresholds=thresholds,
+        provider_adoption_gate=provider_adoption_gate,
+    )
     projected_total = sum(_as_float(cohort.get("projected_savings_usd")) for cohort in cohorts.values())
     observed_total = _as_float(applied.get("observed_savings_usd"))
     return {
@@ -421,6 +457,7 @@ def _finalize_candidate(
         "latest_observed_at": aggregate.get("latest_observed_at"),
         "stale_evidence": stale,
         "thresholds": thresholds,
+        "provider_adoption_gate": provider_adoption_gate,
         "verdict": decision["verdict"],
         "reason_codes": decision["reason_codes"],
         "warning_codes": decision["warning_codes"],
@@ -454,6 +491,7 @@ def build_openai_canary_impact_report(
     lookback_limit = max(1, min(int(limit or 500), 10_000))
     now_dt = now or datetime.now(timezone.utc)
     rows = _call_rows(store_obj, limit=lookback_limit, since=since)
+    adoption_by_call = provider_adoption_windows_by_call(store_obj, [row.get("id") for row in rows])
     aggregates: dict[str, dict[str, Any]] = {}
     observed_rows = 0
     for row in rows:
@@ -463,7 +501,7 @@ def build_openai_canary_impact_report(
             continue
         candidate_id = _candidate_key(canary)
         aggregate = aggregates.setdefault(candidate_id, _new_aggregate(candidate_id, canary))
-        _add_row(aggregate, row, canary)
+        _add_row(aggregate, row, canary, adoption_by_call.get(str(row.get("id") or ""), []))
         observed_rows += 1
 
     candidates = [

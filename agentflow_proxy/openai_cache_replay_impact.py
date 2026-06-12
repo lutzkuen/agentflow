@@ -8,6 +8,11 @@ from typing import Any
 
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, _json_obj
 from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_source_surface
+from agentflow_proxy.provider_adoption_gate import (
+    build_provider_adoption_gate,
+    provider_adoption_thresholds,
+    provider_adoption_windows_by_call,
+)
 from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import utc_now
 
@@ -246,6 +251,7 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
         "cache_decision_buckets": Counter(),
         "invalidation_reason_buckets": Counter(),
         "reason_buckets": Counter(),
+        "provider_adoption_observations": [],
         "latest_observed_at": None,
         "oldest_observed_at": None,
         "canary": _canary_public(rule.get("canary") if isinstance(rule.get("canary"), dict) else {}),
@@ -289,7 +295,7 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
         dict(row)
         for row in store_obj.conn.execute(
             f"""
-            select created_at, path, coalesce(provider, 'anthropic') as provider,
+            select id, created_at, path, coalesce(provider, 'anthropic') as provider,
                    source_surface, endpoint, requested_model, routed_model, stream,
                    cache_hit, status_code, latency_ms, retry_count, cost_est_usd,
                    cost_baseline_usd, category, routing_json, cache_json
@@ -303,7 +309,14 @@ def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[st
     ]
 
 
-def _add_row(candidate: dict[str, Any], row: dict[str, Any], cache: dict[str, Any], canary: dict[str, Any], cohort: str) -> None:
+def _add_row(
+    candidate: dict[str, Any],
+    row: dict[str, Any],
+    cache: dict[str, Any],
+    canary: dict[str, Any],
+    cohort: str,
+    provider_adoption_windows: list[dict[str, Any]] | None = None,
+) -> None:
     raw = candidate["cohorts"][cohort]
     raw["count"] += 1
     status_code = _as_int(row.get("status_code"), -1)
@@ -340,6 +353,10 @@ def _add_row(candidate: dict[str, Any], row: dict[str, Any], cache: dict[str, An
             candidate["latest_observed_at"] = str(created_at)
         if candidate["oldest_observed_at"] is None or str(created_at) < str(candidate["oldest_observed_at"]):
             candidate["oldest_observed_at"] = str(created_at)
+    candidate["provider_adoption_observations"].append({
+        "cohort": cohort,
+        "provider_adoption_windows": provider_adoption_windows or [],
+    })
 
 
 def _stale_evidence(latest_observed_at: str | None, *, now: datetime, max_age_hours: float) -> dict[str, Any]:
@@ -356,6 +373,7 @@ def _decide_gate(
     deltas: dict[str, Any],
     stale: dict[str, Any],
     thresholds: dict[str, Any],
+    provider_adoption_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     applied = cohorts["applied"]
     holdout = cohorts["holdout"]
@@ -391,6 +409,11 @@ def _decide_gate(
     latency_delta = deltas.get("applied_minus_holdout_latency_avg_ms")
     if latency_delta is not None and _as_float(latency_delta) > _as_float(thresholds["max_latency_regression_ms"]):
         reason_codes.append("latency-regression")
+    gate = provider_adoption_gate or {}
+    if gate.get("blocking"):
+        reason_codes.extend(str(code) for code in gate.get("reason_codes") or [])
+    else:
+        warning_codes.extend(str(code) for code in gate.get("warning_codes") or [])
     if _as_float(applied.get("cache_hit_rate")) < _as_float(thresholds["min_cache_hit_rate"]):
         reason_codes.append("cache-hit-rate-below-threshold")
     projected = _as_float(applied.get("projected_savings_usd"))
@@ -401,8 +424,8 @@ def _decide_gate(
         warning_codes.append("target-savings-met")
 
     if reason_codes:
-        return {"verdict": "hold", "reason_codes": reason_codes, "warning_codes": warning_codes}
-    return {"verdict": "promote", "reason_codes": ["target-savings-met"], "warning_codes": warning_codes}
+        return {"verdict": "hold", "reason_codes": sorted(set(reason_codes)), "warning_codes": sorted(set(warning_codes))}
+    return {"verdict": "promote", "reason_codes": ["target-savings-met"], "warning_codes": sorted(set(warning_codes))}
 
 
 def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds: dict[str, Any]) -> dict[str, Any]:
@@ -423,7 +446,21 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         now=now,
         max_age_hours=_as_float(thresholds["max_evidence_age_hours"]),
     )
-    gate = _decide_gate(cohorts=cohorts, deltas=deltas, stale=stale, thresholds=thresholds)
+    provider_adoption_gate = build_provider_adoption_gate(
+        candidate.get("provider_adoption_observations") or [],
+        thresholds={
+            key: value
+            for key, value in thresholds.items()
+            if key.startswith("min_provider_adoption") or key.startswith("max_applied")
+        },
+    )
+    gate = _decide_gate(
+        cohorts=cohorts,
+        deltas=deltas,
+        stale=stale,
+        thresholds=thresholds,
+        provider_adoption_gate=provider_adoption_gate,
+    )
     sample_count = sum(_as_int(value.get("count")) for value in cohorts.values())
     projected = sum(_as_float(value.get("projected_savings_usd")) for value in cohorts.values())
     observed = _as_float(applied.get("observed_savings_usd"))
@@ -454,6 +491,7 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "latest_observed_at": candidate.get("latest_observed_at"),
         "stale_evidence": stale,
         "thresholds": thresholds,
+        "provider_adoption_gate": provider_adoption_gate,
         "verdict": gate["verdict"],
         "reason_codes": gate["reason_codes"],
         "warning_codes": gate["warning_codes"],
@@ -499,7 +537,9 @@ def build_openai_cache_replay_impact_report(
         "min_savings_realization_ratio": round(float(min_savings_realization_ratio), 6),
         "max_evidence_age_hours": round(float(max_evidence_age_hours), 3),
     }
+    thresholds.update(provider_adoption_thresholds())
     rows = _call_rows(store_obj, limit=lookback_limit, since=since)
+    adoption_by_call = provider_adoption_windows_by_call(store_obj, [row.get("id") for row in rows])
     candidates: dict[str, dict[str, Any]] = {}
     observed_rows = 0
     cohort_counts: Counter[str] = Counter()
@@ -517,7 +557,7 @@ def build_openai_cache_replay_impact_report(
             cid = rid or "unknown-openai-cache-replay"
         aggregate = candidates.setdefault(cid, _new_candidate(cid, rid, rule, row, feature))
         cohort = _cohort(cache, rule, canary)
-        _add_row(aggregate, row, cache, canary, cohort)
+        _add_row(aggregate, row, cache, canary, cohort, adoption_by_call.get(str(row.get("id") or ""), []))
         observed_rows += 1
         cohort_counts[cohort] += 1
 
