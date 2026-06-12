@@ -3952,6 +3952,74 @@ def terminal_output_compaction_opportunity_cli(argv: Sequence[str] | None = None
     return 0
 
 
+def terminal_output_compaction_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run terminal-output compaction plans for Anthropic tool-result history")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider calls to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--keep-recent-turns",
+        type=int,
+        default=2,
+        help="Newest message turns to preserve untouched, default: 2",
+    )
+    parser.add_argument(
+        "--min-block-chars",
+        type=int,
+        default=2000,
+        help="Minimum terminal/log text block size eligible for compaction, default: 2000",
+    )
+    parser.add_argument(
+        "--min-text-chars",
+        type=int,
+        default=8000,
+        help="Minimum adjacent call text size for plateau detection, default: 8000",
+    )
+    parser.add_argument(
+        "--max-plateau-delta-ratio",
+        type=float,
+        default=0.03,
+        help="Maximum adjacent text size delta ratio for plateau detection, default: 0.03",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+    from agentflow_proxy.terminal_compaction_dry_run import build_terminal_output_compaction_dry_run
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_terminal_output_compaction_dry_run(
+            store,
+            limit=args.limit,
+            keep_recent_turns=args.keep_recent_turns,
+            min_block_chars=args.min_block_chars,
+            min_text_chars=args.min_text_chars,
+            max_plateau_delta_ratio=args.max_plateau_delta_ratio,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report repeated-scaffold crunch canary impact and rollback gates")
     parser.add_argument(
@@ -7189,6 +7257,10 @@ def repeated_scaffold_opportunity_main() -> None:
 
 def terminal_output_compaction_opportunity_main() -> None:
     raise SystemExit(terminal_output_compaction_opportunity_cli())
+
+
+def terminal_output_compaction_dry_run_main() -> None:
+    raise SystemExit(terminal_output_compaction_dry_run_cli())
 
 
 def repeated_scaffold_impact_main() -> None:
