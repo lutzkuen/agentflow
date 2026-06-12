@@ -509,6 +509,118 @@ def _strip_model_incompatible_params(body: dict[str, Any], routing_meta: dict[st
         routing_meta["stripped_params"] = stripped
 
 
+def _anthropic_shadow_tool_result_audit(body: dict[str, Any]) -> dict[str, Any]:
+    """Return metadata-only Anthropic tool-use protocol diagnostics for shadow calls."""
+    tool_use_ids: set[str] = set()
+    tool_result_count = 0
+    orphan_count = 0
+    for message in body.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        if message.get("role") == "assistant":
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_id = str(block.get("id") or "")
+                    if tool_id:
+                        tool_use_ids.add(tool_id)
+        if message.get("role") == "user":
+            for block in blocks:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_result_count += 1
+                tool_use_id = str(block.get("tool_use_id") or "")
+                if not tool_use_id or tool_use_id not in tool_use_ids:
+                    orphan_count += 1
+    status = "ok"
+    reason = None
+    if orphan_count:
+        status = "unsupported"
+        reason = "orphan-tool-result"
+    return {
+        "schema": "agentflow.anthropic_shadow_tool_result_audit.v1",
+        "status": status,
+        "reason": reason,
+        "tool_result_count": tool_result_count,
+        "assistant_tool_use_count": len(tool_use_ids),
+        "orphan_tool_result_count": orphan_count,
+        "raw_tool_ids_included": False,
+        "tool_payloads_included": False,
+    }
+
+
+def _assistant_empty_content_count(body: dict[str, Any]) -> int:
+    count = 0
+    for message in body.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "assistant" and message.get("content") == []:
+            count += 1
+    return count
+
+
+def _prepare_anthropic_shadow_request(
+    request_body: dict[str, Any],
+    *,
+    shadow_model: str,
+    primary_model: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    shadow_body = copy.deepcopy(request_body)
+    shadow_body["model"] = shadow_model
+    shadow_body["stream"] = False
+    diagnostics: dict[str, Any] = {
+        "schema": "agentflow.anthropic_shadow_request_preflight.v1",
+        "status": "ok",
+        "reason": None,
+        "primary_model": primary_model,
+        "shadow_model": shadow_model,
+        "stream_forced_non_streaming": True,
+        "raw_request_included": False,
+        "raw_prompts_included": False,
+        "tool_payloads_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+    }
+    sanitization: dict[str, Any] = {}
+    _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
+    if sanitization.get("stripped_params"):
+        diagnostics["stripped_params"] = sanitization["stripped_params"]
+    if model_tier(shadow_model) == "haiku":
+        shadow_body, stripped_thinking = strip_thinking_history_blocks(shadow_body)
+        if stripped_thinking:
+            diagnostics["thinking_history_blocks_stripped"] = stripped_thinking
+    empty_assistant_count = _assistant_empty_content_count(shadow_body)
+    if empty_assistant_count:
+        diagnostics.update({
+            "status": "unsupported",
+            "reason": "thinking-history-only-assistant-message",
+            "empty_assistant_message_count": empty_assistant_count,
+        })
+        return None, diagnostics
+    tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
+    diagnostics["tool_result_audit"] = tool_audit
+    if tool_audit["status"] == "unsupported":
+        diagnostics.update({"status": "unsupported", "reason": tool_audit["reason"]})
+        return None, diagnostics
+    return shadow_body, diagnostics
+
+
+def _shadow_http_error_class(status_code: int | None, response_body: dict[str, Any] | None) -> str | None:
+    if status_code is None or status_code < 400:
+        return None
+    if status_code == 400:
+        default = "shadow-http-400"
+    elif status_code < 500:
+        default = "shadow-http-4xx"
+    else:
+        default = "shadow-http-5xx"
+    error_obj = response_body.get("error") if isinstance(response_body, dict) else None
+    if isinstance(error_obj, dict):
+        error_type = str(error_obj.get("type") or "").strip()
+        if error_type and len(error_type) <= 80:
+            return f"{default}:{error_type}"
+    return default
+
+
 
 def build_forward_headers(request: Request) -> dict[str, str]:
     return build_anthropic_forward_headers(request.headers)
@@ -587,9 +699,12 @@ async def _run_anthropic_routing_experiment(
     experiment_id = str(uuid.uuid4())
     shadow_model = str(experiment_meta.get("shadow_model") or routing_meta.get("requested_model") or "")
     primary_model = str(experiment_meta.get("primary_model") or request_body.get("model") or routing_meta.get("routed_model") or "")
-    shadow_body = copy.deepcopy(request_body)
-    shadow_body["model"] = shadow_model
-    shadow_body["stream"] = False
+    shadow_body, shadow_preflight = _prepare_anthropic_shadow_request(
+        request_body,
+        shadow_model=shadow_model,
+        primary_model=primary_model,
+    )
+    experiment_meta["shadow_request_preflight"] = shadow_preflight
     shadow_status_code: Optional[int] = None
     shadow_response_body: Optional[dict[str, Any]] = None
     shadow_latency_ms: Optional[int] = None
@@ -597,22 +712,29 @@ async def _run_anthropic_routing_experiment(
     error: Optional[str] = None
 
     shadow_started = time.time()
-    try:
-        async with context.limiter.semaphores[model_tier(shadow_model)]:
-            async with httpx.AsyncClient(timeout=context.http_timeout) as client:
-                await context.limiter.await_backoff(shadow_model)
-                await context.limiter.throttle_forward()
-                r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=headers, json=shadow_body)
-        shadow_latency_ms = int((time.time() - shadow_started) * 1000)
-        shadow_status_code = r.status_code
+    if shadow_body is None:
+        shadow_latency_ms = 0
+        reason = str(shadow_preflight.get("reason") or "unsupported-shape")
+        error = f"shadow-unsupported-shape:{reason}"
+    else:
         try:
-            shadow_response_body = r.json()
-        except Exception:
-            error = r.text[:1000]
-            shadow_response_body = None
-    except Exception as exc:
-        shadow_latency_ms = int((time.time() - shadow_started) * 1000)
-        error = repr(exc)
+            async with context.limiter.semaphores[model_tier(shadow_model)]:
+                async with httpx.AsyncClient(timeout=context.http_timeout) as client:
+                    await context.limiter.await_backoff(shadow_model)
+                    await context.limiter.throttle_forward()
+                    r = await client.post(context.anthropic_upstream.rstrip("/") + path, headers=headers, json=shadow_body)
+            shadow_latency_ms = int((time.time() - shadow_started) * 1000)
+            shadow_status_code = r.status_code
+            try:
+                shadow_response_body = r.json()
+            except Exception:
+                shadow_response_body = None
+            http_error_class = _shadow_http_error_class(shadow_status_code, shadow_response_body)
+            if http_error_class:
+                error = http_error_class
+        except Exception as exc:
+            shadow_latency_ms = int((time.time() - shadow_started) * 1000)
+            error = repr(exc)
 
     if shadow_response_body is not None:
         usage = shadow_response_body.get("usage") or {}
@@ -737,7 +859,14 @@ async def _run_anthropic_routing_experiment(
         routing_json=stable_json(routing_meta),
         experiment_json=stable_json(experiment_meta),
         primary_response_json=stable_json(primary_response_body) if store_bodies else None,
-        shadow_response_json=stable_json(shadow_response_body) if store_bodies and shadow_response_body is not None else None,
+        shadow_response_json=(
+            stable_json(shadow_response_body)
+            if store_bodies
+            and shadow_response_body is not None
+            and shadow_status_code is not None
+            and shadow_status_code < 400
+            else None
+        ),
     )
 
 
@@ -1285,6 +1414,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             )
                             if experiment_meta.get("status") in {"shadow-error", "shadow-unavailable"}:
                                 experiment_meta["reason"] = "streaming-shadow-error"
+                            elif experiment_meta.get("status") == "shadow-http-400":
+                                experiment_meta["reason"] = "streaming-shadow-http-400"
+                            elif experiment_meta.get("status") == "shadow-unsupported-shape":
+                                experiment_meta["reason"] = "streaming-shadow-unsupported-shape"
                     context.store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,

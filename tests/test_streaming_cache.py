@@ -81,11 +81,11 @@ class FakeShadowPostResponse:
 class FakeShadowErrorPostResponse:
     status_code = 400
     headers = {"content-type": "application/json"}
-    text = '{"error":{"message":"shadow failed"}}'
+    text = '{"error":{"type":"invalid_request_error","message":"shadow failed with raw secret"}}'
     content = text.encode("utf-8")
 
     def json(self):
-        return {"error": {"message": "shadow failed"}}
+        return {"error": {"type": "invalid_request_error", "message": "shadow failed with raw secret"}}
 
 
 class FakeShadowStreamingClient:
@@ -301,6 +301,23 @@ class StreamingCacheTest(unittest.TestCase):
 
         return decide
 
+    def _tool_result_shadow_policy(self):
+        return patch.dict(routing_experiments.ROUTING_EXPERIMENT_POLICY, {
+            "categories": ["chat", "short-completion", "tool-result"],
+            "max_text_chars": 128000,
+            "eligibility_overrides": [
+                {
+                    "scope": "category",
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "category": "tool-result",
+                    "stream": True,
+                    "max_text_chars": 128000,
+                    "sample_rate": 1.0,
+                }
+            ],
+        })
+
     def test_sampled_anthropic_stream_records_shadow_experiment_after_completion(self):
         request_body = {
             "model": "claude-sonnet-4-6",
@@ -434,14 +451,133 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
         [call] = server.store.conn.execute("select routing_json from calls").fetchall()
         experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
-        self.assertEqual(experiment_meta["reason"], "streaming-shadow-error")
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-http-400")
+        self.assertEqual(experiment_meta["status"], "shadow-http-400")
         self.assertEqual(experiment_meta["shadow_status_code"], 400)
+        self.assertIn("shadow-http-400", experiment_meta["reason_codes"])
+        self.assertNotIn("raw secret", json.dumps(experiment_meta, sort_keys=True))
         [sample] = server.store.conn.execute(
-            "select shadow_status_code, primary_response_json, shadow_response_json from routing_experiments"
+            "select shadow_status_code, error, primary_response_json, shadow_response_json from routing_experiments"
         ).fetchall()
         self.assertEqual(sample["shadow_status_code"], 400)
+        self.assertEqual(sample["error"], "shadow-http-400:invalid_request_error")
         self.assertIsNone(sample["primary_response_json"])
         self.assertIsNone(sample["shadow_response_json"])
+
+        report = routing_experiments.build_routing_experiment_report(server.store, limit=5)
+        [candidate] = report["candidates"]
+        self.assertEqual(candidate["shadow_http_400_samples"], 1)
+        self.assertEqual(candidate["compared_samples"], 0)
+        self.assertIn("shadow-http-400-observed", candidate["promotion_reason_codes"])
+
+    def test_streamed_tool_result_shadow_sanitizes_candidate_params(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "thinking": {"type": "enabled", "budget_tokens": 4096, "effort": "medium"},
+            "effort": "medium",
+            "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "private reasoning secret"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "secret.py"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "tool output secret"}],
+                },
+            ],
+        }
+
+        with (
+            self._tool_result_shadow_policy(),
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 1)
+        shadow_payload = FakeShadowStreamingClient.post_payloads[0]
+        self.assertEqual(shadow_payload["model"], "claude-haiku-4-5-20251001")
+        self.assertFalse(shadow_payload["stream"])
+        self.assertNotIn("thinking", shadow_payload)
+        self.assertNotIn("effort", shadow_payload)
+        self.assertNotIn("interleaved_thinking", shadow_payload)
+        assistant_blocks = shadow_payload["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in assistant_blocks], ["tool_use"])
+
+        [sample] = server.store.conn.execute("select experiment_json from routing_experiments").fetchall()
+        experiment_json = json.loads(sample["experiment_json"])
+        preflight = experiment_json["shadow_request_preflight"]
+        self.assertEqual(preflight["status"], "ok")
+        self.assertIn("thinking", preflight["stripped_params"])
+        self.assertIn("effort", preflight["stripped_params"])
+        self.assertEqual(preflight["thinking_history_blocks_stripped"], 1)
+        self.assertEqual(preflight["tool_result_audit"]["status"], "ok")
+        serialized = json.dumps(experiment_json, sort_keys=True)
+        self.assertNotIn("private reasoning secret", serialized)
+        self.assertNotIn("tool output secret", serialized)
+        self.assertNotIn("secret.py", serialized)
+
+    def test_streamed_orphan_tool_result_shadow_is_skipped_before_provider_call(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_orphan", "content": "orphan payload secret"}],
+                }
+            ],
+        }
+
+        with (
+            self._tool_result_shadow_policy(),
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-unsupported-shape")
+        self.assertEqual(experiment_meta["status"], "shadow-unsupported-shape")
+        self.assertIn("unsupported-shadow-shape-orphan-tool-result", experiment_meta["reason_codes"])
+
+        [sample] = server.store.conn.execute(
+            "select shadow_status_code, error, experiment_json from routing_experiments"
+        ).fetchall()
+        self.assertIsNone(sample["shadow_status_code"])
+        self.assertEqual(sample["error"], "shadow-unsupported-shape:orphan-tool-result")
+        experiment_json = json.loads(sample["experiment_json"])
+        preflight = experiment_json["shadow_request_preflight"]
+        self.assertEqual(preflight["status"], "unsupported")
+        self.assertEqual(preflight["reason"], "orphan-tool-result")
+        self.assertEqual(preflight["tool_result_audit"]["orphan_tool_result_count"], 1)
+        serialized = json.dumps(experiment_json, sort_keys=True)
+        self.assertNotIn("orphan payload secret", serialized)
+        self.assertNotIn("toolu_orphan", serialized)
+
+        report = routing_experiments.build_routing_experiment_report(server.store, limit=5)
+        [candidate] = report["candidates"]
+        self.assertEqual(candidate["shadow_unsupported_shape_samples"], 1)
+        self.assertEqual(candidate["shadow_error_samples"], 0)
+        self.assertEqual(candidate["compared_samples"], 0)
+        self.assertIn("shadow-unsupported-shape-observed", candidate["promotion_reason_codes"])
 
     def test_streamed_non_tool_response_is_not_cached_without_explicit_rule(self):
         request_body = {

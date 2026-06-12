@@ -720,6 +720,10 @@ def routing_experiment_feedback_features(
     category = str(routing_meta.get("category") or experiment_meta.get("category") or "unknown")
     requested_model = str(experiment_meta.get("requested_model") or routing_meta.get("requested_model") or "")
     routed_model = str(experiment_meta.get("routed_model") or routing_meta.get("routed_model") or "")
+    shadow_preflight = experiment_meta.get("shadow_request_preflight") if isinstance(experiment_meta, dict) else None
+    unsupported_shape_reason = None
+    if isinstance(shadow_preflight, dict) and shadow_preflight.get("status") == "unsupported":
+        unsupported_shape_reason = _public_label(shadow_preflight.get("reason"), fallback="unsupported-shape")
     compared = (
         primary_status_code is not None
         and primary_status_code < 400
@@ -728,16 +732,29 @@ def routing_experiment_feedback_features(
         and comparison.get("output_similarity") is not None
     )
     status = "compared" if compared else "shadow-unavailable"
+    if unsupported_shape_reason:
+        status = "shadow-unsupported-shape"
+    elif shadow_status_code == 400:
+        status = "shadow-http-400"
     if error:
-        status = "shadow-error"
+        if unsupported_shape_reason:
+            status = "shadow-unsupported-shape"
+        elif shadow_status_code == 400:
+            status = "shadow-http-400"
+        else:
+            status = "shadow-error"
     reason_codes: list[str] = []
     if primary_status_code is not None and primary_status_code >= 400:
         reason_codes.append("primary-error")
+    if unsupported_shape_reason:
+        reason_codes.append("shadow-unsupported-shape")
+        reason_codes.append(f"unsupported-shadow-shape-{unsupported_shape_reason}")
     if shadow_status_code is None:
-        reason_codes.append("shadow-missing")
+        if not unsupported_shape_reason:
+            reason_codes.append("shadow-missing")
     elif shadow_status_code >= 400:
-        reason_codes.append("shadow-error")
-    if error:
+        reason_codes.append("shadow-http-400" if shadow_status_code == 400 else "shadow-error")
+    if error and not unsupported_shape_reason and shadow_status_code != 400:
         reason_codes.append("shadow-exception")
     if compared and not comparison.get("passed_threshold"):
         reason_codes.append("below-similarity-threshold")
@@ -776,6 +793,8 @@ def routing_experiment_feedback_features(
         "similarity_threshold": experiment_meta.get("similarity_threshold"),
         "passed_threshold": bool(comparison.get("passed_threshold")),
         "reason_codes": reason_codes,
+        "shadow_unsupported_shape_reason": unsupported_shape_reason,
+        "shadow_error_class": _public_label(error, fallback="none") if error else None,
         "cost_delta_usd": (
             round(float(primary_cost_est_usd or 0.0) - float(shadow_cost_est_usd or 0.0), 6)
             if primary_cost_est_usd is not None or shadow_cost_est_usd is not None else None
@@ -1002,6 +1021,14 @@ def _score_routing_promotion_candidate(
     if shadow_error_rate > ROUTING_PROMOTION_MAX_SHADOW_ERROR_RATE:
         verdict = "reject"
         reason_codes.append("shadow-error-rate-high")
+    if int(item.get("shadow_http_400_samples") or 0) > 0:
+        if verdict == "promote":
+            verdict = "hold"
+        reason_codes.append("shadow-http-400-observed")
+    if int(item.get("shadow_unsupported_shape_samples") or 0) > 0:
+        if verdict == "promote":
+            verdict = "hold"
+        reason_codes.append("shadow-unsupported-shape-observed")
     if pass_rate is None:
         if verdict == "promote":
             verdict = "needs_more_samples"
@@ -1193,6 +1220,15 @@ def _experiment_from_routing_json(value: Any) -> dict[str, Any]:
 
 
 def _comparison_blocker(row: Any) -> str:
+    experiment = _parse_jsonish(row["experiment_json"]) if "experiment_json" in row.keys() else {}
+    feedback = experiment.get("optimization_feedback") if isinstance(experiment, dict) else {}
+    if isinstance(feedback, dict):
+        status = str(feedback.get("status") or "")
+        reason_codes = {str(item) for item in feedback.get("reason_codes") or []}
+        if status == "shadow-unsupported-shape" or "shadow-unsupported-shape" in reason_codes:
+            return "shadow-unsupported-shape"
+        if status == "shadow-http-400" or "shadow-http-400" in reason_codes:
+            return "shadow-http-400"
     primary_status = row["primary_status_code"]
     shadow_status = row["shadow_status_code"]
     if primary_status is None:
@@ -1619,6 +1655,8 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
                 "compared_samples": 0,
                 "primary_error_samples": 0,
                 "shadow_error_samples": 0,
+                "shadow_http_400_samples": 0,
+                "shadow_unsupported_shape_samples": 0,
                 "fallback_or_retry_count": 0,
                 "primary_cost_usd": 0.0,
                 "shadow_cost_usd": 0.0,
@@ -1634,11 +1672,20 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         item["routing_reasons"][reason] = item["routing_reasons"].get(reason, 0) + 1
         primary_status = row["primary_status_code"]
         shadow_status = row["shadow_status_code"]
+        feedback = experiment.get("optimization_feedback") if isinstance(experiment, dict) else {}
+        feedback_status = str(feedback.get("status") or "") if isinstance(feedback, dict) else ""
+        feedback_reason_codes = {str(item) for item in (feedback.get("reason_codes") if isinstance(feedback, dict) else []) or []}
         primary_ok = primary_status is not None and int(primary_status) < 400
         shadow_ok = shadow_status is not None and int(shadow_status) < 400
         if not primary_ok:
             item["primary_error_samples"] += 1
-        if not shadow_ok or row["error"]:
+        shadow_unsupported_shape = feedback_status == "shadow-unsupported-shape" or "shadow-unsupported-shape" in feedback_reason_codes
+        shadow_http_400 = feedback_status == "shadow-http-400" or "shadow-http-400" in feedback_reason_codes or shadow_status == 400
+        if shadow_http_400:
+            item["shadow_http_400_samples"] += 1
+        if shadow_unsupported_shape:
+            item["shadow_unsupported_shape_samples"] += 1
+        if (not shadow_ok or row["error"]) and not shadow_unsupported_shape:
             item["shadow_error_samples"] += 1
         if primary_ok and shadow_ok and row["output_similarity"] is not None:
             item["compared_samples"] += 1
