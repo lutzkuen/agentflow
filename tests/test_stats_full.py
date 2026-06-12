@@ -5378,6 +5378,8 @@ class StatsFullTest(unittest.TestCase):
                 self.assertEqual(payload["schema"], "agentflow.cache_replay_readiness.v1")
                 dashboard = client.get("/agentflow/dashboard")
                 self.assertEqual(dashboard.status_code, 200)
+                self.assertIn("Cache canary cohorts", dashboard.text)
+                self.assertIn("cache-canary-cohorts-tbody", dashboard.text)
                 self.assertIn("Cache replay activation readiness", dashboard.text)
                 self.assertIn("cache-replay-readiness-tbody", dashboard.text)
                 self.assertNotIn("private readiness prompt", dashboard.text)

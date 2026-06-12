@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import io
 import json
+import os
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
 from fastapi.testclient import TestClient
 
 from agentflow_proxy import cli
 from agentflow_proxy.dashboard_app import create_dashboard_app
+from agentflow_proxy.openai_cache_replay_apply import build_openai_cache_replay_apply_plan
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
@@ -658,6 +662,144 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "sha256:" + "c" * 64,
             ):
                 self.assertNotIn(forbidden, rendered)
+
+    def test_openai_cache_replay_apply_writes_local_canary_overlay(self) -> None:
+        pattern_hash = "sha256:" + "e" * 64
+        candidate_id = "openai-cache-apply-candidate"
+        rule_id = "openai-cache-apply-rule"
+
+        def replay_meta(*, cohort: str, status: str, projected: float, reason: str) -> dict[str, object]:
+            rule: dict[str, object] = {
+                "rule_id": rule_id,
+                "candidate_id": candidate_id,
+                "policy_source": "managed-recommended",
+                "matched_hashes": [pattern_hash],
+                "allow_tool_calls": False,
+                "safe_invalidation": True,
+                "scope": "session",
+                "canary": {
+                    "enabled": True,
+                    "selected": cohort == "canary_applied",
+                    "cohort": cohort,
+                    "fraction": 0.5,
+                    "unit": "request_fingerprint",
+                    "status": status,
+                    "pattern_hashes": [pattern_hash],
+                },
+            }
+            return {
+                "pattern_rule": rule,
+                "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": rule_id,
+                    "candidate_id": candidate_id,
+                    "policy_source": "managed-recommended",
+                    "status": status,
+                    "reason": reason,
+                    "canary": rule["canary"],
+                    "projected_input_savings_usd": projected,
+                    "raw_request_id": "req-apply-secret",
+                },
+                "estimated_saved_cost_usd": projected,
+            }
+
+        for baseline in (0.03, 0.04):
+            self._log_openai_call(
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=baseline,
+                request_fingerprint="raw-apply-request-fingerprint",
+                pattern_hashes=[pattern_hash],
+                cache_extra=replay_meta(
+                    cohort="canary_applied",
+                    status="applied",
+                    projected=baseline,
+                    reason="dependency-stable",
+                ),
+            )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.03,
+            cost_baseline=0.03,
+            request_fingerprint="raw-apply-request-fingerprint",
+            pattern_hashes=[pattern_hash],
+            cache_extra=replay_meta(
+                cohort="canary_holdout",
+                status="holdout",
+                projected=0.03,
+                reason="canary_holdout",
+            ),
+        )
+
+        plan = build_openai_cache_replay_apply_plan(
+            self.store,
+            opportunity_limit=20,
+            impact_limit=20,
+            min_observed_savings_usd=0.001,
+            holdout_fraction=0.2,
+        )
+        self.assertTrue(plan["ok"])
+        self.assertEqual(plan["summary"]["accepted_candidate_count"], 1)
+        self.assertEqual(plan["accepted_candidates"][0]["candidate_id"], candidate_id)
+        self.assertEqual(plan["accepted_candidates"][0]["canary_fraction"], 0.8)
+        self.assertFalse(plan["accepted_candidates"][0]["pattern_hashes_included"])
+
+        output = io.StringIO()
+        config_dir = Path(self.tmpdir.name) / "config"
+        code = cli.openai_cache_replay_apply_cli(
+            [
+                "--db",
+                self.db_path,
+                "--config-dir",
+                str(config_dir),
+                "--impact-limit",
+                "20",
+                "--opportunity-limit",
+                "20",
+                "--min-observed-savings-usd",
+                "0.001",
+                "--holdout-fraction",
+                "0.2",
+            ],
+            stdout=output,
+        )
+        self.assertEqual(code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.openai_cache_replay_apply.v1")
+        self.assertTrue(payload["wrote_policy_files"])
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(payload["privacy"]["pattern_hashes_included"])
+        rendered = output.getvalue()
+        self.assertNotIn(pattern_hash, rendered)
+        self.assertNotIn("raw-apply-request-fingerprint", rendered)
+        self.assertNotIn("req-apply-secret", rendered)
+
+        policy_path = config_dir / "cache_canary_policy.yaml"
+        policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(policy["schema"], "agentflow.openai_cache_replay_canary_policy.v1")
+        self.assertEqual(policy["pattern_rules"][0]["id"], rule_id)
+        self.assertEqual(policy["pattern_rules"][0]["candidate_id"], candidate_id)
+        self.assertEqual(policy["pattern_rules"][0]["conditions"]["pattern_hashes"], [pattern_hash])
+        self.assertEqual(policy["pattern_rules"][0]["rollout"]["canary_fraction"], 0.8)
+        self.assertEqual(policy["pattern_rules"][0]["action"]["scope"], "session")
+
+        from agentflow_proxy import cache as cache_module
+
+        try:
+            with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
+                reloaded = importlib.reload(cache_module)
+                loaded = [rule for rule in reloaded.CACHE_PATTERN_RULES if rule.get("candidate_id") == candidate_id]
+                self.assertEqual(len(loaded), 1)
+                self.assertEqual(loaded[0]["id"], rule_id)
+                self.assertEqual(loaded[0]["conditions"]["pattern_hashes"], [pattern_hash])
+                self.assertEqual(loaded[0]["policy_source"], "managed-recommended")
+                self.assertEqual(str(reloaded.CACHE_CANARY_RULES_PATH), str(policy_path))
+        finally:
+            importlib.reload(cache_module)
 
     def test_openai_dry_run_projects_session_scoped_replay_and_dependency_blockers(self) -> None:
         pattern_hash = "sha256:" + "b" * 64

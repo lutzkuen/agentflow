@@ -81,6 +81,13 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     return candidates
 
 
+def _first_existing_rule_path(filename: str, env_name: str) -> Path | None:
+    for path in _manual_rule_candidates(filename, env_name):
+        if path.exists():
+            return path
+    return None
+
+
 def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     exact = data.get("exact_cache") or {}
     if isinstance(exact, dict):
@@ -117,6 +124,26 @@ def _apply_cache_policy_yaml(policy: dict[str, Any], data: dict[str, Any]) -> di
     if isinstance(hints, dict):
         _apply_session_memory_hints_policy_yaml(policy, hints)
     return policy
+
+
+def _apply_cache_canary_overlay(policy: dict[str, Any]) -> str | None:
+    path = _first_existing_rule_path("cache_canary_policy.yaml", "AGENTFLOW_CACHE_CANARY_POLICY")
+    if path is None:
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        return None
+    overlay_rules = cache_pattern_rules_from_policy_payload(data)
+    if not overlay_rules:
+        return None
+    policy["pattern_rules"] = [
+        *(policy.get("pattern_rules") or []),
+        *overlay_rules,
+    ]
+    policy["cache_canary_policy_path"] = str(path)
+    policy["cache_canary_policy_source"] = str(data.get("policy_source") or "managed-recommended")
+    return str(path)
 
 
 def _apply_session_memory_hints_policy_yaml(policy: dict[str, Any], hints: dict[str, Any]) -> None:
@@ -261,43 +288,53 @@ def cache_pattern_hashes_from_features(pattern_features: dict[str, Any] | None) 
 
 
 def _load_cache_policy() -> tuple[dict[str, Any], str, str]:
+    loaded_policy: dict[str, Any] | None = None
+    loaded_source = "local-default"
+    loaded_path: str | None = None
     for path in _manual_rule_candidates("cache_rules.yaml", "AGENTFLOW_CACHE_RULES"):
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         if isinstance(data, dict):
-            return _apply_cache_policy_yaml(_default_cache_policy(), data), "local-manual", str(path)
+            loaded_policy = _apply_cache_policy_yaml(_default_cache_policy(), data)
+            loaded_source = "local-manual"
+            loaded_path = str(path)
+            break
 
     defaults_path = Path(__file__).parent / "cache_rules.yaml"
-    policy = _default_cache_policy()
-    if defaults_path.exists():
-        with open(defaults_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        if isinstance(data, dict):
-            policy = _apply_cache_policy_yaml(policy, data)
-    policy["exact_cache"]["enabled"] = os.getenv("AGENTFLOW_CACHE", "1") != "0"
-    policy["exact_cache"]["cache_tool_calls"] = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
-    policy["semantic_cache"]["enabled"] = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
-    policy["semantic_cache"]["threshold"] = float(
-        os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
-    )
-    policy["file_watch"]["enabled"] = _as_bool(
-        os.getenv("AGENTFLOW_CACHE_FILE_WATCH"),
-        policy["file_watch"]["enabled"],
-    )
-    policy["file_watch"]["root"] = os.getenv(
-        "AGENTFLOW_CACHE_WATCH_ROOT",
-        str(policy["file_watch"]["root"]),
-    )
-    policy["file_watch"]["max_paths"] = int(
-        os.getenv("AGENTFLOW_CACHE_WATCH_MAX_PATHS", str(policy["file_watch"]["max_paths"]))
-    )
-    policy["file_watch"]["capture_candidates"] = _as_bool(
-        os.getenv("AGENTFLOW_CACHE_CAPTURE_CANDIDATES"),
-        policy["file_watch"]["capture_candidates"],
-    )
-    return policy, "local-default", str(defaults_path)
+    policy = loaded_policy or _default_cache_policy()
+    if loaded_policy is None:
+        if defaults_path.exists():
+            with open(defaults_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            if isinstance(data, dict):
+                policy = _apply_cache_policy_yaml(policy, data)
+        loaded_path = str(defaults_path)
+    if loaded_policy is None:
+        policy["exact_cache"]["enabled"] = os.getenv("AGENTFLOW_CACHE", "1") != "0"
+        policy["exact_cache"]["cache_tool_calls"] = os.getenv("AGENTFLOW_CACHE_TOOL_CALLS", "0") == "1"
+        policy["semantic_cache"]["enabled"] = os.getenv("AGENTFLOW_SEMANTIC_CACHE", "0") == "1"
+        policy["semantic_cache"]["threshold"] = float(
+            os.getenv("AGENTFLOW_SEMANTIC_THRESHOLD", str(policy["semantic_cache"]["threshold"]))
+        )
+        policy["file_watch"]["enabled"] = _as_bool(
+            os.getenv("AGENTFLOW_CACHE_FILE_WATCH"),
+            policy["file_watch"]["enabled"],
+        )
+        policy["file_watch"]["root"] = os.getenv(
+            "AGENTFLOW_CACHE_WATCH_ROOT",
+            str(policy["file_watch"]["root"]),
+        )
+        policy["file_watch"]["max_paths"] = int(
+            os.getenv("AGENTFLOW_CACHE_WATCH_MAX_PATHS", str(policy["file_watch"]["max_paths"]))
+        )
+        policy["file_watch"]["capture_candidates"] = _as_bool(
+            os.getenv("AGENTFLOW_CACHE_CAPTURE_CANDIDATES"),
+            policy["file_watch"]["capture_candidates"],
+        )
+    _apply_cache_canary_overlay(policy)
+    return policy, loaded_source, str(loaded_path or defaults_path)
 
 
 CACHE_POLICY, CACHE_POLICY_SOURCE, CACHE_RULES_PATH = _load_cache_policy()
@@ -312,6 +349,7 @@ CACHE_FILE_WATCH_ROOT = str(CACHE_POLICY["file_watch"]["root"])
 CACHE_FILE_WATCH_MAX_PATHS = int(CACHE_POLICY["file_watch"]["max_paths"])
 CACHE_FILE_WATCH_CAPTURE_CANDIDATES = bool(CACHE_POLICY["file_watch"]["capture_candidates"])
 CACHE_PATTERN_RULES = tuple(CACHE_POLICY.get("pattern_rules") or [])
+CACHE_CANARY_RULES_PATH = CACHE_POLICY.get("cache_canary_policy_path")
 
 
 def cache_decision_meta(

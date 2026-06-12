@@ -4114,6 +4114,87 @@ def openai_cache_replay_readiness_cli(argv: Sequence[str] | None = None, *, stdo
     return 0
 
 
+def openai_cache_replay_apply_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Graduate ready OpenAI cache replay candidates into a local cache canary overlay")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=os.getenv("AGENTFLOW_CONFIG_DIR") or os.getenv("AGENTFLOW_POLICY_CONFIG_DIR", str(Path.home() / ".agentflow")),
+        help="Directory for local AgentFlow policy overlays, default: AGENTFLOW_CONFIG_DIR, AGENTFLOW_POLICY_CONFIG_DIR, or ~/.agentflow",
+    )
+    parser.add_argument(
+        "--opportunity-limit",
+        type=int,
+        default=1000,
+        help="Recent OpenAI calls to scan for replay opportunity, default: 1000, max: 10000.",
+    )
+    parser.add_argument(
+        "--impact-limit",
+        type=int,
+        default=500,
+        help="Recent OpenAI calls to scan for replay impact evidence, default: 500, max: 10000.",
+    )
+    parser.add_argument(
+        "--min-observed-savings-usd",
+        type=float,
+        default=0.0,
+        help="Minimum observed applied savings required before writing a canary, default: 0.",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.20,
+        help="Fraction of matching traffic to keep as holdout, default: 0.20.",
+    )
+    parser.add_argument("--max-candidates", type=int, default=10, help="Maximum ready candidates to write, default: 10.")
+    parser.add_argument("--dry-run", action="store_true", help="Preview cache canary policy without writing YAML.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.openai_cache_replay_apply import apply_openai_cache_replay_candidates
+    from agentflow_proxy.policy_events import log_policy_event
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = apply_openai_cache_replay_candidates(
+            store,
+            config_dir=args.config_dir,
+            dry_run=args.dry_run,
+            opportunity_limit=args.opportunity_limit,
+            impact_limit=args.impact_limit,
+            min_observed_savings_usd=args.min_observed_savings_usd,
+            holdout_fraction=args.holdout_fraction,
+            max_candidates=args.max_candidates,
+        )
+    finally:
+        store.conn.close()
+    log_policy_event(
+        "openai-cache-replay-apply",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "db": str(args.db),
+            "config_dir": str(args.config_dir),
+            "dry_run": bool(args.dry_run),
+            "accepted_candidate_count": (result.get("summary") or {}).get("accepted_candidate_count"),
+            "policy_rule_count": (result.get("summary") or {}).get("policy_rule_count"),
+            "wrote_policy_files": bool(result.get("wrote_policy_files")),
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 def _openai_cache_replay_dry_run_read_error_result(read_error: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": "agentflow.openai_cache_replay_dry_run.v1",
@@ -6779,6 +6860,10 @@ def openai_cache_replay_impact_main() -> None:
 
 def openai_cache_replay_readiness_main() -> None:
     raise SystemExit(openai_cache_replay_readiness_cli())
+
+
+def openai_cache_replay_apply_main() -> None:
+    raise SystemExit(openai_cache_replay_apply_cli())
 
 
 def openai_cache_replay_dry_run_main() -> None:

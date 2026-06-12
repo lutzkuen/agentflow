@@ -14753,6 +14753,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Cache canary cohorts</h2>
+  <table data-table-id="cache-canary-cohorts" data-filter-label="Filter cache canary cohorts">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Configured rules</th><th data-sort-type="number">Active rules</th><th data-sort-type="number">Ready rules</th><th data-sort-type="number">Hits</th><th data-sort-type="number">Holdouts</th><th data-sort-type="number">Invalidations</th><th data-sort-type="number">Safety stops</th><th data-sort-type="text">Policy</th>
+    </tr></thead>
+    <tbody id="cache-canary-cohorts-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>OpenAI cache replay readiness</h2>
   <table data-table-id="openai-cache-replay-readiness" data-filter-label="Filter OpenAI cache replay readiness">
     <thead><tr>
@@ -16207,6 +16216,19 @@ async function refreshCache(){
       <td class="tokens">${(row.count||0).toLocaleString()}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No local cache reason codes recorded yet</td></tr>';
     const readiness=d.cache_replay_readiness||{};
+    const rsum=readiness.summary||{};
+    const cohortCls=readiness.status==='ready'?'hit':(readiness.status==='blocked'||readiness.status==='safety-stopped')?'err':readiness.status==='partial'?'routed':'miss';
+    document.getElementById('cache-canary-cohorts-tbody').innerHTML=`<tr>
+      <td><span class="badge ${cohortCls}">${esc(readiness.status||'unknown')}</span></td>
+      <td class="tokens">${(rsum.configured_rule_count||0).toLocaleString()}</td>
+      <td class="tokens">${(rsum.active_rule_count||0).toLocaleString()}</td>
+      <td class="tokens">${(rsum.ready_rule_count||0).toLocaleString()}</td>
+      <td class="tokens">${(rsum.hit_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(rsum.holdout_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(rsum.invalidation_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(rsum.safety_stop_rows||0).toLocaleString()}</td>
+      <td class="flags"><span class="badge provider">${esc(rsum.policy_source||'unknown')}</span> ${rsum.policy_reload_required?'<span class="badge miss">reload required</span>':'<span class="badge hit">loaded</span>'}</td>
+    </tr>`;
     const readinessRows=readiness.rules||[];
     document.getElementById('cache-replay-readiness-tbody').innerHTML=readinessRows.map(row=>{
       const state=row.readiness||'unknown';
