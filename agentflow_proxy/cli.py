@@ -3708,6 +3708,7 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
             max_non_positive_savings_rate=args.max_non_positive_savings_rate,
             rollback_error_rate=args.rollback_error_rate,
         )
+        _attach_repeated_scaffold_lifecycle_feedback(result, store)
     finally:
         store.conn.close()
     if args.pretty:
@@ -3715,6 +3716,48 @@ def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: A
     else:
         write_json(stdout, result)
     return 0
+
+
+def _attach_repeated_scaffold_lifecycle_feedback(result: dict[str, Any], store: Any) -> None:
+    from agentflow_proxy import recommendations
+    from agentflow_proxy.repeated_scaffold_feedback import (
+        SOURCE_SURFACE as REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+        build_repeated_scaffold_lifecycle_feedback,
+    )
+
+    payload = build_repeated_scaffold_lifecycle_feedback(result)
+    if payload is None:
+        result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta({
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "skipped",
+            "reason": "no-repeated-scaffold-lifecycle-candidates",
+            "auth_configured": recommendations.managed_auth_configured(),
+        })
+        return
+
+    try:
+        meta = asyncio.run(
+            recommendations.queue_policy_event_feedback(
+                store,
+                payload,
+                source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+                flush_immediately=False,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+            "auth_configured": recommendations.managed_auth_configured(),
+        }
+
+    result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta(meta)
 
 
 def _attach_openai_cache_replay_lifecycle_feedback(result: dict[str, Any], *, db_path: str) -> None:

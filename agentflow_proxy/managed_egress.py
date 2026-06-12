@@ -22,6 +22,10 @@ RAW_FEATURE_KEYS = {
     "file_path",
     "file_paths",
     "filepath",
+    "file_dependency_fingerprint",
+    "file_dependency_fingerprint_sha256",
+    "fingerprint",
+    "fingerprints",
     "generated_summary",
     "generated_summaries",
     "input",
@@ -52,6 +56,9 @@ RAW_FEATURE_KEYS = {
     "raw_response",
     "request",
     "request_body",
+    "request_fingerprint",
+    "request_fingerprint_sha256",
+    "request_fingerprints",
     "request_id",
     "request_ids",
     "response",
@@ -83,6 +90,7 @@ LIFECYCLE_METADATA_COMMAND_SCHEMAS = {
     "agentflow.old_context_summary_lifecycle_metadata.v1",
     "agentflow.phase_routing_lifecycle_metadata.v1",
     "agentflow.optimization_promotion_lifecycle_feedback.v1",
+    "agentflow.repeated_scaffold_lifecycle_feedback.v1",
     "agentflow.rollout_action_lifecycle_metadata.v1",
 }
 

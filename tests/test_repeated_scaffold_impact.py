@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -9,17 +10,38 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agentflow_proxy import cli
+from agentflow_proxy.managed_egress import ManagedEgressBlocked, assert_managed_egress_safe
+from agentflow_proxy.repeated_scaffold_feedback import (
+    FEEDBACK_SCHEMA,
+    SOURCE_SURFACE as REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+    build_repeated_scaffold_lifecycle_feedback,
+)
 from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
 from agentflow_proxy.store import SQLiteStore, stable_json
 
 
 class RepeatedScaffoldImpactTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.saved_env = {
+            key: os.environ.get(key)
+            for key in (
+                "AGENTFLOW_RECOMMENDATION_ENABLED",
+                "AGENTFLOW_RECOMMENDATION_SERVER_URL",
+                "AGENTFLOW_MANAGED_API_KEY",
+            )
+        }
+        for key in self.saved_env:
+            os.environ.pop(key, None)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmpdir.name) / "agentflow.sqlite3")
         self.store = SQLiteStore(self.db_path)
 
     def tearDown(self) -> None:
+        for key, value in self.saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         self.store.conn.close()
         self.tmpdir.cleanup()
 
@@ -162,6 +184,92 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
         self.assertFalse(payload["privacy"]["pattern_hashes_included"])
         self.assertFalse(payload["privacy"]["request_fingerprints_included"])
+        self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "disabled")
+        self.assertEqual(
+            self.store.conn.execute("select count(*) from managed_outcome_feedback_queue").fetchone()[0],
+            0,
+        )
+
+    def test_lifecycle_feedback_payload_is_metadata_only_and_egress_safe(self) -> None:
+        self._log_call(cohort="canary_applied", tokens_saved=1000)
+        self._log_call(cohort="canary_applied", tokens_saved=1200)
+        self._log_call(cohort="canary_holdout", tokens_saved=0)
+
+        report = build_repeated_scaffold_impact_report(self.store, limit=20)
+        report["candidates"][0]["raw_prompt"] = "raw prompt must be redacted"
+        report["candidates"][0]["messages"] = [{"content": "raw messages must be redacted"}]
+        report["candidates"][0]["request_id"] = "req_secret"
+        report["candidates"][0]["session_id"] = "session-secret"
+        report["candidates"][0]["file_path"] = "/tmp/secret.py"
+        report["candidates"][0]["request_fingerprint"] = "sha256:" + "1" * 64
+
+        event = build_repeated_scaffold_lifecycle_feedback(report)
+
+        self.assertIsNotNone(event)
+        assert_managed_egress_safe(event)
+        metadata = event["metadata"]
+        self.assertEqual(metadata["schema"], FEEDBACK_SCHEMA)
+        self.assertEqual(metadata["lifecycle_kind"], "repeated_scaffold_crunch")
+        self.assertEqual(metadata["candidate_feedback"][0]["source_surface"], "anthropic_messages")
+        self.assertEqual(metadata["candidate_feedback"][0]["category"], "tool-result")
+        self.assertEqual(metadata["candidate_feedback"][0]["workflow_phase"], "tool-execution")
+        self.assertEqual(metadata["candidate_feedback"][0]["model_tier"], "sonnet")
+        self.assertEqual(metadata["candidate_feedback"][0]["saved_tokens_bucket"], "1k_4k_tokens")
+        self.assertEqual(metadata["candidate_feedback"][0]["cost_savings_bucket"], "0_001_0_01_usd")
+        self.assertEqual(metadata["candidate_feedback"][0]["canary_cohort_counts"]["applied"], 2)
+        self.assertTrue(metadata["privacy"]["metadata_only"])
+
+        rendered = json.dumps(event, sort_keys=True)
+        self.assertNotIn("raw prompt must be redacted", rendered)
+        self.assertNotIn("raw messages must be redacted", rendered)
+        self.assertNotIn("req_secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+        self.assertNotIn("/tmp/secret.py", rendered)
+        self.assertNotIn("sha256:" + "1" * 64, rendered)
+
+    def test_lifecycle_feedback_rejects_raw_fingerprint_keys(self) -> None:
+        with self.assertRaises(ManagedEgressBlocked):
+            assert_managed_egress_safe({
+                "schema": FEEDBACK_SCHEMA,
+                "command": "repeated-scaffold-impact",
+                "request_fingerprint": "sha256:" + "1" * 64,
+            })
+
+    def test_enabled_cli_queues_lifecycle_feedback_without_payload_leakage(self) -> None:
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        self._log_call(cohort="canary_applied", tokens_saved=1000)
+        self._log_call(cohort="canary_applied", tokens_saved=1200)
+        self._log_call(cohort="canary_holdout", tokens_saved=0)
+
+        output = io.StringIO()
+        exit_code = cli.repeated_scaffold_impact_cli(["--db", self.db_path, "--limit", "20"], stdout=output)
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        feedback = payload["managed_lifecycle_feedback"]
+        self.assertEqual(feedback["status"], "queued")
+        self.assertEqual(feedback["endpoint"], "/v1/policy-events")
+        self.assertFalse(feedback["payload_included"])
+
+        row = self.store.conn.execute(
+            "select source_surface, endpoint, status, attempts, payload_json "
+            "from managed_outcome_feedback_queue"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["source_surface"], REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE)
+        self.assertEqual(row["endpoint"], "/v1/policy-events")
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["attempts"], 0)
+        queued = json.loads(row["payload_json"])
+        self.assertEqual(queued["metadata"]["schema"], FEEDBACK_SCHEMA)
+        self.assertEqual(queued["policy_sections"], ["crunch"])
+        queued_text = json.dumps(queued, sort_keys=True)
+        self.assertIn("reviewed-provider-scaffold", queued_text)
+        self.assertNotIn("raw error text must not leak", queued_text)
+        self.assertNotIn("prompt must not leak", queued_text)
+        self.assertNotIn("raw response must not leak", queued_text)
+        self.assertNotIn("raw-session-must-not-leak", queued_text)
 
     def test_need_more_samples_when_holdout_is_missing(self) -> None:
         self._log_call(cohort="canary_applied", tokens_saved=1000)
