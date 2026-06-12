@@ -339,6 +339,33 @@ class SQLiteStore:
             self._ensure_column("calls", "requested_model_family", "text")
             self._ensure_column("calls", "routed_model_family", "text")
             cur.execute("""
+            create table if not exists provider_tool_adoption_windows (
+              id text primary key,
+              created_at text not null,
+              updated_at text not null,
+              provider text not null,
+              source_surface text,
+              endpoint text,
+              app_family text,
+              requested_model text,
+              routed_model text,
+              category text,
+              workflow_phase text,
+              policy_source text,
+              policy_ids_json text,
+              call_id text,
+              fulfilled_call_id text,
+              session_digest text,
+              correlation_digest text,
+              status text not null,
+              reason text,
+              age_bucket text,
+              tool_use_count integer,
+              tool_result_count integer,
+              metadata_json text
+            )
+            """)
+            cur.execute("""
             create table if not exists routing_experiments (
               id text primary key,
               call_id text not null,
@@ -451,6 +478,14 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_calls_created_at
             on calls(created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_provider_tool_adoption_pending
+            on provider_tool_adoption_windows(status, correlation_digest, created_at)
+            """)
+            cur.execute("""
+            create index if not exists idx_provider_tool_adoption_recent
+            on provider_tool_adoption_windows(created_at)
             """)
             cur.execute("""
             create index if not exists idx_codex_app_events_created_at
@@ -634,6 +669,120 @@ class SQLiteStore:
                 values,
             )
             self.conn.commit()
+
+    def log_provider_tool_adoption_window(self, **kwargs: Any) -> None:
+        cols = [
+            "id", "created_at", "updated_at", "provider", "source_surface", "endpoint",
+            "app_family", "requested_model", "routed_model", "category", "workflow_phase",
+            "policy_source", "policy_ids_json", "call_id", "fulfilled_call_id",
+            "session_digest", "correlation_digest", "status", "reason", "age_bucket",
+            "tool_use_count", "tool_result_count", "metadata_json",
+        ]
+        values = [kwargs.get(c) for c in cols]
+        with self._lock:
+            self.conn.execute(
+                f"insert into provider_tool_adoption_windows({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+                values,
+            )
+            self.conn.commit()
+
+    def fulfill_provider_tool_adoption_window(
+        self,
+        *,
+        correlation_digest: str,
+        fulfilled_call_id: str,
+        updated_at: str | None = None,
+        age_bucket: str | None = None,
+    ) -> bool:
+        updated_at = updated_at or utc_now()
+        with self._lock:
+            row = self.conn.execute(
+                """
+                select id from provider_tool_adoption_windows
+                where status = 'pending'
+                  and correlation_digest = ?
+                order by created_at asc
+                limit 1
+                """,
+                (correlation_digest,),
+            ).fetchone()
+            if not row:
+                return False
+            self.conn.execute(
+                """
+                update provider_tool_adoption_windows
+                set status = 'fulfilled',
+                    reason = 'matched-subsequent-tool-result',
+                    fulfilled_call_id = ?,
+                    updated_at = ?,
+                    age_bucket = ?,
+                    tool_result_count = case when coalesce(tool_result_count, 0) < 1 then 1 else tool_result_count end
+                where id = ?
+                """,
+                (fulfilled_call_id, updated_at, age_bucket or "0_1m", row["id"]),
+            )
+            self.conn.commit()
+            return True
+
+    def abandon_stale_provider_tool_adoption_windows(
+        self,
+        *,
+        now: str | None = None,
+        ttl_seconds: int = 3600,
+    ) -> int:
+        now_dt = datetime.now(timezone.utc)
+        if now:
+            try:
+                text = str(now)
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                now_dt = datetime.fromisoformat(text)
+                if now_dt.tzinfo is None:
+                    now_dt = now_dt.replace(tzinfo=timezone.utc)
+                now_dt = now_dt.astimezone(timezone.utc)
+            except Exception:
+                now_dt = datetime.now(timezone.utc)
+        cutoff = (now_dt.timestamp() - max(0, int(ttl_seconds or 0)))
+        cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+        now_iso = now or utc_now()
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                select id from provider_tool_adoption_windows
+                where status = 'pending'
+                  and created_at < ?
+                """,
+                (cutoff_iso,),
+            ).fetchall()
+            for row in rows:
+                self.conn.execute(
+                    """
+                    update provider_tool_adoption_windows
+                    set status = 'abandoned',
+                        reason = 'ttl-expired-without-tool-result',
+                        updated_at = ?,
+                        age_bucket = '1_6h'
+                    where id = ?
+                    """,
+                    (now_iso, row["id"]),
+                )
+            self.conn.commit()
+            return len(rows)
+
+    def provider_tool_adoption_window_rows(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        rows = self.conn.execute(
+            """
+            select created_at, updated_at, provider, source_surface, endpoint, app_family,
+                   requested_model, routed_model, category, workflow_phase, policy_source,
+                   status, reason, age_bucket, tool_use_count, tool_result_count
+            from provider_tool_adoption_windows
+            order by created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def enqueue_managed_outcome_feedback(self, **kwargs: Any) -> None:
         cols = [
@@ -1031,6 +1180,33 @@ class PostgresStore(SQLiteStore):
             )
             """,
             """
+            create table if not exists provider_tool_adoption_windows (
+              id text primary key,
+              created_at timestamptz not null,
+              updated_at timestamptz not null,
+              provider text not null,
+              source_surface text,
+              endpoint text,
+              app_family text,
+              requested_model text,
+              routed_model text,
+              category text,
+              workflow_phase text,
+              policy_source text,
+              policy_ids_json text,
+              call_id text,
+              fulfilled_call_id text,
+              session_digest text,
+              correlation_digest text,
+              status text not null,
+              reason text,
+              age_bucket text,
+              tool_use_count integer,
+              tool_result_count integer,
+              metadata_json text
+            )
+            """,
+            """
             create table if not exists routing_experiments (
               id text primary key,
               call_id text not null,
@@ -1152,6 +1328,14 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_calls_created_at
             on calls(created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_provider_tool_adoption_pending
+            on provider_tool_adoption_windows(status, correlation_digest, created_at)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_provider_tool_adoption_recent
+            on provider_tool_adoption_windows(created_at)
         """)
         self.conn.execute("""
             create index if not exists idx_codex_app_events_created_at

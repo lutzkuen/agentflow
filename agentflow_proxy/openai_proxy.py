@@ -52,6 +52,7 @@ from agentflow_proxy.openai_optimization_governor import (
     attach_openai_optimization_governor,
     selected_openai_governor_family,
 )
+from agentflow_proxy.provider_adoption import capture_provider_tool_adoption, openai_stream_tool_use_ids
 from agentflow_proxy.optimization.openai_features import (
     openai_call_store_fields,
 )
@@ -695,9 +696,11 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                 sse_frame_buf = b""
                 stream_retry_count = 0
                 stream_net_retries = 0
+                stream_tool_use_ids: list[str] = []
+                stream_tool_use_missing_ids = 0
 
                 def parse_sse_usage(frame: bytes) -> None:
-                    nonlocal actual_in, actual_out, cache_read_in, reasoning_tokens
+                    nonlocal actual_in, actual_out, cache_read_in, reasoning_tokens, stream_tool_use_missing_ids
                     for line in frame.decode("utf-8", errors="replace").splitlines():
                         if not line.startswith("data: "):
                             continue
@@ -708,6 +711,9 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                             data = json.loads(payload)
                         except Exception:
                             continue
+                        tool_ids, missing_tool_ids = openai_stream_tool_use_ids(data)
+                        stream_tool_use_ids.extend(tool_ids)
+                        stream_tool_use_missing_ids += missing_tool_ids
                         if data.get("type") == "response.completed":
                             data = data.get("response") or data
                         in_tok, out_tok, cached_tok, reason_tok = usage_tokens(data)
@@ -855,6 +861,23 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         retry_count=stream_retry_count,
                         thinking_output_tokens=reasoning_tokens or None,
                         **openai_call_store_fields(path, requested_model, str(crunched.get("model"))),
+                    )
+                    capture_provider_tool_adoption(
+                        context.store,
+                        provider="openai",
+                        path=path,
+                        call_id=call_id,
+                        session_id=session_id,
+                        request_body=crunched,
+                        response_tool_use_ids=stream_tool_use_ids,
+                        response_tool_use_missing_ids=stream_tool_use_missing_ids,
+                        requested_model=requested_model,
+                        routed_model=str(crunched.get("model")),
+                        status_code=status_code,
+                        category=category,
+                        routing_meta=routing_meta,
+                        crunch_meta=crunch_meta,
+                        cache_meta=stream_cache_meta,
                     )
                     await record_managed_outcome_feedback(
                         context=context,
@@ -1042,6 +1065,22 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     session_id=session_id, category=category, retry_count=0,
                     **openai_call_store_fields(path, requested_model, str(crunched.get("model"))),
                 )
+                capture_provider_tool_adoption(
+                    context.store,
+                    provider="openai",
+                    path=path,
+                    call_id=call_id,
+                    session_id=session_id,
+                    request_body=crunched,
+                    response_body=cached,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    category=category,
+                    routing_meta=routing_meta,
+                    crunch_meta=crunch_meta,
+                    cache_meta=hit_cache_meta,
+                )
                 await record_managed_outcome_feedback(
                     context=context,
                     call_id=call_id,
@@ -1130,6 +1169,22 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     response_json=stable_json(sem_resp) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
                     **openai_call_store_fields(path, requested_model, str(crunched.get("model"))),
+                )
+                capture_provider_tool_adoption(
+                    context.store,
+                    provider="openai",
+                    path=path,
+                    call_id=call_id,
+                    session_id=session_id,
+                    request_body=crunched,
+                    response_body=sem_resp,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    category=category,
+                    routing_meta=routing_meta,
+                    crunch_meta=crunch_meta,
+                    cache_meta=hit_cache_meta,
                 )
                 await record_managed_outcome_feedback(
                     context=context,
@@ -1390,6 +1445,22 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
             retry_count=retry_count,
             thinking_output_tokens=reasoning_tokens or None,
             **openai_call_store_fields(path, requested_model, str(crunched.get("model"))),
+        )
+        capture_provider_tool_adoption(
+            context.store,
+            provider="openai",
+            path=path,
+            call_id=call_id,
+            session_id=session_id,
+            request_body=crunched,
+            response_body=response_body,
+            requested_model=requested_model,
+            routed_model=str(crunched.get("model")),
+            status_code=status_code,
+            category=category,
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
         )
         await record_managed_outcome_feedback(
             context=context,

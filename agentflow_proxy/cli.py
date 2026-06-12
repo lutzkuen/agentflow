@@ -3824,6 +3824,12 @@ def openai_cache_replay_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def provider_tool_adoption_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    from agentflow_proxy.provider_adoption import provider_tool_adoption_report_cli as _provider_tool_adoption_report_cli
+
+    return _provider_tool_adoption_report_cli(argv, stdout=stdout)
+
+
 def repeated_scaffold_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure repeated provider-message scaffolding crunch opportunity")
     parser.add_argument(
@@ -7048,6 +7054,10 @@ def openai_old_context_summary_report_main() -> None:
 
 def openai_cache_replay_report_main() -> None:
     raise SystemExit(openai_cache_replay_report_cli())
+
+
+def provider_tool_adoption_report_main() -> None:
+    raise SystemExit(provider_tool_adoption_report_cli())
 
 
 def repeated_scaffold_opportunity_main() -> None:

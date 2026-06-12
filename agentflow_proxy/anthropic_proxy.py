@@ -51,6 +51,7 @@ from agentflow_proxy.errors import (
     public_proxy_error_body,
     upstream_error_text,
 )
+from agentflow_proxy.provider_adoption import capture_provider_tool_adoption
 from agentflow_proxy.routing_experiments import (
     ROUTING_EXPERIMENT_OUTCOME_SOURCE_SURFACE,
     ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES,
@@ -1243,9 +1244,11 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 stream_net_retries = 0
                 stream_complete = False
                 stream_cancelled = False
+                stream_tool_use_ids: list[str] = []
+                stream_tool_use_missing_ids = 0
 
                 def parse_sse_usage(frame: bytes) -> None:
-                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in, thinking_chars, stream_complete
+                    nonlocal actual_in, actual_out, cache_creation_in, cache_read_in, thinking_chars, stream_complete, stream_tool_use_missing_ids
                     for line in frame.decode("utf-8", errors="replace").splitlines():
                         if not line.startswith("data: "):
                             continue
@@ -1268,6 +1271,14 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             out = (data.get("usage") or {}).get("output_tokens")
                             if out is not None:
                                 actual_out = out
+                        elif t == "content_block_start":
+                            block = data.get("content_block") or {}
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                tool_id = block.get("id")
+                                if tool_id:
+                                    stream_tool_use_ids.append(str(tool_id))
+                                else:
+                                    stream_tool_use_missing_ids += 1
                         elif t == "content_block_delta":
                             delta = (data.get("delta") or {})
                             if delta.get("type") == "thinking_delta":
@@ -1454,6 +1465,23 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                         retry_count=stream_retry_count,
                         thinking_output_tokens=thinking_tokens,
                     )
+                    capture_provider_tool_adoption(
+                        context.store,
+                        provider="anthropic",
+                        path=path,
+                        call_id=call_id,
+                        session_id=session_id,
+                        request_body=crunched,
+                        response_tool_use_ids=stream_tool_use_ids,
+                        response_tool_use_missing_ids=stream_tool_use_missing_ids,
+                        requested_model=requested_model,
+                        routed_model=str(crunched.get("model")),
+                        status_code=status_code,
+                        category=category,
+                        routing_meta=routing_meta,
+                        crunch_meta=crunch_meta,
+                        cache_meta=cache_meta,
+                    )
                     await _record_managed_outcome_feedback(
                         context=context,
                         call_id=call_id,
@@ -1583,6 +1611,22 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     response_json=stable_json(response_body) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
                 )
+                capture_provider_tool_adoption(
+                    context.store,
+                    provider="anthropic",
+                    path=path,
+                    call_id=call_id,
+                    session_id=session_id,
+                    request_body=crunched,
+                    response_body=response_body,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    category=category,
+                    routing_meta=routing_meta,
+                    crunch_meta=crunch_meta,
+                    cache_meta=hit_cache_meta,
+                )
                 await _record_managed_outcome_feedback(
                     context=context,
                     call_id=call_id,
@@ -1640,6 +1684,22 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                     error=None, request_json=stable_json(crunched) if context.log_bodies else None,
                     response_json=stable_json(sem_resp) if context.log_bodies else None,
                     session_id=session_id, category=category, retry_count=0,
+                )
+                capture_provider_tool_adoption(
+                    context.store,
+                    provider="anthropic",
+                    path=path,
+                    call_id=call_id,
+                    session_id=session_id,
+                    request_body=crunched,
+                    response_body=sem_resp,
+                    requested_model=requested_model,
+                    routed_model=str(crunched.get("model")),
+                    status_code=200,
+                    category=category,
+                    routing_meta=routing_meta,
+                    crunch_meta=crunch_meta,
+                    cache_meta=hit_cache_meta,
                 )
                 await _record_managed_outcome_feedback(
                     context=context,
@@ -1823,6 +1883,22 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             cache_creation_input_tokens=cache_creation_in, cache_read_input_tokens=cache_read_in,
             retry_count=retry_count,
             thinking_output_tokens=thinking_tokens,
+        )
+        capture_provider_tool_adoption(
+            context.store,
+            provider="anthropic",
+            path=path,
+            call_id=call_id,
+            session_id=session_id,
+            request_body=crunched,
+            response_body=response_body,
+            requested_model=requested_model,
+            routed_model=str(crunched.get("model")),
+            status_code=status_code,
+            category=category,
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
         )
         await _record_managed_outcome_feedback(
             context=context,
