@@ -44,6 +44,72 @@ _POLICY_SECTION_FILES = {
 }
 _SAFE_POLICY_SOURCES = {"managed-recommended"}
 _PATTERN_ACTION_VALIDATION_DETAIL_SCHEMA = "agentflow.pattern_rollout_action_family_validation.v1"
+_TERMINAL_COMPACTION_FAMILY_VALIDATION_DETAIL_SCHEMA = "agentflow.terminal_output_compaction_rollout_action_validation.v1"
+_TERMINAL_COMPACTION_CANDIDATE_FAMILIES = {
+    "terminal-output-compaction-crunch-policy-rule",
+    "terminal-output-compaction",
+}
+_TERMINAL_COMPACTION_ACTION_TYPES = {
+    "terminal-output-compaction",
+    "terminal-output-compaction-crunch-policy-rule",
+    "compact-terminal-output",
+}
+_TERMINAL_COMPACTION_CONDITION_KEYS = {
+    "source_surface",
+    "app_family",
+    "category",
+    "phase",
+    "workflow_phase",
+    "labels",
+    "requested_model",
+    "model_pattern",
+    "text_bucket",
+    "token_bucket",
+    "expected_saved_token_bucket",
+    "expected_saved_tokens_bucket",
+    "expected_saved_token_buckets",
+    "expected_saved_tokens_buckets",
+    "terminal_output_char_fraction_bucket",
+    "terminal_output_char_fraction_buckets",
+    "has_tools",
+    "stream",
+    "uses_thinking",
+    "min_text_chars",
+    "max_text_chars",
+    "min_saved_tokens",
+    "category_not_in",
+}
+_TERMINAL_COMPACTION_ACTION_KEYS = {
+    "type",
+    "keep_recent_turns",
+    "min_block_chars",
+    "head_lines",
+    "tail_lines",
+    "max_evidence_lines",
+    "min_saved_chars",
+    "preserve_diagnostics",
+    "preserve_tool_protocol",
+}
+_TERMINAL_COMPACTION_CANARY_KEYS = {
+    "enabled",
+    "fraction",
+    "canary_fraction",
+    "rollout_fraction",
+    "holdout_fraction",
+    "salt",
+    "canary_salt",
+    "unit",
+    "canary_unit",
+}
+_TERMINAL_COMPACTION_SAFETY_KEYS = {
+    "enabled",
+    "min_outcome_samples",
+    "window",
+    "max_error_rate",
+    "max_retry_rate",
+    "max_negative_savings_rate",
+    "max_error_rate_delta",
+}
 _PATTERN_FAMILY_ALIASES = {
     "tool-result": "tool_results",
     "tool_results": "tool_results",
@@ -385,7 +451,8 @@ def _validate_rollout_action(action: Any, path: str, errors: list[dict[str, str]
         _add_error(errors, f"{path}.target_candidate_id", "expected non-empty string")
     if action.get("target_rule_id") is not None and (not isinstance(action.get("target_rule_id"), str) or not action.get("target_rule_id").strip()):
         _add_error(errors, f"{path}.target_rule_id", "expected non-empty string when present")
-    if _normalize_pattern_hash(action.get("pattern_hash")) is None:
+    terminal_compaction = _is_terminal_compaction_action(action)
+    if _normalize_pattern_hash(action.get("pattern_hash")) is None and not terminal_compaction:
         _add_error(errors, f"{path}.pattern_hash", "expected sha256 pattern hash")
     for key in ("current_fraction", "recommended_fraction", "confidence"):
         try:
@@ -440,11 +507,52 @@ def _norm_text(value: Any) -> str:
     return str(value or "").strip().lower().replace(" ", "-")
 
 
+def _policy_token(value: Any) -> str:
+    return _norm_text(value).replace("_", "-")
+
+
 def _first_string(*values: Any) -> str | None:
     for value in values:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _slug(value: Any, *, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    chars = [char if char.isalnum() else "-" for char in text]
+    slug = "-".join(part for part in "".join(chars).split("-") if part)
+    return slug[:96] or fallback
+
+
+def _terminal_compaction_edit(action: dict[str, Any]) -> dict[str, Any]:
+    edit = action.get("proposed_edit") if isinstance(action.get("proposed_edit"), dict) else {}
+    return edit
+
+
+def _terminal_compaction_action_block(action: dict[str, Any]) -> dict[str, Any]:
+    edit = _terminal_compaction_edit(action)
+    if isinstance(edit.get("action"), dict):
+        return edit["action"]
+    if isinstance(action.get("action"), dict):
+        return action["action"]
+    return {}
+
+
+def _is_terminal_compaction_action(action: dict[str, Any]) -> bool:
+    family = _policy_token(action.get("candidate_family") or action.get("module_family") or action.get("action_family"))
+    action_block = _terminal_compaction_action_block(action)
+    action_type = _policy_token(action_block.get("type") or action.get("local_action") or action.get("action_family"))
+    edit = _terminal_compaction_edit(action)
+    edit_type = _policy_token(edit.get("type"))
+    return (
+        str(action.get("policy_section") or "") == "crunch"
+        and (
+            family in _TERMINAL_COMPACTION_CANDIDATE_FAMILIES
+            or action_type in _TERMINAL_COMPACTION_ACTION_TYPES
+            or edit_type in _TERMINAL_COMPACTION_ACTION_TYPES
+        )
+    )
 
 
 def _normalize_pattern_family(value: Any) -> str | None:
@@ -672,6 +780,344 @@ def _validate_family_specific_action(
         "errors": errors,
     }
     return detail
+
+
+def _terminal_add_unsupported_keys(
+    errors: list[dict[str, str]],
+    value: Any,
+    *,
+    allowed: set[str],
+    path: str,
+) -> None:
+    if not isinstance(value, dict):
+        return
+    for key in value:
+        if str(key) not in allowed:
+            _add_error(errors, f"{path}.{key}", "unsupported terminal-output compaction rollout field")
+
+
+def _terminal_scalar(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return None
+
+
+def _terminal_sanitize_conditions(value: Any, *, path: str, errors: list[dict[str, str]]) -> dict[str, Any]:
+    aliases = {
+        "phase": "workflow_phase",
+        "expected_saved_tokens_bucket": "expected_saved_token_bucket",
+        "expected_saved_tokens_buckets": "expected_saved_token_buckets",
+    }
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected terminal-output compaction conditions object")
+        return {}
+    _terminal_add_unsupported_keys(errors, value, allowed=_TERMINAL_COMPACTION_CONDITION_KEYS, path=path)
+    sanitized: dict[str, Any] = {}
+    for key, raw in value.items():
+        key_text = aliases.get(str(key), str(key))
+        if key_text not in _TERMINAL_COMPACTION_CONDITION_KEYS or raw is None:
+            continue
+        if isinstance(raw, list):
+            items = [_terminal_scalar(item) for item in raw]
+            sanitized[key_text] = [item for item in items if item is not None]
+        else:
+            scalar = _terminal_scalar(raw)
+            if scalar is not None:
+                sanitized[key_text] = scalar
+    return sanitized
+
+
+def _terminal_int(
+    value: Any,
+    *,
+    key: str,
+    path: str,
+    errors: list[dict[str, str]],
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        _add_error(errors, f"{path}.{key}", "expected integer")
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        _add_error(errors, f"{path}.{key}", "expected integer")
+        return None
+    if number < minimum or number > maximum:
+        _add_error(errors, f"{path}.{key}", f"expected integer between {minimum} and {maximum}")
+        return None
+    return number
+
+
+def _terminal_float(
+    value: Any,
+    *,
+    key: str,
+    path: str,
+    errors: list[dict[str, str]],
+    minimum: float = 0.0,
+    maximum: float = 1.0,
+) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        _add_error(errors, f"{path}.{key}", "expected number")
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        _add_error(errors, f"{path}.{key}", "expected number")
+        return None
+    if number < minimum or number > maximum:
+        _add_error(errors, f"{path}.{key}", f"expected number between {minimum} and {maximum}")
+        return None
+    return number
+
+
+def _terminal_bool(value: Any, *, key: str, path: str, errors: list[dict[str, str]]) -> bool | None:
+    if value is None:
+        return None
+    parsed = _bool_field(value)
+    if parsed is None:
+        _add_error(errors, f"{path}.{key}", "expected boolean")
+    return parsed
+
+
+def _terminal_sanitize_action(value: Any, *, path: str, errors: list[dict[str, str]]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected terminal-output compaction action object")
+        return {}
+    _terminal_add_unsupported_keys(errors, value, allowed=_TERMINAL_COMPACTION_ACTION_KEYS, path=path)
+    action_type = _policy_token(value.get("type"))
+    if action_type not in _TERMINAL_COMPACTION_ACTION_TYPES:
+        _add_error(errors, f"{path}.type", "expected terminal_output_compaction or compact_terminal_output")
+    sanitized: dict[str, Any] = {"type": "compact_terminal_output"}
+    bounds = {
+        "keep_recent_turns": (0, 20),
+        "min_block_chars": (100, 500000),
+        "head_lines": (0, 500),
+        "tail_lines": (0, 500),
+        "max_evidence_lines": (0, 2000),
+        "min_saved_chars": (0, 500000),
+    }
+    for key, (minimum, maximum) in bounds.items():
+        number = _terminal_int(value.get(key), key=key, path=path, errors=errors, minimum=minimum, maximum=maximum)
+        if number is not None:
+            sanitized[key] = number
+    for key in ("preserve_diagnostics", "preserve_tool_protocol"):
+        parsed = _terminal_bool(value.get(key), key=key, path=path, errors=errors)
+        if parsed is not None:
+            sanitized[key] = parsed
+    return sanitized
+
+
+def _terminal_sanitize_canary(value: Any, *, path: str, errors: list[dict[str, str]], fallback_salt: str) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected terminal-output compaction canary object")
+        value = {}
+    _terminal_add_unsupported_keys(errors, value, allowed=_TERMINAL_COMPACTION_CANARY_KEYS, path=path)
+    canary: dict[str, Any] = {
+        "enabled": True,
+        "canary_fraction": 0.0,
+        "holdout_fraction": 1.0,
+        "canary_salt": fallback_salt,
+        "canary_unit": "request_fingerprint",
+    }
+    enabled = _terminal_bool(value.get("enabled"), key="enabled", path=path, errors=errors)
+    if enabled is not None:
+        canary["enabled"] = enabled
+    for source_key, target_key in (
+        ("fraction", "canary_fraction"),
+        ("canary_fraction", "canary_fraction"),
+        ("rollout_fraction", "canary_fraction"),
+        ("holdout_fraction", "holdout_fraction"),
+    ):
+        number = _terminal_float(value.get(source_key), key=source_key, path=path, errors=errors)
+        if number is not None:
+            canary[target_key] = number
+    for source_key, target_key in (("salt", "canary_salt"), ("canary_salt", "canary_salt"), ("unit", "canary_unit"), ("canary_unit", "canary_unit")):
+        if isinstance(value.get(source_key), str) and value[source_key].strip():
+            canary[target_key] = value[source_key].strip()
+    return canary
+
+
+def _terminal_sanitize_safety_stop(value: Any, *, path: str, errors: list[dict[str, str]]) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected terminal-output compaction safety_stop object")
+        value = {}
+    _terminal_add_unsupported_keys(errors, value, allowed=_TERMINAL_COMPACTION_SAFETY_KEYS, path=path)
+    safety: dict[str, Any] = {
+        "enabled": True,
+        "min_outcome_samples": 5,
+        "window": 500,
+        "max_error_rate": 0.1,
+        "max_retry_rate": 0.25,
+        "max_negative_savings_rate": 0.25,
+        "max_error_rate_delta": 0.05,
+    }
+    enabled = _terminal_bool(value.get("enabled"), key="enabled", path=path, errors=errors)
+    if enabled is not None:
+        safety["enabled"] = enabled
+    for key, maximum in (("min_outcome_samples", 100000), ("window", 100000)):
+        number = _terminal_int(value.get(key), key=key, path=path, errors=errors, minimum=0, maximum=maximum)
+        if number is not None:
+            safety[key] = number
+    for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
+        number = _terminal_float(value.get(key), key=key, path=path, errors=errors)
+        if number is not None:
+            safety[key] = number
+    return safety
+
+
+def _terminal_rule_identity(action: dict[str, Any], edit: dict[str, Any]) -> tuple[str, str, str]:
+    candidate_id = str(edit.get("candidate_id") or action.get("target_candidate_id") or "").strip()
+    rule_id = str(
+        edit.get("id")
+        or edit.get("rule_id")
+        or action.get("target_rule_id")
+        or f"managed-terminal-output-compaction-{_slug(candidate_id, fallback='candidate')}"
+    ).strip()
+    action_id = str(edit.get("action_id") or action.get("action_id") or action.get("rollout_action_id") or rollout_action_id(action)).strip()
+    return rule_id, candidate_id, action_id
+
+
+def _terminal_existing_rule_index(rules: list[Any], *, rule_id: str, candidate_id: str, action_id: str) -> int | None:
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        if rule_id and str(rule.get("id") or rule.get("rule_id") or "") == rule_id:
+            return index
+        if candidate_id and str(rule.get("candidate_id") or "") == candidate_id:
+            return index
+        if action_id and str(rule.get("action_id") or rule.get("rollout_action_id") or "") == action_id:
+            return index
+    return None
+
+
+def _terminal_validate_and_build_rule(action: dict[str, Any], *, path: str) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    edit = _terminal_compaction_edit(action)
+    allowed_edit_keys = {
+        "id",
+        "rule_id",
+        "enabled",
+        "policy_source",
+        "candidate_id",
+        "action_id",
+        "conditions",
+        "action",
+        "canary",
+        "rollout",
+        "safety_stop",
+        "provenance",
+        "block_thinking",
+        "local_action_requirements",
+        "compatibility",
+    }
+    if not edit:
+        _add_error(errors, f"{path}.proposed_edit", "expected terminal-output compaction proposed_edit")
+    elif not isinstance(edit, dict):
+        _add_error(errors, f"{path}.proposed_edit", "expected object")
+        edit = {}
+    else:
+        _terminal_add_unsupported_keys(errors, edit, allowed=allowed_edit_keys, path=f"{path}.proposed_edit")
+
+    if str(action.get("policy_section") or "") != "crunch":
+        _add_error(errors, f"{path}.policy_section", "terminal-output compaction actions can only write crunch rules")
+    if _policy_token(action.get("candidate_family")) not in _TERMINAL_COMPACTION_CANDIDATE_FAMILIES:
+        _add_error(errors, f"{path}.candidate_family", "expected terminal-output-compaction-crunch-policy-rule")
+    policy_source = str(edit.get("policy_source") or action.get("policy_source") or "managed-recommended")
+    if policy_source not in _SAFE_POLICY_SOURCES:
+        _add_error(errors, f"{path}.proposed_edit.policy_source", "terminal-output compaction rollout must use managed-recommended policy_source")
+
+    rule_id, candidate_id, action_id = _terminal_rule_identity(action, edit)
+    if not candidate_id:
+        _add_error(errors, f"{path}.target_candidate_id", "expected target candidate id")
+    if not rule_id:
+        _add_error(errors, f"{path}.target_rule_id", "expected target rule id or candidate id")
+
+    fallback_salt = "terminal-output-compaction:" + hashlib.sha256(
+        _canonical_json({"candidate_id": candidate_id, "rule_id": rule_id, "action_id": action_id}).encode("utf-8")
+    ).hexdigest()[:24]
+    local_action = _terminal_sanitize_action(_terminal_compaction_action_block(action), path=f"{path}.proposed_edit.action", errors=errors)
+    conditions = _terminal_sanitize_conditions(edit.get("conditions"), path=f"{path}.proposed_edit.conditions", errors=errors)
+    canary = _terminal_sanitize_canary(edit.get("canary") or edit.get("rollout"), path=f"{path}.proposed_edit.canary", errors=errors, fallback_salt=fallback_salt)
+    safety_stop = _terminal_sanitize_safety_stop(edit.get("safety_stop"), path=f"{path}.proposed_edit.safety_stop", errors=errors)
+    block_thinking = _terminal_bool(edit.get("block_thinking"), key="block_thinking", path=f"{path}.proposed_edit", errors=errors)
+    enabled = _terminal_bool(edit.get("enabled"), key="enabled", path=f"{path}.proposed_edit", errors=errors)
+
+    provenance = edit.get("provenance") if isinstance(edit.get("provenance"), dict) else {}
+    if edit.get("provenance") is not None and not isinstance(edit.get("provenance"), dict):
+        _add_error(errors, f"{path}.proposed_edit.provenance", "expected provenance object")
+    if provenance:
+        allowed_provenance = {
+            "schema",
+            "issuer",
+            "server_id",
+            "key_id",
+            "decision_hash",
+            "signature",
+            "algorithm",
+            "verified",
+            "status",
+            "generated_at",
+            "expires_at",
+        }
+        _terminal_add_unsupported_keys(errors, provenance, allowed=allowed_provenance, path=f"{path}.proposed_edit.provenance")
+        provenance = {
+            key: value
+            for key, value in provenance.items()
+            if key in allowed_provenance and isinstance(value, (str, int, float, bool))
+        }
+
+    rule = {
+        "id": rule_id,
+        "enabled": True if enabled is None else enabled,
+        "policy_source": policy_source,
+        "candidate_id": candidate_id,
+        "action_id": action_id,
+        "conditions": conditions,
+        "action": local_action,
+        "canary": canary,
+        "safety_stop": safety_stop,
+    }
+    if block_thinking is not None:
+        rule["block_thinking"] = block_thinking
+    if provenance:
+        rule["provenance"] = provenance
+
+    detail = {
+        "schema": _TERMINAL_COMPACTION_FAMILY_VALIDATION_DETAIL_SCHEMA,
+        "status": "rejected" if errors else "accepted",
+        "family": "terminal_output_compaction",
+        "target_rule_family": "terminal_output_compaction",
+        "policy_section": "crunch",
+        "policy_profile": action.get("policy_profile") or "conservative",
+        "action_type": "terminal_output_compaction",
+        "candidate_family": action.get("candidate_family"),
+        "compatibility": edit.get("compatibility") if isinstance(edit.get("compatibility"), dict) else {},
+        "local_action_requirements": edit.get("local_action_requirements") if isinstance(edit.get("local_action_requirements"), dict) else action.get("local_action_requirements") if isinstance(action.get("local_action_requirements"), dict) else {},
+        "canary": {
+            "canary_fraction": canary.get("canary_fraction"),
+            "holdout_fraction": canary.get("holdout_fraction"),
+            "canary_unit": canary.get("canary_unit"),
+        },
+        "safety_stop": {
+            key: safety_stop.get(key)
+            for key in ("min_outcome_samples", "window", "max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta")
+        },
+        "errors": errors,
+    }
+    return {"ok": not errors, "rule": rule, "validation": detail}
 
 
 def _rule_rollout(rule: dict[str, Any]) -> dict[str, Any]:
@@ -1478,8 +1924,106 @@ def plan_rollout_actions(
                 if not isinstance(rules, list):
                     rules = []
                     data["pattern_rules"] = rules
-                file_plan = {"section": section, "path": path, "data": data, "old_text": old_text, "rules": rules}
+                terminal_config = data.get("terminal_output_compaction")
+                if not isinstance(terminal_config, dict):
+                    terminal_config = {}
+                    data["terminal_output_compaction"] = terminal_config
+                terminal_rules = terminal_config.get("rules")
+                if not isinstance(terminal_rules, list):
+                    terminal_rules = []
+                    terminal_config["rules"] = terminal_rules
+                file_plan = {
+                    "section": section,
+                    "path": path,
+                    "data": data,
+                    "old_text": old_text,
+                    "rules": rules,
+                    "terminal_config": terminal_config,
+                    "terminal_rules": terminal_rules,
+                }
                 files[section] = file_plan
+
+            if _is_terminal_compaction_action(action):
+                terminal = _terminal_validate_and_build_rule(action, path=f"$.actions[{index}]")
+                terminal_validation = terminal["validation"]
+                if terminal_validation.get("errors"):
+                    for error in terminal_validation.get("errors", []):
+                        if isinstance(error, dict):
+                            _add_error(errors, str(error.get("path") or f"$.actions[{index}]"), str(error.get("message") or "terminal-output compaction rollout action is invalid"))
+                    actions.append({
+                        "path": f"$.actions[{index}]",
+                        "status": "rejected",
+                        "reason": "terminal-output-compaction-validation-failed",
+                        "policy_section": section,
+                        "action_type": action.get("action_type"),
+                        "target_candidate_id": action.get("target_candidate_id"),
+                        "target_rule_id": action.get("target_rule_id"),
+                        "rule_id": action.get("target_rule_id"),
+                        "family_validation": terminal_validation,
+                    })
+                    continue
+                terminal_rule = terminal["rule"]
+                terminal_index = _terminal_existing_rule_index(
+                    file_plan["terminal_rules"],
+                    rule_id=str(terminal_rule.get("id") or ""),
+                    candidate_id=str(terminal_rule.get("candidate_id") or ""),
+                    action_id=str(terminal_rule.get("action_id") or ""),
+                )
+                existing_rule = file_plan["terminal_rules"][terminal_index] if terminal_index is not None else None
+                current_rule = existing_rule if isinstance(existing_rule, dict) else {}
+                existing_policy_source = str(current_rule.get("policy_source") or "") if current_rule else ""
+                if current_rule and existing_policy_source not in _SAFE_POLICY_SOURCES:
+                    _add_error(errors, f"$.actions[{index}]", "terminal-output compaction rollout action targets a rule with an unsafe policy source")
+                    actions.append({
+                        "path": f"$.actions[{index}]",
+                        "status": "rejected",
+                        "reason": "unsafe-policy-source",
+                        "policy_section": section,
+                        "action_type": "terminal_output_compaction",
+                        "target_candidate_id": action.get("target_candidate_id"),
+                        "target_rule_id": action.get("target_rule_id") or terminal_rule.get("id"),
+                        "rule_id": terminal_rule.get("id"),
+                        "policy_source": existing_policy_source,
+                        "family_validation": terminal_validation,
+                    })
+                    continue
+                current_public = {
+                    "enabled": bool(current_rule.get("enabled", False)) if current_rule else None,
+                    "policy_source": current_rule.get("policy_source") if current_rule else None,
+                    "canary": current_rule.get("canary") if isinstance(current_rule.get("canary"), dict) else {},
+                    "safety_stop": current_rule.get("safety_stop") if isinstance(current_rule.get("safety_stop"), dict) else {},
+                }
+                changed = current_rule != terminal_rule
+                actions.append({
+                    "path": f"$.actions[{index}]",
+                    "status": "planned",
+                    "reason": "terminal-output-compaction-rule-upsert",
+                    "policy_section": section,
+                    "action_type": "terminal_output_compaction",
+                    "target_candidate_id": action.get("target_candidate_id"),
+                    "target_rule_id": action.get("target_rule_id") or terminal_rule.get("id"),
+                    "rule_id": terminal_rule.get("id"),
+                    "rule_index": terminal_index,
+                    "rule_collection": "terminal_output_compaction.rules",
+                    "candidate_family": action.get("candidate_family"),
+                    "confidence": action.get("confidence"),
+                    "blockers": action.get("blockers") if isinstance(action.get("blockers"), list) else [],
+                    "rationale": action.get("rationale"),
+                    "current_rule": current_public,
+                    "family_validation": terminal_validation,
+                    "proposed_edit": {
+                        "changed": changed,
+                        "operation": "update" if terminal_index is not None else "append",
+                        "enabled": terminal_rule.get("enabled"),
+                        "policy_source": terminal_rule.get("policy_source"),
+                        "rule": terminal_rule,
+                        "conditions": terminal_rule.get("conditions"),
+                        "action": terminal_rule.get("action"),
+                        "canary": terminal_rule.get("canary"),
+                        "safety_stop": terminal_rule.get("safety_stop"),
+                    },
+                })
+                continue
 
             rule_index, rule = _find_rule(file_plan["rules"], action)
             if rule is None or rule_index is None:
@@ -1637,11 +2181,40 @@ def apply_rollout_actions(
         if not isinstance(rules, list):
             rules = []
             data["pattern_rules"] = rules
+        terminal_config = data.get("terminal_output_compaction")
+        if not isinstance(terminal_config, dict):
+            terminal_config = {}
+            data["terminal_output_compaction"] = terminal_config
+        terminal_rules = terminal_config.get("rules")
+        if not isinstance(terminal_rules, list):
+            terminal_rules = []
+            terminal_config["rules"] = terminal_rules
         section_actions = [
             action for action in review.get("actions", [])
             if action.get("status") == "planned" and action.get("policy_section") == section
         ]
         for planned in section_actions:
+            if planned.get("rule_collection") == "terminal_output_compaction.rules":
+                edit = planned.get("proposed_edit") or {}
+                rule = edit.get("rule") if isinstance(edit.get("rule"), dict) else None
+                if rule is None:
+                    result["error"] = {"type": "plan_mismatch", "message": "terminal-output compaction rollout plan is missing a local rule"}
+                    return result
+                terminal_config["enabled"] = True
+                current_index = _terminal_existing_rule_index(
+                    terminal_rules,
+                    rule_id=str(rule.get("id") or ""),
+                    candidate_id=str(rule.get("candidate_id") or ""),
+                    action_id=str(rule.get("action_id") or ""),
+                )
+                if current_index is None:
+                    terminal_rules.append(rule)
+                elif 0 <= current_index < len(terminal_rules) and isinstance(terminal_rules[current_index], dict):
+                    terminal_rules[current_index] = rule
+                else:
+                    result["error"] = {"type": "plan_mismatch", "message": "local terminal-output compaction rules changed after rollout action review"}
+                    return result
+                continue
             rule_index = int(planned["rule_index"])
             if rule_index < 0 or rule_index >= len(rules) or not isinstance(rules[rule_index], dict):
                 result["error"] = {"type": "plan_mismatch", "message": "local policy file changed after rollout action review"}

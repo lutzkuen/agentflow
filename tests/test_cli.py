@@ -4898,6 +4898,128 @@ class PolicyReloadCliTests(unittest.TestCase):
             },
         }
 
+    def _terminal_compaction_rollout_bundle(
+        self,
+        *,
+        raw_like: bool = False,
+        unsupported_action: bool = False,
+        unsupported_field: bool = False,
+    ):
+        proposed_edit = {
+            "rule_id": "managed-terminal-output-compaction-rule",
+            "policy_source": "managed-recommended",
+            "conditions": {
+                "source_surface": "anthropic_messages",
+                "app_family": "claude_code",
+                "phase": "tool-result",
+                "category": "tool-result",
+                "text_bucket": "32k_128k_chars",
+                "labels": ["terminal-output", "plateau-session"],
+                "expected_saved_tokens_bucket": "1k_2k_tokens",
+                "model_pattern": "sonnet",
+                "has_tools": True,
+                "stream": True,
+                "uses_thinking": False,
+            },
+            "action": {
+                "type": "rewrite_provider_body" if unsupported_action else "terminal_output_compaction",
+                "keep_recent_turns": 2,
+                "min_block_chars": 700,
+                "head_lines": 9,
+                "tail_lines": 11,
+                "max_evidence_lines": 55,
+                "min_saved_chars": 250,
+                "preserve_diagnostics": True,
+                "preserve_tool_protocol": True,
+            },
+            "canary": {
+                "enabled": True,
+                "canary_fraction": 0.25,
+                "holdout_fraction": 0.75,
+                "canary_salt": "terminal-rollout-test",
+                "canary_unit": "request_fingerprint",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 7,
+                "window": 77,
+                "max_error_rate": 0.2,
+                "max_retry_rate": 0.3,
+                "max_negative_savings_rate": 0.4,
+                "max_error_rate_delta": 0.05,
+            },
+            "compatibility": {
+                "minimum_local_client_version": "0.1.0",
+                "supported_local_action_families": ["crunch"],
+            },
+            "local_action_requirements": {
+                "expected_policy_section": "crunch",
+                "actionability_status": "review-only-local-action",
+            },
+        }
+        if raw_like:
+            proposed_edit["raw_request"] = "raw terminal output must not be accepted"
+        if unsupported_field:
+            proposed_edit["action"]["provider_body_patch"] = {"path": "$.messages"}
+        action = {
+            "schema": "agentflow.pattern_rollout_action.v1",
+            "action_type": "widen",
+            "candidate_family": "terminal-output-compaction-crunch-policy-rule",
+            "target_candidate_id": "terminal-compaction-candidate-123",
+            "target_rule_id": "managed-terminal-output-compaction-rule",
+            "policy_section": "crunch",
+            "current_fraction": 0.0,
+            "recommended_fraction": 0.25,
+            "confidence": 0.91,
+            "rationale": "Terminal-output canary evidence is positive without error regression.",
+            "blockers": [],
+            "required_local_review": True,
+            "managed_enforced": False,
+            "proposed_edit": proposed_edit,
+            "privacy_summary": {
+                "metadata_only": True,
+                "raw_payloads_returned": False,
+            },
+        }
+        return self._rollout_bundle_for_actions([action])
+
+    def _write_terminal_compaction_crunch_file(self, tmp: str):
+        path = Path(tmp) / "crunch_rules.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "enabled": True,
+                    "threshold_chars": 24000,
+                    "terminal_output_compaction": {
+                        "enabled": True,
+                        "rules": [
+                            {
+                                "id": "existing-terminal-rule",
+                                "enabled": True,
+                                "policy_source": "local-manual",
+                                "candidate_id": "existing-terminal-candidate",
+                                "conditions": {"category": "tool-result"},
+                                "action": {"type": "compact_terminal_output", "keep_recent_turns": 1},
+                            }
+                        ],
+                    },
+                    "pattern_rules": [
+                        {
+                            "id": "unrelated-pattern-rule",
+                            "enabled": True,
+                            "policy_source": "managed-recommended",
+                            "candidate_id": "unrelated-pattern-candidate",
+                            "conditions": {"pattern_hashes": [self._pattern_hash()]},
+                            "action": {"type": "shorten", "head_chars": 500, "tail_chars": 500},
+                        }
+                    ],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
     def _write_rollout_crunch_rule(self, tmp: str, *, policy_source: str = "managed-recommended"):
         path = Path(tmp) / "crunch_rules.yaml"
         path.write_text(
@@ -4938,6 +5060,181 @@ class PolicyReloadCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return path
+
+    def test_managed_rollout_actions_review_reports_terminal_output_compaction_rule_edit(self):
+        bundle = self._terminal_compaction_rollout_bundle()
+
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_review_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["planned_action_count"], 1)
+        action = payload["actions"][0]
+        self.assertEqual(action["rule_collection"], "terminal_output_compaction.rules")
+        self.assertEqual(action["family_validation"]["status"], "accepted")
+        self.assertEqual(action["family_validation"]["family"], "terminal_output_compaction")
+        self.assertEqual(action["family_validation"]["compatibility"]["minimum_local_client_version"], "0.1.0")
+        edit = action["proposed_edit"]
+        self.assertEqual(edit["operation"], "append")
+        self.assertTrue(edit["changed"])
+        self.assertEqual(edit["policy_source"], "managed-recommended")
+        self.assertEqual(edit["conditions"]["workflow_phase"], "tool-result")
+        self.assertEqual(edit["conditions"]["expected_saved_token_bucket"], "1k_2k_tokens")
+        self.assertEqual(edit["action"]["type"], "compact_terminal_output")
+        self.assertEqual(edit["action"]["keep_recent_turns"], 2)
+        self.assertEqual(edit["canary"]["canary_fraction"], 0.25)
+        self.assertEqual(edit["canary"]["holdout_fraction"], 0.75)
+        self.assertEqual(edit["safety_stop"]["min_outcome_samples"], 7)
+
+    def test_managed_rollout_actions_apply_dry_run_reports_terminal_compaction_without_writing(self):
+        bundle = self._terminal_compaction_rollout_bundle()
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "crunch_rules.yaml"
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "--dry-run", "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertFalse(path.exists())
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["applied_sections"], ["crunch"])
+        self.assertTrue(payload["files"][0]["changed"])
+        self.assertIsNone(payload["files"][0]["backup_path"])
+        self.assertEqual(payload["actions"][0]["proposed_edit"]["rule"]["policy_source"], "managed-recommended")
+
+    def test_managed_rollout_actions_apply_terminal_compaction_creates_backup_and_preserves_rules(self):
+        bundle = self._terminal_compaction_rollout_bundle()
+
+        with TemporaryDirectory() as tmp:
+            path = self._write_terminal_compaction_crunch_file(tmp)
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+            written = yaml.safe_load(path.read_text(encoding="utf-8"))
+            backup_count = len(list(Path(tmp).glob("crunch_rules.yaml.bak-*")))
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["applied_sections"], ["crunch"])
+        self.assertTrue(payload["files"][0]["changed"])
+        self.assertIsNotNone(payload["files"][0]["backup_path"])
+        self.assertEqual(backup_count, 1)
+        self.assertEqual(written["pattern_rules"][0]["id"], "unrelated-pattern-rule")
+        terminal_rules = written["terminal_output_compaction"]["rules"]
+        self.assertEqual([rule["id"] for rule in terminal_rules], ["existing-terminal-rule", "managed-terminal-output-compaction-rule"])
+        managed_rule = terminal_rules[1]
+        self.assertEqual(managed_rule["policy_source"], "managed-recommended")
+        self.assertEqual(managed_rule["candidate_id"], "terminal-compaction-candidate-123")
+        self.assertEqual(managed_rule["action"]["type"], "compact_terminal_output")
+        self.assertEqual(managed_rule["canary"]["canary_fraction"], 0.25)
+        self.assertEqual(managed_rule["safety_stop"]["max_error_rate_delta"], 0.05)
+
+    def test_managed_rollout_actions_reject_terminal_compaction_raw_and_unsupported_before_writing(self):
+        for bundle in (
+            self._terminal_compaction_rollout_bundle(raw_like=True),
+            self._terminal_compaction_rollout_bundle(unsupported_action=True),
+            self._terminal_compaction_rollout_bundle(unsupported_field=True),
+        ):
+            with TemporaryDirectory() as tmp:
+                path = self._write_terminal_compaction_crunch_file(tmp)
+                before = path.read_text(encoding="utf-8")
+                stdout = io.StringIO()
+                code = cli.managed_rollout_actions_apply_cli(
+                    ["--config-dir", tmp, "-"],
+                    stdin=io.StringIO(json.dumps(bundle)),
+                    stdout=stdout,
+                )
+
+                self.assertEqual(code, 1)
+                self.assertEqual(path.read_text(encoding="utf-8"), before)
+                self.assertEqual(list(Path(tmp).glob("crunch_rules.yaml.bak-*")), [])
+                payload = json.loads(stdout.getvalue())
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["type"], "validation_failed")
+
+    def test_managed_rollout_actions_reject_terminal_compaction_local_manual_overwrite(self):
+        bundle = self._terminal_compaction_rollout_bundle()
+
+        with TemporaryDirectory() as tmp:
+            path = self._write_terminal_compaction_crunch_file(tmp)
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data["terminal_output_compaction"]["rules"][0]["id"] = "managed-terminal-output-compaction-rule"
+            data["terminal_output_compaction"]["rules"][0]["candidate_id"] = "terminal-compaction-candidate-123"
+            path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+            before = path.read_text(encoding="utf-8")
+            stdout = io.StringIO()
+            code = cli.managed_rollout_actions_apply_cli(
+                ["--config-dir", tmp, "-"],
+                stdin=io.StringIO(json.dumps(bundle)),
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(list(Path(tmp).glob("crunch_rules.yaml.bak-*")), [])
+            payload = json.loads(stdout.getvalue())
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["review"]["actions"][0]["reason"], "unsafe-policy-source")
+
+    def test_managed_rollout_actions_terminal_compaction_queues_feedback_when_server_unavailable(self):
+        bundle = self._terminal_compaction_rollout_bundle()
+        ManagedFeedbackFlushClient.calls = []
+        ManagedFeedbackFlushClient.status_code = 503
+        ManagedFeedbackFlushClient.text = "managed unavailable"
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                    "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://managed.test",
+                    "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with patch("agentflow_proxy.recommendations.httpx.AsyncClient", ManagedFeedbackFlushClient):
+                    code = cli.managed_rollout_actions_apply_cli(
+                        ["--config-dir", tmp, "--db", db_path, "--dry-run", "-"],
+                        stdin=io.StringIO(json.dumps(bundle)),
+                        stdout=stdout,
+                    )
+            status_stdout = io.StringIO()
+            cli.managed_feedback_status_cli(
+                ["--db", db_path, "--source-surface", "rollout_action_lifecycle"],
+                stdout=status_stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["managed_lifecycle_feedback"]["status"], "retryable-error")
+        self.assertEqual(payload["managed_lifecycle_feedback"]["endpoint"], "/v1/policy-events")
+        self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
+        status_payload = json.loads(status_stdout.getvalue())
+        self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        rendered = json.dumps(ManagedFeedbackFlushClient.calls[0]["json"], sort_keys=True)
+        self.assertIn("terminal_output_compaction", rendered)
+        self.assertNotIn("raw terminal output", rendered)
+        self.assertNotIn("crunch_rules.yaml", rendered)
 
     def test_managed_rollout_actions_review_cli_reports_local_fraction_edit(self):
         bundle = self._rollout_action_bundle(action_type="widen")
