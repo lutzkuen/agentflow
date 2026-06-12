@@ -546,6 +546,199 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
         self.assertFalse(payload["privacy"]["cache_keys_included"])
 
+    def test_cache_replay_cohorts_rank_stable_dependency_plateau_without_raw_ids(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        def audit(reason=None, safe=True):
+            return {
+                "schema": "agentflow.cache_file_dependency_audit.v1",
+                "file_watch_enabled": True,
+                "snapshot_root_policy": "stored-local-paths",
+                "root_path_included": False,
+                "snapshot_count": 2,
+                "snapshot_count_bucket": "2_5",
+                "candidate_path_count_bucket": "2_5",
+                "raw_candidate_path_count_bucket": "2_5",
+                "distinct_candidate_path_count_bucket": "2_5",
+                "dependency_capture_reason": "complete",
+                "present_path_count": 2,
+                "missing_path_count": 0,
+                "changed_path_count": 1 if reason == "dependency-changed" else 0,
+                "deleted_path_count": 0,
+                "created_path_count": 0,
+                "invalidation_reason": reason,
+                "safe_invalidation_evidence": safe,
+                "file_dependency_evidence_available": safe,
+                "paths_included": False,
+            }
+
+        def proposal(fingerprint, *, status="session-plateau-dry-run-eligible", blockers=None):
+            return {
+                "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+                "status": status,
+                "reason": status,
+                "proposal_fingerprint": "sha256:" + fingerprint,
+                "rule_id": "private raw rule id should hash",
+                "policy_source": "local-manual",
+                "phase": "tool-execution",
+                "category": "tool-result",
+                "stream": True,
+                "has_tool_blocks": True,
+                "thinking_present": False,
+                "text_size_bucket": "32k_128k_chars",
+                "projected_tokens_saved_est": 9000,
+                "projected_savings_bucket": "1k_10k_tokens",
+                "projected_cost_savings_bucket": "1c_5c",
+                "blockers": blockers or [],
+                "blocker_families": {"safe_invalidation": bool(blockers)},
+                "review_steps": ["review metadata-only session plateau shape"],
+                "privacy": {"metadata_only": True},
+            }
+
+        def log_plateau(store, call_id, created_at, *, session_id, cost, dep_audit, category="tool-result", proposal_hash="a" * 16):
+            store.log_call(
+                id=call_id,
+                created_at=created_at,
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=100,
+                input_tokens_est=4000,
+                output_tokens_est=200,
+                actual_input_tokens=4000,
+                actual_output_tokens=200,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({
+                    "category": category,
+                    "workflow_phase": "tool-execution",
+                    "has_tools": category.startswith("tool"),
+                    "text_chars": 64000,
+                    "managed_pattern_features": {
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude_code",
+                        "category": category,
+                        "workflow_phase": "tool-execution",
+                        "text_bucket": "32k_128k_chars",
+                        "token_bucket": "1k_10k_tokens",
+                        "pattern_hashes": ["sha256:" + "d" * 64],
+                    },
+                }),
+                cache_json=stable_json({
+                    "status": "skipped",
+                    "reason": "streaming",
+                    "policy_source": "local-default",
+                    "tool_cache_enabled": False,
+                    "replayability_level": "local-exact-response",
+                    "replay_scope": "session",
+                    "replay_scope_id_available": True,
+                    "cacheability": {
+                        "cacheability_bucket": "high",
+                        "static_information_hint": True,
+                        "exact_cache_candidate_hint": True,
+                    },
+                    "file_dependency_audit": dep_audit,
+                    "session_memory_hints": {
+                        "dry_run_replay_proposal": proposal(proposal_hash),
+                    },
+                }),
+                request_json=stable_json({"messages": [{"content": "raw plateau prompt must not leak"}]}),
+                response_json=stable_json({"content": "raw plateau response must not leak"}),
+                session_id=session_id,
+                category=category,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                log_plateau(
+                    store,
+                    "stable-secret-call-1",
+                    "2026-06-10T01:00:00+00:00",
+                    session_id="stable-session-secret",
+                    cost=0.02,
+                    dep_audit=audit(safe=True),
+                )
+                log_plateau(
+                    store,
+                    "stable-secret-call-2",
+                    "2026-06-10T01:01:00+00:00",
+                    session_id="stable-session-secret",
+                    cost=0.03,
+                    dep_audit=audit(safe=True),
+                )
+                log_plateau(
+                    store,
+                    "stale-secret-call-1",
+                    "2026-06-10T01:02:00+00:00",
+                    session_id="stale-session-secret",
+                    cost=0.05,
+                    dep_audit=audit(reason="dependency-changed", safe=False),
+                    proposal_hash="b" * 16,
+                )
+                log_plateau(
+                    store,
+                    "stale-secret-call-2",
+                    "2026-06-10T01:03:00+00:00",
+                    session_id="stale-session-secret",
+                    cost=0.05,
+                    dep_audit=audit(reason="dependency-changed", safe=False),
+                    proposal_hash="b" * 16,
+                )
+                log_plateau(
+                    store,
+                    "oneoff-secret-call",
+                    "2026-06-10T01:04:00+00:00",
+                    session_id="oneoff-session-secret",
+                    cost=0.04,
+                    dep_audit=audit(safe=True),
+                    category="chat",
+                    proposal_hash="c" * 16,
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.cache_replay_cohorts_cli(["--db", db_path, "--scan-limit", "20", "--limit", "10"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.cache_replay_plateau_cohort_ranking.v1")
+        self.assertEqual(payload["summary"]["activation_ready_count"], 1)
+        self.assertEqual(payload["summary"]["needs_more_evidence_count"], 1)
+        self.assertEqual(payload["summary"]["blocked_count"], 1)
+        self.assertEqual(payload["cohorts"][0]["readiness"], "activation-ready")
+        self.assertEqual(payload["cohorts"][0]["dependency_state"], "stable")
+        self.assertEqual(payload["cohorts"][0]["projected_hits"], 1)
+        self.assertEqual(payload["cohorts"][0]["recommended_canary"]["safe_invalidation"], True)
+        self.assertTrue(any(row["readiness"] == "needs-more-evidence" for row in payload["cohorts"]))
+        blocked = [row for row in payload["cohorts"] if row["readiness"] == "blocked"][0]
+        self.assertIn("dependency-invalidated", blocked["blocker_reasons"])
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw plateau prompt must not leak",
+            "raw plateau response must not leak",
+            "stable-session-secret",
+            "stale-session-secret",
+            "oneoff-session-secret",
+            "stable-secret-call",
+            "stale-secret-call",
+            "oneoff-secret-call",
+            "sha256:" + "d" * 64,
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(payload["privacy"]["raw_session_ids_included"])
+        self.assertFalse(payload["privacy"]["cache_keys_included"])
+        self.assertFalse(payload["privacy"]["pattern_hashes_included"])
+
     def test_cache_smoke_diagnostic_cli_explains_exact_cache_hits_and_skips(self):
         from agentflow_proxy.cache import cache_key_for
         from agentflow_proxy.store import Store, stable_json

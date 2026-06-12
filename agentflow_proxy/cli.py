@@ -4956,6 +4956,54 @@ def cache_replayability_report_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def cache_replay_cohorts_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Rank replay-ready plateau cohorts from local cache metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--scan-limit",
+        type=int,
+        default=1000,
+        help="Recent provider and Codex rows per surface to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="Ranked cohorts to return, default: 25",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.stats import stats_cache_replay_cohort_ranking
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = asyncio.run(
+            stats_cache_replay_cohort_ranking(
+                store,
+                limit=args.limit,
+                row_limit=args.scan_limit,
+            )
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def cache_smoke_diagnostic_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Diagnose whether the local exact cache can serve hits from metadata")
     parser.add_argument(
@@ -7130,6 +7178,10 @@ def session_phase_memory_main() -> None:
 
 def cache_replayability_report_main() -> None:
     raise SystemExit(cache_replayability_report_cli())
+
+
+def cache_replay_cohorts_main() -> None:
+    raise SystemExit(cache_replay_cohorts_cli())
 
 
 def cache_smoke_diagnostic_main() -> None:

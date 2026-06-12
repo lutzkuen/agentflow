@@ -6020,6 +6020,366 @@ async def stats_cache_replayability(store_obj: Any, limit: int = 25) -> dict[str
     return _cache_replayability_report_from_units(units, limit=limit)
 
 
+_CACHE_REPLAY_STALE_BLOCKERS = {"current-state", "low-cacheability", "user-specific"}
+_CACHE_REPLAY_ACTIVATION_SETUP_BLOCKERS = {
+    "semantic-cache-disabled",
+    "streaming",
+    "tool-call-disabled",
+}
+
+
+def _cache_replay_dependency_state(unit: dict[str, Any]) -> str:
+    if not bool(unit.get("has_tools")):
+        return "not-required"
+    blockers = {str(item) for item in unit.get("blockers") or []}
+    audit = unit.get("file_dependency_audit") if isinstance(unit.get("file_dependency_audit"), dict) else {}
+    reason = str(audit.get("invalidation_reason") or "")
+    if blockers & {"dependency-changed", "dependency-created", "dependency-deleted", "dependency-cap-exceeded"}:
+        return "invalidated"
+    if reason in {"dependency-changed", "dependency-created", "dependency-deleted"}:
+        return "invalidated"
+    if reason in {"file-dependency-missing", "dependency-missing", "file-watch-disabled"}:
+        return "missing"
+    if blockers & {"file-dependency-missing", "dependency-missing", "file-watch-disabled"}:
+        return "missing"
+    if bool(unit.get("safe_invalidation_evidence")):
+        return "stable"
+    if bool(unit.get("file_dependency_evidence_available")):
+        return "evidence-without-safe-invalidation"
+    return "missing"
+
+
+def _cache_replay_provider_adoption_state(unit: dict[str, Any]) -> tuple[str, list[str]]:
+    cache = unit.get("cache") if isinstance(unit.get("cache"), dict) else {}
+    candidates = [
+        cache.get("provider_adoption_gate"),
+        cache.get("provider_adoption_health"),
+        cache.get("provider_adoption"),
+        (unit.get("pattern_features") or {}).get("provider_adoption_gate")
+        if isinstance(unit.get("pattern_features"), dict)
+        else None,
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        reason_codes = [
+            public_label(item, "unknown")
+            for item in candidate.get("reason_codes") or candidate.get("blockers") or []
+            if isinstance(item, (str, int, float, bool))
+        ]
+        status = public_label(candidate.get("status") or candidate.get("readiness") or "", "")
+        if candidate.get("blocking") is True or status in {"blocked", "regressed", "failed"}:
+            return "blocked", sorted(set(reason_codes or ["provider-adoption-regression"]))
+        if status in {"ready", "pass", "healthy"} or candidate.get("blocking") is False:
+            return "ready", sorted(set(reason_codes))
+    return "not-observed", []
+
+
+def _cache_replay_plateau_evidence(unit: dict[str, Any]) -> dict[str, Any]:
+    proposal = _public_session_memory_replay_proposal(
+        unit.get("session_memory_replay_proposal")
+        if isinstance(unit.get("session_memory_replay_proposal"), dict)
+        else {}
+    )
+    text_chars = _as_int(unit.get("text_chars"))
+    evidence = {
+        "session_memory_proposal": proposal is not None,
+        "session_memory_status": proposal.get("status") if proposal else None,
+        "large_context": text_chars >= 8000,
+        "text_size_bucket": unit.get("text_size_bucket"),
+    }
+    evidence["present"] = bool(
+        proposal is not None
+        or (
+            text_chars >= 8000
+            and str(unit.get("category") or "").startswith("tool")
+        )
+    )
+    return evidence
+
+
+def _cache_replay_cohort_basis(unit: dict[str, Any]) -> dict[str, Any]:
+    cache = unit.get("cache") if isinstance(unit.get("cache"), dict) else {}
+    features = unit.get("pattern_features") if isinstance(unit.get("pattern_features"), dict) else {}
+    dependency_state = _cache_replay_dependency_state(unit)
+    provider_adoption_state, _provider_reasons = _cache_replay_provider_adoption_state(unit)
+    replay_scope = public_label(cache.get("replay_scope") or features.get("replay_scope") or "metadata-shape", "metadata-shape")
+    return {
+        "source_surface": unit.get("source_surface"),
+        "granularity": unit.get("granularity"),
+        "app_family": public_label(features.get("app_family") or "unknown", "unknown"),
+        "category": unit.get("category"),
+        "workflow_phase": unit.get("workflow_phase"),
+        "stream": bool(unit.get("stream")),
+        "has_tools": bool(unit.get("has_tools")),
+        "replay_scope": replay_scope,
+        "replay_scope_id_available": bool(cache.get("replay_scope_id_available")),
+        "replayability_level": unit.get("replayability_level"),
+        "cacheability_bucket": unit.get("cacheability_bucket"),
+        "requested_tier": unit.get("requested_tier"),
+        "target_tier": unit.get("target_tier"),
+        "text_size_bucket": unit.get("text_size_bucket"),
+        "dependency_state": dependency_state,
+        "dependency_snapshot_count_bucket": (
+            (unit.get("file_dependency_audit") or {}).get("snapshot_count_bucket")
+            if isinstance(unit.get("file_dependency_audit"), dict)
+            else "unknown"
+        ),
+        "provider_adoption_state": provider_adoption_state,
+    }
+
+
+def _cache_replay_finalize_cohort(bucket: dict[str, Any]) -> dict[str, Any]:
+    count = _as_int(bucket.get("count"))
+    blockers = set(bucket.pop("_blockers"))
+    if count <= 1:
+        blockers.add("insufficient-repeat-evidence")
+    if not bool(bucket.get("plateau_evidence_present")):
+        blockers.add("plateau-evidence-missing")
+    dependency_state = str(bucket.get("dependency_state") or "unknown")
+    if dependency_state == "invalidated":
+        blockers.add("dependency-invalidated")
+    elif dependency_state in {"missing", "evidence-without-safe-invalidation"}:
+        blockers.add("dependency-evidence-missing")
+    provider_reasons = bucket.pop("_provider_adoption_reason_codes")
+    if str(bucket.get("provider_adoption_state")) == "blocked":
+        blockers.update(provider_reasons or ["provider-adoption-regression"])
+
+    hard_blockers = (
+        (blockers & _CACHE_REPLAY_STALE_BLOCKERS)
+        or "dependency-invalidated" in blockers
+        or "missing-cache-metadata" in blockers
+        or "turn-level-only" in blockers
+        or "provider-adoption-regression" in blockers
+    )
+    evidence_blockers = {
+        "dependency-evidence-missing",
+        "insufficient-repeat-evidence",
+        "plateau-evidence-missing",
+        "provider-adoption-evidence-missing",
+    }
+    if hard_blockers:
+        readiness = "blocked"
+    elif blockers & evidence_blockers:
+        readiness = "needs-more-evidence"
+    else:
+        readiness = "activation-ready"
+
+    avg_cost = float(bucket["estimated_cost_usd"]) / count if count else 0.0
+    projected_hits = max(0, count - 1)
+    projected_savings = max(0.0, float(bucket["estimated_cost_usd"]) - avg_cost) if projected_hits else 0.0
+    activation_blockers = sorted(blockers - _CACHE_REPLAY_ACTIVATION_SETUP_BLOCKERS)
+    recommended_canary = None
+    if readiness == "activation-ready":
+        cohort_hash = str(bucket["cohort_id"]).split(":", 1)[-1]
+        recommended_canary = {
+            "rule_id": f"local-cache-replay-cohort:{cohort_hash}",
+            "policy_source": "local-manual",
+            "source_surface": bucket.get("source_surface"),
+            "category": bucket.get("category"),
+            "workflow_phase": bucket.get("workflow_phase"),
+            "replay_scope": bucket.get("replay_scope"),
+            "streaming": bool(bucket.get("stream")),
+            "allow_tool_calls": bool(bucket.get("has_tools")),
+            "safe_invalidation": bool(bucket.get("has_tools")),
+            "replayability_levels": [bucket.get("replayability_level")],
+            "canary_fraction": 0.05,
+            "holdout_fraction": 0.95,
+            "requires_human_review": True,
+            "pattern_hashes_included": False,
+        }
+
+    public = {
+        key: value
+        for key, value in bucket.items()
+        if key
+        not in {
+            "sessions",
+            "estimated_cost_usd",
+            "baseline_cost_usd",
+            "input_tokens",
+            "text_chars",
+        }
+    }
+    public.update({
+        "readiness": readiness,
+        "blocker_reasons": activation_blockers,
+        "setup_required": sorted(blockers & _CACHE_REPLAY_ACTIVATION_SETUP_BLOCKERS),
+        "session_count": len(bucket["sessions"]),
+        "projected_hits": projected_hits,
+        "projected_saved_cost_usd": round(projected_savings, 6),
+        "projected_cost_bucket": _cache_replay_cost_bucket(projected_savings),
+        "estimated_cost_usd": round(float(bucket["estimated_cost_usd"]), 6),
+        "baseline_cost_usd": round(float(bucket["baseline_cost_usd"]), 6),
+        "avg_input_tokens": round(_as_int(bucket.get("input_tokens")) / count) if count else 0,
+        "avg_text_chars": round(_as_int(bucket.get("text_chars")) / count) if count else 0,
+        "provider_adoption_reason_codes": sorted(set(provider_reasons)),
+        "recommended_canary": recommended_canary,
+        "raw_session_ids_included": False,
+        "cache_keys_included": False,
+        "pattern_hashes_included": False,
+    })
+    return public
+
+
+def _cache_replay_cohort_ranking_from_units(units: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for unit in units:
+        basis = _cache_replay_cohort_basis(unit)
+        raw = json.dumps(basis, sort_keys=True, separators=(",", ":"))
+        cohort_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        bucket = grouped.setdefault(
+            cohort_hash,
+            {
+                "schema": "agentflow.cache_replay_plateau_cohort.v1",
+                "cohort_id": f"cache-replay-cohort:{cohort_hash}",
+                "cohort_basis": basis,
+                "source_surface": basis["source_surface"],
+                "granularity": basis["granularity"],
+                "app_family": basis["app_family"],
+                "category": basis["category"],
+                "workflow_phase": basis["workflow_phase"],
+                "stream": bool(basis["stream"]),
+                "has_tools": bool(basis["has_tools"]),
+                "replay_scope": basis["replay_scope"],
+                "replay_scope_id_available": bool(basis["replay_scope_id_available"]),
+                "replayability_level": basis["replayability_level"],
+                "cacheability_bucket": basis["cacheability_bucket"],
+                "dependency_state": basis["dependency_state"],
+                "provider_adoption_state": basis["provider_adoption_state"],
+                "count": 0,
+                "sessions": set(),
+                "estimated_cost_usd": 0.0,
+                "baseline_cost_usd": 0.0,
+                "input_tokens": 0,
+                "text_chars": 0,
+                "first_seen_at": unit.get("created_at"),
+                "last_seen_at": unit.get("created_at"),
+                "plateau_evidence_present": False,
+                "session_memory_proposal_count": 0,
+                "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+                "safe_invalidation_evidence": bool(unit.get("safe_invalidation_evidence")),
+                "file_dependency_audit": unit.get("file_dependency_audit"),
+                "_blockers": set(unit.get("blockers") or []),
+                "_provider_adoption_reason_codes": set(),
+            },
+        )
+        bucket["count"] += 1
+        session = str(unit.get("session_id") or "")
+        if session:
+            bucket["sessions"].add(hashlib.sha256(session.encode("utf-8")).hexdigest()[:16])
+        bucket["estimated_cost_usd"] += _as_float(unit.get("cost_est_usd"))
+        bucket["baseline_cost_usd"] += _as_float(unit.get("baseline_cost_usd"))
+        bucket["input_tokens"] += _as_int(unit.get("input_tokens"))
+        bucket["text_chars"] += _as_int(unit.get("text_chars"))
+        bucket["file_dependency_evidence_available"] = bool(
+            bucket.get("file_dependency_evidence_available") or unit.get("file_dependency_evidence_available")
+        )
+        bucket["safe_invalidation_evidence"] = bool(bucket.get("safe_invalidation_evidence") or unit.get("safe_invalidation_evidence"))
+        plateau = _cache_replay_plateau_evidence(unit)
+        bucket["plateau_evidence_present"] = bool(bucket.get("plateau_evidence_present") or plateau.get("present"))
+        if plateau.get("session_memory_proposal"):
+            bucket["session_memory_proposal_count"] += 1
+        for blocker in unit.get("blockers") or []:
+            bucket["_blockers"].add(str(blocker))
+        _state, provider_reason_codes = _cache_replay_provider_adoption_state(unit)
+        for code in provider_reason_codes:
+            bucket["_provider_adoption_reason_codes"].add(str(code))
+        if str(unit.get("created_at") or "") < str(bucket.get("first_seen_at") or unit.get("created_at") or ""):
+            bucket["first_seen_at"] = unit.get("created_at")
+        if str(unit.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+            bucket["last_seen_at"] = unit.get("created_at")
+
+    cohorts = [_cache_replay_finalize_cohort(bucket) for bucket in grouped.values()]
+    readiness_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    dependency_counts: dict[str, int] = {}
+    adoption_counts: dict[str, int] = {}
+    for row in cohorts:
+        readiness = str(row.get("readiness") or "unknown")
+        readiness_counts[readiness] = readiness_counts.get(readiness, 0) + 1
+        dependency = str(row.get("dependency_state") or "unknown")
+        dependency_counts[dependency] = dependency_counts.get(dependency, 0) + 1
+        adoption = str(row.get("provider_adoption_state") or "unknown")
+        adoption_counts[adoption] = adoption_counts.get(adoption, 0) + 1
+        for blocker in row.get("blocker_reasons") or []:
+            blocker_counts[str(blocker)] = blocker_counts.get(str(blocker), 0) + 1
+
+    cohorts.sort(
+        key=lambda row: (
+            row.get("readiness") == "activation-ready",
+            row.get("readiness") == "needs-more-evidence",
+            _as_float(row.get("projected_saved_cost_usd")),
+            _as_int(row.get("projected_hits")),
+            _as_int(row.get("count")),
+            _as_float(row.get("estimated_cost_usd")),
+        ),
+        reverse=True,
+    )
+    output_limit = max(1, min(int(limit or 25), 1000))
+    return {
+        "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+        "generated_at": utc_now(),
+        "summary": {
+            "candidate_rows": len(units),
+            "cohort_count": len(cohorts),
+            "activation_ready_count": readiness_counts.get("activation-ready", 0),
+            "needs_more_evidence_count": readiness_counts.get("needs-more-evidence", 0),
+            "blocked_count": readiness_counts.get("blocked", 0),
+            "projected_ready_hits": sum(
+                _as_int(row.get("projected_hits"))
+                for row in cohorts
+                if row.get("readiness") == "activation-ready"
+            ),
+            "projected_ready_saved_cost_usd": round(
+                sum(
+                    _as_float(row.get("projected_saved_cost_usd"))
+                    for row in cohorts
+                    if row.get("readiness") == "activation-ready"
+                ),
+                6,
+            ),
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "readiness_breakdown": _breakdown_from_counts(readiness_counts),
+        "dependency_breakdown": _breakdown_from_counts(dependency_counts),
+        "provider_adoption_breakdown": _breakdown_from_counts(adoption_counts),
+        "blocker_breakdown": _breakdown_from_counts(blocker_counts),
+        "cohorts": cohorts[:output_limit],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "provider_bodies_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "cache_keys_included": False,
+            "pattern_hashes_included": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "basis": "stored cache decision, dependency, session-memory plateau, provider-adoption, and cost metadata only",
+        },
+    }
+
+
+async def stats_cache_replay_cohort_ranking(
+    store_obj: Any,
+    *,
+    limit: int = 25,
+    row_limit: int | None = None,
+) -> dict[str, Any]:
+    scan_limit = max(1, min(_as_int(row_limit if row_limit is not None else 1000) or 1000, 10000))
+    output_limit = max(1, min(_as_int(limit) or 25, 1000))
+    units = _cache_replayability_units_from_store(store_obj, row_limit=scan_limit)
+    return _cache_replay_cohort_ranking_from_units(units, limit=output_limit)
+
+
 def _cache_table_count(conn: Any) -> int | None:
     try:
         row = conn.execute("select count(*) as c from cache").fetchone()
