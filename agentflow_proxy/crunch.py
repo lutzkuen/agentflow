@@ -178,6 +178,36 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     return candidates
 
 
+def _first_existing_rule_path(filename: str, env_name: str) -> Path | None:
+    for path in _manual_rule_candidates(filename, env_name):
+        if path.exists():
+            return path
+    return None
+
+
+def _apply_scaffold_canary_overlay(policy: dict[str, Any], *, base_source: str) -> str | None:
+    path = _first_existing_rule_path("scaffold_canary_policy.yaml", "AGENTFLOW_SCAFFOLD_CANARY_POLICY")
+    if path is None:
+        return None
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        return None
+    provider_scaffolding = data.get("repeated_provider_scaffolding") or {}
+    if not isinstance(provider_scaffolding, dict):
+        return None
+    _apply_provider_scaffolding_policy_yaml(
+        policy,
+        provider_scaffolding,
+        default_policy_source=str(data.get("policy_source") or "managed-recommended"),
+    )
+    target = policy["repeated_provider_scaffolding"]
+    target["policy_source"] = str(data.get("policy_source") or target.get("policy_source") or "managed-recommended")
+    target["overlay_rule_path"] = str(path)
+    target["base_policy_source"] = base_source
+    return str(path)
+
+
 def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
     for path in _manual_rule_candidates("crunch_rules.yaml", "AGENTFLOW_CRUNCH_RULES"):
         if not path.exists():
@@ -225,6 +255,7 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             if isinstance(codex_scaffolding, dict):
                 _apply_codex_scaffolding_policy_yaml(policy, codex_scaffolding)
             _promote_legacy_summary_provider(policy)
+            _apply_scaffold_canary_overlay(policy, base_source="local-manual")
             return policy, "local-manual", str(path)
 
     defaults_path = Path(__file__).parent / "crunch_rules.yaml"
@@ -302,6 +333,7 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
     if os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD") is not None:
         provider["max_summary_cost_usd"] = float(os.getenv("AGENTFLOW_ENHANCED_CRUNCH_MAX_SUMMARY_COST_USD", "0"))
     _promote_legacy_summary_provider(policy)
+    _apply_scaffold_canary_overlay(policy, base_source="local-default")
     return policy, "local-default", str(defaults_path)
 
 
@@ -565,20 +597,22 @@ def _parse_provider_scaffolding_rules_yaml(value: Any, *, default_policy_source:
             or (item.get("conditions") or {}).get("pattern_hashes")
             or (item.get("conditions") or {}).get("pattern_hash")
         )
-        if not pattern_hashes:
-            continue
         action = item.get("action") or {}
         if not isinstance(action, dict):
             action = {}
         conditions = item.get("conditions") or {}
         if not isinstance(conditions, dict):
             conditions = {}
+        match_any_repeated = _as_bool(item.get("match_any_repeated", conditions.get("match_any_repeated")), False)
+        if not pattern_hashes and not match_any_repeated:
+            continue
         normalized: dict[str, Any] = {
             "id": str(item.get("id") or item.get("rule_id") or item.get("candidate_id") or f"repeated-provider-scaffold-{index + 1}"),
             "candidate_id": item.get("candidate_id"),
             "enabled": _as_bool(item.get("enabled"), True),
             "policy_source": str(item.get("policy_source") or default_policy_source),
             "pattern_hashes": pattern_hashes,
+            "match_any_repeated": match_any_repeated,
             "min_repeated_count": int(conditions.get("min_repeated_count", item.get("min_repeated_count", 2))),
             "action": {
                 "type": str(action.get("type") or item.get("action_type") or "omit").strip().lower(),
@@ -600,6 +634,12 @@ def _parse_provider_scaffolding_rules_yaml(value: Any, *, default_policy_source:
             value_for_key = conditions.get(key, item.get(key))
             if value_for_key is not None:
                 normalized[key] = _as_bool(value_for_key, True)
+        safe_conditions: dict[str, Any] = {}
+        for key in ("source_surface", "app_family", "phase", "category", "requested_model", "has_tools", "uses_thinking"):
+            if conditions.get(key) is not None:
+                safe_conditions[key] = conditions[key]
+        if safe_conditions:
+            normalized["conditions"] = safe_conditions
         if item.get("description") is not None:
             normalized["description"] = str(item["description"])
         rules.append(normalized)
@@ -1282,7 +1322,7 @@ def _effective_repeated_provider_scaffolding_policy(
     managed_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     policy = _copy_repeated_provider_scaffolding_policy()
-    policy["policy_source"] = CRUNCH_POLICY_SOURCE
+    policy["policy_source"] = str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE)
     profile = _provider_scaffolding_profile_from_managed_profile(managed_profile)
     if not isinstance(profile, dict):
         return policy
@@ -1319,7 +1359,8 @@ def _provider_scaffolding_meta(policy: dict[str, Any], status: str, reason: str)
         "reason": reason,
         "changed": False,
         "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
-        "rule_path": CRUNCH_RULES_PATH,
+        "rule_path": str(policy.get("overlay_rule_path") or CRUNCH_RULES_PATH),
+        "base_rule_path": CRUNCH_RULES_PATH,
         "configured_rule_count": len(policy.get("rules") or []),
         "rules": [],
         "skip_reasons": [],
@@ -1370,6 +1411,18 @@ def _content_has_thinking(content: Any) -> bool:
         return any(_content_has_thinking(value) for value in content.values())
     if isinstance(content, list):
         return any(_content_has_thinking(item) for item in content)
+    return False
+
+
+def _body_uses_thinking(body: dict[str, Any]) -> bool:
+    if isinstance(body.get("thinking"), dict) and body.get("thinking"):
+        return True
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        return any(isinstance(msg, dict) and _content_has_thinking(msg.get("content")) for msg in messages)
+    input_value = body.get("input")
+    if isinstance(input_value, list):
+        return any(isinstance(item, dict) and _content_has_thinking(item.get("content")) for item in input_value)
     return False
 
 
@@ -1508,6 +1561,22 @@ def _provider_scaffolding_canary_features(
     }
 
 
+def _rule_conditions_match_provider_request(rule: dict[str, Any], *, body: dict[str, Any], category: str) -> tuple[bool, str | None]:
+    conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+    if not conditions:
+        return True, None
+    expected_model = conditions.get("requested_model")
+    if expected_model is not None and str(expected_model) != str(body.get("model") or ""):
+        return False, "requested-model-mismatch"
+    expected_has_tools = conditions.get("has_tools")
+    if expected_has_tools is not None and _as_bool(expected_has_tools, False) != _body_has_tools(body):
+        return False, "has-tools-mismatch"
+    expected_uses_thinking = conditions.get("uses_thinking")
+    if expected_uses_thinking is not None and _as_bool(expected_uses_thinking, False) != _body_uses_thinking(body):
+        return False, "uses-thinking-mismatch"
+    return True, None
+
+
 def _apply_repeated_provider_scaffolding(
     body: dict[str, Any],
     *,
@@ -1561,13 +1630,28 @@ def _apply_repeated_provider_scaffolding(
             rule_meta["skip_reasons"].append({"reason": "disabled", "count": 1})
             meta["rules"].append(rule_meta)
             continue
+        conditions_match, mismatch_reason = _rule_conditions_match_provider_request(rule, body=body, category=category)
+        if not conditions_match:
+            reason = mismatch_reason or "conditions-mismatch"
+            skip_counts[(rule_id, reason)] = skip_counts.get((rule_id, reason), 0) + 1
+            rule_meta["skip_reasons"].append({"reason": reason, "count": 1})
+            meta["rules"].append(rule_meta)
+            continue
         min_repeated = max(1, int(rule.get("min_repeated_count", 2)))
         keep_recent_matches = max(0, int(rule.get("keep_recent_matches", policy.get("keep_recent_matches", 1))))
         max_applications = max(0, min(
             int(rule.get("max_applications", policy.get("max_replacements", 16))),
             int(policy.get("max_replacements", 16)),
         ))
-        for pattern_hash in [str(item) for item in rule.get("pattern_hashes") or []]:
+        pattern_hashes = [str(item) for item in rule.get("pattern_hashes") or []]
+        if not pattern_hashes and _as_bool(rule.get("match_any_repeated"), False):
+            pattern_hashes = [
+                item[0]
+                for item in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+                if item[1] >= min_repeated
+            ]
+            rule_meta["match_any_repeated"] = True
+        for pattern_hash in pattern_hashes:
             occurrences = [entry for entry in entries if str(entry["hash"]) == pattern_hash]
             if len(occurrences) < min_repeated:
                 skip_counts[(rule_id, "min-repeated-count-not-met")] = skip_counts.get((rule_id, "min-repeated-count-not-met"), 0) + 1
