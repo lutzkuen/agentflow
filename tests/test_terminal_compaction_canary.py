@@ -89,6 +89,68 @@ terminal_output_compaction:
     )
 
 
+def _write_conditional_managed_rules(config: Path, *, fraction: float, stream: str = "true") -> None:
+    (config / "crunch_rules.yaml").write_text(
+        f"""
+enabled: true
+terminal_output_compaction:
+  enabled: true
+  rules:
+    - id: managed-terminal-nonmatching-chat
+      enabled: true
+      policy_source: managed-recommended
+      candidate_id: terminal-compaction-nonmatching
+      conditions:
+        category: chat
+      canary:
+        enabled: true
+        canary_fraction: 1.0
+        holdout_fraction: 0.0
+        canary_salt: terminal-managed-test
+        canary_unit: request_fingerprint
+    - id: managed-terminal-output-rule
+      enabled: true
+      policy_source: managed-recommended
+      candidate_id: terminal-compaction-candidate-123
+      action_id: terminal-compaction-rollout-action-123
+      provenance:
+        schema: agentflow.policy_decision_provenance.v1
+        issuer: agentflow-server
+        server_id: managed-prod
+        key_id: managed-key-2026-06
+        decision_hash: sha256:manageddecision
+        signature: hmac-sha256:managedsignature
+        algorithm: hmac-sha256
+        verified: true
+      conditions:
+        source_surface: anthropic_messages
+        category: tool-result
+        model_pattern: sonnet
+        min_text_chars: 1000
+        min_saved_tokens: 100
+        has_tools: true
+        stream: {stream}
+      keep_recent_turns: 2
+      min_block_chars: 500
+      min_saved_chars: 100
+      canary:
+        enabled: true
+        canary_fraction: {fraction}
+        holdout_fraction: 1.0
+        canary_salt: terminal-managed-test
+        canary_unit: request_fingerprint
+      safety_stop:
+        enabled: true
+        min_outcome_samples: 5
+        window: 50
+        max_error_rate: 0.5
+        max_retry_rate: 1.0
+        max_negative_savings_rate: 1.0
+""",
+        encoding="utf-8",
+    )
+
+
 class TerminalOutputCompactionCanaryTests(unittest.TestCase):
     ENV_KEYS = (
         "AGENTFLOW_CRUNCH",
@@ -161,6 +223,79 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
             self.assertNotIn(forbidden, rendered_meta)
         self.assertFalse(terminal_meta["raw_terminal_text_included"])
         self.assertFalse(terminal_meta["raw_tool_ids_included"])
+
+    def test_managed_conditional_rule_applies_with_canary_and_provenance(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            _write_conditional_managed_rules(config, fraction=1.0)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = _tool_result_body("RAW_MANAGED_APPLIED_SECRET")
+
+            crunched, meta = manual.crunch_body(body)
+
+        terminal_meta = meta["terminal_output_compaction"]
+        self.assertTrue(meta["changed"])
+        self.assertEqual(crunched.get("stream"), body.get("stream"))
+        self.assertEqual(terminal_meta["status"], "applied")
+        self.assertEqual(terminal_meta["rule_id"], "managed-terminal-output-rule")
+        self.assertEqual(terminal_meta["candidate_id"], "terminal-compaction-candidate-123")
+        self.assertEqual(terminal_meta["action_id"], "terminal-compaction-rollout-action-123")
+        self.assertEqual(terminal_meta["policy_source"], "managed-recommended")
+        self.assertEqual(terminal_meta["canary"]["cohort"], "canary_applied")
+        self.assertEqual(terminal_meta["provenance"]["issuer"], "agentflow-server")
+        self.assertEqual(terminal_meta["provenance"]["decision_hash"], "sha256:manageddecision")
+        self.assertEqual(terminal_meta["configured_rule_count"], 2)
+        self.assertEqual(terminal_meta["evaluated_rules"][0]["status"], "skipped")
+        self.assertEqual(terminal_meta["evaluated_rules"][1]["status"], "matched")
+        self.assertGreater(terminal_meta["tokens_saved_est"], 0)
+
+        rendered_meta = json.dumps(terminal_meta, sort_keys=True)
+        for forbidden in (
+            "RAW_MANAGED_APPLIED_SECRET",
+            "toolu_raw_id_must_not_leak",
+            "toolu_recent_raw_id",
+            "tests/test_private_terminal.py",
+            "/workspace/private",
+        ):
+            self.assertNotIn(forbidden, rendered_meta)
+        self.assertFalse(terminal_meta["raw_terminal_text_included"])
+        self.assertFalse(terminal_meta["raw_tool_ids_included"])
+
+    def test_managed_conditional_rule_holdout_and_nonmatching_requests_forward_unchanged(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            _write_conditional_managed_rules(config, fraction=0.0)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = _tool_result_body("RAW_MANAGED_HOLDOUT_SECRET")
+
+            holdout, holdout_meta = manual.crunch_body(body)
+            second_holdout, second_meta = manual.crunch_body(body)
+
+            _write_conditional_managed_rules(config, fraction=1.0, stream="false")
+            manual = importlib.reload(crunch_module)
+            nonmatching, nonmatching_meta = manual.crunch_body(body)
+
+        self.assertEqual(holdout, body)
+        self.assertEqual(second_holdout, body)
+        terminal_meta = holdout_meta["terminal_output_compaction"]
+        self.assertEqual(terminal_meta["status"], "holdout")
+        self.assertEqual(terminal_meta["rule_id"], "managed-terminal-output-rule")
+        self.assertEqual(terminal_meta["policy_source"], "managed-recommended")
+        self.assertEqual(terminal_meta["canary"]["cohort"], "canary_holdout")
+        self.assertEqual(terminal_meta["canary"], second_meta["terminal_output_compaction"]["canary"])
+        self.assertGreater(terminal_meta["planned_saved_tokens"], 0)
+
+        self.assertEqual(nonmatching, body)
+        nonmatching_terminal = nonmatching_meta["terminal_output_compaction"]
+        self.assertEqual(nonmatching_terminal["status"], "skipped")
+        self.assertEqual(nonmatching_terminal["reason"], "no-conditional-rule-matched")
+        self.assertEqual(nonmatching_terminal["configured_rule_count"], 2)
 
     def test_yaml_holdout_cohort_records_metadata_without_mutating_request(self):
         with TemporaryDirectory() as tmp:

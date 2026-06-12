@@ -132,6 +132,9 @@ def _default_crunch_policy() -> dict[str, Any]:
             "enabled": False,
             "rule_id": "local-terminal-output-compaction-canary",
             "candidate_id": None,
+            "action_id": None,
+            "conditions": {},
+            "provenance": None,
             "keep_recent_turns": TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS,
             "min_block_chars": TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS,
             "head_lines": TERMINAL_COMPACTION_DEFAULT_HEAD_LINES,
@@ -155,6 +158,7 @@ def _default_crunch_policy() -> dict[str, Any]:
                 "max_negative_savings_rate": 0.25,
                 "max_error_rate_delta": 0.05,
             },
+            "rules": [],
         },
         "pattern_modules": {
             "diffs": {
@@ -539,9 +543,13 @@ def _apply_terminal_output_compaction_policy_yaml(
     target = policy["terminal_output_compaction"]
     target["enabled"] = _as_bool(terminal_compaction.get("enabled"), target["enabled"])
     target["policy_source"] = str(terminal_compaction.get("policy_source") or target.get("policy_source") or default_policy_source)
-    for key in ("rule_id", "candidate_id"):
+    for key in ("rule_id", "candidate_id", "action_id"):
         if terminal_compaction.get(key) is not None:
             target[key] = str(terminal_compaction[key])
+    if isinstance(terminal_compaction.get("conditions"), dict):
+        target["conditions"] = _sanitize_terminal_output_compaction_conditions(terminal_compaction["conditions"])
+    if isinstance(terminal_compaction.get("provenance"), dict):
+        target["provenance"] = _sanitize_terminal_output_compaction_provenance(terminal_compaction["provenance"])
     for key in (
         "keep_recent_turns",
         "min_block_chars",
@@ -583,6 +591,176 @@ def _apply_terminal_output_compaction_policy_yaml(
         for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
             if safety.get(key) is not None:
                 target_safety[key] = max(0.0, float(safety[key]))
+    rules = terminal_compaction.get("rules")
+    if rules is None and (
+        terminal_compaction.get("conditions")
+        or terminal_compaction.get("action_id")
+        or terminal_compaction.get("provenance")
+    ):
+        rules = [terminal_compaction]
+    parsed = _parse_terminal_output_compaction_rules_yaml(
+        rules,
+        base_policy=target,
+        default_policy_source=target["policy_source"],
+    )
+    if parsed:
+        target["rules"] = parsed
+
+
+def _sanitize_terminal_output_compaction_conditions(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "source_surface",
+        "app_family",
+        "category",
+        "workflow_phase",
+        "requested_model",
+        "model_pattern",
+        "text_bucket",
+        "token_bucket",
+        "terminal_output_char_fraction_bucket",
+        "terminal_output_char_fraction_buckets",
+        "has_tools",
+        "stream",
+        "uses_thinking",
+        "min_text_chars",
+        "max_text_chars",
+        "min_saved_tokens",
+        "category_not_in",
+    }
+    sanitized: dict[str, Any] = {}
+    for key, raw in value.items():
+        key_text = str(key)
+        if key_text not in allowed or raw is None:
+            continue
+        if isinstance(raw, (str, int, float, bool)):
+            sanitized[key_text] = raw
+        elif isinstance(raw, list):
+            sanitized[key_text] = [item for item in raw if isinstance(item, (str, int, float, bool))]
+    return sanitized
+
+
+def _sanitize_terminal_output_compaction_provenance(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    allowed = (
+        "schema",
+        "issuer",
+        "server_id",
+        "key_id",
+        "decision_hash",
+        "signature",
+        "algorithm",
+        "verified",
+        "status",
+        "generated_at",
+        "expires_at",
+    )
+    sanitized = {
+        key: value.get(key)
+        for key in allowed
+        if isinstance(value.get(key), (str, int, float, bool))
+    }
+    return sanitized or None
+
+
+def _overlay_terminal_output_compaction_rule(
+    base: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    index: int,
+    default_policy_source: str,
+) -> dict[str, Any]:
+    rule = copy.deepcopy(base)
+    rule["rules"] = []
+    rule["enabled"] = _as_bool(item.get("enabled"), rule.get("enabled", True))
+    rule["policy_source"] = str(item.get("policy_source") or rule.get("policy_source") or default_policy_source)
+    rule["rule_id"] = str(
+        item.get("id")
+        or item.get("rule_id")
+        or item.get("policy_id")
+        or item.get("candidate_id")
+        or f"terminal-output-compaction-rule-{index + 1}"
+    )
+    for key in ("candidate_id", "action_id"):
+        if item.get(key) is not None:
+            rule[key] = str(item[key])
+    if item.get("rollout_action_id") is not None and not rule.get("action_id"):
+        rule["action_id"] = str(item["rollout_action_id"])
+    if isinstance(item.get("conditions"), dict):
+        rule["conditions"] = _sanitize_terminal_output_compaction_conditions(item["conditions"])
+    if isinstance(item.get("provenance"), dict):
+        rule["provenance"] = _sanitize_terminal_output_compaction_provenance(item["provenance"])
+    for key in (
+        "keep_recent_turns",
+        "min_block_chars",
+        "head_lines",
+        "tail_lines",
+        "max_evidence_lines",
+        "min_saved_chars",
+    ):
+        if item.get(key) is not None:
+            rule[key] = int(item[key])
+    if item.get("block_thinking") is not None:
+        rule["block_thinking"] = _as_bool(item.get("block_thinking"), bool(rule.get("block_thinking", True)))
+    canary = item.get("canary") or item.get("rollout") or {}
+    if isinstance(canary, dict):
+        target_canary = rule["canary"]
+        target_canary["enabled"] = _as_bool(
+            canary.get("enabled", canary.get("canary_enabled")),
+            target_canary["enabled"],
+        )
+        for source_key, target_key in (
+            ("fraction", "fraction"),
+            ("canary_fraction", "fraction"),
+            ("rollout_fraction", "fraction"),
+            ("holdout_fraction", "holdout_fraction"),
+        ):
+            if canary.get(source_key) is not None:
+                target_canary[target_key] = max(0.0, min(1.0, float(canary[source_key])))
+        if canary.get("salt") is not None:
+            target_canary["salt"] = str(canary["salt"])
+        if canary.get("canary_salt") is not None:
+            target_canary["salt"] = str(canary["canary_salt"])
+        if canary.get("unit") is not None:
+            target_canary["unit"] = str(canary["unit"])
+        if canary.get("canary_unit") is not None:
+            target_canary["unit"] = str(canary["canary_unit"])
+    safety = item.get("safety_stop") or {}
+    if isinstance(safety, dict):
+        target_safety = rule["safety_stop"]
+        target_safety["enabled"] = _as_bool(safety.get("enabled"), target_safety["enabled"])
+        for key in ("min_outcome_samples", "window"):
+            if safety.get(key) is not None:
+                target_safety[key] = int(safety[key])
+        for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
+            if safety.get(key) is not None:
+                target_safety[key] = max(0.0, float(safety[key]))
+    return rule
+
+
+def _parse_terminal_output_compaction_rules_yaml(
+    value: Any,
+    *,
+    base_policy: dict[str, Any],
+    default_policy_source: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        rules.append(
+            _overlay_terminal_output_compaction_rule(
+                base_policy,
+                item,
+                index=index,
+                default_policy_source=default_policy_source,
+            )
+        )
+    return rules
 
 
 def _apply_pattern_modules_policy_yaml(policy: dict[str, Any], pattern_modules: dict[str, Any]) -> None:
@@ -3013,6 +3191,9 @@ def _terminal_output_compaction_public_policy(policy: dict[str, Any] | None = No
         "rule_path": CRUNCH_RULES_PATH,
         "rule_id": str(policy.get("rule_id") or "local-terminal-output-compaction-canary"),
         "candidate_id": str(policy.get("candidate_id")) if policy.get("candidate_id") is not None else None,
+        "action_id": str(policy.get("action_id")) if policy.get("action_id") is not None else None,
+        "conditions": _sanitize_terminal_output_compaction_conditions(policy.get("conditions")),
+        "provenance": _sanitize_terminal_output_compaction_provenance(policy.get("provenance")),
         "keep_recent_turns": int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
         "min_block_chars": int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
         "head_lines": int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
@@ -3052,6 +3233,9 @@ def _terminal_output_compaction_base_meta(status: str, reason: str, *, policy: d
         "rule_path": public["rule_path"],
         "rule_id": public["rule_id"],
         "candidate_id": public["candidate_id"],
+        "action_id": public["action_id"],
+        "conditions": public["conditions"],
+        "provenance": public["provenance"],
         "canary": public["canary"],
         "safety_stop": public["safety_stop"],
         "raw_terminal_text_included": False,
@@ -3214,6 +3398,204 @@ def evaluate_terminal_output_compaction_safety_stop(
     }
 
 
+def _terminal_output_compaction_candidate_policies(base_policy: dict[str, Any]) -> list[dict[str, Any]]:
+    rules = base_policy.get("rules")
+    if isinstance(rules, list) and rules:
+        return [copy.deepcopy(rule) for rule in rules if isinstance(rule, dict)]
+    return [copy.deepcopy(base_policy)]
+
+
+def _terminal_output_compaction_features(
+    body: dict[str, Any],
+    *,
+    category: str,
+    before_chars: int,
+    plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    features: dict[str, Any] = {
+        "source_surface": "anthropic_messages",
+        "app_family": "claude_code",
+        "category": category,
+        "workflow_phase": category,
+        "text_chars": before_chars,
+        "text_bucket": _text_bucket(before_chars),
+        "token_bucket": _token_bucket(max(1, before_chars // TOKEN_CHARS)),
+        "requested_model": str(body.get("model") or ""),
+        "candidate_target_model": str(body.get("model") or ""),
+        "has_tools": _body_has_tools(body),
+        "stream": bool(body.get("stream")),
+        "uses_thinking": _body_uses_thinking(body),
+    }
+    if isinstance(plan, dict):
+        targets = [target for target in (plan.get("targets") or []) if isinstance(target, dict)]
+        buckets = sorted({
+            str(target.get("terminal_output_char_fraction_bucket"))
+            for target in targets
+            if target.get("terminal_output_char_fraction_bucket") is not None
+        })
+        features.update({
+            "target_count": len(targets),
+            "planned_saved_tokens": _safe_int(plan.get("estimated_saved_tokens")),
+            "terminal_output_char_fraction_buckets": buckets,
+        })
+        if buckets:
+            features["terminal_output_char_fraction_bucket"] = buckets[-1]
+    return features
+
+
+def _condition_values(value: Any) -> set[str]:
+    raw_items = value if isinstance(value, list) else [value]
+    return {str(item) for item in raw_items if item is not None}
+
+
+def _terminal_output_compaction_rule_matches(
+    policy: dict[str, Any],
+    features: dict[str, Any],
+    *,
+    require_plan_conditions: bool,
+) -> tuple[bool, list[str]]:
+    conditions = _sanitize_terminal_output_compaction_conditions(policy.get("conditions"))
+    blockers: list[str] = []
+    if not conditions:
+        return True, blockers
+
+    for key in ("source_surface", "app_family", "category", "workflow_phase", "text_bucket", "token_bucket"):
+        if key in conditions and str(features.get(key)) not in _condition_values(conditions[key]):
+            blockers.append(f"{key}-not-matched")
+    if "category_not_in" in conditions and str(features.get("category")) in _condition_values(conditions["category_not_in"]):
+        blockers.append("category-excluded")
+    if "requested_model" in conditions and str(features.get("requested_model")) not in _condition_values(conditions["requested_model"]):
+        blockers.append("requested-model-not-matched")
+    if "model_pattern" in conditions:
+        patterns = _condition_values(conditions["model_pattern"])
+        requested = str(features.get("requested_model") or "").lower()
+        if not any(pattern.lower() in requested for pattern in patterns):
+            blockers.append("model-pattern-not-matched")
+    for key in ("has_tools", "stream", "uses_thinking"):
+        if key in conditions and bool(features.get(key)) != _as_bool(conditions[key], False):
+            blockers.append(f"{key}-not-matched")
+    if "min_text_chars" in conditions and _safe_int(features.get("text_chars")) < _safe_int(conditions["min_text_chars"]):
+        blockers.append("min-text-chars-not-met")
+    if "max_text_chars" in conditions and _safe_int(features.get("text_chars")) > _safe_int(conditions["max_text_chars"]):
+        blockers.append("max-text-chars-exceeded")
+    if "terminal_output_char_fraction_bucket" in conditions or "terminal_output_char_fraction_buckets" in conditions:
+        if not require_plan_conditions:
+            return not blockers, blockers
+        expected = _condition_values(
+            conditions.get("terminal_output_char_fraction_bucket")
+            if conditions.get("terminal_output_char_fraction_bucket") is not None
+            else conditions.get("terminal_output_char_fraction_buckets")
+        )
+        observed = _condition_values(features.get("terminal_output_char_fraction_buckets"))
+        if not expected.intersection(observed):
+            blockers.append("terminal-output-fraction-bucket-not-matched")
+    if "min_saved_tokens" in conditions:
+        if not require_plan_conditions:
+            return not blockers, blockers
+        if _safe_int(features.get("planned_saved_tokens")) < _safe_int(conditions["min_saved_tokens"]):
+            blockers.append("min-saved-tokens-not-met")
+    return not blockers, blockers
+
+
+def _terminal_output_compaction_rule_sort_key(policy: dict[str, Any]) -> tuple[float, float, str]:
+    public = _terminal_output_compaction_public_policy(policy)
+    canary = public["canary"]
+    return (
+        float(canary.get("fraction") or 0.0),
+        -float(canary.get("holdout_fraction") or 0.0),
+        str(public.get("rule_id") or ""),
+    )
+
+
+def _select_terminal_output_compaction_policy(
+    body: dict[str, Any],
+    *,
+    base_policy: dict[str, Any],
+    category: str,
+    before_chars: int,
+    policy_source: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any], list[dict[str, Any]]]:
+    candidates = _terminal_output_compaction_candidate_policies(base_policy)
+    initial_features = _terminal_output_compaction_features(body, category=category, before_chars=before_chars)
+    evaluated: list[dict[str, Any]] = []
+    applicable: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for raw_policy in candidates:
+        policy = copy.deepcopy(raw_policy)
+        policy["policy_source"] = str(policy.get("policy_source") or policy_source)
+        public = _terminal_output_compaction_public_policy(policy)
+        rule_eval = {
+            "rule_id": public["rule_id"],
+            "candidate_id": public["candidate_id"],
+            "action_id": public["action_id"],
+            "enabled": public["enabled"],
+            "policy_source": public["policy_source"],
+            "conditions": public["conditions"],
+            "status": "skipped",
+            "reasons": [],
+        }
+        if not public["enabled"]:
+            rule_eval["reasons"].append("disabled")
+            evaluated.append(rule_eval)
+            continue
+        matched, blockers = _terminal_output_compaction_rule_matches(
+            policy,
+            initial_features,
+            require_plan_conditions=False,
+        )
+        if not matched:
+            rule_eval["reasons"].extend(blockers)
+            evaluated.append(rule_eval)
+            continue
+        if public["block_thinking"] and bool(initial_features.get("uses_thinking")):
+            rule_eval["reasons"].append("active-thinking-blocked")
+            evaluated.append(rule_eval)
+            continue
+        plan, plan_meta = plan_terminal_output_compaction(
+            body,
+            keep_recent_turns=public["keep_recent_turns"],
+            min_block_chars=public["min_block_chars"],
+            head_lines=public["head_lines"],
+            tail_lines=public["tail_lines"],
+            max_evidence_lines=public["max_evidence_lines"],
+            min_saved_chars=public["min_saved_chars"],
+            policy_source=public["policy_source"],
+        )
+        if plan is None:
+            rule_eval["reasons"].append(str(plan_meta.get("reason") or "not-eligible"))
+            if plan_meta.get("blocker_counts"):
+                rule_eval["blocker_counts"] = plan_meta.get("blocker_counts")
+            evaluated.append(rule_eval)
+            continue
+        final_features = _terminal_output_compaction_features(
+            body,
+            category=category,
+            before_chars=before_chars,
+            plan=plan,
+        )
+        matched, blockers = _terminal_output_compaction_rule_matches(
+            policy,
+            final_features,
+            require_plan_conditions=True,
+        )
+        if not matched:
+            rule_eval["reasons"].extend(blockers)
+            evaluated.append(rule_eval)
+            continue
+        rule_eval.update({
+            "status": "matched",
+            "planned_saved_tokens": _safe_int(plan.get("estimated_saved_tokens")),
+            "target_count": _safe_int(plan.get("target_count")),
+        })
+        evaluated.append(rule_eval)
+        applicable.append((policy, plan, plan_meta))
+
+    if not applicable:
+        return None, None, initial_features, evaluated
+    applicable.sort(key=lambda item: _terminal_output_compaction_rule_sort_key(item[0]))
+    selected_policy, selected_plan, selected_meta = applicable[0]
+    return selected_policy, selected_plan, selected_meta, evaluated
+
+
 def _apply_terminal_output_compaction_canary(
     body: dict[str, Any],
     *,
@@ -3221,41 +3603,59 @@ def _apply_terminal_output_compaction_canary(
     policy_source: str,
     category: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    policy = _copy_terminal_output_compaction_policy()
-    policy["policy_source"] = str(policy.get("policy_source") or policy_source)
-    meta = _terminal_output_compaction_base_meta("skipped", "disabled", policy=policy)
+    base_policy = _copy_terminal_output_compaction_policy()
+    base_policy["policy_source"] = str(base_policy.get("policy_source") or policy_source)
+    meta = _terminal_output_compaction_base_meta("skipped", "disabled", policy=base_policy)
     before_chars = len(stable_json(body))
     meta["before_chars"] = before_chars
     meta["after_chars"] = before_chars
     meta["tokens_saved_est"] = 0
-    if not _as_bool(policy.get("enabled"), False):
+    if not _as_bool(base_policy.get("enabled"), False):
         return body, meta
     if category != "tool-result":
         meta["reason"] = "non-tool-result-category"
         meta["category"] = category
         return body, meta
-    if _as_bool(policy.get("block_thinking"), True) and _body_uses_thinking(body):
-        meta["reason"] = "active-thinking-blocked"
-        meta["category"] = category
-        return body, meta
 
-    plan, plan_meta = plan_terminal_output_compaction(
+    policy, plan, plan_meta, evaluated_rules = _select_terminal_output_compaction_policy(
         body,
-        keep_recent_turns=int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
-        min_block_chars=int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
-        head_lines=int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
-        tail_lines=int(policy.get("tail_lines") or TERMINAL_COMPACTION_DEFAULT_TAIL_LINES),
-        max_evidence_lines=int(policy.get("max_evidence_lines") or TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES),
-        min_saved_chars=int(policy.get("min_saved_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS),
-        policy_source=str(policy.get("policy_source") or policy_source),
+        base_policy=base_policy,
+        category=category,
+        before_chars=before_chars,
+        policy_source=policy_source,
     )
+    meta["evaluated_rules"] = evaluated_rules
+    meta["configured_rule_count"] = len(_terminal_output_compaction_candidate_policies(base_policy))
     if plan is None:
+        if policy is not None:
+            meta = _terminal_output_compaction_base_meta("skipped", "not-eligible", policy=policy)
+            meta["before_chars"] = before_chars
+            meta["after_chars"] = before_chars
+            meta["tokens_saved_est"] = 0
+            meta["evaluated_rules"] = evaluated_rules
+            meta["configured_rule_count"] = len(_terminal_output_compaction_candidate_policies(base_policy))
+        first_reason = None
+        for rule_eval in evaluated_rules:
+            reasons = rule_eval.get("reasons") if isinstance(rule_eval, dict) else None
+            if isinstance(reasons, list) and reasons:
+                first_reason = str(reasons[0])
+                break
         meta.update({
-            "reason": str(plan_meta.get("reason") or "not-eligible"),
+            "reason": (
+                "no-conditional-rule-matched"
+                if (base_policy.get("rules") or []) and first_reason not in {"active-thinking-blocked"}
+                else (first_reason or str((plan_meta or {}).get("reason") or "not-eligible"))
+            ),
             "category": category,
-            "blocker_counts": plan_meta.get("blocker_counts", []),
+            "blocker_counts": (plan_meta or {}).get("blocker_counts", []) if isinstance(plan_meta, dict) else [],
         })
         return body, meta
+    meta = _terminal_output_compaction_base_meta("skipped", "planned", policy=policy)
+    meta["before_chars"] = before_chars
+    meta["after_chars"] = before_chars
+    meta["tokens_saved_est"] = 0
+    meta["evaluated_rules"] = evaluated_rules
+    meta["configured_rule_count"] = len(_terminal_output_compaction_candidate_policies(base_policy))
 
     target_summaries = [
         {
