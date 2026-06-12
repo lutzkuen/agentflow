@@ -152,6 +152,24 @@ class OptimizationCoordinatorTests(unittest.TestCase):
         self.assertEqual(decision["suppressed_families"][0]["family"], "cache_replay")
         self.assertEqual(decision["suppressed_families"][0]["reason_codes"], ["missing-dependency-freshness-evidence"])
 
+    def test_invalid_canary_fractions_are_clamped_and_do_not_apply_candidate(self) -> None:
+        decision = build_optimization_coordinator(
+            ledger=ledger_with(entry("routing")),
+            local_salt="coordinator-test",
+            holdout_fraction=2.0,
+            canary_fraction=-5.0,
+        )
+
+        canary = decision["canary"]
+        self.assertEqual(canary["holdout_fraction"], 1.0)
+        self.assertEqual(canary["canary_fraction"], 0.0)
+        self.assertEqual(canary["cohort"], "coordinator_holdout")
+        self.assertEqual(decision["selected_family"], "none")
+        self.assertEqual(decision["reason_codes"], ["coordinator-holdout"])
+        self.assertEqual(decision["suppressed_families"][0]["reason_codes"], ["coordinator-holdout"])
+        self.assertFalse(canary["salt_included"])
+        self.assert_private(decision)
+
     def test_safety_stop_entry_takes_priority_and_suppresses_other_families(self) -> None:
         decision = build_optimization_coordinator(
             ledger=ledger_with(

@@ -29,6 +29,30 @@ _RAW_PRIVACY_FLAGS = {
     "file_paths_returned",
     "tool_payloads_returned",
 }
+_RAW_REASON_HINTS = {
+    "api",
+    "apikey",
+    "authorization",
+    "body",
+    "cache-key",
+    "cache_key",
+    "content",
+    "file",
+    "message",
+    "path",
+    "payload",
+    "prompt",
+    "provider-body",
+    "provider_body",
+    "request",
+    "response",
+    "secret",
+    "session",
+    "tenant",
+    "thread",
+    "tool-payload",
+    "tool_payload",
+}
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -125,7 +149,11 @@ def _reason_codes(action: dict[str, Any]) -> list[str]:
     for value in values:
         text = public_label(str(value).strip().lower().replace("_", "-").replace(" ", "-"), "")
         if text:
-            codes.append(text)
+            if any(hint.replace("_", "-") in text for hint in _RAW_REASON_HINTS):
+                public = public_id(text, prefix="reason", fallback="redacted-reason")
+                codes.append(public or "redacted-reason")
+            else:
+                codes.append(text)
     return sorted(set(codes))
 
 

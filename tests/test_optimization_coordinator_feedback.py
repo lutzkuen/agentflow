@@ -55,6 +55,34 @@ def _decision(*, selected_family: str = "routing", holdout: bool = False) -> dic
 
 
 class OptimizationCoordinatorFeedbackTests(unittest.TestCase):
+    def _assert_no_private_values(self, payload: object) -> None:
+        rendered = json.dumps(payload, sort_keys=True)
+        for value in (
+            "raw-lifecycle-prompt-secret",
+            "raw-lifecycle-response-secret",
+            "raw-lifecycle-request-secret",
+            "raw-lifecycle-session-secret",
+            "cache-key-lifecycle-secret",
+            "tool payload lifecycle secret",
+            "terminal lifecycle raw line",
+            "/home/lutz/private/lifecycle_secret.py",
+        ):
+            self.assertNotIn(value, rendered)
+        for key in (
+            '"cache_key"',
+            '"content"',
+            '"file_path"',
+            '"messages"',
+            '"prompt"',
+            '"provider_body"',
+            '"raw_request"',
+            '"request_id"',
+            '"response_json"',
+            '"session_id"',
+            '"tool_payload"',
+        ):
+            self.assertNotIn(key, rendered)
+
     def test_builds_metadata_only_selected_suppressed_rollback_and_safety_stop_event(self) -> None:
         payload = build_optimization_coordinator_lifecycle_feedback(
             _decision(),
@@ -97,6 +125,67 @@ class OptimizationCoordinatorFeedbackTests(unittest.TestCase):
         self.assertNotIn("session id 123", rendered)
         self.assertFalse(metadata["privacy"]["raw_provider_bodies_included"])
         self.assertFalse(metadata["privacy"]["cache_keys_included"])
+
+    def test_lifecycle_feedback_hashes_raw_like_reasons_and_ids_before_egress(self) -> None:
+        decision = _decision()
+        decision["selected_candidate"] = {
+            "candidate_id": "raw-lifecycle-session-secret",
+            "rule_id": "/home/lutz/private/lifecycle_secret.py",
+            "action_id": "cache-key-lifecycle-secret",
+            "status": "eligible",
+            "policy_source": "managed-recommended",
+            "reason_codes": [
+                "messages raw-lifecycle-prompt-secret",
+                "provider body raw-lifecycle-response-secret",
+            ],
+        }
+        decision["suppressed_families"] = [
+            {
+                "family": "cache_replay",
+                "status": "eligible",
+                "candidate_id": "cache-key-lifecycle-secret",
+                "reason_codes": [
+                    "request id raw-lifecycle-request-secret",
+                    "session id raw-lifecycle-session-secret",
+                ],
+            }
+        ]
+
+        payload = build_optimization_coordinator_lifecycle_feedback(
+            decision,
+            enforcement={"status": "error"},
+            status_code=500,
+            retry_count=3,
+            extra_family_events=[
+                {
+                    "family": "terminal_output_compaction",
+                    "lifecycle_status": "safety_stop",
+                    "candidate_id": "terminal lifecycle raw line",
+                    "reason_codes": [
+                        "tool payload lifecycle secret",
+                        "file path /home/lutz/private/lifecycle_secret.py",
+                    ],
+                    "prompt": "raw-lifecycle-prompt-secret",
+                    "messages": [{"content": "raw-lifecycle-response-secret"}],
+                    "cache_key": "cache-key-lifecycle-secret",
+                    "request_id": "raw-lifecycle-request-secret",
+                    "session_id": "raw-lifecycle-session-secret",
+                    "tool_payload": "tool payload lifecycle secret",
+                    "file_path": "/home/lutz/private/lifecycle_secret.py",
+                }
+            ],
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        assert_managed_egress_safe(payload)
+        self.assertEqual(payload["metadata"]["local_result_status"], "error")
+        reason_codes = payload["metadata"]["reason_codes"]
+        self.assertTrue(any(str(reason).startswith("reason:") for reason in reason_codes))
+        for event in payload["metadata"]["family_events"]:
+            for raw_key in ("prompt", "messages", "cache_key", "request_id", "session_id", "tool_payload", "file_path"):
+                self.assertNotIn(raw_key, event)
+        self._assert_no_private_values(payload)
 
     def test_queues_selected_holdout_suppressed_rollback_and_safety_stop_events(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
@@ -227,6 +316,57 @@ class OptimizationCoordinatorFeedbackTests(unittest.TestCase):
         self.assertEqual(queue_states["error"], 1)
         self.assertFalse(lifecycle["payload_json_included"])
         self.assertTrue(result["privacy"]["metadata_only"])
+
+    def test_status_rollup_uses_only_sanitized_lifecycle_metadata(self) -> None:
+        payload = build_optimization_coordinator_lifecycle_feedback(
+            _decision(),
+            status_code=500,
+            retry_count=3,
+            extra_family_events=[
+                {
+                    "family": "cache_replay",
+                    "lifecycle_status": "suppressed",
+                    "candidate_id": "cache-key-lifecycle-secret",
+                    "reason_codes": [
+                        "messages raw-lifecycle-prompt-secret",
+                        "request id raw-lifecycle-request-secret",
+                    ],
+                }
+            ],
+        )
+        self.assertIsNotNone(payload)
+        assert payload is not None
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                now = utc_now()
+                store.enqueue_managed_outcome_feedback(
+                    id="coordinator-private-rollup",
+                    created_at=now,
+                    updated_at=now,
+                    source_surface=SOURCE_SURFACE,
+                    endpoint="/v1/policy-events",
+                    optimization_unit_id=0,
+                    payload_json=stable_json(payload),
+                    status="retryable-error",
+                    attempts=2,
+                    next_attempt_at=now,
+                    last_error="unsafe managed egress payload blocked",
+                    last_status_code=503,
+                )
+                result = feedback.managed_feedback_status_result(
+                    store,
+                    source_surface=SOURCE_SURFACE,
+                    sample_limit=10,
+                )
+            finally:
+                store.conn.close()
+
+        lifecycle = result["optimization_coordinator_lifecycle"]
+        self.assertEqual(lifecycle["retryable_failures"], 1)
+        self.assertFalse(lifecycle["payload_json_included"])
+        self._assert_no_private_values(lifecycle)
 
 
 if __name__ == "__main__":

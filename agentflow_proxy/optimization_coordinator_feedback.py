@@ -11,6 +11,30 @@ from agentflow_proxy.store import utc_now
 
 FEEDBACK_SCHEMA = "agentflow.optimization_coordinator_lifecycle_feedback.v1"
 SOURCE_SURFACE = "optimization_coordinator_lifecycle"
+RAW_REASON_HINTS = {
+    "api",
+    "apikey",
+    "authorization",
+    "body",
+    "cache-key",
+    "cache_key",
+    "content",
+    "file",
+    "message",
+    "path",
+    "payload",
+    "prompt",
+    "provider-body",
+    "provider_body",
+    "request",
+    "response",
+    "secret",
+    "session",
+    "tenant",
+    "thread",
+    "tool-payload",
+    "tool_payload",
+}
 
 
 def _as_float(value: Any) -> float:
@@ -48,7 +72,11 @@ def _reason_codes(*values: Any) -> list[str]:
             continue
         text = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
         if text:
-            codes.append(public_label(text, "redacted-reason"))
+            if any(hint.replace("_", "-") in text for hint in RAW_REASON_HINTS):
+                public = public_id(text, prefix="reason", fallback="redacted-reason")
+                codes.append(public or "redacted-reason")
+            else:
+                codes.append(public_label(text, "redacted-reason"))
     return sorted(set(codes))
 
 

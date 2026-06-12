@@ -173,6 +173,51 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
             "omitted_actions": [],
         }
 
+    def _unsafe_rollout_bundle(self) -> dict[str, object]:
+        bundle = self._rollout_bundle()
+        bundle["privacy_summary"] = {
+            "metadata_only": False,
+            "raw_prompts_returned": True,
+            "raw_responses_returned": True,
+            "provider_bodies_returned": True,
+            "request_ids_returned": True,
+            "tenant_ids_returned": True,
+            "cache_keys_returned": True,
+            "file_paths_returned": True,
+        }
+        actions = bundle["actions"]
+        assert isinstance(actions, list)
+        action = actions[0]
+        assert isinstance(action, dict)
+        action["reason_codes"] = [
+            "prompt leak raw-dry-run-prompt-secret",
+            "messages carried raw-dry-run-response-secret",
+        ]
+        return bundle
+
+    def _cache_rollout_bundle_without_holdout_or_freshness(self) -> dict[str, object]:
+        bundle = self._rollout_bundle()
+        actions = bundle["actions"]
+        assert isinstance(actions, list)
+        action = actions[0]
+        assert isinstance(action, dict)
+        action.update(
+            {
+                "action_family": "cache",
+                "candidate_family": "cache-replay-rule",
+                "target_candidate_id": "cache-candidate",
+                "policy_section": "cache",
+                "reason_codes": ["request body missing holdout evidence"],
+                "evidence_summary": {
+                    "local_eval_verdict": {
+                        "reason_codes": ["missing-holdout", "stale-evidence"],
+                    }
+                },
+            }
+        )
+        action.pop("safe_invalidation_evidence", None)
+        return bundle
+
     def test_dry_run_reports_coordinator_counts_conflicts_and_projected_savings(self) -> None:
         self._log_call(
             crunch_meta={
@@ -271,6 +316,53 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
         self.assertGreaterEqual(report["holdout_count"], 1)
         self.assertGreaterEqual(report["noop_count"], 1)
         self._assert_private(report)
+
+    def test_unsafe_rollout_payload_is_summarized_but_not_used(self) -> None:
+        self._log_call()
+
+        report = build_optimization_coordinator_dry_run(
+            self.store,
+            rollout_actions=self._unsafe_rollout_bundle(),
+            limit=10,
+            local_salt="local-salt-dry-run-secret",
+        )
+
+        self.assertEqual(report["managed_rollout_actions"]["unsafe_privacy_flag_count"], 7)
+        self.assertFalse(report["managed_rollout_actions"]["actions_included"])
+        self.assertFalse(report["managed_rollout_actions"]["raw_rollout_payload_included"])
+        self.assertEqual(report["rows_with_rollout_action_candidates"], 0)
+        self._assert_private(report)
+
+    def test_cache_rollout_with_stale_or_missing_evidence_is_suppressed(self) -> None:
+        self._log_call()
+
+        report = build_optimization_coordinator_dry_run(
+            self.store,
+            rollout_actions=self._cache_rollout_bundle_without_holdout_or_freshness(),
+            limit=10,
+            local_salt="coordinator-test",
+        )
+
+        self.assertEqual(report["rows_with_rollout_action_candidates"], 1)
+        reasons = {(row["family"], row["reason"]): row["count"] for row in report["top_suppression_reason_codes"]}
+        self.assertEqual(reasons[("cache_replay", "stale-evidence")], 1)
+        self.assertNotIn("request body missing holdout evidence", json.dumps(report, sort_keys=True))
+        self._assert_private(report)
+
+    def test_cli_rejects_corrupt_rollout_json_without_raw_payload(self) -> None:
+        output = io.StringIO()
+        code = cli.optimization_coordinator_dry_run_cli(
+            ["--db", self.db_path, "-"],
+            stdin=io.StringIO('{"prompt":"raw-dry-run-prompt-secret",'),
+            stdout=output,
+        )
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "read_failed")
+        self.assertFalse(payload["privacy"]["provider_calls_made"])
+        self.assertNotIn("raw-dry-run-prompt-secret", json.dumps(payload, sort_keys=True))
 
     def test_cli_emits_dry_run_report_with_optional_rollout_bundle(self) -> None:
         self._log_call()
