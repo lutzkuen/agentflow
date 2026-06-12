@@ -4020,6 +4020,67 @@ def terminal_output_compaction_dry_run_cli(argv: Sequence[str] | None = None, *,
     return 0
 
 
+def terminal_output_compaction_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report terminal-output compaction canary impact and rollback gates")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider calls to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument("--since", help="Only inspect calls at or after this ISO timestamp.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied rows per candidate, default: 2.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout rows per candidate, default: 1.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Applied error rate hold threshold, default: 0.05.")
+    parser.add_argument("--max-error-rate-delta", type=float, default=0.05, help="Applied-minus-holdout error rollback threshold, default: 0.05.")
+    parser.add_argument("--max-retry-rate-delta", type=float, default=0.10, help="Applied-minus-holdout retry rollback threshold, default: 0.10.")
+    parser.add_argument("--max-latency-regression-ms", type=int, default=2000, help="Applied-minus-holdout latency hold threshold, default: 2000.")
+    parser.add_argument("--min-net-savings-usd", type=float, default=0.0, help="Minimum applied net savings for promote, default: 0.")
+    parser.add_argument(
+        "--max-non-positive-savings-rate",
+        type=float,
+        default=0.0,
+        help="Applied non-positive savings rate hold threshold, default: 0.0.",
+    )
+    parser.add_argument("--rollback-error-rate", type=float, default=0.20, help="Absolute applied error rate rollback threshold, default: 0.20.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+    from agentflow_proxy.terminal_compaction_impact import build_terminal_output_compaction_impact_report
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_terminal_output_compaction_impact_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+            max_error_rate=args.max_error_rate,
+            max_error_rate_delta=args.max_error_rate_delta,
+            max_retry_rate_delta=args.max_retry_rate_delta,
+            max_latency_regression_ms=args.max_latency_regression_ms,
+            min_net_savings_usd=args.min_net_savings_usd,
+            max_non_positive_savings_rate=args.max_non_positive_savings_rate,
+            rollback_error_rate=args.rollback_error_rate,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report repeated-scaffold crunch canary impact and rollback gates")
     parser.add_argument(
@@ -7261,6 +7322,10 @@ def terminal_output_compaction_opportunity_main() -> None:
 
 def terminal_output_compaction_dry_run_main() -> None:
     raise SystemExit(terminal_output_compaction_dry_run_cli())
+
+
+def terminal_output_compaction_impact_main() -> None:
+    raise SystemExit(terminal_output_compaction_impact_cli())
 
 
 def repeated_scaffold_impact_main() -> None:
