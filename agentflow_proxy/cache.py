@@ -466,11 +466,14 @@ def _bool_condition_matches(conditions: dict[str, Any], key: str, actual: Any) -
 def _streaming_static_replay_blocker(
     *,
     has_tool_blocks: bool,
+    has_thinking_blocks: bool = False,
     pattern_features: dict[str, Any] | None,
     rule: dict[str, Any],
 ) -> str | None:
     if has_tool_blocks:
         return "streaming-tools-disabled"
+    if has_thinking_blocks:
+        return "streaming-thinking-disabled"
     if str(rule.get("policy_source") or "").lower() == "local-default":
         return "streaming-rule-source-not-reviewed"
     cacheability = _cacheability_from_pattern_features(pattern_features)
@@ -492,6 +495,7 @@ def _streaming_static_replay_blocker(
 def _cache_pattern_rule_match(
     *,
     has_tool_blocks: bool,
+    has_thinking_blocks: bool = False,
     stream: bool,
     pattern_features: dict[str, Any] | None,
     local_replayability_level: str,
@@ -520,6 +524,9 @@ def _cache_pattern_rule_match(
             continue
         if "stream" in conditions and _as_bool(conditions.get("stream"), False) != bool(stream):
             skip_reasons.append({"rule_id": rule_id, "reason": "stream-mismatch"})
+            continue
+        if stream and has_tool_blocks:
+            skip_reasons.append({"rule_id": rule_id, "reason": "streaming-tools-disabled"})
             continue
         model_pattern = conditions.get("model_pattern")
         if isinstance(model_pattern, str) and model_pattern.strip():
@@ -575,6 +582,7 @@ def _cache_pattern_rule_match(
             if stream:
                 blocker = _streaming_static_replay_blocker(
                     has_tool_blocks=has_tool_blocks,
+                    has_thinking_blocks=has_thinking_blocks,
                     pattern_features=pattern_features,
                     rule=rule,
                 )
@@ -866,6 +874,10 @@ def _cache_replay_cohort(
         return "invalidated", "invalidation"
     if reason == "canary_holdout" or canary.get("cohort") == "canary_holdout" or canary.get("selected") is False:
         return "holdout", "holdout"
+    if replay_canary.get("status") == "bypassed":
+        return "bypassed", "replay-bypassed"
+    if cache_meta.get("status") == "miss" and replay_canary.get("status") == "applied":
+        return "applied", "cache-miss"
     if cache_meta.get("status") == "hit" and replay_canary.get("status") == "applied":
         return "replayed", "cache-hit"
     return None, "not-cache-replay-lifecycle"
@@ -1531,6 +1543,7 @@ def cache_lookup_meta(
 def streaming_cache_lookup_meta(
     has_tool_blocks: bool,
     *,
+    has_thinking_blocks: bool = False,
     pattern_features: dict[str, Any] | None = None,
     store_obj: Any | None = None,
     managed_profile: dict[str, Any] | None = None,
@@ -1542,6 +1555,7 @@ def streaming_cache_lookup_meta(
     exact_enabled = False
     pattern_rule, pattern_skip_reasons = _cache_pattern_rule_match(
         has_tool_blocks=has_tool_blocks,
+        has_thinking_blocks=has_thinking_blocks,
         stream=True,
         pattern_features=pattern_features,
         local_replayability_level="local-exact-response" if CACHE_ENABLED else "features_only",

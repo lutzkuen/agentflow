@@ -258,7 +258,7 @@ class StreamingCacheTest(unittest.TestCase):
         )
         return pattern_feature_diagnostics(unit)
 
-    def _streaming_cache_rule_for_request(self, request_body, *, canary_fraction=1.0):
+    def _streaming_cache_rule_for_request(self, request_body, *, canary_fraction=1.0, safe_invalidation=False):
         features = self._pattern_features_for_request(request_body)
         return cache_module.normalize_cache_pattern_rules([{
             "id": "reviewed-static-streaming-cache",
@@ -287,6 +287,7 @@ class StreamingCacheTest(unittest.TestCase):
                 "type": "exact_cache_pattern",
                 "streaming": True,
                 "allow_tool_calls": False,
+                "safe_invalidation": safe_invalidation,
             },
         }])[0]
 
@@ -624,9 +625,10 @@ class StreamingCacheTest(unittest.TestCase):
             cache_module.CACHE_PATTERN_RULES = (self._streaming_cache_rule_for_request(request_body),)
             with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
                 client = TestClient(server.app)
-                with client.stream("POST", "/v1/messages", json=request_body) as first:
+                headers = {"x-session-id": "streaming-cache-test"}
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as first:
                     first_body = b"".join(first.iter_bytes())
-                with client.stream("POST", "/v1/messages", json=request_body) as second:
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as second:
                     second_body = b"".join(second.iter_bytes())
 
             self.assertEqual(first.status_code, 200)
@@ -646,14 +648,164 @@ class StreamingCacheTest(unittest.TestCase):
             second_cache = json.loads(rows[1]["cache_json"])
             self.assertEqual(first_cache["reason"], "streaming-exact-pattern-miss")
             self.assertEqual(first_cache["pattern_rule"]["canary"]["status"], "applied")
+            self.assertEqual(first_cache["cache_replay_canary"]["status"], "applied")
+            self.assertEqual(first_cache["cache_replay_canary"]["reason"], "no-dependency-required")
+            self.assertEqual(first_cache["cache_replay_lifecycle_feedback"]["status"], "disabled")
             self.assertEqual(second_cache["reason"], "streaming-exact-match")
             self.assertEqual(second_cache["hit_type"], "streaming-exact")
             self.assertEqual(second_cache["pattern_rule"]["candidate_id"], "streaming-static-candidate")
             self.assertEqual(second_cache["pattern_rule"]["canary"]["status"], "applied")
+            self.assertEqual(second_cache["cache_replay_canary"]["status"], "applied")
+            self.assertEqual(second_cache["cache_replay_lifecycle_feedback"]["status"], "disabled")
             self.assertGreater(second_cache["estimated_saved_cost_usd"], 0)
             self.assertEqual(second_cache["stream_replay"]["media_type"], "text/event-stream")
             self.assertEqual(second_cache["stream_replay"]["frame_count"], len(STREAM_FRAMES))
             self.assertTrue(second_cache["stream_replay"]["complete"])
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_static_holdout_rule_fails_closed(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (
+                self._streaming_cache_rule_for_request(request_body, canary_fraction=0.0),
+            )
+            with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                client = TestClient(server.app)
+                headers = {"x-session-id": "streaming-cache-test"}
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as first:
+                    first_body = b"".join(first.iter_bytes())
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as second:
+                    second_body = b"".join(second.iter_bytes())
+
+            self.assertEqual(first.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(second.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(first_body, b"".join(STREAM_FRAMES))
+            self.assertEqual(second_body, first_body)
+            self.assertEqual(FakeAsyncClient.calls, 2)
+            rows = server.store.conn.execute(
+                "select cache_hit, cache_json from calls order by created_at"
+            ).fetchall()
+            self.assertEqual([row["cache_hit"] for row in rows], [0, 0])
+            first_cache = json.loads(rows[0]["cache_json"])
+            self.assertEqual(first_cache["status"], "skipped")
+            self.assertEqual(first_cache["reason"], "canary_holdout")
+            self.assertEqual(first_cache["canary_cohort"], "canary_holdout")
+            self.assertEqual(first_cache["pattern_rule"]["canary"]["status"], "holdout")
+            self.assertEqual(first_cache["cache_replay_lifecycle_feedback"]["status"], "disabled")
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_thinking_turn_fails_closed_even_with_static_rule(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_cache_rule_for_request(request_body),)
+            with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                client = TestClient(server.app)
+                headers = {"x-session-id": "streaming-cache-test"}
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as response:
+                    body = b"".join(response.iter_bytes())
+
+            self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(body, b"".join(STREAM_FRAMES))
+            self.assertEqual(FakeAsyncClient.calls, 1)
+            [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
+            self.assertEqual(row["cache_hit"], 0)
+            cache_meta = json.loads(row["cache_json"])
+            self.assertEqual(cache_meta["status"], "skipped")
+            self.assertEqual(cache_meta["reason"], "streaming-thinking-disabled")
+            self.assertEqual(
+                cache_meta["pattern_rules"]["skip_reasons"][-1]["reason"],
+                "streaming-thinking-disabled",
+            )
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_tool_result_turn_fails_closed_even_with_static_rule(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "static output"}],
+                }
+            ],
+        }
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_cache_rule_for_request(request_body),)
+            with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                client = TestClient(server.app)
+                headers = {"x-session-id": "streaming-cache-test"}
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as response:
+                    body = b"".join(response.iter_bytes())
+
+            self.assertEqual(response.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(body, b"".join(STREAM_FRAMES))
+            self.assertEqual(FakeAsyncClient.calls, 1)
+            [row] = server.store.conn.execute("select cache_hit, cache_json from calls").fetchall()
+            self.assertEqual(row["cache_hit"], 0)
+            cache_meta = json.loads(row["cache_json"])
+            self.assertEqual(cache_meta["status"], "skipped")
+            self.assertEqual(cache_meta["reason"], "streaming-tools-disabled")
+            self.assertEqual(
+                cache_meta["pattern_rules"]["skip_reasons"][-1]["reason"],
+                "streaming-tools-disabled",
+            )
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_dependency_required_rule_fails_closed_without_evidence(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (
+                self._streaming_cache_rule_for_request(request_body, safe_invalidation=True),
+            )
+            with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                client = TestClient(server.app)
+                headers = {"x-session-id": "streaming-cache-test"}
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as first:
+                    first_body = b"".join(first.iter_bytes())
+                with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as second:
+                    second_body = b"".join(second.iter_bytes())
+
+            self.assertEqual(first.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(second.headers["x-agentflow-cache"], "skip-streaming")
+            self.assertEqual(first_body, b"".join(STREAM_FRAMES))
+            self.assertEqual(second_body, first_body)
+            self.assertEqual(FakeAsyncClient.calls, 2)
+            rows = server.store.conn.execute(
+                "select cache_hit, cache_json from calls order by created_at"
+            ).fetchall()
+            self.assertEqual([row["cache_hit"] for row in rows], [0, 0])
+            first_cache = json.loads(rows[0]["cache_json"])
+            self.assertEqual(first_cache["status"], "bypassed")
+            self.assertEqual(first_cache["reason"], "file-dependency-missing")
+            self.assertEqual(first_cache["cache_replay_canary"]["status"], "bypassed")
+            self.assertFalse(first_cache["cache_replay_canary"]["current_dependency_evidence"]["safe_invalidation_evidence"])
+            self.assertEqual(first_cache["cache_replay_lifecycle_feedback"]["status"], "disabled")
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
 

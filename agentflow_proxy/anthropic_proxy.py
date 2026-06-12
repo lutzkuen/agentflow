@@ -30,7 +30,7 @@ from agentflow_proxy.headers import (
 from agentflow_proxy.limiter import TierBackoffActive, model_tier, tier_backoff_headers, tier_backoff_payload
 from agentflow_proxy.router import (
     extract_text, has_tools, categorize_request, route_model,
-    STRIP_THINKING_HISTORY, _has_top_level_thinking, strip_thinking_history_blocks,
+    STRIP_THINKING_HISTORY, _has_top_level_thinking, strip_thinking_history_blocks, uses_thinking,
 )
 from agentflow_proxy.crunch import (
     TOKEN_CHARS, estimate_tokens_from_text, build_embedding,
@@ -1078,8 +1078,10 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
 
         if stream:
             has_tool_blocks = has_tools(crunched)
+            has_thinking_blocks = uses_thinking(crunched)
             can_stream_cache, cache_meta = streaming_cache_lookup_meta(
                 has_tool_blocks,
+                has_thinking_blocks=has_thinking_blocks,
                 pattern_features=routing_meta.get("managed_pattern_features"),
                 store_obj=context.store,
             )
@@ -1117,6 +1119,25 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 replay_scope=replay_scope,
                 replay_scope_id=replay_scope_id,
             )
+            if can_stream_cache:
+                replay_allowed = True
+                if replay_pattern_rule is not None:
+                    dependency_audit = context.store.cache_file_dependency_audit(key)
+                    replay_allowed, replay_canary = cache_replay_canary_decision(
+                        cache_meta=cache_meta,
+                        dependency_audit=dependency_audit,
+                        session_id=session_id,
+                    )
+                    cache_meta["cache_replay_canary"] = replay_canary
+                    if not replay_allowed:
+                        can_stream_cache = False
+                        cache_meta["status"] = replay_canary.get("status", "bypassed")
+                        cache_meta["reason"] = str(replay_canary.get("reason") or "cache-replay-canary-bypassed")
+                        if replay_canary.get("status") == "invalidated":
+                            cache_meta["invalidated"] = True
+                            cache_meta["invalidation_reason"] = str(replay_canary.get("reason") or "dependency-invalidated")
+                            context.store.delete_cache(key)
+                cached = None
             if can_stream_cache:
                 cached, invalidated_reason = context.store.get_cache_with_reason(key)
                 if invalidated_reason:

@@ -1271,6 +1271,74 @@ file_watch:
         self.assertNotIn("/tmp/private.py", json.dumps(event))
         assert_managed_egress_safe(event)
 
+    def test_cache_replay_lifecycle_feedback_covers_streaming_applied_and_bypassed(self):
+        rule = {
+            "rule_id": "reviewed-static-streaming-cache",
+            "candidate_id": "streaming-static-candidate",
+            "policy_source": "managed-recommended",
+            "canary": {"enabled": True, "selected": True, "cohort": "canary_applied", "status": "applied"},
+        }
+        applied_event = cache_module.build_cache_replay_lifecycle_feedback(
+            cache_meta={
+                "status": "miss",
+                "reason": "streaming-exact-pattern-miss",
+                "pattern_rule": rule,
+                "cache_replay_canary": {
+                    "status": "applied",
+                    "reason": "no-dependency-required",
+                    "canary_cohort": "canary_applied",
+                },
+            },
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=200,
+            latency_ms=20,
+            retry_count=0,
+            cost_est_usd=0.002,
+            cost_baseline_usd=0.002,
+            category="short-completion",
+            stream=True,
+        )
+        self.assertEqual(applied_event["cohort"], "applied")
+        self.assertEqual(applied_event["event_reason"], "cache-miss")
+        self.assertTrue(applied_event["stream"])
+        assert_managed_egress_safe(applied_event)
+
+        bypassed_event = cache_module.build_cache_replay_lifecycle_feedback(
+            cache_meta={
+                "status": "bypassed",
+                "reason": "file-dependency-missing",
+                "pattern_rule": rule,
+                "cache_replay_canary": {
+                    "status": "bypassed",
+                    "reason": "file-dependency-missing",
+                    "canary_cohort": "canary_applied",
+                    "dependency_audit": {
+                        "safe_invalidation_evidence": False,
+                        "invalidation_reason": "file-dependency-missing",
+                        "paths_included": False,
+                    },
+                },
+            },
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            status_code=200,
+            latency_ms=21,
+            retry_count=0,
+            cost_est_usd=0.002,
+            cost_baseline_usd=0.002,
+            category="short-completion",
+            stream=True,
+        )
+        self.assertEqual(bypassed_event["cohort"], "bypassed")
+        self.assertEqual(bypassed_event["event_reason"], "replay-bypassed")
+        self.assertIn("file-dependency-missing", bypassed_event["invalidation_reason_codes"])
+        assert_managed_egress_safe(bypassed_event)
+
     def test_cache_replay_lifecycle_feedback_redacts_raw_like_rule_metadata(self):
         raw_path = "/tmp/private/project/secret.py"
         raw_prompt = "raw prompt must not leave local machine"
@@ -1354,7 +1422,7 @@ file_watch:
             "raw_pattern_strings_included": False,
         }
 
-    def _streaming_static_rule(self, pattern_hash, *, canary_fraction=1.0):
+    def _streaming_static_rule(self, pattern_hash, *, canary_fraction=1.0, safe_invalidation=False):
         return cache_module.normalize_cache_pattern_rules([{
             "id": "reviewed-static-streaming-cache",
             "policy_source": "managed-recommended",
@@ -1382,6 +1450,7 @@ file_watch:
                 "type": "exact_cache_pattern",
                 "streaming": True,
                 "allow_tool_calls": False,
+                "safe_invalidation": safe_invalidation,
             },
         }])[0]
 
@@ -1436,6 +1505,27 @@ file_watch:
             self.assertEqual(meta["canary_cohort"], "canary_holdout")
             self.assertEqual(meta["pattern_rule"]["candidate_id"], "streaming-static-candidate")
             self.assertEqual(meta["pattern_rule"]["canary"]["status"], "holdout")
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streaming_static_rule_blocks_thinking_turns_even_when_pattern_matches(self):
+        pattern_hash = "sha256:" + "e" * 64
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (self._streaming_static_rule(pattern_hash),)
+            can_cache, meta = cache_module.streaming_cache_lookup_meta(
+                has_tool_blocks=False,
+                has_thinking_blocks=True,
+                pattern_features=self._streaming_static_features(pattern_hash),
+            )
+
+            self.assertFalse(can_cache)
+            self.assertEqual(meta["status"], "skipped")
+            self.assertEqual(meta["reason"], "streaming-thinking-disabled")
+            self.assertEqual(
+                meta["pattern_rules"]["skip_reasons"][-1]["reason"],
+                "streaming-thinking-disabled",
+            )
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
 
