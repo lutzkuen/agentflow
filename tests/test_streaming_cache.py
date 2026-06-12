@@ -547,7 +547,6 @@ class StreamingCacheTest(unittest.TestCase):
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "thinking", "thinking": "private reasoning secret"},
                         {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "secret.py"}},
                     ],
                 },
@@ -585,11 +584,68 @@ class StreamingCacheTest(unittest.TestCase):
         self.assertEqual(preflight["status"], "ok")
         self.assertIn("thinking", preflight["stripped_params"])
         self.assertIn("effort", preflight["stripped_params"])
-        self.assertEqual(preflight["thinking_history_blocks_stripped"], 1)
         self.assertEqual(preflight["tool_result_audit"]["status"], "ok")
         serialized = json.dumps(experiment_json, sort_keys=True)
-        self.assertNotIn("private reasoning secret", serialized)
         self.assertNotIn("tool output secret", serialized)
+        self.assertNotIn("secret.py", serialized)
+
+    def test_streamed_tool_result_shadow_skips_thinking_continuation_before_provider_call(self):
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "stream": True,
+            "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "private current reasoning secret", "signature": "sig-secret"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "secret.py"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "tool output secret"}],
+                },
+            ],
+        }
+
+        with (
+            self._tool_result_shadow_policy(),
+            patch.object(server.httpx, "AsyncClient", FakeShadowStreamingClient),
+            patch.object(anthropic_proxy, "routing_experiment_decision", self._streaming_experiment_decision(random_value=0.0)),
+        ):
+            client = TestClient(server.app)
+            with client.stream("POST", "/v1/messages", json=request_body) as response:
+                body = b"".join(response.iter_bytes())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body, b"".join(STREAM_FRAMES))
+        self.assertEqual(FakeShadowStreamingClient.post_calls, 0)
+        [call] = server.store.conn.execute("select routing_json from calls").fetchall()
+        experiment_meta = json.loads(call["routing_json"])["routing_experiment"]
+        self.assertEqual(experiment_meta["reason"], "streaming-shadow-unsupported-shape")
+        self.assertEqual(experiment_meta["status"], "shadow-unsupported-shape")
+        self.assertIn("unsupported-shadow-shape-tool-result-thinking-continuation", experiment_meta["reason_codes"])
+
+        [sample] = server.store.conn.execute(
+            "select shadow_status_code, error, experiment_json from routing_experiments"
+        ).fetchall()
+        self.assertIsNone(sample["shadow_status_code"])
+        self.assertEqual(sample["error"], "shadow-unsupported-shape:tool-result-thinking-continuation")
+        experiment_json = json.loads(sample["experiment_json"])
+        preflight = experiment_json["shadow_request_preflight"]
+        self.assertEqual(preflight["status"], "unsupported")
+        self.assertEqual(preflight["reason"], "tool-result-thinking-continuation")
+        self.assertTrue(preflight["candidate_would_strip_thinking_history"])
+        self.assertEqual(preflight["tool_result_audit"]["tool_result_from_thinking_turn_count"], 1)
+        self.assertFalse(preflight["raw_request_included"])
+        self.assertFalse(preflight["tool_payloads_included"])
+        serialized = json.dumps(experiment_json, sort_keys=True)
+        self.assertNotIn("private current reasoning secret", serialized)
+        self.assertNotIn("sig-secret", serialized)
+        self.assertNotIn("tool output secret", serialized)
+        self.assertNotIn("toolu_1", serialized)
         self.assertNotIn("secret.py", serialized)
 
     def test_streamed_orphan_tool_result_shadow_is_skipped_before_provider_call(self):

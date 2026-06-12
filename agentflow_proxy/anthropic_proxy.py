@@ -514,35 +514,93 @@ def _strip_model_incompatible_params(body: dict[str, Any], routing_meta: dict[st
         routing_meta["stripped_params"] = stripped
 
 
+_ANTHROPIC_THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+
+
+def _anthropic_message_blocks(message: Any) -> list[dict[str, Any]]:
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
+def _anthropic_tool_use_ids(message: Any) -> set[str]:
+    ids: set[str] = set()
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return ids
+    for block in _anthropic_message_blocks(message):
+        if block.get("type") != "tool_use":
+            continue
+        tool_id = str(block.get("id") or "")
+        if tool_id:
+            ids.add(tool_id)
+    return ids
+
+
+def _anthropic_thinking_block_count(message: Any) -> int:
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return 0
+    return sum(
+        1
+        for block in _anthropic_message_blocks(message)
+        if block.get("type") in _ANTHROPIC_THINKING_BLOCK_TYPES
+    )
+
+
+def _previous_assistant_message(messages: list[Any], index: int) -> dict[str, Any] | None:
+    if index <= 0:
+        return None
+    candidate = messages[index - 1]
+    if isinstance(candidate, dict) and candidate.get("role") == "assistant":
+        return candidate
+    return None
+
+
 def _anthropic_shadow_tool_result_audit(body: dict[str, Any]) -> dict[str, Any]:
     """Return metadata-only Anthropic tool-use protocol diagnostics for shadow calls."""
     tool_use_ids: set[str] = set()
     tool_result_count = 0
     orphan_count = 0
-    for message in body.get("messages") or []:
+    non_adjacent_count = 0
+    tool_result_from_thinking_turn_count = 0
+    thinking_blocks_before_tool_results = 0
+    messages = body.get("messages") or []
+    for message in messages:
         if not isinstance(message, dict):
             continue
-        content = message.get("content")
-        blocks = content if isinstance(content, list) else []
         if message.get("role") == "assistant":
-            for block in blocks:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    tool_id = str(block.get("id") or "")
-                    if tool_id:
-                        tool_use_ids.add(tool_id)
+            tool_use_ids.update(_anthropic_tool_use_ids(message))
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
         if message.get("role") == "user":
-            for block in blocks:
+            previous_assistant = _previous_assistant_message(messages, index)
+            previous_tool_use_ids = _anthropic_tool_use_ids(previous_assistant)
+            previous_thinking_blocks = _anthropic_thinking_block_count(previous_assistant)
+            for block in _anthropic_message_blocks(message):
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
                 tool_result_count += 1
                 tool_use_id = str(block.get("tool_use_id") or "")
                 if not tool_use_id or tool_use_id not in tool_use_ids:
                     orphan_count += 1
+                    continue
+                if tool_use_id not in previous_tool_use_ids:
+                    non_adjacent_count += 1
+                    continue
+                if previous_thinking_blocks:
+                    tool_result_from_thinking_turn_count += 1
+                    thinking_blocks_before_tool_results += previous_thinking_blocks
     status = "ok"
     reason = None
     if orphan_count:
         status = "unsupported"
         reason = "orphan-tool-result"
+    elif non_adjacent_count:
+        status = "unsupported"
+        reason = "non-adjacent-tool-result"
     return {
         "schema": "agentflow.anthropic_shadow_tool_result_audit.v1",
         "status": status,
@@ -550,6 +608,9 @@ def _anthropic_shadow_tool_result_audit(body: dict[str, Any]) -> dict[str, Any]:
         "tool_result_count": tool_result_count,
         "assistant_tool_use_count": len(tool_use_ids),
         "orphan_tool_result_count": orphan_count,
+        "non_adjacent_tool_result_count": non_adjacent_count,
+        "tool_result_from_thinking_turn_count": tool_result_from_thinking_turn_count,
+        "thinking_blocks_before_tool_results": thinking_blocks_before_tool_results,
         "raw_tool_ids_included": False,
         "tool_payloads_included": False,
     }
@@ -589,7 +650,20 @@ def _prepare_anthropic_shadow_request(
     _strip_model_incompatible_params(shadow_body, sanitization, primary_model)
     if sanitization.get("stripped_params"):
         diagnostics["stripped_params"] = sanitization["stripped_params"]
+    tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
+    diagnostics["tool_result_audit"] = tool_audit
+    if tool_audit["status"] == "unsupported":
+        diagnostics.update({"status": "unsupported", "reason": tool_audit["reason"]})
+        return None, diagnostics
     if model_tier(shadow_model) == "haiku":
+        diagnostics["candidate_would_strip_thinking_history"] = True
+        if int(tool_audit.get("tool_result_from_thinking_turn_count") or 0) > 0:
+            diagnostics.update({
+                "status": "unsupported",
+                "reason": "tool-result-thinking-continuation",
+                "thinking_history_blocks_detected": tool_audit.get("thinking_blocks_before_tool_results"),
+            })
+            return None, diagnostics
         shadow_body, stripped_thinking = strip_thinking_history_blocks(shadow_body)
         if stripped_thinking:
             diagnostics["thinking_history_blocks_stripped"] = stripped_thinking
@@ -600,11 +674,6 @@ def _prepare_anthropic_shadow_request(
             "reason": "thinking-history-only-assistant-message",
             "empty_assistant_message_count": empty_assistant_count,
         })
-        return None, diagnostics
-    tool_audit = _anthropic_shadow_tool_result_audit(shadow_body)
-    diagnostics["tool_result_audit"] = tool_audit
-    if tool_audit["status"] == "unsupported":
-        diagnostics.update({"status": "unsupported", "reason": tool_audit["reason"]})
         return None, diagnostics
     return shadow_body, diagnostics
 
