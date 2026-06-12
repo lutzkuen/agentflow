@@ -9679,6 +9679,280 @@ def _terminal_output_compaction_policy_state() -> dict[str, Any]:
     }
 
 
+def _terminal_output_compaction_public_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+    safety = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else {}
+    action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+    return {
+        "enabled": bool(rule.get("enabled")),
+        "policy_source": public_label(rule.get("policy_source") or "unknown", "unknown"),
+        "rule_id": public_id(rule.get("rule_id"), prefix="terminal-compaction-rule", fallback="unknown"),
+        "candidate_id": public_id(rule.get("candidate_id"), prefix="terminal-compaction-candidate"),
+        "action_id": public_id(rule.get("action_id"), prefix="terminal-compaction-action"),
+        "action_type": public_label(action.get("type") or "compact_terminal_output", "compact_terminal_output"),
+        "canary": {
+            "enabled": bool(canary.get("enabled", True)),
+            "fraction": _as_float(canary.get("fraction")),
+            "holdout_fraction": _as_float(canary.get("holdout_fraction")),
+            "unit": public_label(canary.get("unit") or "request_fingerprint", "request_fingerprint"),
+            "salt_configured": bool(canary.get("salt_configured")),
+        },
+        "safety_stop": {
+            "enabled": bool(safety.get("enabled", True)),
+            "min_outcome_samples": _as_int(safety.get("min_outcome_samples")),
+            "window": _as_int(safety.get("window")),
+        },
+        "conditions_included": False,
+        "policy_file_contents_included": False,
+    }
+
+
+def _terminal_output_compaction_count_lookup(rows: Any) -> dict[str, int]:
+    if not isinstance(rows, list):
+        return {}
+    result: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        result[str(row.get("value") or "unknown")] = _as_int(row.get("count"))
+    return result
+
+
+def _terminal_output_compaction_lifecycle_summary(lifecycle: dict[str, Any]) -> dict[str, Any]:
+    queue_counts = _terminal_output_compaction_count_lookup(lifecycle.get("queue_state_breakdown"))
+    lifecycle_counts = _terminal_output_compaction_count_lookup(lifecycle.get("lifecycle_status_breakdown"))
+    cohort_counts = _terminal_output_compaction_count_lookup(lifecycle.get("cohort_count_breakdown"))
+    reason_counts = lifecycle.get("reason_code_breakdown") if isinstance(lifecycle.get("reason_code_breakdown"), list) else []
+    return {
+        "schema": lifecycle.get("schema"),
+        "queue_rows": _as_int(lifecycle.get("queue_rows")),
+        "action_count": _as_int(lifecycle.get("action_count")),
+        "queued_count": queue_counts.get("queued", 0),
+        "sent_count": queue_counts.get("sent", 0),
+        "retryable_error_count": queue_counts.get("retryable-error", 0),
+        "dropped_count": queue_counts.get("dropped-after-limit", 0),
+        "reviewed_count": lifecycle_counts.get("reviewed", 0) + lifecycle_counts.get("review", 0),
+        "applied_count": lifecycle_counts.get("applied", 0) + lifecycle_counts.get("canary-applied", 0),
+        "rejected_count": lifecycle_counts.get("rejected", 0),
+        "holdout_count": cohort_counts.get("canary_holdout", 0) + cohort_counts.get("holdout", 0),
+        "safety_stop_count": lifecycle_counts.get("safety-stop", 0) + lifecycle_counts.get("safety_stopped", 0),
+        "rollback_count": lifecycle_counts.get("rollback", 0),
+        "queue_state_breakdown": lifecycle.get("queue_state_breakdown") if isinstance(lifecycle.get("queue_state_breakdown"), list) else [],
+        "event_type_breakdown": lifecycle.get("event_type_breakdown") if isinstance(lifecycle.get("event_type_breakdown"), list) else [],
+        "lifecycle_status_breakdown": lifecycle.get("lifecycle_status_breakdown") if isinstance(lifecycle.get("lifecycle_status_breakdown"), list) else [],
+        "cohort_count_breakdown": lifecycle.get("cohort_count_breakdown") if isinstance(lifecycle.get("cohort_count_breakdown"), list) else [],
+        "reason_code_breakdown": reason_counts,
+        "payload_json_included": False,
+    }
+
+
+def _terminal_output_compaction_activation_status(
+    *,
+    policy: dict[str, Any],
+    readiness_summary: dict[str, Any],
+    lifecycle_summary: dict[str, Any],
+) -> tuple[str, str]:
+    if _as_int(readiness_summary.get("rollback_action_count")) or _as_int(lifecycle_summary.get("rollback_count")):
+        return "rollback-ready", "rollback metadata or rollback action readiness is present"
+    if _as_int(readiness_summary.get("safety_stop_count")) or _as_int(lifecycle_summary.get("safety_stop_count")):
+        return "safety-stopped", "terminal-output compaction safety-stop metadata is present"
+    if _as_int(readiness_summary.get("applied_count")):
+        return "applied", "local terminal-output compaction canary has applied rows"
+    if _as_int(readiness_summary.get("holdout_count")):
+        return "holdout", "local terminal-output compaction has holdout rows"
+    if bool(policy.get("enabled")) and (_as_int(policy.get("rule_count")) or bool(policy.get("candidate_id_configured"))):
+        return "staged", "terminal-output compaction policy is staged locally"
+    if bool(policy.get("enabled")):
+        return "available", "terminal-output compaction policy is enabled with bundled defaults"
+    return "disabled", "terminal-output compaction policy is disabled"
+
+
+def _terminal_output_compaction_latest_safety_reason(readiness_summary: dict[str, Any], lifecycle_summary: dict[str, Any]) -> str | None:
+    reason_counts = readiness_summary.get("reason_code_counts")
+    if isinstance(reason_counts, list):
+        for row in reason_counts:
+            if isinstance(row, dict) and row.get("value"):
+                return public_label(row.get("value"), "sanitized-reason")
+    lifecycle_reasons = lifecycle_summary.get("reason_code_breakdown")
+    if isinstance(lifecycle_reasons, list):
+        for row in lifecycle_reasons:
+            if isinstance(row, dict) and row.get("value"):
+                return public_label(row.get("value"), "sanitized-reason")
+    recent = readiness_summary.get("recent_reason_codes")
+    if isinstance(recent, list) and recent:
+        return public_label(recent[0], "sanitized-reason")
+    return None
+
+
+def _terminal_output_compaction_public_lifecycle_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": public_id(row.get("candidate_id"), prefix="terminal-compaction-candidate", fallback="unknown"),
+        "queue_rows": _as_int(row.get("queue_rows")),
+        "action_count": _as_int(row.get("action_count")),
+        "net_savings_usd": round(_as_float(row.get("net_savings_usd")), 8),
+        "projected_saved_tokens": _as_int(row.get("projected_saved_tokens")),
+        "rule_id_breakdown": [
+            {"value": public_id(item.get("value"), prefix="terminal-compaction-rule", fallback="unknown"), "count": _as_int(item.get("count"))}
+            for item in row.get("rule_id_breakdown") or []
+            if isinstance(item, dict)
+        ],
+        "queue_state_breakdown": row.get("queue_state_breakdown") if isinstance(row.get("queue_state_breakdown"), list) else [],
+        "event_type_breakdown": row.get("event_type_breakdown") if isinstance(row.get("event_type_breakdown"), list) else [],
+        "lifecycle_status_breakdown": row.get("lifecycle_status_breakdown") if isinstance(row.get("lifecycle_status_breakdown"), list) else [],
+        "cohort_count_breakdown": row.get("cohort_count_breakdown") if isinstance(row.get("cohort_count_breakdown"), list) else [],
+        "reason_code_breakdown": [
+            {"value": public_label(item.get("value"), "sanitized-reason"), "count": _as_int(item.get("count"))}
+            for item in row.get("reason_code_breakdown") or []
+            if isinstance(item, dict)
+        ],
+        "payload_json_included": False,
+    }
+
+
+async def stats_terminal_output_compaction_activation(
+    store_obj: Any,
+    *,
+    opportunity_limit: int = 1000,
+    impact_limit: int = 500,
+) -> dict[str, Any]:
+    from agentflow_proxy.optimization.feedback import managed_feedback_status_result
+    from agentflow_proxy.terminal_compaction_feedback import SOURCE_SURFACE as TERMINAL_COMPACTION_LIFECYCLE_SOURCE_SURFACE
+
+    readiness = await stats_terminal_output_compaction_readiness(
+        store_obj,
+        opportunity_limit=opportunity_limit,
+        impact_limit=impact_limit,
+    )
+    policy = readiness.get("policy") if isinstance(readiness.get("policy"), dict) else {}
+    summary = readiness.get("summary") if isinstance(readiness.get("summary"), dict) else {}
+    canary = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
+    feedback = managed_feedback_status_result(
+        store_obj,
+        source_surface=TERMINAL_COMPACTION_LIFECYCLE_SOURCE_SURFACE,
+        sample_limit=5,
+    )
+    lifecycle = feedback.get("terminal_output_compaction_lifecycle") if isinstance(feedback.get("terminal_output_compaction_lifecycle"), dict) else {}
+    lifecycle_summary = _terminal_output_compaction_lifecycle_summary(lifecycle)
+    status, status_reason = _terminal_output_compaction_activation_status(
+        policy=policy,
+        readiness_summary=summary,
+        lifecycle_summary=lifecycle_summary,
+    )
+    safety_stop_count = _as_int(summary.get("safety_stop_count")) + _as_int(lifecycle_summary.get("safety_stop_count"))
+    rollback_action_count = _as_int(summary.get("rollback_action_count"))
+    latest_safety_reason = _terminal_output_compaction_latest_safety_reason(summary, lifecycle_summary) if safety_stop_count else None
+    rules = [
+        _terminal_output_compaction_public_rule(rule)
+        for rule in policy.get("rules") or []
+        if isinstance(rule, dict)
+    ]
+    if not rules and policy:
+        rules = [_terminal_output_compaction_public_rule({
+            "enabled": policy.get("enabled"),
+            "policy_source": policy.get("policy_source"),
+            "rule_id": policy.get("rule_id"),
+            "candidate_id": None,
+            "action_id": None,
+            "canary": canary,
+            "safety_stop": policy.get("safety_stop"),
+            "action": policy.get("action"),
+        })]
+
+    impact_rows: list[dict[str, Any]] = []
+    for row in readiness.get("impact_gates") or []:
+        if not isinstance(row, dict):
+            continue
+        impact_rows.append({
+            "candidate_id": public_id(row.get("candidate_id"), prefix="terminal-compaction-candidate", fallback="unknown"),
+            "rule_id": public_id(row.get("rule_id"), prefix="terminal-compaction-rule", fallback="unknown"),
+            "policy_source": public_label(row.get("policy_source") or "unknown", "unknown"),
+            "activation_state": row.get("verdict") or "observed",
+            "applied_count": _as_int(row.get("applied_count")),
+            "holdout_count": _as_int(row.get("holdout_count")),
+            "bypass_count": _as_int(row.get("safety_stop_count")),
+            "safety_stop_count": _as_int(row.get("safety_stop_count")),
+            "projected_saved_tokens": _as_int(row.get("planned_saved_tokens")),
+            "observed_saved_tokens": _as_int(row.get("applied_saved_tokens")),
+            "projected_savings_usd": round(_as_float(row.get("projected_holdout_savings_usd")), 8),
+            "observed_savings_usd": round(_as_float(row.get("net_savings_usd")), 8),
+            "rollback_action_ready": str(row.get("verdict") or "") == "rollback",
+            "latest_safety_stop_reason": latest_safety_reason if _as_int(row.get("safety_stop_count")) else None,
+            "reason_codes": [
+                public_label(value, "sanitized-reason")
+                for value in (row.get("reason_codes") or [])
+            ] if isinstance(row.get("reason_codes"), list) else [],
+        })
+
+    lifecycle_candidates = [
+        _terminal_output_compaction_public_lifecycle_candidate(row)
+        for row in lifecycle.get("candidate_breakdown") or []
+        if isinstance(row, dict)
+    ]
+
+    states = [
+        {"state": "staged", "active": status in {"staged", "available", "applied", "holdout", "safety-stopped", "rollback-ready"}, "count": len(rules)},
+        {"state": "applied", "active": _as_int(summary.get("applied_count")) > 0, "count": _as_int(summary.get("applied_count"))},
+        {"state": "holdout", "active": _as_int(summary.get("holdout_count")) > 0, "count": _as_int(summary.get("holdout_count"))},
+        {"state": "safety-stopped", "active": safety_stop_count > 0, "count": safety_stop_count},
+        {"state": "rollback-ready", "active": rollback_action_count > 0, "count": rollback_action_count},
+    ]
+
+    return {
+        "schema": "agentflow.terminal_output_compaction_activation.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "status": status,
+        "status_reason": status_reason,
+        "summary": {
+            "local_rule_staged_count": len(rules),
+            "active_rule_count": sum(1 for rule in rules if rule.get("enabled")),
+            "policy_source": public_label(policy.get("policy_source") or "unknown", "unknown"),
+            "policy_enabled": bool(policy.get("enabled")),
+            "canary_fraction": _as_float(canary.get("fraction")),
+            "holdout_fraction": _as_float(canary.get("holdout_fraction")),
+            "applied_count": _as_int(summary.get("applied_count")),
+            "holdout_count": _as_int(summary.get("holdout_count")),
+            "bypass_count": _as_int(summary.get("skipped_count")) + safety_stop_count,
+            "safety_stop_count": safety_stop_count,
+            "rollback_action_count": rollback_action_count,
+            "rollback_action_ready": rollback_action_count > 0 or status == "rollback-ready",
+            "latest_safety_stop_reason": latest_safety_reason,
+            "projected_saved_tokens": _as_int(summary.get("projected_saved_tokens")),
+            "projected_savings_usd": round(_as_float(summary.get("projected_saved_usd")), 8),
+            "observed_saved_tokens": _as_int(summary.get("applied_saved_tokens")),
+            "observed_savings_usd": round(_as_float(summary.get("net_savings_usd")), 8),
+            "managed_lifecycle_feedback_rows": _as_int(lifecycle_summary.get("queue_rows")),
+            "managed_lifecycle_feedback_queued": _as_int(lifecycle_summary.get("queued_count")),
+            "managed_lifecycle_feedback_retryable_error": _as_int(lifecycle_summary.get("retryable_error_count")),
+            "managed_lifecycle_feedback_dropped": _as_int(lifecycle_summary.get("dropped_count")),
+        },
+        "states": states,
+        "policy": {
+            "enabled": bool(policy.get("enabled")),
+            "policy_source": public_label(policy.get("policy_source") or "unknown", "unknown"),
+            "rule_id": public_id(policy.get("rule_id"), prefix="terminal-compaction-rule", fallback="unknown"),
+            "candidate_id_configured": bool(policy.get("candidate_id_configured")),
+            "rule_count": _as_int(policy.get("rule_count")),
+            "rule_file": policy.get("rule_file") if isinstance(policy.get("rule_file"), dict) else {},
+            "canary": {
+                "enabled": bool(canary.get("enabled", True)),
+                "fraction": _as_float(canary.get("fraction")),
+                "holdout_fraction": _as_float(canary.get("holdout_fraction")),
+                "unit": public_label(canary.get("unit") or "request_fingerprint", "request_fingerprint"),
+                "salt_configured": bool(canary.get("salt_configured")),
+            },
+            "rules": rules,
+            "conditions_included": False,
+            "action_contents_included": False,
+            "policy_file_contents_included": False,
+        },
+        "activation_candidates": impact_rows,
+        "lifecycle_feedback": lifecycle_summary,
+        "lifecycle_candidates": lifecycle_candidates,
+        "privacy": _terminal_output_compaction_privacy(),
+    }
+
+
 async def stats_terminal_output_compaction_readiness(
     store_obj: Any,
     *,
@@ -16853,6 +17127,24 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-terminal">
 <div class="section">
+  <h2>Terminal-output compaction activation</h2>
+  <table data-table-id="terminal-compaction-activation" data-filter-label="Filter terminal compaction activation">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Rules</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Bypass</th><th data-sort-type="number">Safety stops</th><th data-sort-type="text">Canary</th><th data-sort-type="money">Projected savings</th><th data-sort-type="money">Observed savings</th><th data-sort-type="text">Rollback</th><th data-sort-type="text">Lifecycle feedback</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="terminal-compaction-activation-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Terminal-output activation candidates</h2>
+  <table class="activity-table" data-table-id="terminal-compaction-activation-candidates" data-filter-label="Filter terminal compaction activation candidates">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Bypass</th><th data-sort-type="number">Safety</th><th data-sort-type="number">Projected tokens</th><th data-sort-type="number">Observed tokens</th><th data-sort-type="money">Observed savings</th><th data-sort-type="text">Reasons</th>
+    </tr></thead>
+    <tbody id="terminal-compaction-activation-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Terminal-output compaction readiness</h2>
   <table data-table-id="terminal-compaction-summary" data-filter-label="Filter terminal compaction summary">
     <thead><tr>
@@ -18590,10 +18882,10 @@ function repeatedScaffoldReasonBadges(values,verdict){
   return values.slice(0,5).map(value=>`<span class="badge ${verdict==='rollback'?'err':'miss'}">${esc(value)}</span>`).join(' ');
 }
 function terminalCompactionStatusBadge(status){
-  if(status==='saving'||status==='ready'||status==='promote')return'hit';
-  if(status==='canarying'||status==='hold'||status==='blocked')return'routed';
-  if(status==='rollback'||status==='safety-stopped')return'err';
-  if(status==='disabled'||status==='no-candidates'||status==='insufficient-evidence')return'miss';
+  if(status==='saving'||status==='ready'||status==='promote'||status==='applied'||status==='available'||status==='staged')return'hit';
+  if(status==='canarying'||status==='hold'||status==='holdout'||status==='blocked')return'routed';
+  if(status==='rollback'||status==='rollback-ready'||status==='safety-stopped')return'err';
+  if(status==='disabled'||status==='no-candidates'||status==='insufficient-evidence'||status==='no-lifecycle')return'miss';
   return'provider';
 }
 function terminalCompactionPrivacyBadges(privacy){
@@ -18610,16 +18902,56 @@ function terminalCompactionReasonBadges(values,verdict){
   if(!values.length)return'<span class="badge hit">none</span>';
   return values.slice(0,5).map(value=>`<span class="badge ${verdict==='rollback'||String(value).includes('rollback')?'err':'miss'}">${esc(value)}</span>`).join(' ');
 }
+function terminalCompactionStateBadges(states){
+  states=states||[];
+  if(!states.length)return'<span class="badge miss">none</span>';
+  return states.map(row=>`<span class="badge ${row.active?terminalCompactionStatusBadge(row.state):'miss'}">${esc(row.state||'unknown')} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
 async function refreshTerminalOutputCompaction(){
   try{
-    const r=await fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500');
+    const [r,ar]=await Promise.all([
+      fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500'),
+      fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=1000&impact_limit=500')
+    ]);
     const d=await r.json();
+    const activation=await ar.json();
     const s=d.summary||{};
+    const as=activation.summary||{};
     const policy=d.policy||{};
     const canary=policy.canary||{};
     const safety=policy.safety_stop||{};
     const ruleFile=policy.rule_file||{};
     const privacy=d.privacy||{};
+    const activationPrivacy=activation.privacy||{};
+    const lifecycle=activation.lifecycle_feedback||{};
+    document.getElementById('terminal-compaction-activation-tbody').innerHTML=`<tr>
+      <td><span class="badge ${terminalCompactionStatusBadge(activation.status)}">${esc(activation.status||'unknown')}</span><div class="sub">${esc(activation.status_reason||'')}</div><div class="flags">${terminalCompactionStateBadges(activation.states||[])}</div></td>
+      <td class="tokens">${(as.active_rule_count||0).toLocaleString()} / ${(as.local_rule_staged_count||0).toLocaleString()}<div class="sub">${esc(as.policy_source||'unknown')}</div></td>
+      <td class="tokens">${(as.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.bypass_count||0).toLocaleString()}</td>
+      <td class="tokens">${(as.safety_stop_count||0).toLocaleString()}${as.latest_safety_stop_reason?`<div class="sub">${esc(as.latest_safety_stop_reason)}</div>`:''}</td>
+      <td class="flags"><span class="badge provider">target ${fmtPctValue(Number(as.canary_fraction||0))}</span> <span class="badge provider">holdout ${fmtPctValue(Number(as.holdout_fraction||0))}</span></td>
+      <td class="savings">${fmt(as.projected_savings_usd||0,6)}<div class="sub">${fmtTok(as.projected_saved_tokens||0)} tokens</div></td>
+      <td class="${(as.observed_savings_usd||0)>=0?'savings':'cost'}">${fmt(as.observed_savings_usd||0,6)}<div class="sub">${fmtTok(as.observed_saved_tokens||0)} tokens</div></td>
+      <td class="flags">${as.rollback_action_ready?'<span class="badge err">ready</span>':'<span class="badge hit">not needed</span>'} <span class="badge provider">${(as.rollback_action_count||0).toLocaleString()} actions</span></td>
+      <td class="flags"><span class="badge provider">${(as.managed_lifecycle_feedback_rows||0).toLocaleString()} rows</span> <span class="badge ${as.managed_lifecycle_feedback_retryable_error||as.managed_lifecycle_feedback_dropped?'err':'hit'}">${(as.managed_lifecycle_feedback_queued||0).toLocaleString()} queued</span> ${terminalCompactionBreakdownBadges(lifecycle.lifecycle_status_breakdown,'no lifecycle','provider')}</td>
+      <td class="flags">${terminalCompactionPrivacyBadges(activationPrivacy)}</td>
+    </tr>`;
+    const activationRows=activation.activation_candidates||[];
+    document.getElementById('terminal-compaction-activation-candidates-tbody').innerHTML=activationRows.map(row=>`<tr>
+      <td><span class="badge ${terminalCompactionStatusBadge(row.activation_state)}">${esc(row.activation_state||'unknown')}</span></td>
+      <td class="model">${esc(row.candidate_id||'unknown')}</td>
+      <td class="model">${esc(row.rule_id||'unknown')}</td>
+      <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.bypass_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}${row.latest_safety_stop_reason?`<div class="sub">${esc(row.latest_safety_stop_reason)}</div>`:''}</td>
+      <td class="tokens">${fmtTok(row.projected_saved_tokens||0)}</td>
+      <td class="tokens">${fmtTok(row.observed_saved_tokens||0)}</td>
+      <td class="${(row.observed_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.observed_savings_usd||0,6)}</td>
+      <td class="flags">${terminalCompactionReasonBadges(row.reason_codes,row.activation_state)} ${row.rollback_action_ready?'<span class="badge err">rollback ready</span>':''}</td>
+    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No terminal-output activation metadata yet</td></tr>';
     document.getElementById('terminal-compaction-summary-tbody').innerHTML=`<tr>
       <td><span class="badge ${terminalCompactionStatusBadge(d.state)}">${esc(d.state||'unknown')}</span><div class="sub">${esc(d.state_reason||'')}</div></td>
       <td class="tokens">${(s.opportunity_candidate_count||0).toLocaleString()}</td>

@@ -807,6 +807,225 @@ class DashboardImportTests(unittest.TestCase):
             tmp.close()
             policy_tmp.close()
 
+    def test_terminal_output_compaction_activation_endpoint_is_read_only_and_content_free(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        policy_tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml")
+        policy_tmp.write("raw-activation-policy-file-secret: must-not-render\n")
+        policy_tmp.flush()
+        store = Store(tmp.name)
+        try:
+            from agentflow_proxy import crunch
+            from agentflow_proxy.terminal_compaction_feedback import FEEDBACK_SCHEMA, SOURCE_SURFACE
+
+            policy = {
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "rule_id": "raw activation rule secret / local-path",
+                "candidate_id": "raw activation candidate secret",
+                "canary": {
+                    "enabled": True,
+                    "fraction": 0.25,
+                    "holdout_fraction": 0.75,
+                    "unit": "request_fingerprint",
+                    "salt": "raw activation salt secret",
+                },
+                "safety_stop": {"enabled": True, "min_outcome_samples": 1, "window": 50},
+                "rules": [
+                    {
+                        "enabled": True,
+                        "policy_source": "managed-recommended",
+                        "rule_id": "raw activation rule secret / local-path",
+                        "candidate_id": "raw activation candidate secret",
+                        "action_id": "raw activation action secret",
+                        "action": {"type": "compact_terminal_output"},
+                        "canary": {
+                            "enabled": True,
+                            "fraction": 0.25,
+                            "holdout_fraction": 0.75,
+                            "unit": "request_fingerprint",
+                            "salt_configured": True,
+                        },
+                        "safety_stop": {"enabled": True, "min_outcome_samples": 1, "window": 50},
+                    }
+                ],
+            }
+
+            def log_activation_call(call_id, *, status, cohort, reason, changed, tokens_saved=0, planned_tokens=1200):
+                terminal_meta = {
+                    "schema": "agentflow.terminal_output_compaction_decision.v1",
+                    "enabled": True,
+                    "status": status,
+                    "reason": reason,
+                    "changed": changed,
+                    "applied": changed,
+                    "policy_source": "managed-recommended",
+                    "rule_id": "raw activation rule secret / local-path",
+                    "candidate_id": "raw activation candidate secret",
+                    "action_id": "raw activation action secret",
+                    "category": "tool-result",
+                    "canary": {
+                        "schema": "agentflow.terminal_output_compaction_canary_decision.v1",
+                        "enabled": True,
+                        "selected": changed,
+                        "status": status,
+                        "cohort": cohort,
+                    },
+                    "planned_saved_tokens": planned_tokens,
+                    "tokens_saved_est": tokens_saved,
+                    "compaction_cost_usd": 0.0,
+                    "raw_terminal_text_included": False,
+                    "raw_request_body_included": False,
+                    "raw_tool_ids_included": False,
+                    "raw_session_ids_included": False,
+                }
+                store.log_call(
+                    id=call_id,
+                    created_at="2026-06-12T10:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=100,
+                    input_tokens_est=10_000,
+                    output_tokens_est=100,
+                    actual_input_tokens=10_000,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.03,
+                    cost_baseline_usd=0.034,
+                    crunch_json=stable_json({"changed": changed, "terminal_output_compaction": terminal_meta}),
+                    routing_json=stable_json({
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "text_chars": 40_000,
+                        "request_id": "raw-activation-request-id",
+                    }),
+                    cache_json=stable_json({"status": "skipped", "cache_key": "raw-activation-cache-key"}),
+                    error=None,
+                    request_json=stable_json({"messages": [{"content": "raw activation terminal secret"}]}),
+                    response_json=stable_json({"text": "raw activation response secret"}),
+                    session_id="raw-activation-session-id",
+                    category="tool-result",
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    retry_count=0,
+                    thinking_output_tokens=0,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    requested_model_family="sonnet",
+                    routed_model_family="sonnet",
+                )
+
+            log_activation_call(
+                "activation-applied",
+                status="applied",
+                cohort="canary_applied",
+                reason="terminal-output-compaction-applied",
+                changed=True,
+                tokens_saved=900,
+            )
+            log_activation_call(
+                "activation-holdout",
+                status="holdout",
+                cohort="canary_holdout",
+                reason="canary_holdout",
+                changed=False,
+            )
+            log_activation_call(
+                "activation-safety",
+                status="safety_stop",
+                cohort="safety_stop",
+                reason="safety-stop-error-rate",
+                changed=False,
+            )
+            store.enqueue_managed_outcome_feedback(
+                id="raw-activation-queue-id",
+                created_at="2026-06-12T10:05:00+00:00",
+                updated_at="2026-06-12T10:05:00+00:00",
+                source_surface=SOURCE_SURFACE,
+                endpoint="/v1/feedback",
+                optimization_unit_id=0,
+                status="queued",
+                payload_json=stable_json({
+                    "event_type": "canary-applied",
+                    "metadata": {
+                        "schema": FEEDBACK_SCHEMA,
+                        "action_snapshots": [
+                            {
+                                "candidate_id": "raw activation candidate secret",
+                                "rule_id": "raw activation rule secret / local-path",
+                                "lifecycle_status": "safety-stop",
+                                "actual_cohort_counts": {"canary_applied": 1, "canary_holdout": 1},
+                                "reason_codes": ["safety-stop-error-rate"],
+                                "net_savings_usd": 0.004,
+                                "projected_saved_tokens": 2400,
+                            }
+                        ],
+                    },
+                }),
+            )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            with (
+                patch.object(crunch, "TERMINAL_OUTPUT_COMPACTION_POLICY", policy),
+                patch.object(crunch, "CRUNCH_RULES_PATH", policy_tmp.name),
+            ):
+                response = client.get("/agentflow/stats/terminal-output-compaction-activation?limit=20")
+                dashboard_response = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(dashboard_response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_activation.v1")
+            self.assertTrue(payload["read_only"])
+            self.assertEqual(payload["status"], "safety-stopped")
+            self.assertGreaterEqual(payload["summary"]["active_rule_count"], 1)
+            self.assertEqual(payload["summary"]["applied_count"], 1)
+            self.assertEqual(payload["summary"]["holdout_count"], 1)
+            self.assertGreaterEqual(payload["summary"]["safety_stop_count"], 1)
+            self.assertTrue(payload["summary"]["latest_safety_stop_reason"])
+            self.assertGreater(payload["summary"]["managed_lifecycle_feedback_rows"], 0)
+            self.assertIn("Terminal-output compaction activation", dashboard_response.text)
+            self.assertIn("terminal-compaction-activation-tbody", dashboard_response.text)
+            self.assertIn("fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=1000&impact_limit=500')", dashboard_response.text)
+            self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
+            self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
+            self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(payload["privacy"]["tool_payloads_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
+            self.assertFalse(payload["privacy"]["session_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertFalse(payload["privacy"]["policy_file_contents_included"])
+            rendered = json.dumps(payload, sort_keys=True)
+            for forbidden in (
+                "raw activation terminal secret",
+                "raw activation response secret",
+                "raw activation rule secret",
+                "raw activation candidate secret",
+                "raw activation action secret",
+                "raw activation request-id",
+                "raw-activation-request-id",
+                "raw-activation-session-id",
+                "raw-activation-cache-key",
+                "raw-activation-policy-file-secret",
+                policy_tmp.name,
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            store.conn.close()
+            tmp.close()
+            policy_tmp.close()
+
     def test_managed_openai_activation_dashboard_uses_metadata_only_sources(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()

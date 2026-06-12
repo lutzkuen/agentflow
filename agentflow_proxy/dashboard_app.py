@@ -257,6 +257,20 @@ def create_dashboard_router(
             max_plateau_delta_ratio=max_plateau_delta_ratio,
         )
 
+    @router.get("/agentflow/stats/terminal-output-compaction-activation")
+    async def stats_terminal_output_compaction_activation(
+        opportunity_limit: int = 1000,
+        impact_limit: int = 500,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        if limit is not None:
+            impact_limit = limit
+        return await stats_views.stats_terminal_output_compaction_activation(
+            _store(store_obj),
+            opportunity_limit=opportunity_limit,
+            impact_limit=impact_limit,
+        )
+
     @router.get("/agentflow/stats/repeated-scaffold-impact")
     async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit)
