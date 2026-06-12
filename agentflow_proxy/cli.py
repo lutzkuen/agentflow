@@ -2078,9 +2078,15 @@ def managed_rollout_actions_review_cli(
             fetch = {"status": "skipped", "reason": "local-input", "error": read_error}
 
     from agentflow_proxy.policy_events import log_policy_event
-    from agentflow_proxy.rollout_actions import plan_rollout_actions
 
-    review = plan_rollout_actions(bundle, config_dir=args.config_dir, sections=args.section)
+    if isinstance(bundle, dict) and bundle.get("schema") == "agentflow.openai_cache_replay_rollout_actions.v1":
+        from agentflow_proxy.openai_cache_replay_rollout_actions import review_openai_cache_replay_rollout_actions
+
+        review = review_openai_cache_replay_rollout_actions(bundle, config_dir=args.config_dir)
+    else:
+        from agentflow_proxy.rollout_actions import plan_rollout_actions
+
+        review = plan_rollout_actions(bundle, config_dir=args.config_dir, sections=args.section)
     if fetch:
         review["fetch"] = fetch
     log_policy_event(
@@ -2602,14 +2608,23 @@ def managed_rollout_actions_apply_cli(
             "actions": [],
         }
     else:
-        from agentflow_proxy.rollout_actions import apply_rollout_actions
+        if isinstance(bundle, dict) and bundle.get("schema") == "agentflow.openai_cache_replay_rollout_actions.v1":
+            from agentflow_proxy.openai_cache_replay_rollout_actions import apply_openai_cache_replay_rollout_actions
 
-        result = apply_rollout_actions(
-            bundle,
-            config_dir=args.config_dir,
-            dry_run=args.dry_run,
-            sections=args.section,
-        )
+            result = apply_openai_cache_replay_rollout_actions(
+                bundle,
+                config_dir=args.config_dir,
+                dry_run=args.dry_run,
+            )
+        else:
+            from agentflow_proxy.rollout_actions import apply_rollout_actions
+
+            result = apply_rollout_actions(
+                bundle,
+                config_dir=args.config_dir,
+                dry_run=args.dry_run,
+                sections=args.section,
+            )
 
     from agentflow_proxy.policy_events import log_policy_event
 
@@ -2687,20 +2702,26 @@ def managed_rollout_actions_dry_run_cli(
             "actions": [],
         }
     else:
-        from agentflow_proxy.rollout_actions import dry_run_rollout_actions
+        if isinstance(bundle, dict) and bundle.get("schema") == "agentflow.openai_cache_replay_rollout_actions.v1":
+            from agentflow_proxy.openai_cache_replay_rollout_actions import dry_run_openai_cache_replay_rollout_actions
 
-        store = _open_store_for_db(args.db)
-        try:
-            result = dry_run_rollout_actions(
-                bundle,
-                store_obj=store,
-                config_dir=args.config_dir,
-                sections=args.section,
-                limit=args.limit,
-            )
+            result = dry_run_openai_cache_replay_rollout_actions(bundle, config_dir=args.config_dir)
             result["db_path"] = args.db
-        finally:
-            store.conn.close()
+        else:
+            from agentflow_proxy.rollout_actions import dry_run_rollout_actions
+
+            store = _open_store_for_db(args.db)
+            try:
+                result = dry_run_rollout_actions(
+                    bundle,
+                    store_obj=store,
+                    config_dir=args.config_dir,
+                    sections=args.section,
+                    limit=args.limit,
+                )
+                result["db_path"] = args.db
+            finally:
+                store.conn.close()
 
     from agentflow_proxy.policy_events import log_policy_event
 
