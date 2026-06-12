@@ -7950,7 +7950,20 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
+        self.assertIn("const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','terminal','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
+
+    def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn(">Terminal compaction</button>", html)
+        self.assertIn("<h2>Terminal-output compaction readiness</h2>", html)
+        self.assertIn("id=\"terminal-compaction-summary-tbody\"", html)
+        self.assertIn("id=\"terminal-compaction-policy-tbody\"", html)
+        self.assertIn("id=\"terminal-compaction-candidates-tbody\"", html)
+        self.assertIn("id=\"terminal-compaction-impact-tbody\"", html)
+        self.assertIn("fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500')", html)
+        self.assertIn("terminal text omitted", html)
+        self.assertIn("policy contents omitted", html)
 
     def test_dashboard_exposes_codex_quota_token_usage_panel(self):
         html = stats_views.dashboard_html()

@@ -241,13 +241,18 @@ def create_dashboard_router(
 
     @router.get("/agentflow/stats/terminal-output-compaction")
     async def stats_terminal_output_compaction(
-        limit: int = 1000,
+        opportunity_limit: int = 1000,
+        impact_limit: int = 500,
+        limit: int | None = None,
         min_text_chars: int = 8000,
         max_plateau_delta_ratio: float = 0.03,
     ) -> dict[str, Any]:
-        return await stats_views.stats_terminal_output_compaction_opportunity(
+        if limit is not None:
+            opportunity_limit = limit
+        return await stats_views.stats_terminal_output_compaction_readiness(
             _store(store_obj),
-            limit=limit,
+            opportunity_limit=opportunity_limit,
+            impact_limit=impact_limit,
             min_text_chars=min_text_chars,
             max_plateau_delta_ratio=max_plateau_delta_ratio,
         )

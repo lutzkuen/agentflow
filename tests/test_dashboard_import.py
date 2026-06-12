@@ -89,6 +89,7 @@ class DashboardImportTests(unittest.TestCase):
             openai_old_context_summary = client.get("/agentflow/stats/openai-old-context-summary")
             openai_cache_replay_readiness = client.get("/agentflow/stats/openai-cache-replay-readiness")
             cache_replay_activation_health = client.get("/agentflow/stats/cache-replay-activation-health")
+            terminal_output_compaction = client.get("/agentflow/stats/terminal-output-compaction")
             repeated_scaffold_opportunity = client.get("/agentflow/stats/repeated-scaffold-opportunity")
             repeated_scaffold_impact = client.get("/agentflow/stats/repeated-scaffold-impact")
             repeated_scaffold_activation = client.get("/agentflow/stats/repeated-scaffold-activation")
@@ -171,6 +172,17 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(cache_replay_activation_health.json()["privacy"]["provider_calls_made"])
             self.assertFalse(cache_replay_activation_health.json()["privacy"]["raw_request_bodies_included"])
             self.assertFalse(cache_replay_activation_health.json()["privacy"]["cache_keys_included"])
+            self.assertEqual(terminal_output_compaction.status_code, 200)
+            self.assertEqual(terminal_output_compaction.json()["schema"], "agentflow.terminal_output_compaction_readiness.v1")
+            self.assertTrue(terminal_output_compaction.json()["read_only"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["raw_terminal_lines_included"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["tool_payloads_included"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["request_ids_included"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["session_ids_included"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["cache_keys_included"])
+            self.assertFalse(terminal_output_compaction.json()["privacy"]["policy_file_contents_included"])
             self.assertEqual(repeated_scaffold_opportunity.status_code, 200)
             self.assertEqual(repeated_scaffold_opportunity.json()["schema"], "agentflow.repeated_scaffold_opportunity.v1")
             self.assertEqual(repeated_scaffold_opportunity.json()["summary"]["candidate_count"], 0)
@@ -660,8 +672,13 @@ class DashboardImportTests(unittest.TestCase):
 
     def test_terminal_output_compaction_dashboard_endpoint_is_content_free(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        policy_tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml")
+        policy_tmp.write("raw-dashboard-policy-file-secret: must-not-render\n")
+        policy_tmp.flush()
         store = Store(tmp.name)
         try:
+            from agentflow_proxy import crunch
+
             terminal_text = "\n".join(
                 [
                     "$ pytest tests/test_dashboard_secret.py",
@@ -677,6 +694,7 @@ class DashboardImportTests(unittest.TestCase):
                     {
                         "role": "user",
                         "content": [
+                            {"type": "text", "text": "raw dashboard prompt secret must not leak"},
                             {
                                 "type": "tool_result",
                                 "tool_use_id": "raw-dashboard-tool-use-id",
@@ -709,8 +727,14 @@ class DashboardImportTests(unittest.TestCase):
                         "workflow_phase": "tool-execution",
                         "text_chars": text_chars,
                         "has_tools": True,
+                        "request_id": "raw-dashboard-request-id",
                     }),
-                    cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                    cache_json=stable_json({
+                        "status": "skipped",
+                        "reason": "streaming",
+                        "policy_source": "local-default",
+                        "cache_key": "raw-dashboard-cache-key",
+                    }),
                     error=None,
                     request_json=stable_json(body),
                     response_json=stable_json({"text": "raw dashboard response must not leak"}),
@@ -736,19 +760,44 @@ class DashboardImportTests(unittest.TestCase):
                 full_stats_ttl_s=0,
             )
             client = TestClient(app)
-            response = client.get("/agentflow/stats/terminal-output-compaction?limit=10")
+            with patch.object(crunch, "CRUNCH_RULES_PATH", policy_tmp.name):
+                response = client.get("/agentflow/stats/terminal-output-compaction?opportunity_limit=10&impact_limit=10")
+                dashboard_response = client.get("/agentflow/dashboard")
 
             self.assertEqual(response.status_code, 200)
+            self.assertEqual(dashboard_response.status_code, 200)
             payload = response.json()
-            self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_opportunity.v1")
+            self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_readiness.v1")
+            self.assertTrue(payload["read_only"])
             self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
+            self.assertEqual(payload["summary"]["opportunity_candidate_count"], 1)
+            self.assertIn(payload["state"], {"disabled", "ready"})
+            self.assertFalse(payload["policy"]["rule_file"]["rule_path_included"])
+            self.assertFalse(payload["policy"]["rule_file"]["policy_file_contents_included"])
+            self.assertIn("Terminal-output compaction readiness", dashboard_response.text)
+            self.assertIn("terminal-compaction-summary-tbody", dashboard_response.text)
+            self.assertIn("fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500')", dashboard_response.text)
+            self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
+            self.assertFalse(payload["privacy"]["raw_terminal_text_included"])
             self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(payload["privacy"]["raw_responses_included"])
+            self.assertFalse(payload["privacy"]["tool_payloads_included"])
+            self.assertFalse(payload["privacy"]["file_paths_included"])
+            self.assertFalse(payload["privacy"]["request_ids_included"])
             self.assertFalse(payload["privacy"]["session_ids_included"])
+            self.assertFalse(payload["privacy"]["cache_keys_included"])
+            self.assertFalse(payload["privacy"]["policy_file_contents_included"])
             rendered = json.dumps(payload, sort_keys=True)
             for forbidden in (
                 "raw-dashboard-terminal-secret",
+                "raw dashboard prompt secret",
+                "raw dashboard response",
                 "raw-dashboard-tool-use-id",
+                "raw-dashboard-request-id",
                 "raw-dashboard-session-id",
+                "raw-dashboard-cache-key",
+                "raw-dashboard-policy-file-secret",
                 "tests/test_dashboard_secret.py",
                 "/workspace/private",
             ):
@@ -756,6 +805,7 @@ class DashboardImportTests(unittest.TestCase):
         finally:
             store.conn.close()
             tmp.close()
+            policy_tmp.close()
 
     def test_managed_openai_activation_dashboard_uses_metadata_only_sources(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")

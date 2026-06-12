@@ -9538,6 +9538,274 @@ async def stats_terminal_output_compaction_opportunity(
     )
 
 
+def _terminal_output_compaction_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "content_free": True,
+        "dashboard_read_only": True,
+        "raw_terminal_lines_included": False,
+        "raw_terminal_text_included": False,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "raw_tool_payloads_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "filesystem_paths_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "raw_session_ids_included": False,
+        "cache_keys_included": False,
+        "policy_file_contents_included": False,
+        "yaml_contents_included": False,
+        "rule_path_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "basis": "terminal-output compaction policy metadata plus sanitized local opportunity and canary impact aggregates only",
+    }
+
+
+def _terminal_output_compaction_state(
+    *,
+    policy_enabled: bool,
+    opportunity_summary: dict[str, Any],
+    impact_summary: dict[str, Any],
+    impact_candidates: list[dict[str, Any]],
+) -> tuple[str, str]:
+    verdicts = {str(row.get("verdict") or "") for row in impact_candidates if isinstance(row, dict)}
+    candidate_count = _as_int(opportunity_summary.get("candidate_count"))
+    projected_saved_tokens = _as_int(opportunity_summary.get("projected_saved_tokens"))
+    applied_count = _as_int(impact_summary.get("applied_count"))
+    holdout_count = _as_int(impact_summary.get("holdout_count"))
+    safety_stop_count = _as_int(impact_summary.get("safety_stop_count"))
+    net_savings = _as_float(impact_summary.get("net_savings_usd"))
+    rollback_actions = _as_int(impact_summary.get("rollback_action_count"))
+
+    if rollback_actions or "rollback" in verdicts:
+        return "rollback", "local impact gates recommend review-only rollback"
+    if safety_stop_count:
+        return "safety-stopped", "local safety-stop metadata was observed"
+    if applied_count and net_savings > 0 and "promote" in verdicts:
+        return "saving", "applied canary evidence is positive"
+    if applied_count or holdout_count:
+        return "canarying", "applied or holdout canary metadata is present"
+    if not policy_enabled:
+        return "disabled", "terminal-output compaction policy is disabled"
+    if candidate_count and projected_saved_tokens > 0:
+        return "ready", "candidate cohorts have projected savings"
+    if candidate_count:
+        return "blocked", "candidate cohorts exist but blockers or low savings prevent readiness"
+    return "no-candidates", "no terminal-output compaction candidate cohorts found in the sampled window"
+
+
+def _terminal_output_compaction_policy_state() -> dict[str, Any]:
+    from agentflow_proxy import crunch
+
+    policy = getattr(crunch, "TERMINAL_OUTPUT_COMPACTION_POLICY", {}) or {}
+    canary = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
+    safety = policy.get("safety_stop") if isinstance(policy.get("safety_stop"), dict) else {}
+    file_state = policy_file_status(
+        getattr(crunch, "CRUNCH_RULES_PATH", None),
+        loaded_at=getattr(crunch, "CRUNCH_RULES_LOADED_AT", None),
+        loaded_snapshot=getattr(crunch, "CRUNCH_RULES_LOADED_FILE", None),
+    )
+    return {
+        "enabled": bool(policy.get("enabled")),
+        "policy_source": str(policy.get("policy_source") or getattr(crunch, "CRUNCH_POLICY_SOURCE", "unknown")),
+        "rule_id": str(policy.get("rule_id") or "local-terminal-output-compaction-canary"),
+        "candidate_id_configured": policy.get("candidate_id") is not None,
+        "rule_file": {
+            "configured": bool(getattr(crunch, "CRUNCH_RULES_PATH", None)),
+            "path_class": _local_path_class(getattr(crunch, "CRUNCH_RULES_PATH", None)),
+            "reload_required": bool(file_state.get("reload_required")),
+            "rule_path_included": False,
+            "policy_file_contents_included": False,
+            "yaml_contents_included": False,
+        },
+        "canary": {
+            "enabled": bool(canary.get("enabled", True)),
+            "fraction": _as_float(canary.get("fraction")),
+            "holdout_fraction": _as_float(canary.get("holdout_fraction")),
+            "unit": str(canary.get("unit") or "request_fingerprint"),
+            "salt_configured": bool(canary.get("salt")),
+        },
+        "safety_stop": {
+            "enabled": bool(safety.get("enabled", True)),
+            "min_outcome_samples": _as_int(safety.get("min_outcome_samples")),
+            "window": _as_int(safety.get("window")),
+            "max_error_rate": _as_float(safety.get("max_error_rate")),
+            "max_retry_rate": _as_float(safety.get("max_retry_rate")),
+            "max_negative_savings_rate": _as_float(safety.get("max_negative_savings_rate")),
+            "max_error_rate_delta": _as_float(safety.get("max_error_rate_delta")),
+        },
+    }
+
+
+async def stats_terminal_output_compaction_readiness(
+    store_obj: Any,
+    *,
+    opportunity_limit: int = 1000,
+    impact_limit: int = 500,
+    min_text_chars: int = 8000,
+    max_plateau_delta_ratio: float = 0.03,
+) -> dict[str, Any]:
+    from agentflow_proxy.terminal_compaction_impact import build_terminal_output_compaction_impact_report
+
+    policy = _terminal_output_compaction_policy_state()
+    opportunity = await stats_terminal_output_compaction_opportunity(
+        store_obj,
+        limit=opportunity_limit,
+        min_text_chars=min_text_chars,
+        max_plateau_delta_ratio=max_plateau_delta_ratio,
+    )
+    impact = build_terminal_output_compaction_impact_report(store_obj, limit=impact_limit)
+    opportunity_summary = opportunity.get("summary") if isinstance(opportunity.get("summary"), dict) else {}
+    impact_summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    impact_candidates = [row for row in impact.get("candidates") or [] if isinstance(row, dict)]
+    state, state_reason = _terminal_output_compaction_state(
+        policy_enabled=bool(policy.get("enabled")),
+        opportunity_summary=opportunity_summary,
+        impact_summary=impact_summary,
+        impact_candidates=impact_candidates,
+    )
+    latest = impact_candidates[0] if impact_candidates else {}
+    latest_cohorts = latest.get("cohorts") if isinstance(latest.get("cohorts"), dict) else {}
+    latest_applied = latest_cohorts.get("applied") if isinstance(latest_cohorts.get("applied"), dict) else {}
+
+    summary = {
+        "state": state,
+        "state_reason": state_reason,
+        "opportunity_candidate_count": _as_int(opportunity_summary.get("candidate_count")),
+        "matched_count": _as_int(opportunity_summary.get("matched_count")),
+        "plateau_pair_count": _as_int(opportunity_summary.get("plateau_pair_count")),
+        "terminal_signal_rows": _as_int(opportunity_summary.get("terminal_signal_rows")),
+        "projected_saved_tokens": _as_int(opportunity_summary.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(opportunity_summary.get("projected_saved_usd")), 8),
+        "impact_candidate_count": _as_int(impact_summary.get("candidate_group_count")),
+        "observed_terminal_output_compaction_metadata_row_count": _as_int(
+            impact_summary.get("observed_terminal_output_compaction_metadata_row_count")
+        ),
+        "applied_count": _as_int(impact_summary.get("applied_count")),
+        "holdout_count": _as_int(impact_summary.get("holdout_count")),
+        "skipped_count": _as_int(impact_summary.get("skipped_count")),
+        "safety_stop_count": _as_int(impact_summary.get("safety_stop_count")),
+        "applied_saved_tokens": sum(
+            _as_int(((row.get("cohorts") or {}).get("applied") or {}).get("tokens_saved_est"))
+            for row in impact_candidates
+            if isinstance(row.get("cohorts"), dict)
+        ),
+        "net_savings_usd": round(_as_float(impact_summary.get("net_savings_usd")), 8),
+        "projected_holdout_savings_usd": round(_as_float(impact_summary.get("projected_holdout_savings_usd")), 8),
+        "rollback_action_count": _as_int(impact_summary.get("rollback_action_count")),
+        "recent_verdict": latest.get("verdict") if latest else None,
+        "recent_reason_codes": latest.get("reason_codes") if isinstance(latest.get("reason_codes"), list) else [],
+        "recent_error_rate_delta": (latest.get("deltas") or {}).get("error_rate_delta") if isinstance(latest.get("deltas"), dict) else None,
+        "recent_retry_rate_delta": (latest.get("deltas") or {}).get("retry_rate_delta") if isinstance(latest.get("deltas"), dict) else None,
+        "recent_latency_avg_ms_delta": (latest.get("deltas") or {}).get("latency_avg_ms_delta") if isinstance(latest.get("deltas"), dict) else None,
+        "recent_applied_error_rate": latest_applied.get("error_rate"),
+        "recent_applied_retry_rate": latest_applied.get("retry_rate"),
+        "verdict_counts": impact_summary.get("verdict_counts") if isinstance(impact_summary.get("verdict_counts"), list) else [],
+        "reason_code_counts": impact_summary.get("reason_code_counts") if isinstance(impact_summary.get("reason_code_counts"), list) else [],
+        "top_blockers": opportunity.get("blocker_reason_breakdown") if isinstance(opportunity.get("blocker_reason_breakdown"), list) else [],
+    }
+
+    readiness_candidates: list[dict[str, Any]] = []
+    for row in (opportunity.get("candidates") or [])[:25]:
+        if not isinstance(row, dict):
+            continue
+        readiness_candidates.append({
+            "candidate_id": row.get("candidate_id"),
+            "provider": row.get("provider"),
+            "source_surface": row.get("source_surface"),
+            "category": row.get("category"),
+            "workflow_phase": row.get("workflow_phase"),
+            "requested_model_family": row.get("requested_model_family"),
+            "routed_model_family": row.get("routed_model_family"),
+            "matched_count": _as_int(row.get("matched_count")),
+            "plateau_pair_count": _as_int(row.get("plateau_pair_count")),
+            "terminal_signal_rows": _as_int(row.get("terminal_signal_rows")),
+            "body_rows": _as_int(row.get("body_rows")),
+            "metadata_only_rows": _as_int(row.get("metadata_only_rows")),
+            "projected_saved_tokens": _as_int(row.get("projected_saved_tokens")),
+            "projected_saved_usd": round(_as_float(row.get("projected_saved_usd")), 8),
+            "blocker_reason_breakdown": row.get("blocker_reason_breakdown") if isinstance(row.get("blocker_reason_breakdown"), list) else [],
+            "privacy": row.get("privacy") if isinstance(row.get("privacy"), dict) else _terminal_output_compaction_privacy(),
+        })
+
+    impact_rows: list[dict[str, Any]] = []
+    for row in impact_candidates[:25]:
+        cohorts = row.get("cohorts") if isinstance(row.get("cohorts"), dict) else {}
+        applied = cohorts.get("applied") if isinstance(cohorts.get("applied"), dict) else {}
+        holdout = cohorts.get("holdout") if isinstance(cohorts.get("holdout"), dict) else {}
+        safety = cohorts.get("safety_stop") if isinstance(cohorts.get("safety_stop"), dict) else {}
+        impact_rows.append({
+            "candidate_id": row.get("candidate_id"),
+            "rule_id": row.get("rule_id"),
+            "policy_source": row.get("policy_source"),
+            "provider": row.get("provider"),
+            "source_surface": row.get("source_surface"),
+            "category": row.get("category"),
+            "workflow_phase": row.get("workflow_phase"),
+            "requested_model_family": row.get("requested_model_family"),
+            "routed_model_family": row.get("routed_model_family"),
+            "verdict": row.get("verdict"),
+            "reason_codes": row.get("reason_codes") if isinstance(row.get("reason_codes"), list) else [],
+            "applied_count": _as_int(applied.get("count")),
+            "holdout_count": _as_int(holdout.get("count")),
+            "safety_stop_count": _as_int(safety.get("count")),
+            "applied_saved_tokens": _as_int(applied.get("tokens_saved_est")),
+            "planned_saved_tokens": _as_int(applied.get("planned_saved_tokens")) + _as_int(holdout.get("planned_saved_tokens")),
+            "net_savings_usd": round(_as_float(row.get("net_savings_usd")), 8),
+            "projected_holdout_savings_usd": round(_as_float(row.get("projected_holdout_savings_usd")), 8),
+            "error_rate_delta": (row.get("deltas") or {}).get("error_rate_delta") if isinstance(row.get("deltas"), dict) else None,
+            "retry_rate_delta": (row.get("deltas") or {}).get("retry_rate_delta") if isinstance(row.get("deltas"), dict) else None,
+            "latency_avg_ms_delta": (row.get("deltas") or {}).get("latency_avg_ms_delta") if isinstance(row.get("deltas"), dict) else None,
+            "privacy": row.get("privacy") if isinstance(row.get("privacy"), dict) else _terminal_output_compaction_privacy(),
+        })
+
+    return {
+        "schema": "agentflow.terminal_output_compaction_readiness.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "state": state,
+        "state_reason": state_reason,
+        "policy": policy,
+        "summary": summary,
+        "safety_stop": {
+            "enabled": bool((policy.get("safety_stop") or {}).get("enabled")),
+            "active": state in {"safety-stopped", "rollback"} or _as_int(summary.get("safety_stop_count")) > 0,
+            "observed_count": _as_int(summary.get("safety_stop_count")),
+            "rollback_action_count": _as_int(summary.get("rollback_action_count")),
+            "reason_code_counts": summary["reason_code_counts"],
+        },
+        "provider_breakdown": opportunity.get("provider_breakdown") if isinstance(opportunity.get("provider_breakdown"), list) else [],
+        "category_breakdown": opportunity.get("category_breakdown") if isinstance(opportunity.get("category_breakdown"), list) else [],
+        "source_surface_breakdown": opportunity.get("source_surface_breakdown") if isinstance(opportunity.get("source_surface_breakdown"), list) else [],
+        "blocker_reason_breakdown": opportunity.get("blocker_reason_breakdown") if isinstance(opportunity.get("blocker_reason_breakdown"), list) else [],
+        "opportunity": {
+            "schema": opportunity.get("schema"),
+            "limit": opportunity.get("limit"),
+            "projection_policy": opportunity.get("projection_policy"),
+            "summary": opportunity_summary,
+        },
+        "impact": {
+            "schema": impact.get("schema"),
+            "status": impact.get("status"),
+            "lookback_limit": impact.get("lookback_limit"),
+            "thresholds": impact.get("thresholds"),
+            "summary": impact_summary,
+        },
+        "candidate_cohorts": readiness_candidates,
+        "impact_gates": impact_rows,
+        "privacy": _terminal_output_compaction_privacy(),
+    }
+
+
 async def stats_repeated_scaffold_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
 
@@ -16209,6 +16477,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" onclick="showTab('categories')">By category</button>
   <button class="tab-btn" onclick="showTab('cache')">Cache</button>
+  <button class="tab-btn" onclick="showTab('terminal')">Terminal compaction</button>
   <button class="tab-btn" onclick="showTab('scaffold')">Scaffold crunch</button>
   <button class="tab-btn" onclick="showTab('errors')">Errors</button>
   <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
@@ -16545,6 +16814,45 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Hit type</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Calls</th>
     </tr></thead>
     <tbody id="cache-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-terminal">
+<div class="section">
+  <h2>Terminal-output compaction readiness</h2>
+  <table data-table-id="terminal-compaction-summary" data-filter-label="Filter terminal compaction summary">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Matched</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Projected tokens</th><th data-sort-type="number">Applied tokens</th><th data-sort-type="money">Projected savings</th><th data-sort-type="money">Net savings</th><th data-sort-type="text">Recent verdict</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="terminal-compaction-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Terminal-output policy and blockers</h2>
+  <table data-table-id="terminal-compaction-policy" data-filter-label="Filter terminal compaction policy">
+    <thead><tr>
+      <th data-sort-type="text">Policy</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Canary</th><th data-sort-type="text">Safety stop</th><th data-sort-type="text">Top providers</th><th data-sort-type="text">Top categories</th><th data-sort-type="text">Top blockers</th>
+    </tr></thead>
+    <tbody id="terminal-compaction-policy-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Terminal-output candidate cohorts</h2>
+  <table class="activity-table" data-table-id="terminal-compaction-candidates" data-filter-label="Filter terminal compaction candidate cohorts">
+    <thead><tr>
+      <th data-sort-type="text">Candidate</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Model</th><th data-sort-type="number">Rows</th><th data-sort-type="number">Plateaus</th><th data-sort-type="number">Signals</th><th data-sort-type="number">Body rows</th><th data-sort-type="number">Metadata rows</th><th data-sort-type="number">Projected tokens</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="terminal-compaction-candidates-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Terminal-output canary impact gates</h2>
+  <table class="activity-table" data-table-id="terminal-compaction-impact" data-filter-label="Filter terminal compaction impact gates">
+    <thead><tr>
+      <th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Safety</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="number">Planned tokens</th><th data-sort-type="money">Net savings</th><th data-sort-type="money">Holdout projected</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="latency">Latency delta</th><th data-sort-type="text">Reasons</th>
+    </tr></thead>
+    <tbody id="terminal-compaction-impact-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -17483,7 +17791,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
+  const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','terminal','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -18247,6 +18555,112 @@ function repeatedScaffoldReasonBadges(values,verdict){
   values=values||[];
   if(!values.length)return'<span class="badge hit">none</span>';
   return values.slice(0,5).map(value=>`<span class="badge ${verdict==='rollback'?'err':'miss'}">${esc(value)}</span>`).join(' ');
+}
+function terminalCompactionStatusBadge(status){
+  if(status==='saving'||status==='ready'||status==='promote')return'hit';
+  if(status==='canarying'||status==='hold'||status==='blocked')return'routed';
+  if(status==='rollback'||status==='safety-stopped')return'err';
+  if(status==='disabled'||status==='no-candidates'||status==='insufficient-evidence')return'miss';
+  return'provider';
+}
+function terminalCompactionPrivacyBadges(privacy){
+  privacy=privacy||{};
+  return `${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>'} ${privacy.raw_terminal_lines_included||privacy.raw_terminal_text_included?'<span class="badge err">terminal text</span>':'<span class="badge hit">terminal text omitted</span>'} ${privacy.raw_request_bodies_included?'<span class="badge err">raw bodies</span>':'<span class="badge hit">raw bodies omitted</span>'} ${privacy.tool_payloads_included||privacy.raw_tool_payloads_included?'<span class="badge err">tool payloads</span>':'<span class="badge hit">tool payloads omitted</span>'} ${privacy.session_ids_included||privacy.raw_session_ids_included?'<span class="badge err">session IDs</span>':'<span class="badge hit">session IDs omitted</span>'} ${privacy.policy_file_contents_included?'<span class="badge err">policy contents</span>':'<span class="badge hit">policy contents omitted</span>'}`;
+}
+function terminalCompactionBreakdownBadges(rows,emptyLabel,cls='miss'){
+  rows=rows||[];
+  if(!rows.length)return`<span class="badge ${cls}">${esc(emptyLabel||'none')}</span>`;
+  return rows.slice(0,5).map(row=>`<span class="badge ${cls}">${esc(row.value||'unknown')} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
+function terminalCompactionReasonBadges(values,verdict){
+  values=values||[];
+  if(!values.length)return'<span class="badge hit">none</span>';
+  return values.slice(0,5).map(value=>`<span class="badge ${verdict==='rollback'||String(value).includes('rollback')?'err':'miss'}">${esc(value)}</span>`).join(' ');
+}
+async function refreshTerminalOutputCompaction(){
+  try{
+    const r=await fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const policy=d.policy||{};
+    const canary=policy.canary||{};
+    const safety=policy.safety_stop||{};
+    const ruleFile=policy.rule_file||{};
+    const privacy=d.privacy||{};
+    document.getElementById('terminal-compaction-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${terminalCompactionStatusBadge(d.state)}">${esc(d.state||'unknown')}</span><div class="sub">${esc(d.state_reason||'')}</div></td>
+      <td class="tokens">${(s.opportunity_candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.matched_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safety_stop_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(s.projected_saved_tokens||0)}</td>
+      <td class="tokens">${fmtTok(s.applied_saved_tokens||0)}</td>
+      <td class="savings">${fmt(s.projected_saved_usd||0,6)}</td>
+      <td class="${(s.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(s.net_savings_usd||0,6)}</td>
+      <td class="flags"><span class="badge ${terminalCompactionStatusBadge(s.recent_verdict)}">${esc(s.recent_verdict||'none')}</span> ${terminalCompactionReasonBadges(s.recent_reason_codes,s.recent_verdict)}</td>
+      <td class="flags">${terminalCompactionPrivacyBadges(privacy)}</td>
+    </tr>`;
+    const canaryBadges=[
+      canary.enabled?'canary on':'canary off',
+      `target ${fmtPctValue(Number(canary.fraction||0))}`,
+      `holdout ${fmtPctValue(Number(canary.holdout_fraction||0))}`,
+      canary.salt_configured?'salt configured':'salt default'
+    ].map(item=>`<span class="badge provider">${esc(item)}</span>`).join(' ');
+    const safetyBadges=[
+      safety.enabled?'enabled':'disabled',
+      `min ${(safety.min_outcome_samples||0).toLocaleString()}`,
+      `window ${(safety.window||0).toLocaleString()}`,
+      `err ${fmtPctValue(Number(safety.max_error_rate||0))}`,
+      `retry ${fmtPctValue(Number(safety.max_retry_rate||0))}`
+    ].map(item=>`<span class="badge provider">${esc(item)}</span>`).join(' ');
+    document.getElementById('terminal-compaction-policy-tbody').innerHTML=`<tr>
+      <td class="flags">${policy.enabled?'<span class="badge hit">enabled</span>':'<span class="badge miss">disabled</span>'} <span class="badge provider">${esc(policy.policy_source||'unknown')}</span> ${ruleFile.reload_required?'<span class="badge err">reload required</span>':'<span class="badge hit">loaded</span>'}<div class="sub">path ${ruleFile.rule_path_included?'<span class="badge err">shown</span>':'omitted'} · ${esc(ruleFile.path_class||'unknown')}</div></td>
+      <td class="model">${esc(policy.rule_id||'unknown')}</td>
+      <td class="flags">${canaryBadges}</td>
+      <td class="flags">${safetyBadges}</td>
+      <td class="flags">${terminalCompactionBreakdownBadges(d.provider_breakdown,'none','provider')}</td>
+      <td class="flags">${terminalCompactionBreakdownBadges(d.category_breakdown,'none','provider')}</td>
+      <td class="flags">${terminalCompactionBreakdownBadges(d.blocker_reason_breakdown,'none','miss')}</td>
+    </tr>`;
+    const candidates=d.candidate_cohorts||[];
+    document.getElementById('terminal-compaction-candidates-tbody').innerHTML=candidates.map(row=>`<tr>
+      <td class="model">${esc(row.candidate_id||'unknown')}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td><span class="badge miss">${esc(row.workflow_phase||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(row.requested_model_family||'unknown')}&rarr;${esc(row.routed_model_family||'unknown')}</span></td>
+      <td class="tokens">${(row.matched_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.plateau_pair_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.terminal_signal_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.body_rows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.metadata_only_rows||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.projected_saved_tokens||0)}</td>
+      <td class="savings">${fmt(row.projected_saved_usd||0,6)}</td>
+      <td class="flags">${terminalCompactionBreakdownBadges(row.blocker_reason_breakdown,'none','miss')}</td>
+      <td class="flags">${terminalCompactionPrivacyBadges(row.privacy||{})}</td>
+    </tr>`).join('')||'<tr><td colspan="14" style="color:#8b949e">No terminal-output compaction candidate cohorts yet</td></tr>';
+    const impactRows=d.impact_gates||[];
+    document.getElementById('terminal-compaction-impact-tbody').innerHTML=impactRows.map(row=>`<tr>
+      <td><span class="badge ${terminalCompactionStatusBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+      <td class="model">${esc(row.candidate_id||'unknown')}</td>
+      <td class="model">${esc(row.rule_id||'unknown')}</td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+      <td class="tokens">${(row.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.safety_stop_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(row.applied_saved_tokens||0)}</td>
+      <td class="tokens">${fmtTok(row.planned_saved_tokens||0)}</td>
+      <td class="${(row.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(row.net_savings_usd||0,6)}</td>
+      <td class="savings">${fmt(row.projected_holdout_savings_usd||0,6)}</td>
+      <td class="tokens">${row.error_rate_delta==null?'—':fmtPctValue(row.error_rate_delta)}</td>
+      <td class="tokens">${row.retry_rate_delta==null?'—':fmtPctValue(row.retry_rate_delta)}</td>
+      <td class="latency">${row.latency_avg_ms_delta==null?'—':fmtMs(row.latency_avg_ms_delta)}</td>
+      <td class="flags">${terminalCompactionReasonBadges(row.reason_codes,row.verdict)}</td>
+    </tr>`).join('')||'<tr><td colspan="16" style="color:#8b949e">No terminal-output canary impact metadata yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
 }
 async function refreshRepeatedScaffold(){
   try{
@@ -20030,6 +20444,7 @@ refreshWeekly();
 refreshCategories();
 refreshCache();
 refreshOpenAICacheReplayReadiness();
+refreshTerminalOutputCompaction();
 refreshRepeatedScaffold();
 refreshErrors();
 refreshLimiter();
@@ -20060,6 +20475,7 @@ setInterval(refreshWeekly,30000);
 setInterval(refreshCategories,30000);
 setInterval(refreshCache,30000);
 setInterval(refreshOpenAICacheReplayReadiness,30000);
+setInterval(refreshTerminalOutputCompaction,30000);
 setInterval(refreshRepeatedScaffold,30000);
 setInterval(refreshErrors,30000);
 setInterval(refreshLimiter,5000);
