@@ -12,6 +12,7 @@ from typing import Any
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.pricing import pricing_basis
 from agentflow_proxy.pattern_rollout import (
+    PATTERN_ROLLOUT_SCHEMA,
     normalize_pattern_rollout,
     pattern_canary_decision,
     pattern_rollout_public_meta,
@@ -23,6 +24,15 @@ from agentflow_proxy.pattern_safety import (
 )
 from agentflow_proxy.pattern_modules import evaluate_pattern_modules, registered_pattern_modules
 from agentflow_proxy.store import stable_json
+from agentflow_proxy.terminal_compaction_dry_run import (
+    DEFAULT_HEAD_LINES as TERMINAL_COMPACTION_DEFAULT_HEAD_LINES,
+    DEFAULT_KEEP_RECENT_TURNS as TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS,
+    DEFAULT_MAX_EVIDENCE_LINES as TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES,
+    DEFAULT_MIN_BLOCK_CHARS as TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS,
+    DEFAULT_MIN_SAVED_CHARS as TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS,
+    DEFAULT_TAIL_LINES as TERMINAL_COMPACTION_DEFAULT_TAIL_LINES,
+    plan_terminal_output_compaction,
+)
 
 TOKEN_CHARS = 4  # rough estimator only
 ENHANCED_CRUNCH_PROVIDER_MODES = {
@@ -43,6 +53,17 @@ def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _default_crunch_policy() -> dict[str, Any]:
@@ -106,6 +127,34 @@ def _default_crunch_policy() -> dict[str, Any]:
             "min_lines": 8,
             "min_repeated_lines": 4,
             "max_annotations": 12,
+        },
+        "terminal_output_compaction": {
+            "enabled": False,
+            "rule_id": "local-terminal-output-compaction-canary",
+            "candidate_id": None,
+            "keep_recent_turns": TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS,
+            "min_block_chars": TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS,
+            "head_lines": TERMINAL_COMPACTION_DEFAULT_HEAD_LINES,
+            "tail_lines": TERMINAL_COMPACTION_DEFAULT_TAIL_LINES,
+            "max_evidence_lines": TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES,
+            "min_saved_chars": TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS,
+            "block_thinking": True,
+            "canary": {
+                "enabled": True,
+                "fraction": 0.0,
+                "holdout_fraction": 1.0,
+                "salt": "",
+                "unit": "request_fingerprint",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 5,
+                "window": 500,
+                "max_error_rate": 0.1,
+                "max_retry_rate": 0.25,
+                "max_negative_savings_rate": 0.25,
+                "max_error_rate_delta": 0.05,
+            },
         },
         "pattern_modules": {
             "diffs": {
@@ -239,6 +288,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             terminal_log = data.get("terminal_log_boilerplate") or {}
             if isinstance(terminal_log, dict):
                 _apply_terminal_log_policy_yaml(policy, terminal_log)
+            terminal_compaction = data.get("terminal_output_compaction") or {}
+            if isinstance(terminal_compaction, dict):
+                _apply_terminal_output_compaction_policy_yaml(
+                    policy,
+                    terminal_compaction,
+                    default_policy_source="local-manual",
+                )
             pattern_modules = data.get("pattern_modules") or {}
             if isinstance(pattern_modules, dict):
                 _apply_pattern_modules_policy_yaml(policy, pattern_modules)
@@ -287,6 +343,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             terminal_log = data.get("terminal_log_boilerplate") or {}
             if isinstance(terminal_log, dict):
                 _apply_terminal_log_policy_yaml(policy, terminal_log)
+            terminal_compaction = data.get("terminal_output_compaction") or {}
+            if isinstance(terminal_compaction, dict):
+                _apply_terminal_output_compaction_policy_yaml(
+                    policy,
+                    terminal_compaction,
+                    default_policy_source="local-default",
+                )
             pattern_modules = data.get("pattern_modules") or {}
             if isinstance(pattern_modules, dict):
                 _apply_pattern_modules_policy_yaml(policy, pattern_modules)
@@ -465,6 +528,61 @@ def _apply_terminal_log_policy_yaml(policy: dict[str, Any], terminal_log: dict[s
     for key in ("min_lines", "min_repeated_lines", "max_annotations"):
         if terminal_log.get(key) is not None:
             target[key] = int(terminal_log[key])
+
+
+def _apply_terminal_output_compaction_policy_yaml(
+    policy: dict[str, Any],
+    terminal_compaction: dict[str, Any],
+    *,
+    default_policy_source: str,
+) -> None:
+    target = policy["terminal_output_compaction"]
+    target["enabled"] = _as_bool(terminal_compaction.get("enabled"), target["enabled"])
+    target["policy_source"] = str(terminal_compaction.get("policy_source") or target.get("policy_source") or default_policy_source)
+    for key in ("rule_id", "candidate_id"):
+        if terminal_compaction.get(key) is not None:
+            target[key] = str(terminal_compaction[key])
+    for key in (
+        "keep_recent_turns",
+        "min_block_chars",
+        "head_lines",
+        "tail_lines",
+        "max_evidence_lines",
+        "min_saved_chars",
+    ):
+        if terminal_compaction.get(key) is not None:
+            target[key] = int(terminal_compaction[key])
+    target["block_thinking"] = _as_bool(terminal_compaction.get("block_thinking"), target["block_thinking"])
+    canary = terminal_compaction.get("canary") or {}
+    if isinstance(canary, dict):
+        target_canary = target["canary"]
+        target_canary["enabled"] = _as_bool(canary.get("enabled"), target_canary["enabled"])
+        for source_key, target_key in (
+            ("fraction", "fraction"),
+            ("canary_fraction", "fraction"),
+            ("rollout_fraction", "fraction"),
+            ("holdout_fraction", "holdout_fraction"),
+        ):
+            if canary.get(source_key) is not None:
+                target_canary[target_key] = max(0.0, min(1.0, float(canary[source_key])))
+        if canary.get("salt") is not None:
+            target_canary["salt"] = str(canary["salt"])
+        if canary.get("canary_salt") is not None:
+            target_canary["salt"] = str(canary["canary_salt"])
+        if canary.get("unit") is not None:
+            target_canary["unit"] = str(canary["unit"])
+        if canary.get("canary_unit") is not None:
+            target_canary["unit"] = str(canary["canary_unit"])
+    safety = terminal_compaction.get("safety_stop") or {}
+    if isinstance(safety, dict):
+        target_safety = target["safety_stop"]
+        target_safety["enabled"] = _as_bool(safety.get("enabled"), target_safety["enabled"])
+        for key in ("min_outcome_samples", "window"):
+            if safety.get(key) is not None:
+                target_safety[key] = int(safety[key])
+        for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
+            if safety.get(key) is not None:
+                target_safety[key] = max(0.0, float(safety[key]))
 
 
 def _apply_pattern_modules_policy_yaml(policy: dict[str, Any], pattern_modules: dict[str, Any]) -> None:
@@ -735,6 +853,7 @@ TERMINAL_LOG_ENABLED = bool(TERMINAL_LOG_POLICY["enabled"])
 TERMINAL_LOG_MIN_LINES = int(TERMINAL_LOG_POLICY["min_lines"])
 TERMINAL_LOG_MIN_REPEATED_LINES = int(TERMINAL_LOG_POLICY["min_repeated_lines"])
 TERMINAL_LOG_MAX_ANNOTATIONS = int(TERMINAL_LOG_POLICY["max_annotations"])
+TERMINAL_OUTPUT_COMPACTION_POLICY = CRUNCH_POLICY["terminal_output_compaction"]
 PATTERN_MODULES_POLICY = copy.deepcopy(CRUNCH_POLICY["pattern_modules"])
 PATTERN_RULES = list(CRUNCH_POLICY["pattern_rules"])
 REPEATED_PROVIDER_SCAFFOLDING_POLICY = CRUNCH_POLICY["repeated_provider_scaffolding"]
@@ -2877,6 +2996,383 @@ def _summary_input_savings_usd(model: str, tokens_saved: int) -> float:
     return (max(0, int(tokens_saved)) / 1_000_000.0) * input_price
 
 
+def _copy_terminal_output_compaction_policy() -> dict[str, Any]:
+    return copy.deepcopy(TERMINAL_OUTPUT_COMPACTION_POLICY)
+
+
+def _terminal_output_compaction_public_policy(policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy or TERMINAL_OUTPUT_COMPACTION_POLICY
+    canary = policy.get("canary") or {}
+    safety = policy.get("safety_stop") or {}
+    fraction = max(0.0, min(1.0, float(canary.get("fraction", 0.0))))
+    holdout_fraction = max(0.0, min(1.0, float(canary.get("holdout_fraction", max(0.0, 1.0 - fraction)))))
+    return {
+        "schema": "agentflow.terminal_output_compaction_policy.v1",
+        "enabled": _as_bool(policy.get("enabled"), False),
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "rule_path": CRUNCH_RULES_PATH,
+        "rule_id": str(policy.get("rule_id") or "local-terminal-output-compaction-canary"),
+        "candidate_id": str(policy.get("candidate_id")) if policy.get("candidate_id") is not None else None,
+        "keep_recent_turns": int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
+        "min_block_chars": int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
+        "head_lines": int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
+        "tail_lines": int(policy.get("tail_lines") or TERMINAL_COMPACTION_DEFAULT_TAIL_LINES),
+        "max_evidence_lines": int(policy.get("max_evidence_lines") or TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES),
+        "min_saved_chars": int(policy.get("min_saved_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS),
+        "block_thinking": _as_bool(policy.get("block_thinking"), True),
+        "canary": {
+            "enabled": _as_bool(canary.get("enabled"), True),
+            "fraction": fraction,
+            "holdout_fraction": holdout_fraction,
+            "salt": str(canary.get("salt") or ""),
+            "unit": str(canary.get("unit") or "request_fingerprint"),
+        },
+        "safety_stop": {
+            "enabled": _as_bool(safety.get("enabled"), True),
+            "min_outcome_samples": int(safety.get("min_outcome_samples", 5)),
+            "window": int(safety.get("window", 500)),
+            "max_error_rate": float(safety.get("max_error_rate", 0.1)),
+            "max_retry_rate": float(safety.get("max_retry_rate", 0.25)),
+            "max_negative_savings_rate": float(safety.get("max_negative_savings_rate", 0.25)),
+            "max_error_rate_delta": float(safety.get("max_error_rate_delta", 0.05)),
+        },
+    }
+
+
+def _terminal_output_compaction_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    public = _terminal_output_compaction_public_policy(policy)
+    return {
+        "schema": "agentflow.terminal_output_compaction_decision.v1",
+        "enabled": public["enabled"],
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "applied": False,
+        "policy_source": public["policy_source"],
+        "rule_path": public["rule_path"],
+        "rule_id": public["rule_id"],
+        "candidate_id": public["candidate_id"],
+        "canary": public["canary"],
+        "safety_stop": public["safety_stop"],
+        "raw_terminal_text_included": False,
+        "raw_request_body_included": False,
+        "raw_tool_ids_included": False,
+        "raw_session_ids_included": False,
+    }
+
+
+def _terminal_output_compaction_canary_decision(
+    body: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    category: str,
+) -> dict[str, Any]:
+    public = _terminal_output_compaction_public_policy(policy)
+    canary = public["canary"]
+    rollout = {
+        "schema": PATTERN_ROLLOUT_SCHEMA,
+        "recommendation_mode": "canary-only",
+        "canary_enabled": canary["enabled"],
+        "canary_fraction": canary["fraction"],
+        "canary_salt": canary["salt"],
+        "canary_unit": canary["unit"],
+    }
+    features = {
+        "source_surface": "anthropic_messages",
+        "app_family": "claude_code",
+        "category": category,
+        "workflow_phase": category,
+        "text_bucket": _text_bucket(int(plan.get("before_chars") or 0)),
+        "token_bucket": _token_bucket(max(1, int(plan.get("before_chars") or 0) // TOKEN_CHARS)),
+        "requested_model": str(body.get("model") or ""),
+        "candidate_target_model": str(body.get("model") or ""),
+        "has_tools": True,
+        "stream": bool(body.get("stream")),
+        "request_fingerprint": "sha256:" + sha256_text(stable_json(body)),
+    }
+    decision = pattern_canary_decision(
+        rollout=rollout,
+        rule_id=public["rule_id"],
+        candidate_id=public["candidate_id"],
+        pattern_hashes=[],
+        features=features,
+    )
+    decision["schema"] = "agentflow.terminal_output_compaction_canary_decision.v1"
+    decision["holdout_fraction"] = canary["holdout_fraction"]
+    decision["raw_request_body_included"] = False
+    decision["raw_terminal_text_included"] = False
+    return decision
+
+
+def _terminal_output_compaction_meta_from_crunch_json(raw: Any) -> dict[str, Any]:
+    crunch_meta = _json_obj(raw)
+    meta = crunch_meta.get("terminal_output_compaction")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _terminal_output_compaction_is_applied(meta: dict[str, Any]) -> bool:
+    canary = meta.get("canary")
+    return bool(meta.get("applied")) and isinstance(canary, dict) and str(canary.get("cohort")) == "canary_applied"
+
+
+def _terminal_output_compaction_is_holdout(meta: dict[str, Any]) -> bool:
+    canary = meta.get("canary")
+    return isinstance(canary, dict) and str(canary.get("cohort")) == "canary_holdout"
+
+
+def evaluate_terminal_output_compaction_safety_stop(
+    store_obj: Any | None,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    public = _terminal_output_compaction_public_policy(policy)
+    safety = public["safety_stop"]
+    if not safety["enabled"]:
+        return None
+    if store_obj is None or not hasattr(store_obj, "conn"):
+        return None
+    window = max(1, min(int(safety["window"]), 10_000))
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select status_code, retry_count, crunch_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (window,),
+        ).fetchall()
+    except Exception:
+        return None
+
+    applied = {"samples": 0, "errors": 0, "retries": 0, "negative_savings": 0}
+    holdout = {"samples": 0, "errors": 0, "retries": 0}
+    for row in rows:
+        row_dict = dict(row)
+        meta = _terminal_output_compaction_meta_from_crunch_json(row_dict.get("crunch_json"))
+        if not meta or str(meta.get("rule_id") or "") != public["rule_id"]:
+            continue
+        errored = _safe_int(row_dict.get("status_code")) >= 400
+        retried = _safe_int(row_dict.get("retry_count")) > 0
+        if _terminal_output_compaction_is_applied(meta):
+            applied["samples"] += 1
+            applied["errors"] += int(errored)
+            applied["retries"] += int(retried)
+            applied["negative_savings"] += int(_safe_int(meta.get("tokens_saved_est")) <= 0)
+        elif _terminal_output_compaction_is_holdout(meta):
+            holdout["samples"] += 1
+            holdout["errors"] += int(errored)
+            holdout["retries"] += int(retried)
+
+    samples = applied["samples"]
+    min_samples = max(1, int(safety["min_outcome_samples"]))
+    if samples < min_samples:
+        return None
+    error_rate = _rate(applied["errors"], samples)
+    retry_rate = _rate(applied["retries"], samples)
+    negative_savings_rate = _rate(applied["negative_savings"], samples)
+    holdout_error_rate = _rate(holdout["errors"], holdout["samples"])
+    triggers: list[dict[str, Any]] = []
+    if error_rate >= float(safety["max_error_rate"]):
+        triggers.append({"metric": "error_rate", "value": round(error_rate, 4), "threshold": safety["max_error_rate"]})
+    if retry_rate >= float(safety["max_retry_rate"]):
+        triggers.append({"metric": "retry_rate", "value": round(retry_rate, 4), "threshold": safety["max_retry_rate"]})
+    if negative_savings_rate >= float(safety["max_negative_savings_rate"]):
+        triggers.append({
+            "metric": "negative_savings_rate",
+            "value": round(negative_savings_rate, 4),
+            "threshold": safety["max_negative_savings_rate"],
+        })
+    if holdout["samples"] >= min_samples and (error_rate - holdout_error_rate) >= float(safety["max_error_rate_delta"]):
+        triggers.append({
+            "metric": "error_rate_delta_vs_holdout",
+            "value": round(error_rate - holdout_error_rate, 4),
+            "threshold": safety["max_error_rate_delta"],
+        })
+    if not triggers:
+        return None
+    return {
+        "schema": "agentflow.terminal_output_compaction_safety_stop.v1",
+        "stopped": True,
+        "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+        "rule_id": public["rule_id"],
+        "candidate_id": public["candidate_id"],
+        "sample_count": samples,
+        "holdout_sample_count": holdout["samples"],
+        "error_count": applied["errors"],
+        "retry_count": applied["retries"],
+        "negative_savings_count": applied["negative_savings"],
+        "error_rate": round(error_rate, 4),
+        "retry_rate": round(retry_rate, 4),
+        "negative_savings_rate": round(negative_savings_rate, 4),
+        "holdout_error_rate": round(holdout_error_rate, 4),
+        "min_outcome_samples": min_samples,
+        "window": window,
+        "triggers": triggers,
+        "raw_payload_included": False,
+    }
+
+
+def _apply_terminal_output_compaction_canary(
+    body: dict[str, Any],
+    *,
+    store_obj: Any | None = None,
+    policy_source: str,
+    category: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy = _copy_terminal_output_compaction_policy()
+    policy["policy_source"] = str(policy.get("policy_source") or policy_source)
+    meta = _terminal_output_compaction_base_meta("skipped", "disabled", policy=policy)
+    before_chars = len(stable_json(body))
+    meta["before_chars"] = before_chars
+    meta["after_chars"] = before_chars
+    meta["tokens_saved_est"] = 0
+    if not _as_bool(policy.get("enabled"), False):
+        return body, meta
+    if category != "tool-result":
+        meta["reason"] = "non-tool-result-category"
+        meta["category"] = category
+        return body, meta
+    if _as_bool(policy.get("block_thinking"), True) and _body_uses_thinking(body):
+        meta["reason"] = "active-thinking-blocked"
+        meta["category"] = category
+        return body, meta
+
+    plan, plan_meta = plan_terminal_output_compaction(
+        body,
+        keep_recent_turns=int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
+        min_block_chars=int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
+        head_lines=int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
+        tail_lines=int(policy.get("tail_lines") or TERMINAL_COMPACTION_DEFAULT_TAIL_LINES),
+        max_evidence_lines=int(policy.get("max_evidence_lines") or TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES),
+        min_saved_chars=int(policy.get("min_saved_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS),
+        policy_source=str(policy.get("policy_source") or policy_source),
+    )
+    if plan is None:
+        meta.update({
+            "reason": str(plan_meta.get("reason") or "not-eligible"),
+            "category": category,
+            "blocker_counts": plan_meta.get("blocker_counts", []),
+        })
+        return body, meta
+
+    target_summaries = [
+        {
+            "target_id": target.get("target_id"),
+            "kind": target.get("kind"),
+            "terminal_output_char_fraction_bucket": target.get("terminal_output_char_fraction_bucket"),
+            "before_chars": target.get("before_chars"),
+            "after_chars": target.get("after_chars"),
+            "saved_chars": target.get("saved_chars"),
+            "estimated_saved_tokens": target.get("estimated_saved_tokens"),
+            "line_count": target.get("line_count"),
+            "preserved_line_count": target.get("preserved_line_count"),
+            "omitted_line_count": target.get("omitted_line_count"),
+            "source_evidence_counts": target.get("source_evidence_counts"),
+            "preserved_evidence_counts": target.get("preserved_evidence_counts"),
+            "preservation_flags": target.get("preservation_flags"),
+        }
+        for target in plan.get("targets") or []
+        if isinstance(target, dict)
+    ]
+    meta.update({
+        "status": "planned",
+        "reason": "eligible",
+        "category": category,
+        "target_count": int(plan.get("target_count") or 0),
+        "before_chars": int(plan.get("before_chars") or before_chars),
+        "planned_after_chars": int(plan.get("after_chars") or before_chars),
+        "planned_saved_chars": int(plan.get("saved_chars") or 0),
+        "planned_saved_tokens": int(plan.get("estimated_saved_tokens") or 0),
+        "preservation_flags": plan.get("preservation_flags") or {},
+        "target_summaries": target_summaries,
+    })
+    preservation_flags = plan.get("preservation_flags") if isinstance(plan.get("preservation_flags"), dict) else {}
+    if not preservation_flags or not all(bool(value) for value in preservation_flags.values()):
+        meta.update({"status": "bypass", "reason": "preservation-check-failed"})
+        return body, meta
+    planned_body = plan_meta.get("planned_body")
+    if not isinstance(planned_body, dict):
+        meta.update({"status": "bypass", "reason": "malformed-planned-body"})
+        return body, meta
+    if body.get("stream") != planned_body.get("stream"):
+        meta.update({"status": "bypass", "reason": "streaming-protocol-mismatch"})
+        return body, meta
+    planned_after = len(stable_json(planned_body))
+    planned_saved = before_chars - planned_after
+    if planned_saved <= 0 or int(plan.get("estimated_saved_tokens") or 0) <= 0:
+        meta.update({"status": "bypass", "reason": "compaction-savings-anomaly"})
+        return body, meta
+
+    canary = _terminal_output_compaction_canary_decision(body, plan, policy=policy, category=category)
+    meta["canary"] = canary
+    if canary.get("enabled") and not canary.get("selected", True):
+        meta.update({
+            "status": "holdout",
+            "reason": str(canary.get("reason") or "canary_holdout"),
+            "holdout": True,
+            "after_chars": before_chars,
+            "tokens_saved_est": 0,
+        })
+        return body, meta
+
+    safety_stop = evaluate_terminal_output_compaction_safety_stop(store_obj, policy=policy)
+    if safety_stop:
+        meta.update({
+            "status": "bypass",
+            "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+            "safety_stop_state": "stopped",
+            "safety_stop": safety_stop,
+            "after_chars": before_chars,
+            "tokens_saved_est": 0,
+        })
+        try:
+            from agentflow_proxy.policy_events import log_policy_event
+
+            log_policy_event(
+                "terminal-output-compaction-safety-stop",
+                ok=True,
+                details={
+                    key: safety_stop.get(key)
+                    for key in (
+                        "schema",
+                        "reason",
+                        "rule_id",
+                        "candidate_id",
+                        "sample_count",
+                        "holdout_sample_count",
+                        "error_count",
+                        "retry_count",
+                        "negative_savings_count",
+                        "error_rate",
+                        "retry_rate",
+                        "negative_savings_rate",
+                        "min_outcome_samples",
+                        "window",
+                        "raw_payload_included",
+                    )
+                },
+            )
+        except Exception:
+            pass
+        return body, meta
+
+    meta.update({
+        "status": "applied",
+        "reason": "terminal-output-compaction-applied",
+        "changed": True,
+        "applied": True,
+        "after_chars": planned_after,
+        "saved_chars": planned_saved,
+        "tokens_saved_est": planned_saved // TOKEN_CHARS,
+        "compaction_cost_usd": 0.0,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    })
+    return planned_body, meta
+
+
 async def maybe_summarize_old_context(
     body: dict[str, Any],
     *,
@@ -3091,6 +3587,12 @@ def crunch_body(
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
     category = _crunch_request_category(new_body)
+    new_body, terminal_output_compaction_meta = _apply_terminal_output_compaction_canary(
+        new_body,
+        store_obj=store_obj,
+        policy_source=policy_source,
+        category=category,
+    )
     new_body, pattern_modules_meta = evaluate_pattern_modules(
         new_body,
         module_settings=PATTERN_MODULES_POLICY,
@@ -3197,6 +3699,7 @@ def crunch_body(
         "terminal_log_boilerplate_simplified": terminal_log_meta["simplified_line_count"],
         "terminal_log_boilerplate_saved_chars": terminal_log_meta["saved_chars"],
         "terminal_log_boilerplate": terminal_log_meta,
+        "terminal_output_compaction": terminal_output_compaction_meta,
         "pattern_modules": pattern_modules_meta,
         "registered_pattern_modules": registered_pattern_modules(),
         "pattern_rules_applied": pattern_rules_meta["applied_count"],
