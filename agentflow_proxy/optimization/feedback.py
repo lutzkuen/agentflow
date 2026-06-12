@@ -491,7 +491,7 @@ def _terminal_output_compaction_lifecycle_status(
         if not snapshots:
             continue
         row_count += 1
-        queue_state = _queue_state(row.get("status"))
+        queue_state = str(row.get("status") or "unknown")
         event_type = str(payload.get("event_type") or metadata.get("event_type") or metadata.get("command") or "unknown")
         _add_count(queue_state_counts, queue_state)
         _add_count(event_counts, event_type)

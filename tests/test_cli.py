@@ -4902,8 +4902,13 @@ class PolicyReloadCliTests(unittest.TestCase):
         self,
         *,
         raw_like: bool = False,
+        unsafe_privacy: bool = False,
         unsupported_action: bool = False,
         unsupported_field: bool = False,
+        expired_bundle: bool = False,
+        expired_action: bool = False,
+        incompatible_bundle: bool = False,
+        incompatible_action: bool = False,
     ):
         proposed_edit = {
             "rule_id": "managed-terminal-output-compaction-rule",
@@ -4958,7 +4963,23 @@ class PolicyReloadCliTests(unittest.TestCase):
             },
         }
         if raw_like:
-            proposed_edit["raw_request"] = "raw terminal output must not be accepted"
+            proposed_edit.update(
+                {
+                    "raw_request": "raw terminal output must not be accepted",
+                    "provider_body": {"messages": [{"content": "raw provider body must not be accepted"}]},
+                    "prompt": "raw prompt must not be accepted",
+                    "message_content": "raw message content must not be accepted",
+                    "terminal_lines": ["raw terminal line must not be accepted"],
+                    "tool_payload": {"command": "cat /workspace/private/terminal-secret.log"},
+                    "request_id": "raw-terminal-request-id",
+                    "session_id": "raw-terminal-session-id",
+                    "cache_key": "raw-terminal-cache-key",
+                    "file_path": "/workspace/private/terminal-secret.log",
+                    "tenant_id": "raw-terminal-tenant-id",
+                    "api_key": "sk-terminal-secret",
+                    "local_policy_file_contents": "raw local policy file contents must not be accepted",
+                }
+            )
         if unsupported_field:
             proposed_edit["action"]["provider_body_patch"] = {"path": "$.messages"}
         action = {
@@ -4979,9 +5000,27 @@ class PolicyReloadCliTests(unittest.TestCase):
             "privacy_summary": {
                 "metadata_only": True,
                 "raw_payloads_returned": False,
+                "raw_provider_bodies_included": bool(unsafe_privacy),
+                "request_ids_returned": bool(unsafe_privacy),
+                "session_ids_returned": bool(unsafe_privacy),
+                "cache_keys_returned": bool(unsafe_privacy),
+                "file_paths_returned": bool(unsafe_privacy),
+            },
+            "expires_at": "2000-01-01T00:00:00+00:00" if expired_action else "2099-06-12T00:00:00+00:00",
+            "local_executor_compatibility": {
+                "minimum_local_client_version": "99.0.0" if incompatible_action else "0.1.0",
+                "compatible": not incompatible_action,
+                "supported_local_action_families": ["routing"] if incompatible_action else ["crunch"],
             },
         }
-        return self._rollout_bundle_for_actions([action])
+        bundle = self._rollout_bundle_for_actions([action])
+        bundle["expires_at"] = "2000-01-01T00:00:00+00:00" if expired_bundle else "2099-06-12T00:00:00+00:00"
+        bundle["local_executor_compatibility"] = {
+            "minimum_local_client_version": "99.0.0" if incompatible_bundle else "0.1.0",
+            "compatible": not incompatible_bundle,
+            "supported_local_action_families": ["routing"] if incompatible_bundle else ["crunch"],
+        }
+        return bundle
 
     def _write_terminal_compaction_crunch_file(self, tmp: str):
         path = Path(tmp) / "crunch_rules.yaml"
@@ -5150,8 +5189,13 @@ class PolicyReloadCliTests(unittest.TestCase):
     def test_managed_rollout_actions_reject_terminal_compaction_raw_and_unsupported_before_writing(self):
         for bundle in (
             self._terminal_compaction_rollout_bundle(raw_like=True),
+            self._terminal_compaction_rollout_bundle(unsafe_privacy=True),
             self._terminal_compaction_rollout_bundle(unsupported_action=True),
             self._terminal_compaction_rollout_bundle(unsupported_field=True),
+            self._terminal_compaction_rollout_bundle(expired_bundle=True),
+            self._terminal_compaction_rollout_bundle(expired_action=True),
+            self._terminal_compaction_rollout_bundle(incompatible_bundle=True),
+            self._terminal_compaction_rollout_bundle(incompatible_action=True),
         ):
             with TemporaryDirectory() as tmp:
                 path = self._write_terminal_compaction_crunch_file(tmp)
@@ -5169,6 +5213,7 @@ class PolicyReloadCliTests(unittest.TestCase):
                 payload = json.loads(stdout.getvalue())
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["error"]["type"], "validation_failed")
+                self.assertNotIn("raw terminal output must not be accepted", json.dumps(payload, sort_keys=True))
 
     def test_managed_rollout_actions_reject_terminal_compaction_local_manual_overwrite(self):
         bundle = self._terminal_compaction_rollout_bundle()
@@ -5231,9 +5276,13 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["managed_lifecycle_feedback"]["payload_included"])
         status_payload = json.loads(status_stdout.getvalue())
         self.assertEqual(status_payload["summary"]["retryable_error"], 1)
+        self.assertFalse(status_payload["terminal_output_compaction_lifecycle"]["payload_json_included"])
         rendered = json.dumps(ManagedFeedbackFlushClient.calls[0]["json"], sort_keys=True)
         self.assertIn("terminal_output_compaction", rendered)
         self.assertNotIn("raw terminal output", rendered)
+        self.assertNotIn("raw-terminal-request-id", rendered)
+        self.assertNotIn("raw-terminal-session-id", rendered)
+        self.assertNotIn("raw-terminal-cache-key", rendered)
         self.assertNotIn("crunch_rules.yaml", rendered)
 
     def test_managed_rollout_actions_review_cli_reports_local_fraction_edit(self):

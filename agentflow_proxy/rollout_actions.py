@@ -172,10 +172,12 @@ _RAW_LIKE_KEY_PARTS = (
     "api_key",
     "apikey",
     "authorization",
+    "cache_key",
     "command",
     "content",
     "credential",
     "file_content",
+    "file_path",
     "message",
     "param",
     "prompt",
@@ -183,8 +185,11 @@ _RAW_LIKE_KEY_PARTS = (
     "raw_pattern",
     "raw_request",
     "raw_response",
+    "request_id",
     "secret",
+    "session_id",
     "system",
+    "tenant_id",
     "tool_payload",
     "transcript",
 )
@@ -196,6 +201,26 @@ _ALLOWED_RAW_KEYS = {
     "raw_responses_included",
     "raw_tool_payloads_included",
     "raw_provider_bodies_included",
+}
+_UNSAFE_PRIVACY_KEYS = {
+    "raw_payloads_returned",
+    "raw_prompts_returned",
+    "raw_responses_returned",
+    "raw_payloads_included",
+    "raw_prompts_included",
+    "raw_params_included",
+    "raw_responses_included",
+    "raw_tool_payloads_included",
+    "raw_provider_bodies_included",
+    "provider_bodies_returned",
+    "provider_forwarding",
+    "server_content_processing",
+    "managed_enforced",
+    "request_ids_returned",
+    "session_ids_returned",
+    "tenant_ids_returned",
+    "cache_keys_returned",
+    "file_paths_returned",
 }
 
 
@@ -241,6 +266,66 @@ def _is_iso_datetime(value: Any) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in value.replace("-", ".").split("."):
+        if not piece.isdigit():
+            break
+        parts.append(int(piece))
+    return tuple(parts)
+
+
+def _minimum_local_version_compatible(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return True
+    from agentflow_proxy import __version__
+
+    current = _version_tuple(__version__)
+    required = _version_tuple(value)
+    if not current or not required:
+        return True
+    return current >= required
+
+
+def _validate_optional_rollout_compatibility(
+    value: Any,
+    path: str,
+    errors: list[dict[str, str]],
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        _add_error(errors, path, "expected local executor compatibility object")
+        return
+    minimum = value.get("minimum_local_client_version")
+    if minimum is not None and (
+        not isinstance(minimum, str)
+        or not minimum.strip()
+        or not _minimum_local_version_compatible(minimum)
+    ):
+        _add_error(errors, f"{path}.minimum_local_client_version", "minimum local client version is newer than this package")
+    if value.get("compatible") is False:
+        _add_error(errors, f"{path}.compatible", "managed bundle reports local executor incompatibility")
+    supported = value.get("supported_local_action_families")
+    if supported is not None and (
+        not isinstance(supported, list)
+        or "crunch" not in {str(item) for item in supported}
+    ):
+        _add_error(errors, f"{path}.supported_local_action_families", "expected crunch support")
 
 
 def _add_error(errors: list[dict[str, str]], path: str, message: str) -> None:
@@ -291,6 +376,19 @@ def _scan_raw_like(value: Any, path: str, errors: list[dict[str, str]]) -> None:
     elif isinstance(value, list):
         for index, item in enumerate(value[:200]):
             _scan_raw_like(item, f"{path}[{index}]", errors)
+
+
+def _privacy_flags_safe(value: Any, path: str, errors: list[dict[str, str]]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            child_path = f"{path}.{key_text}" if path else f"$.{key_text}"
+            if key_text.lower() in _UNSAFE_PRIVACY_KEYS and bool(item):
+                _add_error(errors, child_path, "privacy summary reports raw payloads or local identifiers")
+            _privacy_flags_safe(item, child_path, errors)
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:200]):
+            _privacy_flags_safe(item, f"{path}[{index}]", errors)
 
 
 def verify_rollout_action_provenance(bundle: Any) -> dict[str, Any]:
@@ -412,6 +510,16 @@ def validate_rollout_action_bundle(bundle: Any) -> dict[str, Any]:
         _add_error(errors, "$.schema", f"expected {PATTERN_ROLLOUT_ACTIONS_SCHEMA}")
     if not _is_iso_datetime(bundle.get("generated_at")):
         _add_error(errors, "$.generated_at", "expected ISO-8601 timestamp string")
+    expires_at = _parse_datetime(bundle.get("expires_at"))
+    if bundle.get("expires_at") is not None and expires_at is None:
+        _add_error(errors, "$.expires_at", "expected ISO-8601 timestamp string")
+    elif expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        _add_error(errors, "$.expires_at", "rollout action bundle is expired")
+    _validate_optional_rollout_compatibility(
+        bundle.get("local_executor_compatibility"),
+        "$.local_executor_compatibility",
+        errors,
+    )
     actions = bundle.get("actions")
     if not isinstance(actions, list):
         _add_error(errors, "$.actions", "expected list")
@@ -419,6 +527,7 @@ def validate_rollout_action_bundle(bundle: Any) -> dict[str, Any]:
         for index, action in enumerate(actions):
             _validate_rollout_action(action, f"$.actions[{index}]", errors)
     _scan_raw_like(bundle, "$", errors)
+    _privacy_flags_safe(bundle, "$", errors)
     for error in provenance.get("errors", []):
         if isinstance(error, dict):
             _add_error(errors, str(error.get("path") or "$.provenance"), str(error.get("message") or "provenance verification failed"))
@@ -466,6 +575,16 @@ def _validate_rollout_action(action: Any, path: str, errors: list[dict[str, str]
         _add_error(errors, f"{path}.required_local_review", "expected true")
     if action.get("managed_enforced") is not False:
         _add_error(errors, f"{path}.managed_enforced", "expected false")
+    expires_at = _parse_datetime(action.get("expires_at"))
+    if action.get("expires_at") is not None and expires_at is None:
+        _add_error(errors, f"{path}.expires_at", "expected ISO-8601 timestamp string")
+    elif expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        _add_error(errors, f"{path}.expires_at", "rollout action is expired")
+    _validate_optional_rollout_compatibility(
+        action.get("local_executor_compatibility"),
+        f"{path}.local_executor_compatibility",
+        errors,
+    )
 
 
 def _load_policy_yaml(path: Path) -> tuple[dict[str, Any], str | None]:

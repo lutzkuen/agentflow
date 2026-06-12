@@ -966,6 +966,42 @@ class DashboardImportTests(unittest.TestCase):
                     },
                 }),
             )
+            for suffix, status in (("retry", "retryable-error"), ("dropped", "dropped-after-limit")):
+                store.enqueue_managed_outcome_feedback(
+                    id=f"raw-activation-queue-{suffix}",
+                    created_at=f"2026-06-12T10:0{6 if suffix == 'retry' else 7}:00+00:00",
+                    updated_at=f"2026-06-12T10:0{6 if suffix == 'retry' else 7}:00+00:00",
+                    source_surface=SOURCE_SURFACE,
+                    endpoint="/v1/feedback",
+                    optimization_unit_id=0,
+                    status=status,
+                    last_error="raw activation feedback failure must stay hidden",
+                    last_status_code=503,
+                    payload_json=stable_json({
+                        "event_type": "rollback" if suffix == "retry" else "rejected",
+                        "metadata": {
+                            "schema": FEEDBACK_SCHEMA,
+                            "action_snapshots": [
+                                {
+                                    "candidate_id": "raw activation candidate secret",
+                                    "rule_id": "raw activation rule secret / local-path",
+                                    "lifecycle_status": "rollback" if suffix == "retry" else "rejected",
+                                    "reason_codes": [
+                                        "rollback-error-rate",
+                                        "raw activation terminal secret",
+                                        "raw-activation-request-id",
+                                    ],
+                                    "raw_provider_body": "raw activation provider body must stay hidden",
+                                    "request_id": "raw-activation-request-id",
+                                    "session_id": "raw-activation-session-id",
+                                    "cache_key": "raw-activation-cache-key",
+                                    "file_path": "/workspace/private/activation-secret.log",
+                                    "tenant_id": "raw-activation-tenant-id",
+                                }
+                            ],
+                        },
+                    }),
+                )
 
             app = create_dashboard_app(
                 store_obj=lambda: store,
@@ -988,13 +1024,17 @@ class DashboardImportTests(unittest.TestCase):
             payload = response.json()
             self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_activation.v1")
             self.assertTrue(payload["read_only"])
-            self.assertEqual(payload["status"], "safety-stopped")
+            self.assertEqual(payload["status"], "rollback-ready")
             self.assertGreaterEqual(payload["summary"]["active_rule_count"], 1)
             self.assertEqual(payload["summary"]["applied_count"], 1)
             self.assertEqual(payload["summary"]["holdout_count"], 1)
             self.assertGreaterEqual(payload["summary"]["safety_stop_count"], 1)
+            self.assertTrue(payload["summary"]["rollback_action_ready"])
             self.assertTrue(payload["summary"]["latest_safety_stop_reason"])
             self.assertGreater(payload["summary"]["managed_lifecycle_feedback_rows"], 0)
+            self.assertEqual(payload["summary"]["managed_lifecycle_feedback_retryable_error"], 1)
+            self.assertEqual(payload["summary"]["managed_lifecycle_feedback_dropped"], 1)
+            self.assertFalse(payload["lifecycle_feedback"]["payload_json_included"])
             self.assertIn("Terminal-output compaction activation", dashboard_response.text)
             self.assertIn("terminal-compaction-activation-tbody", dashboard_response.text)
             self.assertIn("fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=1000&impact_limit=500')", dashboard_response.text)
@@ -1018,6 +1058,10 @@ class DashboardImportTests(unittest.TestCase):
                 "raw-activation-session-id",
                 "raw-activation-cache-key",
                 "raw-activation-policy-file-secret",
+                "raw activation feedback failure",
+                "raw activation provider body",
+                "raw-activation-tenant-id",
+                "/workspace/private/activation-secret.log",
                 policy_tmp.name,
             ):
                 self.assertNotIn(forbidden, rendered)

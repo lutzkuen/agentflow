@@ -9722,7 +9722,12 @@ def _terminal_output_compaction_lifecycle_summary(lifecycle: dict[str, Any]) -> 
     queue_counts = _terminal_output_compaction_count_lookup(lifecycle.get("queue_state_breakdown"))
     lifecycle_counts = _terminal_output_compaction_count_lookup(lifecycle.get("lifecycle_status_breakdown"))
     cohort_counts = _terminal_output_compaction_count_lookup(lifecycle.get("cohort_count_breakdown"))
-    reason_counts = lifecycle.get("reason_code_breakdown") if isinstance(lifecycle.get("reason_code_breakdown"), list) else []
+    raw_reason_counts = lifecycle.get("reason_code_breakdown") if isinstance(lifecycle.get("reason_code_breakdown"), list) else []
+    reason_counts = [
+        {"value": public_label(row.get("value"), "sanitized-reason"), "count": _as_int(row.get("count"))}
+        for row in raw_reason_counts
+        if isinstance(row, dict)
+    ]
     return {
         "schema": lifecycle.get("schema"),
         "queue_rows": _as_int(lifecycle.get("queue_rows")),
