@@ -129,6 +129,19 @@ _CODEX_STATEFUL_REFERENCE_RE = re.compile(
     r"\b(this|current|previous|above|earlier|last)\s+(thread|conversation|chat|session|turn|task|run|state|context)\b",
     re.IGNORECASE,
 )
+_CODEX_SHADOW_OMIT_ONLY_PARAM_KEYS = (
+    "approvalPolicy",
+    "approval_policy",
+    "clientUserMessageId",
+    "client_user_message_id",
+    "cwd",
+    "effort",
+    "runtimeWorkspaceRoots",
+    "runtime_workspace_roots",
+    "sandboxPolicy",
+    "sandbox_policy",
+)
+_CODEX_SHADOW_KNOWN_PARAM_KEYS = set(CODEX_SAFE_TURN_PARAM_KEYS) | set(_CODEX_SHADOW_OMIT_ONLY_PARAM_KEYS)
 _codex_app_session_alert_windows: dict[tuple[str, str, str], int] = {}
 
 
@@ -1198,7 +1211,7 @@ def _codex_stale_risk_skip_reason(params: dict[str, Any], file_dependency_audit_
 
 
 def _codex_stateless_shadow_skip_reason(params: dict[str, Any]) -> str | None:
-    unknown_keys = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)
+    unknown_keys = sorted(str(key) for key in params if str(key) not in _CODEX_SHADOW_KNOWN_PARAM_KEYS)
     if unknown_keys:
         return "unknown-param-shape"
     if _contains_action_hint(params):
@@ -1239,7 +1252,14 @@ def _codex_shadow_preflight(
     text = "\n\n".join(item.strip() for item in texts if item.strip()).strip()
     omitted_fields = [
         key
-        for key in ("threadId", "thread_id", "model", "modelId", "model_id")
+        for key in (
+            "threadId",
+            "thread_id",
+            "model",
+            "modelId",
+            "model_id",
+            *_CODEX_SHADOW_OMIT_ONLY_PARAM_KEYS,
+        )
         if key in params
     ]
     meta: dict[str, Any] = {
@@ -3093,6 +3113,30 @@ def _attach_codex_routing_experiment_pending(
             "pending_outcome": False,
             "would_sample": True,
         })
+    if request_id is not None and experiment_meta.get("sampled"):
+        _, shadow_preflight = _codex_shadow_preflight(
+            params,
+            shadow_model=str(experiment_meta.get("shadow_model") or ""),
+        )
+        experiment_meta["shadow_request_preflight"] = shadow_preflight
+        if shadow_preflight.get("status") != "executable":
+            reason = str(shadow_preflight.get("reason") or "shadow-unavailable")
+            status = "shadow-unsupported-shape" if reason == "unsupported-shape" else "shadow-unavailable"
+            experiment_meta = dict(experiment_meta)
+            experiment_meta.update({
+                "status": "skipped",
+                "sampled": False,
+                "reason": f"codex-shadow-preflight-{status}",
+                "pending_outcome": False,
+                "would_sample": True,
+                "shadow_preflight_status": status,
+                "shadow_preflight_reason": reason,
+                "reason_codes": [
+                    "codex-shadow-preflight-skipped",
+                    status,
+                    f"{status}-{reason}",
+                ],
+            })
     live_routing_meta = (optimization_metadata or {}).get("routing") if isinstance(optimization_metadata, dict) else None
     if isinstance(live_routing_meta, dict):
         live_routing_meta["routing_experiment"] = experiment_meta

@@ -2238,6 +2238,12 @@ summary_model_hint:
             "params": {
                 "threadId": "thread-routing-experiment",
                 "model": "gpt-5-codex",
+                "approvalPolicy": "never",
+                "clientUserMessageId": "private-client-message-id",
+                "cwd": "/private/workspace/path",
+                "effort": "medium",
+                "runtimeWorkspaceRoots": ["/private/workspace/path"],
+                "sandboxPolicy": "danger-full-access",
                 "input": [{"type": "text", "text": f"Summarize the following self-contained note: {secret_prompt}"}],
                 "temperature": 0,
             },
@@ -2306,7 +2312,15 @@ summary_model_hint:
             self.assertEqual(shadow_body["model"], "gpt-5-mini")
             self.assertFalse(shadow_body["store"])
             self.assertNotIn("threadId", shadow_body)
+            self.assertNotIn("approvalPolicy", shadow_body)
+            self.assertNotIn("clientUserMessageId", shadow_body)
+            self.assertNotIn("cwd", shadow_body)
+            self.assertNotIn("effort", shadow_body)
+            self.assertNotIn("runtimeWorkspaceRoots", shadow_body)
+            self.assertNotIn("sandboxPolicy", shadow_body)
             self.assertNotIn("thread-routing-experiment", json.dumps(shadow_body))
+            self.assertNotIn("/private/workspace/path", json.dumps(shadow_body))
+            self.assertNotIn("private-client-message-id", json.dumps(shadow_body))
             self.assertIn(secret_prompt, shadow_body["input"])
             return {
                 "status_code": 200,
@@ -2392,6 +2406,8 @@ summary_model_hint:
         self.assertIsNone(experiment_json["shadow_limitation"])
         self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "executable")
         self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateless-summary-text-only-replay")
+        self.assertIn("cwd", experiment_json["shadow_request_preflight"]["omitted_turn_fields"])
+        self.assertIn("runtimeWorkspaceRoots", experiment_json["shadow_request_preflight"]["omitted_turn_fields"])
         self.assertFalse(experiment_json["shadow_request_preflight"]["privacy"]["raw_prompts_included"])
         self.assertEqual(experiment_json["status"], "compared")
         self.assertNotIn("shadow-exception", experiment_json["reason_codes"])
@@ -2420,6 +2436,8 @@ summary_model_hint:
         self.assertNotIn("thread-routing-experiment", json.dumps(payload))
         self.assertNotIn(secret_prompt, json.dumps(experiment_json))
         self.assertNotIn(secret_result, json.dumps(experiment_json))
+        self.assertNotIn("/private/workspace/path", json.dumps(experiment_json))
+        self.assertNotIn("private-client-message-id", json.dumps(experiment_json))
 
         self.assertEqual(routing["routing_experiment"]["source_surface"], "codex_turn")
         self.assertEqual(routing["routing_experiment"]["managed_feedback"]["status"], "queued")
@@ -2519,39 +2537,41 @@ summary_model_hint:
                             start_event_id=start_event_id,
                             pending_routing_experiments=pending,
                         )
+                        self.assertEqual(pending, {})
                         await codex_app_proxy._maybe_run_codex_routing_experiment(
                             json.dumps(response),
                             request_started=request_started,
                             pending_routing_experiments=pending,
                         )
-                    experiment = dict(test_store.conn.execute("select * from routing_experiments").fetchone())
+                    experiment_count = test_store.conn.execute("select count(*) as c from routing_experiments").fetchone()["c"]
+                    queue_count = test_store.conn.execute("select count(*) as c from managed_outcome_feedback_queue").fetchone()["c"]
+                    routing_row = dict(test_store.conn.execute(
+                        "select routing_json from codex_app_events where id = ?",
+                        (start_event_id,),
+                    ).fetchone())
                     report = __import__(
                         "agentflow_proxy.routing_experiments",
                         fromlist=["build_routing_experiment_report"],
                     ).build_routing_experiment_report(test_store, limit=5)
-                    queue_row = dict(test_store.conn.execute(
-                        "select payload_json from managed_outcome_feedback_queue"
-                    ).fetchone())
-                    return experiment, report, json.loads(queue_row["payload_json"])
+                    return experiment_count, queue_count, json.loads(routing_row["routing_json"]), report
                 finally:
                     test_store.conn.close()
 
-        experiment, report, payload = asyncio.run(run_fixture())
+        experiment_count, queue_count, routing, report = asyncio.run(run_fixture())
 
-        self.assertIsNone(experiment["shadow_status_code"])
-        self.assertEqual(experiment["error"], "shadow-unavailable:stateful-context-reference")
-        experiment_json = json.loads(experiment["experiment_json"])
-        self.assertEqual(experiment_json["status"], "shadow-unavailable")
+        self.assertEqual(experiment_count, 0)
+        self.assertEqual(queue_count, 0)
+        experiment_json = routing["routing_experiment"]
+        self.assertEqual(experiment_json["status"], "skipped")
+        self.assertFalse(experiment_json["sampled"])
+        self.assertTrue(experiment_json["would_sample"])
+        self.assertEqual(experiment_json["reason"], "codex-shadow-preflight-shadow-unavailable")
         self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "unavailable")
         self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateful-context-reference")
-        self.assertIn("shadow-unavailable", experiment_json["reason_codes"])
-        self.assertEqual(payload["outcome"]["status"], "shadow-unavailable")
-        self.assertFalse(payload["outcome"]["compared"])
-        [candidate] = report["candidates"]
-        self.assertEqual(candidate["compared_samples"], 0)
-        self.assertEqual(candidate["shadow_unavailable_samples"], 1)
-        self.assertEqual(candidate["shadow_error_samples"], 0)
-        self.assertIn("shadow-unavailable-observed", candidate["promotion_reason_codes"])
+        self.assertIn("codex-shadow-preflight-skipped", experiment_json["reason_codes"])
+        self.assertIn("shadow-unavailable-stateful-context-reference", experiment_json["reason_codes"])
+        self.assertEqual(report["candidates"], [])
+        self.assertEqual(report["summary"]["sample_count"], 0)
 
     def test_codex_routing_experiment_respects_budget_and_sample_skips(self):
         message = {
@@ -2743,7 +2763,7 @@ summary_model_hint:
             "method": "turn/start",
             "params": {
                 "threadId": "thread-active-model",
-                "input": [{"type": "text", "text": secret_prompt}],
+                "input": [{"type": "text", "text": f"Summarize this self-contained note: {secret_prompt}"}],
             },
         }
         response = {
@@ -2751,6 +2771,22 @@ summary_model_hint:
             "id": "turn-active-model",
             "result": {"message": "completed"},
         }
+
+        async def fake_shadow_executor(shadow_body, *, shadow_model):
+            self.assertEqual(shadow_model, "gpt-5-mini")
+            self.assertEqual(shadow_body["model"], "gpt-5-mini")
+            self.assertNotIn("threadId", shadow_body)
+            self.assertNotIn("thread-active-model", json.dumps(shadow_body))
+            return {
+                "status_code": 200,
+                "response_body": {
+                    "output_text": "completed",
+                    "usage": {"input_tokens": 9, "output_tokens": 1},
+                },
+                "latency_ms": 12,
+                "cost_est_usd": 0.00001,
+                "error": None,
+            }
 
         async def run_fixture():
             with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
@@ -2764,6 +2800,8 @@ summary_model_hint:
                     with (
                         patch.object(codex_app_proxy, "store", test_store),
                         patch.object(codex_app_proxy, "routing_experiment_decision", decision),
+                        patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value="test-key"),
+                        patch.object(codex_app_proxy, "_execute_codex_stateless_shadow_request", side_effect=fake_shadow_executor),
                     ):
                         codex_app_proxy._record_message(
                             json.dumps(initialize),
