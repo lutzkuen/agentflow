@@ -837,6 +837,23 @@ class SQLiteStore:
                 })
         return {call_id: rows for call_id, rows in grouped.items() if rows}
 
+    def optimization_action_ledger_rows(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        rows = self.conn.execute(
+            """
+            select created_at, path, requested_model, routed_model, stream, cache_hit,
+                   status_code, latency_ms, input_tokens_est, actual_input_tokens,
+                   cost_est_usd, cost_baseline_usd, category, provider, source_surface,
+                   endpoint, requested_model_family, routed_model_family,
+                   routing_json, crunch_json, cache_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def enqueue_managed_outcome_feedback(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "updated_at", "source_surface", "endpoint",
