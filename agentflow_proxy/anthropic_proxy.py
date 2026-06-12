@@ -69,11 +69,13 @@ from agentflow_proxy.recommendations import (
     build_phase_routing_outcome_event,
     build_phase_routing_outcome_feedback,
     build_optimization_unit,
+    fetch_policy_decision,
     fetch_recommendation,
     CACHE_REPLAY_LIFECYCLE_SOURCE_SURFACE,
     OLD_CONTEXT_SUMMARY_OUTCOME_SOURCE_SURFACE,
     PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
     pattern_feature_diagnostics,
+    policy_decisions_enabled,
     queue_policy_event_feedback,
     queue_outcome_feedback,
 )
@@ -1038,7 +1040,16 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             session_id=session_id,
         )
         preflight_pattern_features = pattern_feature_diagnostics(preflight_recommendation_unit)
-        recommendation_meta = await fetch_recommendation(preflight_recommendation_unit)
+        if policy_decisions_enabled():
+            recommendation_meta = {
+                "enabled": False,
+                "status": "skipped",
+                "reason": "policy-decision-routing-preflight",
+                "fallback": "local-policy",
+                "applied": False,
+            }
+        else:
+            recommendation_meta = await fetch_recommendation(preflight_recommendation_unit)
         managed_crunch_profile = _managed_crunch_profile_from_recommendation(recommendation_meta)
         if managed_crunch_profile:
             crunched, crunch_meta = crunch_body(
@@ -1120,6 +1131,8 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
         )
         routing_meta["managed_pattern_features"] = pattern_feature_diagnostics(recommendation_unit)
         routing_meta["managed_preflight_pattern_features"] = preflight_pattern_features
+        if policy_decisions_enabled():
+            recommendation_meta = await fetch_policy_decision(recommendation_unit)
         recommendation_meta = apply_recommendation_to_body(
             provider="anthropic",
             body=crunched,

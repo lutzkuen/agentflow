@@ -70,6 +70,10 @@ class RecommendationTest(unittest.TestCase):
         "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
         "AGENTFLOW_RECOMMENDATION_FAILURE_MODE",
         "AGENTFLOW_MANAGED_API_KEY",
+        "AGENTFLOW_POLICY_DECISION_ENABLED",
+        "AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE",
+        "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION",
+        "AGENTFLOW_POLICY_DECISION_CANARY_SALT",
         "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
         "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
     )
@@ -490,6 +494,161 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(invalid_schema["reason"], "invalid-schema")
         self.assertIn("schema_error", invalid_schema)
         self.assertEqual(invalid_schema["fallback"], "local-policy")
+
+    def test_policy_decision_fetch_posts_strict_feature_snapshot_and_preserves_predictor_fields(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://127.0.0.1:4100"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "agentflow.policy_decision.v1",
+            "optimization_unit_id": 99,
+            "policy_id": "feature-policy-decision:anthropic:99",
+            "confidence": 0.91,
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "target_model": "claude-haiku-4-5-20251001",
+                "policy_id": "routing-predictor-policy",
+                "confidence": 0.91,
+                "route_down_probability": 0.93,
+                "recommended_mode": "shadow",
+                "model_artifact_version": "routing-predictor-v1-abcd",
+                "model_evidence_hash": "sha256:evidence",
+                "predictor_rule_id": "routing-evidence:anthropic:sonnet->haiku",
+                "required_local_gates": ["local-shadow-gate"],
+                "reason_codes": ["active-routing-predictor-model"],
+            },
+        })
+        unit = {
+            "schema": "agentflow.openai_preflight_feature_unit.v1",
+            "feature_schema_version": recommendations.FEATURE_SCHEMA_VERSION,
+            "source_surface": "anthropic_messages",
+            "granularity": "provider_request",
+            "app_family": "claude_code",
+            "requested_model": "claude-sonnet-4-6",
+            "candidate_target_model": "claude-haiku-4-5-20251001",
+            "input_features": {
+                "path": "/v1/messages",
+                "category": "tool-result",
+                "text_chars": 6200,
+                "input_tokens_est": 1550,
+            },
+            "tool_features": {"has_tools": True},
+            "grouping_identifiers": {"session_id_hash": "sha256:session"},
+            "privacy_summary": {"metadata_only": True},
+            "pattern_features": {"raw_pattern_strings_included": False},
+            "replayability_level": "features_only",
+        }
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision(unit))
+
+        self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-decision")
+        sent = FakeAsyncClient.last_json
+        self.assertEqual(sent["schema"], "agentflow.policy_decision_preflight.v1")
+        self.assertEqual(sent["replayability_level"], "features_only")
+        self.assertEqual(sent["input_features"]["api_endpoint"], "v1_messages")
+        self.assertNotIn("path", sent["input_features"])
+        self.assertNotIn("privacy_summary", sent)
+        self.assertNotIn("pattern_features", sent)
+        self.assertEqual(meta["status"], "received")
+        self.assertEqual(meta["policy_decision_schema"], "agentflow.policy_decision.v1")
+        self.assertEqual(meta["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(meta["recommended_mode"], "shadow")
+        self.assertEqual(meta["route_down_probability"], 0.93)
+        self.assertEqual(meta["model_artifact_version"], "routing-predictor-v1-abcd")
+        self.assertEqual(meta["predictor_rule_id"], "routing-evidence:anthropic:sonnet->haiku")
+
+    def test_policy_decision_fetch_fails_closed_on_timeout_and_schema_mismatch(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        FakeAsyncClient.error = httpx.TimeoutException("too slow")
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            timeout_meta = asyncio.run(recommendations.fetch_policy_decision({
+                "source_surface": "anthropic_messages",
+                "granularity": "provider_request",
+                "app_family": "claude_code",
+                "requested_model": "claude-sonnet-4-6",
+                "input_features": {},
+                "tool_features": {},
+                "replayability_level": "features_only",
+            }))
+
+        FakeAsyncClient.error = None
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "agentflow.unexpected.v1",
+            "routing": {"status": "recommended", "target_model": "claude-haiku-4-5-20251001"},
+        })
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            schema_meta = asyncio.run(recommendations.fetch_policy_decision({
+                "source_surface": "anthropic_messages",
+                "granularity": "provider_request",
+                "app_family": "claude_code",
+                "requested_model": "claude-sonnet-4-6",
+                "input_features": {},
+                "tool_features": {},
+                "replayability_level": "features_only",
+            }))
+
+        self.assertEqual(timeout_meta["status"], "error")
+        self.assertEqual(timeout_meta["reason"], "timeout")
+        self.assertEqual(timeout_meta["fallback"], "local-policy")
+        self.assertEqual(schema_meta["status"], "invalid")
+        self.assertEqual(schema_meta["reason"], "invalid-schema")
+        self.assertEqual(schema_meta["schema_error"], "schema-mismatch")
+        self.assertEqual(schema_meta["fallback"], "local-policy")
+
+    def test_policy_decision_application_observes_shadow_and_canary_gates_before_mutating(self):
+        base_meta = {
+            "status": "received",
+            "policy_decision_schema": "agentflow.policy_decision.v1",
+            "routing_status": "recommended",
+            "target_model": "claude-haiku-4-5-20251001",
+            "confidence": 0.92,
+            "route_down_probability": 0.9,
+            "model_artifact_version": "routing-predictor-v1-abcd",
+            "recommended_mode": "shadow",
+            "policy_id": "routing-policy",
+        }
+        body = {"model": "claude-sonnet-4-6"}
+        routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "local route"}
+
+        observed = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=base_meta,
+        )
+
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+        self.assertFalse(observed["applied"])
+        self.assertEqual(observed["local_action_taken"], "shadow")
+        self.assertEqual(observed["would_route_model"], "claude-haiku-4-5-20251001")
+
+        missing_version = dict(base_meta, recommended_mode="canary", model_artifact_version=None)
+        skipped = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=missing_version,
+        )
+        self.assertEqual(skipped["apply_reason"], "routing-predictor-model-version-missing")
+        self.assertEqual(body["model"], "claude-sonnet-4-6")
+
+        os.environ["AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"] = "1"
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=dict(base_meta, recommended_mode="canary"),
+        )
+
+        self.assertTrue(applied["applied"])
+        self.assertEqual(applied["local_action_taken"], "canary_applied")
+        self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
 
     def test_unsafe_replacement_prompt_is_not_applied_and_raw_text_is_not_stored(self):
         routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "keep requested model"}

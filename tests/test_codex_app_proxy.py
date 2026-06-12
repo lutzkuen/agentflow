@@ -75,6 +75,7 @@ class CodexAppProxyTelemetryTest(unittest.TestCase):
         "AGENTFLOW_RECOMMENDATION_ENABLED",
         "AGENTFLOW_RECOMMENDATION_SERVER_URL",
         "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+        "AGENTFLOW_POLICY_DECISION_ENABLED",
         "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_MAX_ATTEMPTS",
         "AGENTFLOW_OUTCOME_FEEDBACK_QUEUE_RETRY_DELAY_SECONDS",
     )
@@ -1821,6 +1822,64 @@ summary_model_hint:
         self.assertEqual(managed["reason"], "disabled")
         self.assertFalse(managed["enabled"])
         self.assertEqual(ManagedCodexClient.calls, [])
+        self.assertEqual(pending["managed"], managed)
+
+    def test_codex_policy_decision_records_predicted_routing_as_observed_metadata(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_RECOMMENDATION_SERVER_URL"] = "http://managed.test"
+        secret = "raw codex policy decision prompt"
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-policy-decision",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-policy-decision",
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": secret}],
+            },
+        }
+
+        class PolicyDecisionCodexClient(ManagedCodexClient):
+            async def post(self, url, json, headers=None):
+                self.__class__.calls.append({"method": "post", "url": url, "json": json, "headers": dict(headers or {})})
+                return ManagedResponse(body={
+                    "schema": "agentflow.policy_decision.v1",
+                    "optimization_unit_id": 88,
+                    "policy_id": "codex-policy-decision",
+                    "confidence": 0.9,
+                    "provider_forwarding": False,
+                    "server_content_processing": False,
+                    "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+                    "routing": {
+                        "status": "recommended",
+                        "target_model": "gpt-5-mini",
+                        "confidence": 0.9,
+                        "route_down_probability": 0.92,
+                        "recommended_mode": "shadow",
+                        "model_artifact_version": "routing-predictor-v1-codex",
+                        "model_evidence_hash": "sha256:evidence",
+                        "predictor_rule_id": "routing-evidence:codex:gpt5->mini",
+                        "reason_codes": ["active-routing-predictor-model"],
+                    },
+                })
+
+        forwarded, metadata = codex_app_proxy._optimize_client_message(json.dumps(message))
+        with patch("agentflow_proxy.recommendations.httpx.AsyncClient", PolicyDecisionCodexClient):
+            pending = asyncio.run(codex_app_proxy._attach_codex_managed_recommendation(forwarded, metadata))
+
+        managed = metadata["routing"]["managed_recommendation"]
+        self.assertEqual(PolicyDecisionCodexClient.calls[0]["url"], "http://managed.test/v1/policy-decision")
+        unit = PolicyDecisionCodexClient.calls[0]["json"]
+        self.assertEqual(unit["schema"], "agentflow.policy_decision_preflight.v1")
+        self.assertEqual(unit["source_surface"], "codex_turn")
+        self.assertNotIn(secret, json.dumps(unit))
+        self.assertNotIn("thread-policy-decision", json.dumps(unit))
+        self.assertEqual(managed["status"], "received")
+        self.assertEqual(managed["recommended_mode"], "shadow")
+        self.assertEqual(managed["local_action_taken"], "shadow")
+        self.assertEqual(managed["would_route_model"], "gpt-5-mini")
+        self.assertFalse(managed["applied"])
         self.assertEqual(pending["managed"], managed)
 
     def test_codex_managed_feedback_posts_unit_and_patches_sanitized_outcome(self):

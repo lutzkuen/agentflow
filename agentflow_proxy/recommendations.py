@@ -26,13 +26,20 @@ from agentflow_proxy.terminal_features import TERMINAL_LOG_FEATURE_SCHEMA
 
 
 RECOMMENDATION_PATH = "/v1/recommendation"
+POLICY_DECISION_PATH = "/v1/policy-decision"
 OUTCOME_PATH_TEMPLATE = "/v1/optimization-units/{unit_id}/outcome"
 POLICY_EVENTS_PATH = "/v1/policy-events"
 FEATURE_SCHEMA_VERSION = "agentflow.optimization_unit_features.v1"
+POLICY_DECISION_PREFLIGHT_SCHEMA = "agentflow.policy_decision_preflight.v1"
+POLICY_DECISION_SCHEMA = "agentflow.policy_decision.v1"
 MANAGED_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 RECOMMENDATION_SERVER_URL_ENV = "AGENTFLOW_RECOMMENDATION_SERVER_URL"
 RECOMMENDATION_TIMEOUT_ENV = "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS"
 RECOMMENDATION_FAILURE_MODE_ENV = "AGENTFLOW_RECOMMENDATION_FAILURE_MODE"
+POLICY_DECISION_ENABLED_ENV = "AGENTFLOW_POLICY_DECISION_ENABLED"
+POLICY_DECISION_MIN_CONFIDENCE_ENV = "AGENTFLOW_POLICY_DECISION_MIN_CONFIDENCE"
+POLICY_DECISION_CANARY_FRACTION_ENV = "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"
+POLICY_DECISION_CANARY_SALT_ENV = "AGENTFLOW_POLICY_DECISION_CANARY_SALT"
 DEFAULT_RECOMMENDATION_SERVER_URL = "http://127.0.0.1:4100"
 ROLLOUT_ACTION_LIFECYCLE_SOURCE_SURFACE = "rollout_action_lifecycle"
 OLD_CONTEXT_SUMMARY_LIFECYCLE_SOURCE_SURFACE = "old_context_summary_lifecycle"
@@ -118,6 +125,10 @@ def _metadata_only_privacy_summary() -> dict[str, Any]:
         "aggregate_only": False,
         "raw_payload_included": False,
     }
+
+
+def _env_enabled(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _compact_grouping_identifiers(values: dict[str, str | None]) -> dict[str, str]:
@@ -799,6 +810,40 @@ def _base_meta() -> dict[str, Any]:
     }
 
 
+def policy_decisions_enabled() -> bool:
+    return _env_enabled(POLICY_DECISION_ENABLED_ENV)
+
+
+def policy_decision_min_confidence() -> float:
+    raw = os.getenv(POLICY_DECISION_MIN_CONFIDENCE_ENV, "0.75")
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.75
+
+
+def policy_decision_canary_fraction() -> float:
+    raw = os.getenv(POLICY_DECISION_CANARY_FRACTION_ENV, "0.0")
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def policy_decision_canary_salt() -> str:
+    return os.getenv(POLICY_DECISION_CANARY_SALT_ENV, "agentflow-policy-decision-canary-v1")
+
+
+def _policy_decision_base_meta() -> dict[str, Any]:
+    meta = _base_meta()
+    meta.update({
+        "enabled": recommendations_enabled() and policy_decisions_enabled(),
+        "endpoint": POLICY_DECISION_PATH,
+        "policy_decision_enabled": policy_decisions_enabled(),
+    })
+    return meta
+
+
 def disabled_recommendation_meta() -> dict[str, Any]:
     meta = _base_meta()
     meta.update({
@@ -808,6 +853,227 @@ def disabled_recommendation_meta() -> dict[str, Any]:
         "applied": False,
     })
     return meta
+
+
+def _policy_decision_preflight_payload(unit: dict[str, Any]) -> dict[str, Any]:
+    input_features = dict(unit.get("input_features") or {})
+    path_hint = input_features.pop("path", None)
+    requested_actions = input_features.get("requested_local_actions")
+    if not isinstance(requested_actions, list):
+        requested_actions = ["routing"]
+        if isinstance(unit.get("crunch"), dict):
+            requested_actions.append("crunch")
+        if isinstance(unit.get("cache"), dict):
+            requested_actions.append("cache")
+    input_features["requested_local_actions"] = sorted({str(item) for item in requested_actions if item})
+    input_features.setdefault("use_routing_predictor", True)
+    endpoint_hint = unit.get("endpoint") or unit.get("provider_endpoint") or path_hint
+    if isinstance(endpoint_hint, str) and endpoint_hint:
+        endpoint_hint = endpoint_hint.strip("/").replace("/", "_")
+    input_features.setdefault("api_endpoint", endpoint_hint)
+
+    payload = {
+        "schema": POLICY_DECISION_PREFLIGHT_SCHEMA,
+        "feature_schema_version": unit.get("feature_schema_version") or FEATURE_SCHEMA_VERSION,
+        "source_surface": unit.get("source_surface") or "anthropic_messages",
+        "granularity": unit.get("granularity") or "provider_request",
+        "app_family": unit.get("app_family") or "unknown",
+        "requested_model": unit.get("requested_model"),
+        "candidate_target_model": unit.get("candidate_target_model"),
+        "input_features": input_features,
+        "tool_features": dict(unit.get("tool_features") or {}),
+        "outcome_features": dict(unit.get("outcome_features") or {}),
+        "grouping_identifiers": dict(unit.get("grouping_identifiers") or {}),
+        "replayability_level": "features_only",
+    }
+    return _sanitize_features(payload)
+
+
+def _copy_policy_decision_response_fields(body: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in (
+        "decision_id",
+        "generated_at",
+        "expires_at",
+        "expired",
+        "optimization_unit_id",
+        "source_surface",
+        "granularity",
+        "app_family",
+        "policy_id",
+        "confidence",
+        "reason_codes",
+        "local_action_requirements",
+        "provider_capability_matrix_schema",
+    ):
+        value = body.get(key)
+        if value is not None:
+            normalized[key] = _sanitize_features(value)
+    for key in (
+        "routing",
+        "crunch",
+        "cache",
+        "canary",
+        "omitted_actions",
+        "privacy_summary",
+        "provenance",
+        "local_executor_compatibility",
+        "provider_capabilities",
+        "capability_audit",
+    ):
+        value = body.get(key)
+        if value is not None:
+            normalized[key] = _sanitize_features(value)
+    return normalized
+
+
+def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(body, dict):
+        return None, "response was not a JSON object"
+    if body.get("schema") != POLICY_DECISION_SCHEMA:
+        return None, "schema-mismatch"
+    privacy = body.get("privacy_summary")
+    if isinstance(privacy, dict):
+        if privacy.get("metadata_only") is False or privacy.get("raw_payload_included") is True:
+            return None, "privacy-not-metadata-only"
+    if body.get("provider_forwarding") is True or body.get("server_content_processing") is True:
+        return None, "managed-server-forwarding-not-allowed"
+
+    routing = body.get("routing")
+    if not isinstance(routing, dict):
+        return None, "missing-routing-section"
+    confidence = body.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        confidence = routing.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        confidence = 0.0
+    target_model = routing.get("target_model")
+    policy_id = body.get("policy_id") or routing.get("policy_id") or body.get("decision_id") or "managed-policy-decision"
+    reason_codes = routing.get("reason_codes") if isinstance(routing.get("reason_codes"), list) else []
+    reason = ", ".join(str(item) for item in reason_codes if item) or "managed policy decision"
+    normalized = _copy_policy_decision_response_fields(body)
+    normalized.update({
+        "schema": POLICY_DECISION_SCHEMA,
+        "policy_decision_schema": POLICY_DECISION_SCHEMA,
+        "target_model": target_model if isinstance(target_model, str) else None,
+        "confidence": float(confidence),
+        "policy_id": str(policy_id),
+        "reason": reason,
+        "routing_status": routing.get("status"),
+        "recommended_mode": routing.get("recommended_mode"),
+        "route_down_probability": routing.get("route_down_probability"),
+        "model_artifact_version": routing.get("model_artifact_version"),
+        "model_evidence_hash": routing.get("model_evidence_hash"),
+        "predictor_rule_id": routing.get("predictor_rule_id"),
+        "required_local_gates": routing.get("required_local_gates") if isinstance(routing.get("required_local_gates"), list) else [],
+        "replacement_prompt_present": False,
+        "raw_payload_included": False,
+        "status": "received",
+        "policy_source": "managed-recommended",
+    })
+    return normalized, None
+
+
+async def fetch_policy_decision(unit: dict[str, Any]) -> dict[str, Any]:
+    if not recommendations_enabled() or not policy_decisions_enabled():
+        meta = _policy_decision_base_meta()
+        meta.update({
+            "status": "skipped",
+            "reason": "disabled",
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
+
+    meta = _policy_decision_base_meta()
+    try:
+        payload = _policy_decision_preflight_payload(unit)
+        assert_managed_egress_safe(payload)
+    except ManagedEgressBlocked as exc:
+        meta.update(managed_egress_blocked_meta(endpoint=POLICY_DECISION_PATH, violations=exc.violations))
+        return meta
+
+    if not recommendation_server_configured():
+        meta.update({
+            "status": "skipped",
+            "reason": "server-url-not-configured",
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
+
+    started = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=recommendation_timeout_seconds()) as client:
+            response = await client.post(
+                recommendation_server_url() + POLICY_DECISION_PATH,
+                json=payload,
+                headers=_managed_headers(),
+            )
+        meta["latency_ms"] = int((time.time() - started) * 1000)
+        meta["status_code"] = response.status_code
+        if response.status_code >= 400:
+            meta.update({
+                "status": "error",
+                "reason": "server-error",
+                "error": response.text[:500],
+                "fallback": "local-policy",
+                "applied": False,
+            })
+            return meta
+        try:
+            body = response.json()
+        except Exception as exc:
+            meta.update({
+                "status": "invalid",
+                "reason": "invalid-json",
+                "error": repr(exc),
+                "fallback": "local-policy",
+                "applied": False,
+            })
+            return meta
+        decision, error = _normalize_policy_decision(body)
+        if decision is None:
+            meta.update({
+                "status": "invalid",
+                "reason": "invalid-schema",
+                "schema_error": error or "invalid-response",
+                "fallback": "local-policy",
+                "applied": False,
+            })
+            return meta
+        meta.update(decision)
+        return meta
+    except httpx.TimeoutException as exc:
+        meta.update({
+            "latency_ms": int((time.time() - started) * 1000),
+            "status": "error",
+            "reason": "timeout",
+            "error": repr(exc),
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
+    except httpx.NetworkError as exc:
+        meta.update({
+            "latency_ms": int((time.time() - started) * 1000),
+            "status": "error",
+            "reason": "unreachable",
+            "error": repr(exc),
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
+    except Exception as exc:
+        meta.update({
+            "latency_ms": int((time.time() - started) * 1000),
+            "status": "error",
+            "reason": "request-failed",
+            "error": repr(exc),
+            "fallback": "local-policy",
+            "applied": False,
+        })
+        return meta
 
 
 def _normalize_recommendation(body: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -1017,6 +1283,179 @@ def _supported_target_model(provider: str, target_model: str) -> bool:
     return bool(target_l)
 
 
+def policy_decision_canary_sample(meta: dict[str, Any], *, current_model: str, target_model: str) -> dict[str, Any]:
+    fraction = policy_decision_canary_fraction()
+    basis = {
+        "policy_id": meta.get("policy_id"),
+        "decision_id": meta.get("decision_id"),
+        "optimization_unit_id": meta.get("optimization_unit_id"),
+        "model_artifact_version": meta.get("model_artifact_version"),
+        "model_evidence_hash": meta.get("model_evidence_hash"),
+        "predictor_rule_id": meta.get("predictor_rule_id"),
+        "current_model": current_model,
+        "target_model": target_model,
+    }
+    digest = hashlib.sha256(f"{policy_decision_canary_salt()}:{stable_json(basis)}".encode("utf-8")).hexdigest()
+    score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    selected = score < fraction
+    return {
+        "schema": "agentflow.policy_decision_local_canary.v1",
+        "enabled": fraction > 0.0,
+        "fraction": fraction,
+        "salt": policy_decision_canary_salt(),
+        "unit": "policy_decision",
+        "bucket": round(score, 8),
+        "threshold": fraction,
+        "selected": selected,
+        "cohort": "canary_applied" if selected else "canary_holdout",
+        "cohort_key_hash": f"sha256:{digest}",
+    }
+
+
+def _policy_decision_routing_gate(meta: dict[str, Any], *, target_model: str, current_model: str) -> str | None:
+    if meta.get("routing_status") != "recommended":
+        return "routing-not-recommended"
+    if not target_model:
+        return "missing-target-model"
+    if target_model == current_model:
+        return "target-model-already-selected"
+    try:
+        confidence = float(meta.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    probability = meta.get("route_down_probability")
+    if isinstance(probability, (int, float)):
+        confidence = min(confidence, float(probability))
+    if confidence < policy_decision_min_confidence():
+        return "routing-predictor-confidence-too-low"
+    if not isinstance(meta.get("model_artifact_version"), str) or not meta.get("model_artifact_version"):
+        return "routing-predictor-model-version-missing"
+    return None
+
+
+def apply_policy_decision_routing_to_body(
+    *,
+    provider: str,
+    body: dict[str, Any],
+    routing_meta: dict[str, Any],
+    recommendation_meta: dict[str, Any],
+) -> dict[str, Any]:
+    meta = dict(recommendation_meta)
+    if meta.get("status") != "received":
+        meta.setdefault("applied", False)
+        meta.setdefault("local_action_taken", "fallback")
+        return meta
+    target_model = str(meta.get("target_model") or "")
+    current_model = str(body.get("model") or routing_meta.get("routed_model") or "")
+    meta["local_model_before_recommendation"] = current_model
+    meta["local_policy_decision_mode"] = meta.get("recommended_mode") or "observe"
+    meta["min_confidence"] = policy_decision_min_confidence()
+    meta["canary_fraction"] = policy_decision_canary_fraction()
+
+    if not _provider_compatible(provider, target_model):
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "provider-mismatch" if target_model else "missing-target-model",
+            "fallback": "local-policy",
+            "local_action_taken": "noop",
+        })
+        return meta
+    if not _supported_target_model(provider, target_model):
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "unsupported-target-model",
+            "fallback": "local-policy",
+            "local_action_taken": "noop",
+        })
+        return meta
+    if meta.get("replacement_prompt_present"):
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "unsafe-replacement-prompt",
+            "fallback": "local-policy",
+            "replacement_prompt_applied": False,
+            "local_action_taken": "noop",
+        })
+        return meta
+    if target_model != current_model and "thinking request" in str(routing_meta.get("reason") or ""):
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "local-thinking-safety-guard",
+            "fallback": "local-policy",
+            "local_action_taken": "noop",
+        })
+        return meta
+
+    gate_reason = _policy_decision_routing_gate(meta, target_model=target_model, current_model=current_model)
+    if gate_reason is not None:
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": gate_reason,
+            "fallback": "local-policy",
+            "would_route_model": target_model,
+            "local_action_taken": "noop",
+        })
+        return meta
+
+    recommended_mode = str(meta.get("recommended_mode") or "observe").lower()
+    if recommended_mode in {"observe", "shadow"}:
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": f"{recommended_mode}-only",
+            "fallback": "local-policy",
+            "would_route_model": target_model,
+            "local_action_taken": recommended_mode,
+        })
+        routing_meta["managed_route_candidate_model"] = target_model
+        routing_meta["managed_route_candidate_reason"] = meta.get("reason")
+        routing_meta["managed_route_recommended_mode"] = recommended_mode
+        return meta
+    if recommended_mode != "canary":
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": f"recommended-mode-{recommended_mode or 'missing'}",
+            "fallback": "local-policy",
+            "would_route_model": target_model,
+            "local_action_taken": "noop",
+        })
+        return meta
+
+    canary = policy_decision_canary_sample(meta, current_model=current_model, target_model=target_model)
+    meta["local_canary"] = canary
+    if not canary["selected"]:
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "local-canary-holdout",
+            "fallback": "local-policy",
+            "would_route_model": target_model,
+            "local_action_taken": "canary_holdout",
+        })
+        return meta
+
+    body["model"] = target_model
+    routing_meta["routed_model"] = target_model
+    routing_meta["final_policy_source"] = "managed-recommended"
+    routing_meta["managed_policy_id"] = meta.get("policy_id")
+    routing_meta["managed_reason"] = meta.get("reason")
+    routing_meta["managed_route_recommended_mode"] = recommended_mode
+    meta.update({
+        "applied": True,
+        "changed_model": True,
+        "fallback": None,
+        "apply_reason": "local-canary-selected",
+        "local_action_taken": "canary_applied",
+    })
+    return meta
+
+
 def apply_recommendation_to_body(
     *,
     provider: str,
@@ -1024,6 +1463,14 @@ def apply_recommendation_to_body(
     routing_meta: dict[str, Any],
     recommendation_meta: dict[str, Any],
 ) -> dict[str, Any]:
+    if recommendation_meta.get("policy_decision_schema") == POLICY_DECISION_SCHEMA:
+        return apply_policy_decision_routing_to_body(
+            provider=provider,
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=recommendation_meta,
+        )
+
     meta = dict(recommendation_meta)
     if meta.get("status") != "received":
         meta.setdefault("applied", False)

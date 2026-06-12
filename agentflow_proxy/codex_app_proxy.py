@@ -49,8 +49,10 @@ from agentflow_proxy.recommendations import (
     build_codex_app_canary_lifecycle_feedback,
     build_codex_turn_optimization_unit,
     build_codex_turn_outcome_feedback,
+    fetch_policy_decision,
     fetch_recommendation,
     pattern_feature_diagnostics,
+    policy_decisions_enabled,
     queue_codex_app_canary_lifecycle_feedback,
     queue_codex_outcome_feedback,
     queue_policy_event_feedback,
@@ -2529,11 +2531,21 @@ async def _attach_codex_managed_recommendation(
     crunch = local["crunch"]
     cache = local["cache"]
     unit = local["unit"]
-    managed = await fetch_recommendation(unit)
+    managed = await (fetch_policy_decision(unit) if policy_decisions_enabled() else fetch_recommendation(unit))
     managed.setdefault("applied", False)
     if managed.get("status") == "received":
         managed["applied"] = False
-        managed["apply_reason"] = "codex-app-managed-recommendation-observed-only"
+        if managed.get("policy_decision_schema"):
+            mode = str(managed.get("recommended_mode") or "observe").lower()
+            managed["apply_reason"] = (
+                f"{mode}-only" if mode in {"observe", "shadow"} else "codex-app-policy-decision-observed-only"
+            )
+            managed["local_action_taken"] = mode if mode in {"observe", "shadow"} else "noop"
+            if managed.get("target_model"):
+                managed["would_route_model"] = managed.get("target_model")
+        else:
+            managed["apply_reason"] = "codex-app-managed-recommendation-observed-only"
+            managed["local_action_taken"] = "observe"
     managed["source_surface"] = "codex_turn"
     routing["managed_recommendation"] = managed
     return {

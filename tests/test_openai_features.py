@@ -518,11 +518,15 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.old_openai_auth_mode = server.OPENAI_AUTH_MODE
         self.old_log_bodies = server.LOG_BODIES
         self.saved_recommendation_enabled = os.environ.get("AGENTFLOW_RECOMMENDATION_ENABLED")
+        self.saved_policy_decision_enabled = os.environ.get("AGENTFLOW_POLICY_DECISION_ENABLED")
+        self.saved_policy_decision_canary_fraction = os.environ.get("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION")
         self.saved_routing_rules = os.environ.get("AGENTFLOW_ROUTING_RULES")
         self.saved_crunch_rules = os.environ.get("AGENTFLOW_CRUNCH_RULES")
         self.saved_routing_experiments = os.environ.get("AGENTFLOW_ROUTING_EXPERIMENTS")
         self.saved_openai_summary_enabled = os.environ.get("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED")
         os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
+        os.environ.pop("AGENTFLOW_POLICY_DECISION_ENABLED", None)
+        os.environ.pop("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION", None)
         os.environ.pop("AGENTFLOW_ROUTING_EXPERIMENTS", None)
         os.environ.pop("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
         importlib.reload(routing_experiments_module)
@@ -550,6 +554,14 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
         else:
             os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = self.saved_recommendation_enabled
+        if self.saved_policy_decision_enabled is None:
+            os.environ.pop("AGENTFLOW_POLICY_DECISION_ENABLED", None)
+        else:
+            os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = self.saved_policy_decision_enabled
+        if self.saved_policy_decision_canary_fraction is None:
+            os.environ.pop("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION", None)
+        else:
+            os.environ["AGENTFLOW_POLICY_DECISION_CANARY_FRACTION"] = self.saved_policy_decision_canary_fraction
         if self.saved_routing_rules is None:
             os.environ.pop("AGENTFLOW_ROUTING_RULES", None)
         else:
@@ -1077,6 +1089,59 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(managed["mode"], "observe-only")
         self.assertFalse(managed["enabled"])
         self.assertFalse(managed["applied"])
+
+    def test_openai_policy_decision_observe_fetches_predicted_routing_without_changing_request(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "raw openai prompt secret",
+        }
+        seen = {}
+
+        async def fake_policy_decision(unit):
+            seen["unit"] = copy.deepcopy(unit)
+            rendered = json.dumps(unit, sort_keys=True)
+            self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+            self.assertNotIn("raw openai prompt secret", rendered)
+            return {
+                "enabled": True,
+                "status": "received",
+                "policy_decision_schema": "agentflow.policy_decision.v1",
+                "routing_status": "recommended",
+                "target_model": "gpt-5-mini",
+                "confidence": 0.91,
+                "route_down_probability": 0.9,
+                "recommended_mode": "shadow",
+                "model_artifact_version": "routing-predictor-v1-openai",
+                "model_evidence_hash": "sha256:evidence",
+                "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
+                "policy_id": "openai-predictor-policy",
+                "reason": "active predictor",
+                "policy_source": "managed-recommended",
+            }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_policy_decision",
+                side_effect=fake_policy_decision,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(managed["status"], "observe")
+        self.assertEqual(managed["apply_reason"], "observe-only")
+        self.assertEqual(managed["would_route_model"], "gpt-5-mini")
+        self.assertFalse(managed["applied"])
+        self.assertIn("unit", seen)
+        self.assertNotIn("raw openai prompt secret", row["routing_json"])
 
     def test_openai_dry_run_recommendation_records_projection_without_changing_request(self):
         request_body = {

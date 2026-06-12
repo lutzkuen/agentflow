@@ -6,7 +6,13 @@ from typing import Any
 
 from agentflow_proxy.optimization.managed_actions import evaluate_managed_local_actions
 from agentflow_proxy.pricing import estimate_cost
-from agentflow_proxy.recommendations import fetch_recommendation
+from agentflow_proxy.recommendations import (
+    fetch_recommendation,
+    fetch_policy_decision,
+    policy_decision_canary_sample,
+    policy_decision_min_confidence,
+    policy_decisions_enabled,
+)
 from agentflow_proxy.store import stable_json
 
 
@@ -219,10 +225,10 @@ async def fetch_openai_recommendation_decision(
 ) -> dict[str, Any]:
     """Fetch and evaluate an OpenAI managed recommendation without mutating the provider request."""
     mode = openai_recommendation_mode()
-    if mode == "observe-only":
+    if mode == "observe-only" and not policy_decisions_enabled():
         return _base_decision(mode=mode, current_model=current_model, input_tokens_est=input_tokens_est)
 
-    fetched = await fetch_recommendation(recommendation_unit)
+    fetched = await (fetch_policy_decision(recommendation_unit) if policy_decisions_enabled() else fetch_recommendation(recommendation_unit))
     decision = _base_decision(
         mode=mode,
         current_model=current_model,
@@ -234,6 +240,19 @@ async def fetch_openai_recommendation_decision(
             "status": fetched.get("status") or "skipped",
             "apply_reason": fetched.get("reason") or "recommendation-not-received",
             "lifecycle_event": "fallback",
+        })
+        return decision
+
+    if policy_decisions_enabled() and mode == "observe-only":
+        decision.update({
+            "enabled": False,
+            "status": "observe",
+            "apply_reason": "observe-only",
+            "would_change_model": isinstance(_managed_target_model(fetched), str)
+            and _managed_target_model(fetched) != current_model,
+            "would_route_model": _managed_target_model(fetched) if isinstance(_managed_target_model(fetched), str) else None,
+            "local_action_taken": "observe",
+            "lifecycle_event": "observe",
         })
         return decision
 
@@ -260,6 +279,61 @@ async def fetch_openai_recommendation_decision(
             "lifecycle_event": "fallback",
         })
         return decision
+    if fetched.get("policy_decision_schema") and fetched.get("routing_status") != "recommended":
+        decision.update({
+            "status": "skipped",
+            "apply_reason": "routing-not-recommended",
+            "lifecycle_event": "fallback",
+        })
+        return decision
+    if fetched.get("policy_decision_schema"):
+        confidence = float(fetched.get("confidence") or 0.0)
+        probability = fetched.get("route_down_probability")
+        if isinstance(probability, (int, float)):
+            confidence = min(confidence, float(probability))
+        if confidence < policy_decision_min_confidence():
+            decision.update({
+                "status": "skipped",
+                "apply_reason": "routing-predictor-confidence-too-low",
+                "lifecycle_event": "fallback",
+            })
+            return decision
+        if not isinstance(fetched.get("model_artifact_version"), str) or not fetched.get("model_artifact_version"):
+            decision.update({
+                "status": "skipped",
+                "apply_reason": "routing-predictor-model-version-missing",
+                "lifecycle_event": "fallback",
+            })
+            return decision
+        recommended_mode = str(fetched.get("recommended_mode") or "observe").lower()
+        decision["local_policy_decision_mode"] = recommended_mode
+        if recommended_mode in {"observe", "shadow"}:
+            decision.update({
+                "status": recommended_mode,
+                "apply_reason": f"{recommended_mode}-only",
+                "would_change_model": target_model is not None and target_model != current_model,
+                "would_route_model": target_model,
+                "local_action_taken": recommended_mode,
+                "lifecycle_event": recommended_mode,
+            })
+            return decision
+        if recommended_mode == "hold":
+            decision.update({
+                "status": "hold",
+                "apply_reason": "routing-predictor-hold",
+                "would_change_model": target_model is not None and target_model != current_model,
+                "would_route_model": target_model,
+                "local_action_taken": "noop",
+                "lifecycle_event": "holdout",
+            })
+            return decision
+        if recommended_mode != "canary":
+            decision.update({
+                "status": "skipped",
+                "apply_reason": f"recommended-mode-{recommended_mode or 'missing'}",
+                "lifecycle_event": "fallback",
+            })
+            return decision
     if target_model == current_model:
         decision.update({
             "status": "noop",
@@ -286,7 +360,11 @@ async def fetch_openai_recommendation_decision(
         return decision
 
     fraction = openai_canary_fraction()
-    canary = _cohort(recommendation_unit, fetched, fraction)
+    canary = (
+        policy_decision_canary_sample(fetched, current_model=current_model, target_model=target_model)
+        if fetched.get("policy_decision_schema") and target_model
+        else _cohort(recommendation_unit, fetched, fraction)
+    )
     decision["canary"] = canary
     if not canary["selected"]:
         decision["local_actions"] = evaluate_managed_local_actions(
