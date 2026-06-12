@@ -11,6 +11,7 @@ from agentflow_proxy.cache import cache_pattern_rules_from_policy_payload
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, build_openai_cache_replay_report
+from agentflow_proxy.public_metadata import public_path_state
 from agentflow_proxy.store import utc_now
 
 
@@ -129,7 +130,9 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
             "status": "staged-policy-missing",
             "blockers": ["staged-canary-policy-missing"],
             "configured_policy_path": None,
+            "configured_policy_path_state": public_path_state(None),
             "runtime_loaded_policy_path": None,
+            "runtime_loaded_policy_path_state": public_path_state(None),
             "runtime_loaded": False,
             "policy_rule_count": 0,
             "provider_calls_made": False,
@@ -144,9 +147,11 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
             "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
             "status": "staged-policy-unreadable",
             "blockers": ["staged-canary-policy-unreadable"],
-            "configured_policy_path": str(path),
+            "configured_policy_path": None,
+            "configured_policy_path_state": public_path_state(path),
             "read_error_type": type(exc).__name__,
             "runtime_loaded_policy_path": None,
+            "runtime_loaded_policy_path_state": public_path_state(None),
             "runtime_loaded": False,
             "provider_calls_made": False,
             "managed_server_calls_made": False,
@@ -160,8 +165,10 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
             "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
             "status": "staged-policy-empty",
             "blockers": ["staged-canary-policy-empty"],
-            "configured_policy_path": str(path),
+            "configured_policy_path": None,
+            "configured_policy_path_state": public_path_state(path),
             "runtime_loaded_policy_path": None,
+            "runtime_loaded_policy_path_state": public_path_state(None),
             "runtime_loaded": False,
             "policy_rule_count": 0,
             "provider_calls_made": False,
@@ -181,8 +188,10 @@ def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str
         "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
         "status": status,
         "blockers": blockers,
-        "configured_policy_path": str(path),
-        "runtime_loaded_policy_path": str(runtime_path) if runtime_path else None,
+        "configured_policy_path": None,
+        "configured_policy_path_state": public_path_state(path),
+        "runtime_loaded_policy_path": None,
+        "runtime_loaded_policy_path_state": public_path_state(runtime_path),
         "runtime_loaded": loaded_by_runtime,
         "policy_rule_count": len(rules),
         "dry_run_summary": {

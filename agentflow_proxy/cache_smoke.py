@@ -6,6 +6,7 @@ from typing import Any
 
 from agentflow_proxy.cache import cache_key_for
 from agentflow_proxy.policy_files import utc_now
+from agentflow_proxy.public_metadata import public_label
 
 
 def _json_obj(raw: Any) -> dict[str, Any]:
@@ -94,7 +95,7 @@ def _model_breakdown(store_obj: Any) -> list[dict[str, Any]]:
         order by count desc, model asc
         """
     ).fetchall()
-    return [{"model": str(row["model"] or "unknown"), "count": _as_int(row["count"])} for row in rows]
+    return [{"model": public_label(row["model"], "unknown"), "count": _as_int(row["count"])} for row in rows]
 
 
 def _cache_row_diagnostic(store_obj: Any, row: dict[str, Any]) -> dict[str, Any]:
@@ -158,17 +159,18 @@ def _call_shape(row: dict[str, Any], cache_meta: dict[str, Any]) -> str:
     text_chars = routing.get("text_chars")
     if text_chars is None:
         text_chars = routing.get("input_text_chars")
+    status, reason = _status_reason(cache_meta)
     return json.dumps(
         {
-            "provider": row.get("provider") or "anthropic",
-            "path": row.get("path"),
-            "model": row.get("routed_model") or row.get("requested_model"),
+            "provider": public_label(row.get("provider") or "anthropic", "unknown"),
+            "path": public_label(row.get("path"), "provider-api-path"),
+            "model": public_label(row.get("routed_model") or row.get("requested_model"), "unknown"),
             "stream": _as_int(row.get("stream")),
-            "category": row.get("category") or routing.get("category"),
+            "category": public_label(row.get("category") or routing.get("category"), "unknown"),
             "has_tools": routing.get("has_tools"),
             "text_bucket": _char_bucket(text_chars),
-            "cache_status": cache_meta.get("status"),
-            "cache_reason": cache_meta.get("reason"),
+            "cache_status": public_label(status, "unknown"),
+            "cache_reason": public_label(reason, "unknown"),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -205,9 +207,9 @@ def _key_stability_sample(store_obj: Any, call_rows: list[dict[str, Any]]) -> di
                 "status": "matched",
                 "reason": "stored-request-recomputes-existing-cache-key",
                 "call_created_at": row.get("created_at"),
-                "provider": provider,
-                "path": row.get("path"),
-                "model": row.get("routed_model") or row.get("requested_model"),
+                "provider": public_label(provider, "unknown"),
+                "path": public_label(row.get("path"), "provider-api-path"),
+                "model": public_label(row.get("routed_model") or row.get("requested_model"), "unknown"),
                 "raw_request_bodies_included": False,
                 "cache_keys_included": False,
             }
@@ -262,9 +264,11 @@ def build_cache_smoke_diagnostic(
             missing_cache_json += 1
             cache_meta = {"status": "missing", "reason": "missing-cache-json"}
         status, reason = _status_reason(cache_meta)
-        status_reason_counts[f"{status}:{reason}"] += 1
+        public_status = public_label(status, "unknown")
+        public_reason = public_label(reason, "unknown")
+        status_reason_counts[f"{public_status}:{public_reason}"] += 1
         if status == "skipped":
-            skip_reason_counts[reason] += 1
+            skip_reason_counts[public_reason] += 1
             if "streaming" in reason or _as_int(row.get("stream")):
                 streaming_skip_count += 1
             if "tools-disabled" in reason or "tool-cache-disabled" in reason:

@@ -8,6 +8,7 @@ from typing import Any
 
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, _json_obj
 from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_source_surface
+from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import utc_now
 
 
@@ -151,11 +152,15 @@ def _cache_replay_canary(cache: dict[str, Any], rule: dict[str, Any] | None) -> 
 
 
 def _canary_public(canary: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: canary.get(key)
-        for key in ("enabled", "selected", "cohort", "fraction", "threshold", "unit", "reason", "status")
-        if canary.get(key) is not None
-    } | {"pattern_hashes_included": False}
+    public: dict[str, Any] = {}
+    for key in ("enabled", "selected", "fraction", "threshold"):
+        if canary.get(key) is not None:
+            public[key] = canary.get(key)
+    for key in ("cohort", "unit", "reason", "status"):
+        if canary.get(key) is not None:
+            public[key] = public_label(canary.get(key), "unknown")
+    public["pattern_hashes_included"] = False
+    return public
 
 
 def _cohort(cache: dict[str, Any], rule: dict[str, Any], canary: dict[str, Any]) -> str:
@@ -222,11 +227,11 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
     return {
         "candidate_id": candidate_id,
         "rule_id": rule_id,
-        "policy_source": rule.get("policy_source") or "unknown",
-        "source_surface": feature.get("source_surface") or _source_surface(row),
-        "endpoint": feature.get("endpoint") or _endpoint(row),
-        "category": row.get("category") or feature.get("category") or "unknown",
-        "workflow_phase": feature.get("workflow_phase") or row.get("category") or "unknown",
+        "policy_source": public_label(rule.get("policy_source") or "unknown", "unknown"),
+        "source_surface": public_label(feature.get("source_surface") or _source_surface(row), "unknown"),
+        "endpoint": public_label(feature.get("endpoint") or _endpoint(row), "unknown"),
+        "category": public_label(row.get("category") or feature.get("category") or "unknown", "unknown"),
+        "workflow_phase": public_label(feature.get("workflow_phase") or row.get("category") or "unknown", "unknown"),
         "cohorts": {
             "applied": _empty_cohort(),
             "holdout": _empty_cohort(),

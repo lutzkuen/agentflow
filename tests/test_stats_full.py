@@ -4973,6 +4973,98 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("Skipped cache replayability", html)
             self.assertIn("cache-replayability-tbody", html)
 
+    def test_cache_replayability_dashboard_api_sanitizes_raw_like_labels(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=100,
+            output_tokens_est=1,
+            actual_input_tokens=100,
+            actual_output_tokens=1,
+            cost_est_usd=0.01,
+            cost_baseline_usd=0.01,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json({
+                "text_chars": 12_000,
+                "category": "raw replay prompt /tmp/replay-label-secret.py",
+                "workflow_phase": "raw replay response message",
+                "has_tools": False,
+            }),
+            cache_json=stable_json({
+                "status": "miss",
+                "reason": "cache-key-secret req-replay-secret prompt",
+                "policy_source": "managed-recommended",
+                "rule_id": "raw rule id cache-key-secret",
+                "candidate_id": "raw candidate id request-id-secret",
+                "session_memory_hints": {
+                    "dry_run_replay_proposal": {
+                        "schema": "agentflow.session_memory_cache_replay_proposal.v1",
+                        "status": "raw status prompt",
+                        "reason": "cache-key-secret reason",
+                        "proposal_id": "raw proposal id must not leak",
+                        "proposal_fingerprint": "sha256:" + "a" * 16,
+                        "rule_id": "raw rule id request-id-secret",
+                        "policy_source": "managed-recommended",
+                        "phase": "raw phase prompt",
+                        "category": "raw category /tmp/proposal-secret.py",
+                        "blockers": ["cache-key-secret blocker"],
+                        "review_steps": ["review metadata-only session plateau shape"],
+                        "privacy": {"metadata_only": True},
+                    }
+                },
+            }),
+            error=None,
+            request_json=stable_json({"messages": [{"content": "private replayability prompt"}]}),
+            response_json=stable_json({"content": [{"text": "private replayability response"}]}),
+            session_id="raw-replayability-session-secret",
+            category="raw replay prompt /tmp/replay-label-secret.py",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            payload = client.get("/agentflow/stats/cache-replayability?limit=10").json()
+            readiness = client.get("/agentflow/stats/cache-replay-readiness?limit=10").json()
+            html = client.get("/agentflow/dashboard").text
+
+        rendered = json.dumps({"payload": payload, "readiness": readiness}, sort_keys=True) + html
+        for forbidden in (
+            "raw replay prompt",
+            "/tmp/replay-label-secret.py",
+            "raw replay response",
+            "cache-key-secret",
+            "req-replay-secret",
+            "raw rule id",
+            "raw candidate id",
+            "raw proposal id",
+            "/tmp/proposal-secret.py",
+            "private replayability prompt",
+            "private replayability response",
+            "raw-replayability-session-secret",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(payload["privacy"]["file_paths_included"])
+        self.assertEqual(payload["groups"][0]["category"], "unknown")
+        self.assertEqual(payload["groups"][0]["cache_reason"], "unknown")
+
     def test_cache_replayability_reports_session_memory_dry_run_proposals_metadata_only(self):
         from agentflow_proxy.session_memory_hints import build_session_memory_optimization_hints
 

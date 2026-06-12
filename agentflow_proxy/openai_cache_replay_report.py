@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_model_family, openai_source_surface
+from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import utc_now
 
 
@@ -462,25 +463,28 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         routing = _json_obj(row.get("routing_json"))
         cache = _json_obj(row.get("cache_json"))
         feature = _feature_unit(routing)
-        endpoint = str(feature.get("endpoint") or _endpoint(row))
-        source_surface = str(feature.get("source_surface") or _source_surface(row))
+        endpoint = public_label(feature.get("endpoint") or _endpoint(row), "unknown")
+        source_surface = public_label(feature.get("source_surface") or _source_surface(row), "unknown")
         requested_model = str(row.get("requested_model") or routing.get("requested_model") or "")
-        model_family = str(
+        model_family = public_label(
             feature.get("requested_model_family")
             or row.get("requested_model_family")
             or openai_model_family(requested_model)
-            or "unknown"
+            or "unknown",
+            "unknown",
         )
-        category = str(row.get("category") or feature.get("category") or routing.get("category") or "unknown")
-        workflow_phase = str(feature.get("workflow_phase") or routing.get("workflow_phase") or category or "unknown")
+        category = public_label(row.get("category") or feature.get("category") or routing.get("category") or "unknown", "unknown")
+        workflow_phase = public_label(feature.get("workflow_phase") or routing.get("workflow_phase") or category or "unknown", "unknown")
         stream = bool(_as_int(row.get("stream")) or feature.get("stream"))
         has_tools = _has_tools(row, routing, cache, feature)
         text_chars = _row_text_chars(row, routing, feature)
         input_tokens = _as_int(row.get("actual_input_tokens")) or _as_int(row.get("input_tokens_est")) or max(0, text_chars // 4)
         cost = _as_float(row.get("cost_est_usd")) or _as_float(row.get("cost_baseline_usd"))
-        cache_status = _cache_status(row, cache)
-        cache_reason = _cache_reason(cache, cache_status)
-        replayability = _replayability_level(cache, feature)
+        raw_cache_status = _cache_status(row, cache)
+        raw_cache_reason = _cache_reason(cache, raw_cache_status)
+        cache_status = public_label(raw_cache_status, "unknown")
+        cache_reason = public_label(raw_cache_reason, "unknown")
+        replayability = public_label(_replayability_level(cache, feature), "metadata_shape")
         fingerprint = _fingerprint_value(cache, routing, feature)
         fingerprint_state = "available" if fingerprint else "missing"
         if fingerprint:
@@ -492,8 +496,8 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         audit = _sanitized_dependency_audit(cache)
         dep_status = _dependency_status(audit)
         blockers = _row_blockers(
-            cache_status=cache_status,
-            cache_reason=cache_reason,
+            cache_status=raw_cache_status,
+            cache_reason=raw_cache_reason,
             stream=stream,
             has_tools=has_tools,
             dependency_status=dep_status,
@@ -501,7 +505,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         safety_blocked = bool(
             set(blockers)
             - {"exact-miss", "replay-rule-required", "already-cache-hit"}
-        ) or cache_status == "hit"
+        ) or raw_cache_status == "hit"
 
         _increment(endpoint_counts, endpoint)
         _increment(category_counts, category)
@@ -533,7 +537,7 @@ def build_openai_cache_replay_report(store_obj: Any, limit: int = 1000) -> dict[
         cid = _candidate_id(basis)
         group = groups.setdefault(cid, _new_group(basis, cid))
         group["matched_count"] += 1
-        group["already_cache_hit_count"] += int(cache_status == "hit")
+        group["already_cache_hit_count"] += int(raw_cache_status == "hit")
         group["estimated_cost_usd"] += cost
         group["input_tokens"] += input_tokens
         group["file_dependency_audit"] = _merge_audit(group.get("file_dependency_audit"), audit)

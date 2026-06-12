@@ -1566,12 +1566,15 @@ def streaming_cache_lookup_meta(
     if exact_enabled:
         status = "miss"
         reason = "streaming-exact-pattern-miss"
-    elif pattern_skip_reasons:
-        status = "skipped"
-        reason = str(pattern_skip_reasons[-1].get("reason") or "streaming-pattern-rule-skipped")
     elif has_tool_blocks and CACHE_ENABLED:
         status = "skipped"
         reason = "streaming-tools-disabled"
+    elif has_thinking_blocks and CACHE_ENABLED:
+        status = "skipped"
+        reason = "streaming-thinking-disabled"
+    elif pattern_skip_reasons:
+        status = "skipped"
+        reason = str(pattern_skip_reasons[-1].get("reason") or "streaming-pattern-rule-skipped")
     elif CACHE_ENABLED and base_exact_enabled:
         status = "skipped"
         reason = "streaming-pattern-rule-required"

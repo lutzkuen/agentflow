@@ -24,6 +24,7 @@ from agentflow_proxy.codex_app_policy import (
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
+from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.quality import (
     derive_codex_turn_quality_signals,
     derive_provider_quality_signals,
@@ -3550,19 +3551,13 @@ _CACHE_REPLAY_SAFETY_STOP_REASON = "local-canary-safety-stop"
 def _public_cache_canary(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
-    public = {
-        key: value.get(key)
-        for key in (
-            "enabled",
-            "selected",
-            "cohort",
-            "fraction",
-            "threshold",
-            "unit",
-            "reason",
-        )
-        if value.get(key) is not None
-    }
+    public: dict[str, Any] = {}
+    for key in ("enabled", "selected", "fraction", "threshold"):
+        if value.get(key) is not None:
+            public[key] = value.get(key)
+    for key in ("cohort", "unit", "reason"):
+        if value.get(key) is not None:
+            public[key] = public_label(value.get(key), "unknown")
     public["pattern_hashes_included"] = False
     return public
 
@@ -3624,15 +3619,17 @@ def _cache_rule_identity(
     has_tools: bool,
 ) -> dict[str, Any]:
     rule = rule if isinstance(rule, dict) else {}
-    rule_id = str(rule.get("rule_id") or cache.get("rule_id") or "unruled-cache-decision")
-    candidate_id = rule.get("candidate_id") if rule.get("candidate_id") is not None else cache.get("candidate_id")
-    policy_source = str(rule.get("policy_source") or cache.get("policy_source") or "unknown")
+    raw_rule_id = rule.get("rule_id") or cache.get("rule_id") or "unruled-cache-decision"
+    raw_candidate_id = rule.get("candidate_id") if rule.get("candidate_id") is not None else cache.get("candidate_id")
+    rule_id = public_id(raw_rule_id, prefix="rule-id", fallback="unruled-cache-decision") or "unruled-cache-decision"
+    candidate_id = public_id(raw_candidate_id, prefix="candidate-id") if raw_candidate_id is not None else None
+    policy_source = public_label(rule.get("policy_source") or cache.get("policy_source") or "unknown", "unknown")
     return {
         "rule_id": rule_id,
         "candidate_id": candidate_id,
         "policy_source": policy_source,
         "source_surface": canonical_source_surface(source_surface),
-        "category": category or "unknown",
+        "category": public_label(category or "unknown", "unknown"),
         "stream": bool(stream),
         "has_tools": bool(has_tools),
     }
@@ -4052,16 +4049,16 @@ def _cache_replay_rule_public_from_config(rule: dict[str, Any]) -> dict[str, Any
     action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
     conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
     return {
-        "rule_id": str(rule.get("id") or rule.get("rule_id") or "cache-pattern-rule"),
-        "candidate_id": rule.get("candidate_id"),
-        "policy_source": str(rule.get("policy_source") or "managed-recommended"),
+        "rule_id": public_id(rule.get("id") or rule.get("rule_id") or "cache-pattern-rule", prefix="rule-id", fallback="cache-pattern-rule"),
+        "candidate_id": public_id(rule.get("candidate_id"), prefix="candidate-id") if rule.get("candidate_id") is not None else None,
+        "policy_source": public_label(rule.get("policy_source") or "managed-recommended", "unknown"),
         "enabled": bool(rule.get("enabled", True)),
         "allow_tool_calls": bool(action.get("allow_tool_calls")),
         "safe_invalidation": bool(action.get("safe_invalidation")),
         "streaming": bool(action.get("streaming")),
-        "scope": action.get("scope") or "session",
+        "scope": public_label(action.get("scope") or "session", "unknown"),
         "replayability_levels": [
-            str(item)
+            public_label(item, "unknown")
             for item in conditions.get("replayability_levels") or []
             if isinstance(item, (str, int, float, bool))
         ],
@@ -5430,8 +5427,8 @@ def _cache_file_dependency_audit_from_cache(cache: dict[str, Any]) -> dict[str, 
 
 def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granularity: str) -> dict[str, Any] | None:
     decision = _cache_decision_for_breakdown({**row, "source_surface": source_surface})
-    status = str(decision.get("status") or "missing")
-    if status == "hit":
+    raw_status = str(decision.get("status") or "missing")
+    if raw_status == "hit":
         return None
     cache = _json_obj(row.get("cache_json"))
     routing = _json_obj(row.get("routing_json"))
@@ -5440,18 +5437,22 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
     input_tokens = _as_int(row.get("input_tokens") if row.get("input_tokens") is not None else row.get("input_tokens_est"))
     if not text_chars and input_tokens:
         text_chars = input_tokens * TOKEN_CHARS
-    category = str(row.get("category") or routing.get("category") or "unknown")
-    requested_model = str(row.get("requested_model") or "")
-    routed_model = str(row.get("routed_model") or requested_model)
-    replayability_level = str(cache.get("replayability_level") or ("features_only" if granularity == "agent_turn" else "metadata_shape"))
+    category = public_label(row.get("category") or routing.get("category") or "unknown", "unknown")
+    requested_model = public_label(row.get("requested_model") or "", "unknown")
+    routed_model = public_label(row.get("routed_model") or requested_model, requested_model or "unknown")
+    replayability_level = public_label(
+        cache.get("replayability_level") or ("features_only" if granularity == "agent_turn" else "metadata_shape"),
+        "metadata_shape",
+    )
     pattern_diagnostics = routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {}
     cacheability = _cacheability_meta_from_row(routing=routing, crunch=crunch, cache=cache)
-    workflow_phase = str(
+    workflow_phase = public_label(
         cache.get("workflow_phase")
         or routing.get("workflow_phase")
         or pattern_diagnostics.get("workflow_phase")
         or category
-        or "unknown"
+        or "unknown",
+        "unknown",
     )
     has_tools = bool(routing.get("has_tools") or category.startswith("tool"))
     file_dependency_audit = _cache_file_dependency_audit_from_cache(cache)
@@ -5469,10 +5470,10 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "created_at": row.get("created_at"),
         "session_id": row.get("session_id"),
         "stream": bool(_as_int(row.get("stream"))),
-        "cache_status": status,
-        "cache_reason": str(decision.get("reason") or "unknown"),
-        "hit_type": str(decision.get("hit_type") or ""),
-        "policy_source": str(decision.get("policy_source") or "unknown"),
+        "cache_status": public_label(raw_status, "unknown"),
+        "cache_reason": public_label(decision.get("reason") or "unknown", "unknown"),
+        "hit_type": public_label(decision.get("hit_type") or "", ""),
+        "policy_source": public_label(decision.get("policy_source") or "unknown", "unknown"),
         "category": category,
         "workflow_phase": workflow_phase,
         "requested_model": requested_model,
@@ -5570,15 +5571,19 @@ def _public_session_memory_replay_proposal(proposal: dict[str, Any]) -> dict[str
     privacy = proposal.get("privacy") if isinstance(proposal.get("privacy"), dict) else {}
     return {
         "schema": "agentflow.session_memory_cache_replay_proposal.v1",
-        "status": str(proposal.get("status") or "unknown"),
-        "reason": str(proposal.get("reason") or "unknown"),
-        "proposal_id": str(proposal.get("proposal_id") or f"session-memory-cache-replay:{fingerprint.removeprefix('sha256:')}"),
+        "status": public_label(proposal.get("status") or "unknown", "unknown"),
+        "reason": public_label(proposal.get("reason") or "unknown", "unknown"),
+        "proposal_id": f"session-memory-cache-replay:{fingerprint.removeprefix('sha256:')}",
         "proposal_fingerprint": fingerprint,
-        "rule_id": str(proposal.get("rule_id") or "local-session-plateau-cache-hint"),
-        "policy_source": str(proposal.get("policy_source") or "unknown"),
+        "rule_id": public_id(
+            proposal.get("rule_id") or "local-session-plateau-cache-hint",
+            prefix="rule-id",
+            fallback="local-session-plateau-cache-hint",
+        ),
+        "policy_source": public_label(proposal.get("policy_source") or "unknown", "unknown"),
         "policy_rule_path_included": False,
-        "phase": str(proposal.get("phase") or "unknown"),
-        "category": str(proposal.get("category") or "unknown"),
+        "phase": public_label(proposal.get("phase") or "unknown", "unknown"),
+        "category": public_label(proposal.get("category") or "unknown", "unknown"),
         "stream": bool(proposal.get("stream")),
         "has_tool_blocks": bool(proposal.get("has_tool_blocks")),
         "thinking_present": bool(proposal.get("thinking_present")),
@@ -5586,7 +5591,7 @@ def _public_session_memory_replay_proposal(proposal: dict[str, Any]) -> dict[str
         "projected_tokens_saved_est": _as_int(proposal.get("projected_tokens_saved_est")),
         "projected_savings_bucket": str(proposal.get("projected_savings_bucket") or "none"),
         "projected_cost_savings_bucket": str(proposal.get("projected_cost_savings_bucket") or "none"),
-        "blockers": sorted(set(blockers)),
+        "blockers": sorted({public_label(blocker, "unknown") for blocker in blockers}),
         "blocker_families": {
             key: bool(families.get(key))
             for key in (
@@ -6056,6 +6061,9 @@ def _cache_dry_run_public_canary(canary: dict[str, Any] | None) -> dict[str, Any
     public = dict(canary)
     pattern_hash_count = len(public.get("pattern_hashes") or []) if isinstance(public.get("pattern_hashes"), list) else 0
     public.pop("pattern_hashes", None)
+    for key in ("cohort", "unit", "reason", "status", "rule_id", "candidate_id"):
+        if key in public:
+            public[key] = public_id(public[key], prefix=key.replace("_", "-")) if key.endswith("_id") else public_label(public[key], "unknown")
     public["pattern_hash_count"] = pattern_hash_count
     public["pattern_hashes_included"] = False
     return public
@@ -6074,9 +6082,9 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
         last_reason = "pattern-features-missing"
 
     for rule in rules:
-        rule_id = str(rule.get("id") or "cache-pattern-rule")
-        candidate_id = rule.get("candidate_id")
-        policy_source = str(rule.get("policy_source") or "managed-recommended")
+        rule_id = public_id(rule.get("id") or "cache-pattern-rule", prefix="rule-id", fallback="cache-pattern-rule")
+        candidate_id = public_id(rule.get("candidate_id"), prefix="candidate-id") if rule.get("candidate_id") is not None else None
+        policy_source = public_label(rule.get("policy_source") or "managed-recommended", "unknown")
         if not rule.get("enabled", True):
             last_reason = "disabled"
             continue

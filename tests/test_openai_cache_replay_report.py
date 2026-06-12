@@ -30,6 +30,17 @@ from agentflow_proxy.stats import (
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
 
+def _reload_cache_module_for_test():
+    from agentflow_proxy import anthropic_proxy
+    from agentflow_proxy import cache as cache_module
+
+    reloaded = importlib.reload(cache_module)
+    anthropic_proxy.cache_lookup_meta = reloaded.cache_lookup_meta
+    anthropic_proxy.cache_replay_canary_decision = reloaded.cache_replay_canary_decision
+    anthropic_proxy.streaming_cache_lookup_meta = reloaded.streaming_cache_lookup_meta
+    return reloaded
+
+
 class OpenAICacheReplayReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -226,6 +237,48 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["session_ids_included"])
         self.assertFalse(report["privacy"]["request_fingerprints_included"])
         self.assertFalse(report["privacy"]["provider_calls_made"])
+
+    def test_cache_replay_diagnostics_sanitize_raw_like_metadata_labels(self) -> None:
+        self._log_openai_call(
+            category="raw prompt must not leak /tmp/openai-category-secret.py",
+            cache_status="skipped",
+            cache_reason="cache-key-secret req-secret prompt body",
+            request_fingerprint="raw-openai-diagnostic-fingerprint-secret",
+            cost=0.02,
+        )
+
+        opportunity = build_openai_cache_replay_report(self.store, limit=20)
+        readiness = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        smoke = build_cache_smoke_diagnostic(self.store, limit=20, scan_limit=20)
+        stats_result = asyncio.run(stats_openai_cache_replay_report(self.store, limit=20))
+
+        rendered = json.dumps(
+            {
+                "opportunity": opportunity,
+                "readiness": readiness,
+                "smoke": smoke,
+                "stats": stats_result,
+            },
+            sort_keys=True,
+        )
+        for forbidden in (
+            "raw prompt must not leak",
+            "/tmp/openai-category-secret.py",
+            "cache-key-secret",
+            "req-secret",
+            "prompt body",
+            "raw-openai-diagnostic-fingerprint-secret",
+            "raw prompt must not leak",
+            "raw response must not leak",
+            "raw-cache-key-secret",
+            "raw-openai-session-must-not-leak",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertIn('"category": "unknown"', rendered)
+        self.assertIn('"cache_reason": "unknown"', rendered)
+        self.assertFalse(opportunity["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(readiness["privacy"]["file_paths_included"])
+        self.assertFalse(smoke["privacy"]["cache_keys_included"])
 
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         self._log_openai_call(request_fingerprint="raw-cli-request-fingerprint")
@@ -807,20 +860,27 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         try:
             with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
-                importlib.reload(cache_module)
+                _reload_cache_module_for_test()
                 report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
         finally:
-            importlib.reload(cache_module)
+            _reload_cache_module_for_test()
 
         diagnostics = report["lifecycle_diagnostics"]["staged_canary_policy"]
         self.assertEqual(diagnostics["status"], "staged-policy-can-run")
         self.assertTrue(diagnostics["runtime_loaded"])
+        self.assertIsNone(diagnostics["configured_policy_path"])
+        self.assertIsNone(diagnostics["runtime_loaded_policy_path"])
+        self.assertTrue(diagnostics["configured_policy_path_state"]["configured"])
+        self.assertFalse(diagnostics["configured_policy_path_state"]["path_included"])
+        self.assertTrue(diagnostics["runtime_loaded_policy_path_state"]["configured"])
+        self.assertFalse(diagnostics["runtime_loaded_policy_path_state"]["path_included"])
         self.assertEqual(diagnostics["policy_rule_count"], 1)
         self.assertEqual(diagnostics["dry_run_summary"]["projected_applied_rows"], 2)
         self.assertEqual(diagnostics["dry_run_summary"]["projected_hits"], 1)
         self.assertFalse(diagnostics["dry_run_summary"]["cache_table_mutated"])
         self.assertFalse(diagnostics["provider_calls_made"])
         encoded = json.dumps(report, sort_keys=True)
+        self.assertNotIn(str(policy_path), encoded)
         self.assertNotIn(pattern_hash, encoded)
         self.assertNotIn("raw-staged-readiness-request-fingerprint", encoded)
         self.assertFalse(diagnostics["privacy"]["pattern_hashes_included"])
@@ -954,7 +1014,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         try:
             with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
-                reloaded = importlib.reload(cache_module)
+                reloaded = _reload_cache_module_for_test()
                 loaded = [rule for rule in reloaded.CACHE_PATTERN_RULES if rule.get("candidate_id") == candidate_id]
                 self.assertEqual(len(loaded), 1)
                 self.assertEqual(loaded[0]["id"], rule_id)
@@ -962,7 +1022,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 self.assertEqual(loaded[0]["policy_source"], "managed-recommended")
                 self.assertEqual(str(reloaded.CACHE_CANARY_RULES_PATH), str(policy_path))
         finally:
-            importlib.reload(cache_module)
+            _reload_cache_module_for_test()
 
     def test_openai_dry_run_projects_session_scoped_replay_and_dependency_blockers(self) -> None:
         pattern_hash = "sha256:" + "b" * 64

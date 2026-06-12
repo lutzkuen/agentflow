@@ -1,4 +1,5 @@
 import base64
+import importlib
 import importlib.util
 import json
 import os
@@ -16,6 +17,7 @@ if HAS_RUNTIME_DEPS:
 
     import agentflow_proxy.cache as cache_module
     import agentflow_proxy.anthropic_proxy as anthropic_proxy
+    import agentflow_proxy.router as router_module
     import agentflow_proxy.routing_experiments as routing_experiments
     from agentflow_proxy.crunch import crunch_body, estimate_tokens_from_text
     from agentflow_proxy.managed_egress import assert_managed_egress_safe
@@ -187,28 +189,72 @@ class FakeEmptyErrorClient:
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
 class StreamingCacheTest(unittest.TestCase):
     def setUp(self):
+        global categorize_request, extract_text, route_model
+
         self.old_store = server.store
         self.old_provider = server.PROVIDER
         self.old_upstream = server.ANTHROPIC_UPSTREAM
         self.old_openai_upstream = server.OPENAI_UPSTREAM
+        importlib.reload(cache_module)
         self.old_cache_enabled = cache_module.CACHE_ENABLED
         self.old_cache_tool_calls = cache_module.CACHE_TOOL_CALLS
         self.old_semantic_cache_enabled = cache_module.SEMANTIC_CACHE_ENABLED
         self.old_cache_pattern_rules = cache_module.CACHE_PATTERN_RULES
         self.old_anthropic_cache_enabled = anthropic_proxy.CACHE_ENABLED
         self.old_anthropic_semantic_threshold = anthropic_proxy.SEMANTIC_CACHE_THRESHOLD
+        self.old_anthropic_cache_policy = anthropic_proxy.CACHE_POLICY
+        self.old_anthropic_cache_policy_source = anthropic_proxy.CACHE_POLICY_SOURCE
+        self.old_anthropic_cache_rules_path = anthropic_proxy.CACHE_RULES_PATH
         self.old_anthropic_cache_lookup_meta = anthropic_proxy.cache_lookup_meta
         self.old_anthropic_cache_replay_canary_decision = anthropic_proxy.cache_replay_canary_decision
         self.old_anthropic_streaming_cache_lookup_meta = anthropic_proxy.streaming_cache_lookup_meta
+        self.old_anthropic_cache_key_for = anthropic_proxy.cache_key_for
+        self.old_anthropic_cache_decision_meta = anthropic_proxy.cache_decision_meta
+        self.old_anthropic_cache_hit_decision_meta = anthropic_proxy.cache_hit_decision_meta
+        self.old_anthropic_stream_cache_payload = anthropic_proxy.stream_cache_payload
+        self.old_anthropic_validate_stream_cache_payload = anthropic_proxy.validate_stream_cache_payload
+        self.old_anthropic_response_output_text = anthropic_proxy.response_output_text
+        self.old_anthropic_cache_file_dependency_audit = anthropic_proxy.cache_file_dependency_audit
+        self.old_anthropic_cache_file_dependency_snapshots = anthropic_proxy.cache_file_dependency_snapshots
+        self.old_anthropic_cache_replay_scope_for_meta = anthropic_proxy.cache_replay_scope_for_meta
+        self.old_anthropic_build_cache_replay_lifecycle_feedback = anthropic_proxy.build_cache_replay_lifecycle_feedback
+        self.old_anthropic_cache_replay_lifecycle_feedback_public_meta = anthropic_proxy.cache_replay_lifecycle_feedback_public_meta
+        self.old_anthropic_categorize_request = anthropic_proxy.categorize_request
+        self.old_anthropic_extract_text = anthropic_proxy.extract_text
+        self.old_anthropic_route_model = anthropic_proxy.route_model
+        self.old_anthropic_routing_experiment_decision = anthropic_proxy.routing_experiment_decision
+        importlib.reload(router_module)
+        importlib.reload(routing_experiments)
+        categorize_request = router_module.categorize_request
+        extract_text = router_module.extract_text
+        route_model = router_module.route_model
         cache_module.CACHE_ENABLED = True
         cache_module.CACHE_TOOL_CALLS = False
         cache_module.SEMANTIC_CACHE_ENABLED = False
         cache_module.CACHE_PATTERN_RULES = ()
         anthropic_proxy.CACHE_ENABLED = True
+        anthropic_proxy.CACHE_POLICY = cache_module.CACHE_POLICY
+        anthropic_proxy.CACHE_POLICY_SOURCE = cache_module.CACHE_POLICY_SOURCE
+        anthropic_proxy.CACHE_RULES_PATH = cache_module.CACHE_RULES_PATH
+        anthropic_proxy.categorize_request = router_module.categorize_request
+        anthropic_proxy.extract_text = router_module.extract_text
+        anthropic_proxy.route_model = router_module.route_model
+        anthropic_proxy.routing_experiment_decision = routing_experiments.routing_experiment_decision
         anthropic_proxy.SEMANTIC_CACHE_THRESHOLD = cache_module.SEMANTIC_CACHE_THRESHOLD
+        anthropic_proxy.cache_key_for = cache_module.cache_key_for
+        anthropic_proxy.cache_decision_meta = cache_module.cache_decision_meta
+        anthropic_proxy.cache_hit_decision_meta = cache_module.cache_hit_decision_meta
         anthropic_proxy.cache_lookup_meta = cache_module.cache_lookup_meta
         anthropic_proxy.cache_replay_canary_decision = cache_module.cache_replay_canary_decision
         anthropic_proxy.streaming_cache_lookup_meta = cache_module.streaming_cache_lookup_meta
+        anthropic_proxy.stream_cache_payload = cache_module.stream_cache_payload
+        anthropic_proxy.validate_stream_cache_payload = cache_module.validate_stream_cache_payload
+        anthropic_proxy.response_output_text = cache_module.response_output_text
+        anthropic_proxy.cache_file_dependency_audit = cache_module.cache_file_dependency_audit
+        anthropic_proxy.cache_file_dependency_snapshots = cache_module.cache_file_dependency_snapshots
+        anthropic_proxy.cache_replay_scope_for_meta = cache_module.cache_replay_scope_for_meta
+        anthropic_proxy.build_cache_replay_lifecycle_feedback = cache_module.build_cache_replay_lifecycle_feedback
+        anthropic_proxy.cache_replay_lifecycle_feedback_public_meta = cache_module.cache_replay_lifecycle_feedback_public_meta
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         server.store = Store(self.tmp.name)
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
@@ -228,9 +274,27 @@ class StreamingCacheTest(unittest.TestCase):
         cache_module.CACHE_PATTERN_RULES = self.old_cache_pattern_rules
         anthropic_proxy.CACHE_ENABLED = self.old_anthropic_cache_enabled
         anthropic_proxy.SEMANTIC_CACHE_THRESHOLD = self.old_anthropic_semantic_threshold
+        anthropic_proxy.CACHE_POLICY = self.old_anthropic_cache_policy
+        anthropic_proxy.CACHE_POLICY_SOURCE = self.old_anthropic_cache_policy_source
+        anthropic_proxy.CACHE_RULES_PATH = self.old_anthropic_cache_rules_path
         anthropic_proxy.cache_lookup_meta = self.old_anthropic_cache_lookup_meta
         anthropic_proxy.cache_replay_canary_decision = self.old_anthropic_cache_replay_canary_decision
         anthropic_proxy.streaming_cache_lookup_meta = self.old_anthropic_streaming_cache_lookup_meta
+        anthropic_proxy.cache_key_for = self.old_anthropic_cache_key_for
+        anthropic_proxy.cache_decision_meta = self.old_anthropic_cache_decision_meta
+        anthropic_proxy.cache_hit_decision_meta = self.old_anthropic_cache_hit_decision_meta
+        anthropic_proxy.stream_cache_payload = self.old_anthropic_stream_cache_payload
+        anthropic_proxy.validate_stream_cache_payload = self.old_anthropic_validate_stream_cache_payload
+        anthropic_proxy.response_output_text = self.old_anthropic_response_output_text
+        anthropic_proxy.cache_file_dependency_audit = self.old_anthropic_cache_file_dependency_audit
+        anthropic_proxy.cache_file_dependency_snapshots = self.old_anthropic_cache_file_dependency_snapshots
+        anthropic_proxy.cache_replay_scope_for_meta = self.old_anthropic_cache_replay_scope_for_meta
+        anthropic_proxy.build_cache_replay_lifecycle_feedback = self.old_anthropic_build_cache_replay_lifecycle_feedback
+        anthropic_proxy.cache_replay_lifecycle_feedback_public_meta = self.old_anthropic_cache_replay_lifecycle_feedback_public_meta
+        anthropic_proxy.categorize_request = self.old_anthropic_categorize_request
+        anthropic_proxy.extract_text = self.old_anthropic_extract_text
+        anthropic_proxy.route_model = self.old_anthropic_route_model
+        anthropic_proxy.routing_experiment_decision = self.old_anthropic_routing_experiment_decision
         server.store = self.old_store
         server.configure_provider(
             self.old_provider,
