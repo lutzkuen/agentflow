@@ -18,6 +18,7 @@ from agentflow_proxy.repeated_scaffold_feedback import (
     FEEDBACK_SCHEMA,
     SOURCE_SURFACE as REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
     build_repeated_scaffold_lifecycle_feedback,
+    build_repeated_scaffold_lifecycle_feedback_status,
 )
 from agentflow_proxy.repeated_scaffold_activation import build_repeated_scaffold_activation_report
 from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
@@ -48,6 +49,19 @@ class RepeatedScaffoldFeedbackClient:
 
 
 class RepeatedScaffoldImpactTests(unittest.TestCase):
+    REPEATED_SCAFFOLD_PRIVACY_DECOYS = (
+        "raw activation request prompt must not leak",
+        "raw activation response must not leak",
+        "raw activation message must not leak",
+        "raw activation provider body must not leak",
+        "raw activation feedback payload must not leak",
+        "raw activation request id must not leak",
+        "raw activation session id must not leak",
+        "raw activation cache key must not leak",
+        "raw activation pattern hash must not leak",
+        "/tmp/raw-activation-secret.py",
+    )
+
     def setUp(self) -> None:
         self.saved_env = {
             key: os.environ.get(key)
@@ -265,9 +279,15 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
             routing_json=stable_json(routing),
             cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
             error="raw activation error must not leak" if status_code >= 400 else None,
-            request_json=stable_json({"raw": "activation prompt must not leak", "path": "/tmp/activation-secret.py"}),
-            response_json=stable_json({"text": "activation response must not leak"}),
-            session_id="activation-session-must-not-leak",
+            request_json=stable_json({
+                "messages": [{"role": "user", "content": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[0]}],
+                "request_id": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[5],
+                "session_id": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[6],
+                "cache_key": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[7],
+                "file_path": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[9],
+            }),
+            response_json=stable_json({"text": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[1]}),
+            session_id=self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[6],
             category=category,
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
@@ -324,12 +344,23 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
                 "rules": [{"id": "managed-rule-secret", "candidate_id": "managed-candidate-secret"}],
             },
         }
+        raw_like_managed_decoys = {
+            "raw_prompt": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[0],
+            "messages": [{"content": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[2]}],
+            "provider_body": {"content": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[3]},
+            "request_id": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[5],
+            "session_id": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[6],
+            "cache_key": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[7],
+            "pattern_hashes": [self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[8]],
+            "file_path": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[9],
+        }
         self._log_activation_call(
             managed={
                 "enabled": False,
                 "status": "skipped",
                 "reason": "disabled",
                 "applied": False,
+                **raw_like_managed_decoys,
             },
             created_at="2026-06-12T01:00:00+00:00",
         )
@@ -343,6 +374,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
                 "applied": False,
                 "apply_reason": "missing-target-model",
                 "crunch": {"profile": "baseline"},
+                **raw_like_managed_decoys,
             },
             created_at="2026-06-12T01:01:00+00:00",
         )
@@ -356,6 +388,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
                 "applied": False,
                 "apply_reason": "missing-target-model",
                 "crunch": repeated_crunch,
+                **raw_like_managed_decoys,
             },
             repeated_status="skipped",
             repeated_reason="canary_holdout",
@@ -377,7 +410,9 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
                     "status": "sent",
                     "reason": "accepted",
                     "optimization_unit_id": 103,
+                    "payload_json": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[4],
                 },
+                **raw_like_managed_decoys,
             },
             repeated_status="applied",
             repeated_reason="repeated-provider-scaffolding-crunched",
@@ -395,6 +430,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
                 "applied": False,
                 "apply_reason": "missing-target-model",
                 "crunch": repeated_crunch,
+                **raw_like_managed_decoys,
             },
             repeated_status="safety_stop",
             repeated_reason="safety_stop_error_rate",
@@ -409,6 +445,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
                 "fallback": "local-policy",
                 "applied": False,
                 "error": "raw managed error must not leak",
+                **raw_like_managed_decoys,
             },
             created_at="2026-06-12T01:05:00+00:00",
             status_code=502,
@@ -418,7 +455,7 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
             source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
             endpoint="/v1/policy-feedback",
             optimization_unit_id=103,
-            payload_json=stable_json({"raw_prompt": "feedback payload must not leak"}),
+            payload_json=stable_json({"raw_prompt": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[4]}),
             status="sent",
             sent_at="2026-06-12T01:06:00+00:00",
         )
@@ -458,20 +495,51 @@ class RepeatedScaffoldImpactTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["summary"]["applied_count"], 1)
-        rendered = json.dumps(payload, sort_keys=True)
+        rendered = json.dumps(report, sort_keys=True) + json.dumps(payload, sort_keys=True)
         for forbidden in (
-            "activation prompt must not leak",
-            "activation response must not leak",
-            "activation-session-must-not-leak",
-            "/tmp/activation-secret.py",
+            *self.REPEATED_SCAFFOLD_PRIVACY_DECOYS,
             "activation-rule-must-not-leak",
             "activation-candidate-must-not-leak",
             "managed-rule-secret",
             "managed-candidate-secret",
-            "feedback payload must not leak",
             "raw managed error must not leak",
         ):
             self.assertNotIn(forbidden, rendered)
+
+    def test_repeated_scaffold_lifecycle_queue_public_view_omits_raw_payloads(self) -> None:
+        self.store.enqueue_managed_outcome_feedback(
+            id="queue-public-activation-privacy",
+            created_at="2026-06-12T01:00:00+00:00",
+            updated_at="2026-06-12T01:01:00+00:00",
+            source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+            endpoint="/v1/policy-events",
+            optimization_unit_id=99,
+            payload_json=stable_json({
+                "raw_prompt": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[0],
+                "messages": [{"content": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[2]}],
+                "provider_body": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[3],
+                "request_id": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[5],
+                "session_id": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[6],
+                "cache_key": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[7],
+                "file_path": self.REPEATED_SCAFFOLD_PRIVACY_DECOYS[9],
+            }),
+            status="retryable-error",
+            attempts=1,
+            next_attempt_at="2000-01-01T00:00:00+00:00",
+            last_error="ConnectError: raw activation feedback payload must not leak",
+        )
+
+        status = build_repeated_scaffold_lifecycle_feedback_status(self.store, sample_limit=10)
+
+        self.assertEqual(status["schema"], "agentflow.repeated_scaffold_lifecycle_feedback_queue_status.v1")
+        self.assertEqual(status["summary"]["retryable_error"], 1)
+        self.assertEqual(status["summary"]["due"], 1)
+        self.assertEqual(status["due_samples"][0]["payload_included"], False)
+        self.assertFalse(status["privacy"]["payload_json_included"])
+        rendered = json.dumps(status, sort_keys=True)
+        for forbidden in self.REPEATED_SCAFFOLD_PRIVACY_DECOYS:
+            self.assertNotIn(forbidden, rendered)
+        self.assertNotIn("ConnectError: raw activation feedback payload must not leak", rendered)
 
     def test_lifecycle_feedback_payload_is_metadata_only_and_egress_safe(self) -> None:
         self._log_call(cohort="canary_applied", tokens_saved=1000)

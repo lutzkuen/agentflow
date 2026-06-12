@@ -241,6 +241,96 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
         self.assertNotIn("raw prompt", rendered)
         self.assertFalse(result["privacy"]["raw_provider_bodies_included"])
 
+    def test_review_rejects_raw_like_scaffold_rollout_decoys_without_leaking_values(self) -> None:
+        bundle = self._bundle()
+        action = bundle["actions"][0]
+        action["raw_request"] = {"messages": [{"content": "raw action request must not leak"}]}
+        action["action"]["proposed_edit"]["messages"] = [{"content": "raw proposed messages must not leak"}]
+        action["action"]["proposed_edit"]["provider_body"] = {"content": "raw provider body must not leak"}
+        action["action"]["proposed_edit"]["request_id"] = "raw-request-id-must-not-leak"
+        action["action"]["proposed_edit"]["session_id"] = "raw-session-id-must-not-leak"
+        action["action"]["proposed_edit"]["cache_key"] = "raw-cache-key-must-not-leak"
+        action["action"]["proposed_edit"]["file_path"] = "/tmp/raw-scaffold-secret.py"
+        action["privacy_summary"]["raw_prompts_returned"] = True
+        bundle["privacy_summary"]["provider_bodies_returned"] = True
+        signed = self._signed(bundle)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            review = review_scaffold_rollout_actions(signed)
+            applied = apply_scaffold_rollout_actions(signed, config_dir=tmp, dry_run=False)
+
+            self.assertFalse(review["ok"])
+            self.assertFalse(applied["ok"])
+            self.assertFalse(applied["wrote_policy_files"])
+            self.assertFalse((Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE).exists())
+            self.assertFalse((Path(tmp) / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE).exists())
+
+        error_paths = {error["path"] for error in review["errors"]}
+        self.assertIn("$.privacy_summary.provider_bodies_returned", error_paths)
+        self.assertTrue(any("raw_request" in path or "messages" in path for path in error_paths))
+        rendered = stable_json(review) + stable_json(applied)
+        for forbidden in (
+            "raw action request must not leak",
+            "raw proposed messages must not leak",
+            "raw provider body must not leak",
+            "raw-request-id-must-not-leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "/tmp/raw-scaffold-secret.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(review["privacy"]["raw_provider_bodies_included"])
+        self.assertFalse(review["privacy"]["request_ids_included"])
+        self.assertFalse(review["privacy"]["cache_keys_included"])
+
+    def test_invalid_or_incompatible_scaffold_rollout_bundles_fail_closed(self) -> None:
+        expired = self._bundle()
+        expired["expires_at"] = "2000-01-01T00:00:00+00:00"
+        expired["actions"][0]["expires_at"] = "2000-01-01T00:00:00+00:00"
+
+        unsupported = self._bundle()
+        unsupported["local_executor_compatibility"]["supported_local_action_families"] = ["routing"]
+        unsupported["actions"][0]["local_executor_compatibility"]["supported_local_action_families"] = ["routing"]
+
+        cases = {
+            "expired": self._signed(expired),
+            "unsigned": self._bundle(),
+            "capability-mismatch": self._signed(unsupported),
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            for name, bundle in cases.items():
+                with self.subTest(name=name):
+                    result = apply_scaffold_rollout_actions(bundle, config_dir=tmp, dry_run=False)
+
+                    self.assertFalse(result["ok"])
+                    self.assertFalse(result["wrote_policy_files"])
+                    self.assertEqual(result["accepted_action_count"], 0)
+                    self.assertEqual(result["error"]["type"], "validation_failed")
+            self.assertFalse((Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE).exists())
+            self.assertFalse((Path(tmp) / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE).exists())
+
+    def test_stale_and_missing_holdout_lifecycle_omissions_preserve_pass_through_policy(self) -> None:
+        cases = {
+            "stale-evidence": self._decision_bundle("hold", omitted=True),
+            "missing-holdout": self._decision_bundle("hold", omitted=True),
+        }
+        cases["stale-evidence"]["omitted_actions"][0]["reason_codes"] = ["stale-evidence"]
+        cases["stale-evidence"]["omitted_actions"][0]["reason"] = "stale-evidence"
+        cases["missing-holdout"]["omitted_actions"][0]["reason_codes"] = ["insufficient-holdout-samples"]
+        cases["missing-holdout"]["omitted_actions"][0]["reason"] = "insufficient-holdout-samples"
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
+            for name, bundle in cases.items():
+                with self.subTest(name=name):
+                    result = apply_scaffold_rollout_actions(self._signed(bundle), config_dir=tmp, dry_run=False)
+
+                    self.assertTrue(result["ok"])
+                    self.assertFalse(result["wrote_policy_files"])
+                    self.assertEqual(result["accepted_action_count"], 1)
+                    self.assertEqual(result["files"][0]["reason"], "hold-no-local-policy-change")
+            self.assertFalse((Path(tmp) / SCAFFOLD_CANARY_POLICY_FILE).exists())
+            self.assertFalse((Path(tmp) / SCAFFOLD_LOCAL_CRUNCH_RULES_FILE).exists())
+
     def test_apply_cli_writes_scaffold_canary_overlay_by_default(self) -> None:
         signed = self._signed(self._decision_bundle("widen", canary_fraction=0.5))
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"AGENTFLOW_MANAGED_POLICY_VERIFICATION_SECRET": "scaffold-review-secret"}):
@@ -263,6 +353,19 @@ class ScaffoldRolloutReviewTests(unittest.TestCase):
             self.assertTrue(scaffold["enabled"])
             self.assertEqual(scaffold["rules"][0]["candidate_id"], "repeated-scaffold-candidate:test")
             self.assertEqual(scaffold["rules"][0]["rollout"]["canary_fraction"], 0.5)
+            rendered = yaml.safe_dump(data, sort_keys=True)
+            for forbidden in (
+                "raw_prompt",
+                "messages:",
+                "content:",
+                "provider_body",
+                "request_id",
+                "session_id",
+                "cache_key",
+                "file_path",
+                "pattern_hash",
+            ):
+                self.assertNotIn(forbidden, rendered)
 
     def test_review_accepts_widen_promote_hold_rollback_and_suppress_actions(self) -> None:
         cases = {

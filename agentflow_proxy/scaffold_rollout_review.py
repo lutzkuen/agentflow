@@ -72,6 +72,7 @@ _UNSAFE_PRIVACY_KEYS = {
     "raw_prompts_included",
     "raw_responses_included",
     "raw_provider_bodies_included",
+    "provider_bodies_returned",
     "raw_body_storage",
     "request_ids_returned",
     "cache_keys_returned",
