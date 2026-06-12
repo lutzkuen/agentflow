@@ -40,6 +40,47 @@ class QualitySignalTest(unittest.TestCase):
         self.assertEqual(throttled["status"], "local_throttled")
         self.assertIn("local-throttled", throttled["signal_codes"])
 
+    def test_provider_adoption_windows_add_risk_without_raw_identifiers(self):
+        quality = derive_provider_quality_signals(
+            source_surface="anthropic_messages",
+            status_code=200,
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            routing_meta={
+                "applied": True,
+                "phase_canary": {
+                    "status": "applied",
+                    "cohort": "canary_applied",
+                    "policy_id": "phase-tool-result-haiku",
+                },
+            },
+            provider_adoption_windows=[
+                {
+                    "status": "abandoned",
+                    "reason": "ttl-expired-without-tool-result",
+                    "age_bucket": "1_6h",
+                    "relationship": "emitted_tool_use",
+                    "tool_use_count": 1,
+                    "tool_result_count": 0,
+                    "correlation_digest": "sha256:secret-digest",
+                    "session_id": "raw-session",
+                    "tool_id": "raw-tool",
+                }
+            ],
+        )
+
+        rendered = str(quality)
+        self.assertEqual(quality["status"], "success")
+        self.assertEqual(quality["risk_level"], "warning")
+        self.assertIn("tool-use-abandoned", quality["signal_codes"])
+        self.assertIn("optimized-adoption-risk", quality["signal_codes"])
+        self.assertEqual(quality["provider_adoption"]["status_counts"]["abandoned"], 1)
+        self.assertEqual(quality["provider_adoption"]["risk_window_count"], 1)
+        self.assertEqual(quality["optimization_cohorts"][0]["cohort"], "canary_applied")
+        self.assertNotIn("secret-digest", rendered)
+        self.assertNotIn("raw-session", rendered)
+        self.assertNotIn("raw-tool", rendered)
+
     def test_codex_pending_and_abandoned_turns_use_metadata_age(self):
         now = datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc)
         pending = derive_codex_turn_quality_signals(

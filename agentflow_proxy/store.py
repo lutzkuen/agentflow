@@ -784,6 +784,40 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def provider_tool_adoption_windows_for_call_ids(self, call_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        ids = [str(call_id) for call_id in call_ids if call_id]
+        if not ids:
+            return {}
+        capped_ids = ids[:500]
+        placeholders = ",".join(["?"] * len(capped_ids))
+        rows = self.conn.execute(
+            f"""
+            select call_id, fulfilled_call_id, status, reason, age_bucket,
+                   tool_use_count, tool_result_count
+            from provider_tool_adoption_windows
+            where call_id in ({placeholders})
+               or fulfilled_call_id in ({placeholders})
+            order by created_at desc
+            """,
+            tuple(capped_ids + capped_ids),
+        ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {call_id: [] for call_id in capped_ids}
+        for row in rows:
+            item = dict(row)
+            emitted_call_id = item.pop("call_id", None)
+            fulfilled_call_id = item.pop("fulfilled_call_id", None)
+            if emitted_call_id in grouped:
+                grouped[str(emitted_call_id)].append({
+                    **item,
+                    "relationship": "emitted_tool_use",
+                })
+            if fulfilled_call_id in grouped and fulfilled_call_id != emitted_call_id:
+                grouped[str(fulfilled_call_id)].append({
+                    **item,
+                    "relationship": "fulfilled_tool_result",
+                })
+        return {call_id: rows for call_id, rows in grouped.items() if rows}
+
     def enqueue_managed_outcome_feedback(self, **kwargs: Any) -> None:
         cols = [
             "id", "created_at", "updated_at", "source_surface", "endpoint",

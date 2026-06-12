@@ -1703,6 +1703,7 @@ def build_outcome_feedback(
     category: str | None,
     session_id: str | None,
     error: str | None = None,
+    provider_adoption_windows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     managed = routing_meta.get("managed_recommendation") if isinstance(routing_meta, dict) else None
     if not isinstance(managed, dict):
@@ -1721,6 +1722,7 @@ def build_outcome_feedback(
         routing_meta=routing_meta,
         crunch_meta=crunch_meta,
         cache_meta=cache_meta,
+        provider_adoption_windows=provider_adoption_windows,
     )
     pattern_decisions = pattern_decision_summaries(
         provider=provider,

@@ -12479,7 +12479,11 @@ def _add_usage_hint(bucket: dict[str, Any], code: str, label: str, detail: str) 
     })
 
 
-def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+def _provider_activity_unit(
+    row: sqlite3.Row | dict[str, Any],
+    *,
+    provider_adoption_windows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     r = dict(row)
     routing = _json_obj(r.get("routing_json"))
     crunch = _json_obj(r.get("crunch_json"))
@@ -12508,6 +12512,7 @@ def _provider_activity_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
         routing_meta=routing,
         crunch_meta=crunch,
         cache_meta=cache,
+        provider_adoption_windows=provider_adoption_windows,
     )
     return {
         "feature_schema_version": "agentflow.optimization_unit_features.v1",
@@ -13239,7 +13244,18 @@ async def stats_activity(store_obj: Any, limit: int = 100) -> dict[str, Any]:
         order by created_at desc
         limit ?
     """, (capped_limit,)).fetchall()
-    provider_units = [_provider_activity_unit(row) for row in provider_rows]
+    adoption_by_call: dict[str, list[dict[str, Any]]] = {}
+    if hasattr(store_obj, "provider_tool_adoption_windows_for_call_ids"):
+        adoption_by_call = store_obj.provider_tool_adoption_windows_for_call_ids(
+            [str(dict(row).get("id") or "") for row in provider_rows]
+        )
+    provider_units = [
+        _provider_activity_unit(
+            row,
+            provider_adoption_windows=adoption_by_call.get(str(dict(row).get("id") or "")),
+        )
+        for row in provider_rows
+    ]
 
     codex_rows = conn.execute("""
         select s.id as start_event_id,
@@ -13352,7 +13368,6 @@ async def stats_quality_signals(store_obj: Any, limit: int = 500) -> dict[str, A
                 "granularity": unit.get("granularity"),
                 "app_family": unit.get("app_family"),
                 "quality_signals": unit.get("quality_signals"),
-                "local_ids": unit.get("local_ids"),
             }
             for unit in activity["units"]
         ],

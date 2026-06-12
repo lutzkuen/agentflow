@@ -635,6 +635,18 @@ class RecommendationTest(unittest.TestCase):
             category="chat",
             session_id="session-secret",
             error='{"error":{"type":"invalid_request_error","message":"bad raw body"}}',
+            provider_adoption_windows=[
+                {
+                    "status": "abandoned",
+                    "reason": "ttl-expired-without-tool-result",
+                    "age_bucket": "1_6h",
+                    "relationship": "emitted_tool_use",
+                    "tool_use_count": 1,
+                    "tool_result_count": 0,
+                    "correlation_digest": "sha256:secret-tool-digest",
+                    "tool_id": "tool-secret",
+                }
+            ],
         )
 
         with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
@@ -652,6 +664,13 @@ class RecommendationTest(unittest.TestCase):
         )
         self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["output_similarity"], 0.95)
         self.assertEqual(FakeAsyncClient.last_json["routing_experiment"]["primary_output_sha256"], "primary-hash")
+        self.assertEqual(FakeAsyncClient.last_json["quality_signals"]["risk_level"], "warning")
+        self.assertIn("tool-use-abandoned", FakeAsyncClient.last_json["quality_signals"]["signal_codes"])
+        self.assertIn("optimized-adoption-risk", FakeAsyncClient.last_json["quality_signals"]["signal_codes"])
+        self.assertEqual(
+            FakeAsyncClient.last_json["quality_signals"]["provider_adoption"]["status_counts"]["abandoned"],
+            1,
+        )
         pattern_decisions = FakeAsyncClient.last_json["pattern_decisions"]
         crunch_decision = next(item for item in pattern_decisions if item["decision_type"] == "crunch")
         cache_decision = next(item for item in pattern_decisions if item["decision_type"] == "cache")
@@ -669,6 +688,8 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("must not leave", str(FakeAsyncClient.last_json))
         self.assertNotIn("must be stripped", str(FakeAsyncClient.last_json))
         self.assertNotIn("raw pattern text", str(FakeAsyncClient.last_json))
+        self.assertNotIn("secret-tool-digest", str(FakeAsyncClient.last_json))
+        self.assertNotIn("tool-secret", str(FakeAsyncClient.last_json))
 
     def test_outcome_feedback_includes_old_context_summary_metadata_only(self):
         outcome = recommendations.build_outcome_feedback(

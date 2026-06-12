@@ -7241,6 +7241,87 @@ class StatsFullTest(unittest.TestCase):
         self.assertGreaterEqual(by_signal["abandoned"], 1)
         self.assertNotIn("request_json", json.dumps(quality))
 
+    def test_stats_quality_signals_reports_provider_adoption_risk(self):
+        call_id = str(uuid.uuid4())
+        server.store.log_call(
+            id=call_id,
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=100,
+            input_tokens_est=200,
+            output_tokens_est=20,
+            actual_input_tokens=200,
+            actual_output_tokens=20,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False, "policy_source": "local-default"}),
+            routing_json=stable_json({
+                "applied": True,
+                "policy_source": "local-manual",
+                "phase_canary": {
+                    "status": "holdout",
+                    "cohort": "canary_holdout",
+                    "policy_id": "phase-tool-result-haiku",
+                },
+            }),
+            cache_json=stable_json({"status": "skipped", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="raw-local-session",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_provider_tool_adoption_window(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            app_family="claude",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            category="tool-result",
+            workflow_phase="tool-result",
+            policy_source="local-manual",
+            policy_ids_json="[]",
+            call_id=call_id,
+            fulfilled_call_id=None,
+            session_digest="sha256:secret-session-digest",
+            correlation_digest="sha256:secret-tool-digest",
+            status="abandoned",
+            reason="ttl-expired-without-tool-result",
+            age_bucket="1_6h",
+            tool_use_count=1,
+            tool_result_count=0,
+            metadata_json=None,
+        )
+
+        quality = asyncio.run(stats_views.stats_quality_signals(server.store, limit=5))
+        rendered = json.dumps(quality, sort_keys=True)
+        item = next(row for row in quality["recent"] if row["unit_id"] == f"provider_call:{call_id}")
+        signals = item["quality_signals"]
+
+        self.assertEqual(signals["status"], "success")
+        self.assertEqual(signals["risk_level"], "warning")
+        self.assertIn("tool-use-abandoned", signals["signal_codes"])
+        self.assertIn("optimized-adoption-risk", signals["signal_codes"])
+        self.assertEqual(signals["provider_adoption"]["status_counts"]["abandoned"], 1)
+        self.assertEqual(signals["optimization_cohorts"][0]["cohort"], "canary_holdout")
+        self.assertFalse(quality["privacy"]["raw_tool_payloads_included"])
+        self.assertNotIn("secret-tool-digest", rendered)
+        self.assertNotIn("secret-session-digest", rendered)
+        self.assertNotIn("raw-local-session", rendered)
+
     def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
         old_engineer = os.environ.get("AGENTFLOW_ENGINEER")
         old_app = os.environ.get("AGENTFLOW_APP")

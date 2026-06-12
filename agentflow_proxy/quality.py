@@ -9,6 +9,15 @@ from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE
 QUALITY_SIGNAL_SCHEMA = "agentflow.quality_signals.v1"
 ABANDONED_AFTER_SECONDS = 30 * 60
 
+ADOPTION_SIGNAL_BY_STATUS = {
+    "fulfilled": ("tool-use-fulfilled", "info", "provider tool-use was followed by a matching tool result"),
+    "pending": ("tool-use-pending", "info", "provider tool-use has not yet reached a terminal adoption outcome"),
+    "abandoned": ("tool-use-abandoned", "warning", "provider tool-use was not followed by a tool result before the local TTL"),
+    "orphan_result": ("orphan-tool-result", "warning", "tool result arrived without a matching pending provider tool-use window"),
+    "unknown": ("unsupported-tool-protocol-shape", "warning", "provider tool-use metadata had an unsupported protocol shape"),
+}
+ADOPTION_RISK_STATUSES = {"abandoned", "orphan_result", "unknown"}
+
 
 def _as_int(value: Any) -> int:
     try:
@@ -48,6 +57,151 @@ def _signal(code: str, severity: str, reason: str) -> dict[str, str]:
     return {"code": code, "severity": severity, "reason": reason}
 
 
+def _risk_level(signals: Iterable[dict[str, str]]) -> str:
+    severities = {str(signal.get("severity") or "") for signal in signals}
+    if "error" in severities:
+        return "error"
+    if "warning" in severities:
+        return "warning"
+    return "info"
+
+
+def _public_label(value: Any, *, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-")
+    if len(text) <= 128 and text[0].isalnum() and all(ch in allowed for ch in text):
+        lowered = text.lower()
+        blocked = (
+            "raw",
+            "secret",
+            "api_key",
+            "apikey",
+            "request_id",
+            "session_id",
+            "tenant_id",
+            "thread_id",
+            "provider_body",
+            "tool_payload",
+            "cache_key",
+        )
+        if not any(token in lowered for token in blocked):
+            return text
+    return fallback
+
+
+def _status_counts(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _provider_adoption_summary(rows: Iterable[dict[str, Any]] | None) -> dict[str, Any] | None:
+    sanitized_rows: list[dict[str, Any]] = []
+    age_counts: dict[str, int] = {}
+    relationship_counts: dict[str, int] = {}
+    total_tool_uses = 0
+    total_tool_results = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "unknown")
+        age_bucket = _public_label(row.get("age_bucket"), fallback="unknown")
+        relationship = _public_label(row.get("relationship"), fallback="unknown")
+        age_counts[age_bucket] = age_counts.get(age_bucket, 0) + 1
+        relationship_counts[relationship] = relationship_counts.get(relationship, 0) + 1
+        total_tool_uses += _as_int(row.get("tool_use_count"))
+        total_tool_results += _as_int(row.get("tool_result_count"))
+        sanitized_rows.append({
+            "status": status,
+            "reason": _public_label(row.get("reason"), fallback="unknown"),
+            "age_bucket": age_bucket,
+            "relationship": relationship,
+            "tool_use_count": _as_int(row.get("tool_use_count")),
+            "tool_result_count": _as_int(row.get("tool_result_count")),
+        })
+    if not sanitized_rows:
+        return None
+    counts = _status_counts(sanitized_rows)
+    return {
+        "schema": "agentflow.provider_adoption_quality.v1",
+        "window_count": len(sanitized_rows),
+        "status_counts": dict(sorted(counts.items())),
+        "risk_window_count": sum(counts.get(status, 0) for status in ADOPTION_RISK_STATUSES),
+        "age_bucket_counts": dict(sorted(age_counts.items())),
+        "relationship_counts": dict(sorted(relationship_counts.items())),
+        "tool_use_count": total_tool_uses,
+        "tool_result_count": total_tool_results,
+        "windows": sanitized_rows[:20],
+        "privacy": {
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "tool_ids_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "correlation_digests_included": False,
+        },
+    }
+
+
+def _cohort_value(value: Any) -> str | None:
+    label = _public_label(value, fallback="")
+    return label or None
+
+
+def _collect_optimization_cohorts(
+    *,
+    routing_meta: dict[str, Any] | None = None,
+    crunch_meta: dict[str, Any] | None = None,
+    cache_meta: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    cohorts: list[dict[str, str]] = []
+
+    def add(family: str, meta: Any, *, nested_key: str | None = None) -> None:
+        if not isinstance(meta, dict):
+            return
+        candidate = meta.get(nested_key) if nested_key else meta
+        if not isinstance(candidate, dict):
+            return
+        cohort = _cohort_value(candidate.get("cohort") or candidate.get("canary_cohort"))
+        status = _cohort_value(candidate.get("status") or candidate.get("lifecycle_event"))
+        reason = _cohort_value(candidate.get("reason"))
+        if cohort is None and status not in {"applied", "holdout", "canary_applied", "canary_holdout", "safety_stopped"}:
+            return
+        item: dict[str, str] = {"family": family}
+        if status:
+            item["status"] = status
+        if cohort:
+            item["cohort"] = cohort
+        if reason:
+            item["reason"] = reason
+        policy_id = _cohort_value(candidate.get("policy_id") or candidate.get("candidate_id") or candidate.get("rule_id"))
+        if policy_id:
+            item["policy_id"] = policy_id
+        if item not in cohorts:
+            cohorts.append(item)
+
+    routing = routing_meta or {}
+    crunch = crunch_meta or {}
+    cache = cache_meta or {}
+    add("routing_experiment", routing, nested_key="routing_experiment")
+    add("phase_routing", routing, nested_key="phase_canary")
+    add("openai_routing", routing, nested_key="openai_canary")
+    managed = routing.get("managed_recommendation")
+    if isinstance(managed, dict):
+        add("managed_recommendation", managed)
+        add("managed_recommendation", managed, nested_key="canary")
+    add("old_context_summarization", crunch, nested_key="old_context_summarization")
+    add("cache_replay", cache, nested_key="cache_replay_canary")
+    if cache.get("status") in {"holdout", "applied"}:
+        add("cache", cache)
+    return cohorts[:20]
+
+
 def _optimized_from_decisions(
     *,
     requested_model: Any = None,
@@ -78,6 +232,8 @@ def _compact(
     observed_age_seconds: int | None = None,
     latency_ms: Any = None,
     retry_count: Any = None,
+    provider_adoption: dict[str, Any] | None = None,
+    optimization_cohorts: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema": QUALITY_SIGNAL_SCHEMA,
@@ -87,6 +243,7 @@ def _compact(
         "signals": signals,
         "signal_codes": [signal["code"] for signal in signals],
         "signal_count": len(signals),
+        "risk_level": _risk_level(signals),
     }
     if observed_age_seconds is not None:
         payload["observed_age_seconds"] = observed_age_seconds
@@ -94,6 +251,10 @@ def _compact(
         payload["latency_ms"] = latency_ms
     if retry_count is not None:
         payload["retry_count"] = _as_int(retry_count)
+    if provider_adoption is not None:
+        payload["provider_adoption"] = provider_adoption
+    if optimization_cohorts:
+        payload["optimization_cohorts"] = optimization_cohorts
     return payload
 
 
@@ -110,6 +271,7 @@ def derive_provider_quality_signals(
     routing_meta: dict[str, Any] | None = None,
     crunch_meta: dict[str, Any] | None = None,
     cache_meta: dict[str, Any] | None = None,
+    provider_adoption_windows: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     status = _as_int(status_code)
     retries = _as_int(retry_count)
@@ -151,6 +313,23 @@ def derive_provider_quality_signals(
     elif optimized and outcome == "success":
         signals.append(_signal("optimized-success", "info", "optimized request completed successfully"))
 
+    adoption_summary = _provider_adoption_summary(provider_adoption_windows)
+    if adoption_summary is not None:
+        for status in sorted(adoption_summary.get("status_counts") or {}):
+            mapped = ADOPTION_SIGNAL_BY_STATUS.get(status)
+            if mapped is None:
+                continue
+            code, severity, reason = mapped
+            signals.append(_signal(code, severity, reason))
+        if optimized and adoption_summary.get("risk_window_count"):
+            signals.append(_signal("optimized-adoption-risk", "warning", "optimized request had risky provider tool-use adoption metadata"))
+
+    optimization_cohorts = _collect_optimization_cohorts(
+        routing_meta=routing_meta,
+        crunch_meta=crunch_meta,
+        cache_meta=cache_meta,
+    )
+
     return _compact(
         source_surface=source_surface,
         status=outcome,
@@ -158,6 +337,8 @@ def derive_provider_quality_signals(
         optimized=optimized,
         latency_ms=latency_ms,
         retry_count=retries,
+        provider_adoption=adoption_summary,
+        optimization_cohorts=optimization_cohorts,
     )
 
 

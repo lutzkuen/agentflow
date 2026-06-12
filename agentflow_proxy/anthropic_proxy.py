@@ -409,6 +409,9 @@ async def _record_managed_outcome_feedback(
             "reason": "outcome-feedback-pending",
             "optimization_unit_id": managed.get("optimization_unit_id"),
         }
+    provider_adoption_windows = []
+    if hasattr(context.store, "provider_tool_adoption_windows_for_call_ids"):
+        provider_adoption_windows = context.store.provider_tool_adoption_windows_for_call_ids([call_id]).get(call_id, [])
     outcome = build_outcome_feedback(
         provider="anthropic",
         path=path,
@@ -432,6 +435,7 @@ async def _record_managed_outcome_feedback(
         category=category,
         session_id=session_id,
         error=error,
+        provider_adoption_windows=provider_adoption_windows,
     )
     managed["outcome_feedback"] = await queue_outcome_feedback(
         context.store,

@@ -121,6 +121,9 @@ async def record_managed_outcome_feedback(
     managed = routing_meta.get("managed_recommendation")
     if not isinstance(managed, dict) or not managed.get("enabled"):
         return
+    provider_adoption_windows = []
+    if hasattr(store_obj, "provider_tool_adoption_windows_for_call_ids"):
+        provider_adoption_windows = store_obj.provider_tool_adoption_windows_for_call_ids([call_id]).get(call_id, [])
     outcome = build_outcome_feedback(
         provider="openai",
         path=path,
@@ -144,6 +147,7 @@ async def record_managed_outcome_feedback(
         category=category,
         session_id=session_id,
         error=error,
+        provider_adoption_windows=provider_adoption_windows,
     )
     managed["outcome_feedback"] = await queue_outcome_feedback(
         store_obj,
