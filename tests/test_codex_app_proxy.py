@@ -2238,7 +2238,8 @@ summary_model_hint:
             "params": {
                 "threadId": "thread-routing-experiment",
                 "model": "gpt-5-codex",
-                "input": [{"type": "text", "text": secret_prompt}],
+                "input": [{"type": "text", "text": f"Summarize the following self-contained note: {secret_prompt}"}],
+                "temperature": 0,
             },
         }
         response = {
@@ -2300,6 +2301,24 @@ summary_model_hint:
                 },
             }
 
+        async def fake_shadow_executor(shadow_body, *, shadow_model):
+            self.assertEqual(shadow_model, "gpt-5-mini")
+            self.assertEqual(shadow_body["model"], "gpt-5-mini")
+            self.assertFalse(shadow_body["store"])
+            self.assertNotIn("threadId", shadow_body)
+            self.assertNotIn("thread-routing-experiment", json.dumps(shadow_body))
+            self.assertIn(secret_prompt, shadow_body["input"])
+            return {
+                "status_code": 200,
+                "response_body": {
+                    "output_text": f"Summary: {secret_result}",
+                    "usage": {"input_tokens": 11, "output_tokens": 5},
+                },
+                "latency_ms": 37,
+                "cost_est_usd": 0.00012,
+                "error": None,
+            }
+
         async def run_fixture():
             with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
                 test_store = Store(tmp.name)
@@ -2309,6 +2328,8 @@ summary_model_hint:
                     with (
                         patch.object(codex_app_proxy, "store", test_store),
                         patch.object(codex_app_proxy, "routing_experiment_decision", side_effect=sampled_decision),
+                        patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value="test-key"),
+                        patch.object(codex_app_proxy, "_execute_codex_stateless_shadow_request", side_effect=fake_shadow_executor),
                     ):
                         start_event_id = codex_app_proxy._record_message(
                             json.dumps(message),
@@ -2356,17 +2377,24 @@ summary_model_hint:
         self.assertEqual(experiment["primary_model"], "gpt-5-codex")
         self.assertEqual(experiment["shadow_model"], "gpt-5-mini")
         self.assertEqual(experiment["primary_status_code"], 200)
-        self.assertIsNone(experiment["shadow_status_code"])
-        self.assertEqual(experiment["error"], "websocket-stateful-turn-shadow-unsafe")
+        self.assertEqual(experiment["shadow_status_code"], 200)
+        self.assertIsNone(experiment["error"])
+        self.assertEqual(experiment["shadow_latency_ms"], 37)
+        self.assertEqual(experiment["shadow_cost_est_usd"], 0.00012)
         self.assertGreater(experiment["primary_output_chars"], 0)
+        self.assertGreater(experiment["shadow_output_chars"], 0)
         self.assertIsNone(experiment["primary_response_json"])
+        self.assertIsNone(experiment["shadow_response_json"])
         experiment_json = json.loads(experiment["experiment_json"])
         self.assertEqual(experiment_json["mode"], "shadow_candidate_pass_through")
         self.assertTrue(experiment_json["counterfactual"])
         self.assertTrue(experiment_json["shadow_only"])
-        self.assertEqual(experiment_json["shadow_limitation"], "websocket-stateful-turn-shadow-unsafe")
-        self.assertEqual(experiment_json["status"], "shadow-error")
-        self.assertIn("shadow-exception", experiment_json["reason_codes"])
+        self.assertIsNone(experiment_json["shadow_limitation"])
+        self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "executable")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateless-summary-text-only-replay")
+        self.assertFalse(experiment_json["shadow_request_preflight"]["privacy"]["raw_prompts_included"])
+        self.assertEqual(experiment_json["status"], "compared")
+        self.assertNotIn("shadow-exception", experiment_json["reason_codes"])
         self.assertEqual(experiment_json["managed_feedback"]["status"], "queued")
         self.assertFalse(experiment_json["managed_feedback"]["payload_included"])
 
@@ -2380,6 +2408,8 @@ summary_model_hint:
         self.assertTrue(payload["candidate"]["counterfactual"])
         self.assertTrue(payload["candidate"]["shadow_only"])
         self.assertEqual(payload["candidate"]["shadow_model_family"], "gpt-5")
+        self.assertEqual(payload["outcome"]["status"], "compared")
+        self.assertTrue(payload["outcome"]["compared"])
         self.assertTrue(payload["privacy"]["metadata_only"])
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
         self.assertFalse(payload["privacy"]["raw_responses_included"])
@@ -2397,7 +2427,131 @@ summary_model_hint:
         self.assertEqual(candidate["source_surface"], "codex_turn")
         self.assertEqual(candidate["requested_model"], "gpt-5-codex")
         self.assertEqual(candidate["routed_model"], "gpt-5-mini")
+        self.assertEqual(candidate["compared_samples"], 1)
+        self.assertEqual(candidate["shadow_error_samples"], 0)
         self.assertEqual(report["summary"]["sample_mode_counts"], {"shadow_candidate_pass_through": 1})
+
+    def test_codex_routing_experiment_stateful_turn_is_unavailable_not_shadow_error(self):
+        message = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-stateful",
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread-routing-experiment-stateful",
+                "model": "gpt-5-codex",
+                "input": [{"type": "text", "text": "Summarize this current session."}],
+                "temperature": 0,
+            },
+        }
+        response = {
+            "jsonrpc": "2.0",
+            "id": "turn-routing-experiment-stateful",
+            "result": {"message": "session summary"},
+        }
+        optimization_metadata = {
+            "routing": {
+                "status": "skipped",
+                "reason": "keep requested Codex model",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-codex",
+                "workflow_phase": "summary",
+                "model_field": "model",
+            },
+            "crunch": {"status": "skipped", "reason": "no-change", "applied": False},
+            "cache": {"status": "skipped", "reason": "codex-app-cache-disabled", "eligible": False},
+        }
+
+        def sampled_decision(body, routing_meta, *, stream, provider, source_surface, store_obj):
+            return {
+                "schema": "agentflow.routing_experiment_decision.v1",
+                "enabled": True,
+                "mode": "shadow_candidate_pass_through",
+                "status": "selected",
+                "sampled": True,
+                "reason": "sampled-shadow-candidate-pass-through",
+                "counterfactual": True,
+                "shadow_only": True,
+                "provider": "openai",
+                "source_surface": "codex_turn",
+                "requested_model": "gpt-5-codex",
+                "routed_model": "gpt-5-mini",
+                "primary_model": "gpt-5-codex",
+                "shadow_model": "gpt-5-mini",
+                "user_visible_model": "gpt-5-codex",
+                "category": "codex-turn",
+                "workflow_phase": "summary",
+                "text_chars": 31,
+                "daily_budget_usd": 10.0,
+                "budget_spent_usd": 0.0,
+                "budget_remaining_usd": 10.0,
+                "similarity_threshold": 0.86,
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "raw_responses_included": False,
+                    "request_ids_included": False,
+                    "session_ids_included": False,
+                    "file_paths_included": False,
+                },
+            }
+
+        async def run_fixture():
+            with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+                test_store = Store(tmp.name)
+                try:
+                    request_started = {}
+                    pending = {}
+                    with (
+                        patch.object(codex_app_proxy, "store", test_store),
+                        patch.object(codex_app_proxy, "routing_experiment_decision", side_effect=sampled_decision),
+                        patch.object(codex_app_proxy, "_codex_shadow_api_key", return_value="test-key"),
+                    ):
+                        start_event_id = codex_app_proxy._record_message(
+                            json.dumps(message),
+                            direction="client_to_server",
+                            session_id="session-routing-experiment-stateful",
+                            request_started=request_started,
+                            optimization_metadata=optimization_metadata,
+                        )
+                        codex_app_proxy._attach_codex_routing_experiment_pending(
+                            json.dumps(message),
+                            optimization_metadata=optimization_metadata,
+                            start_event_id=start_event_id,
+                            pending_routing_experiments=pending,
+                        )
+                        await codex_app_proxy._maybe_run_codex_routing_experiment(
+                            json.dumps(response),
+                            request_started=request_started,
+                            pending_routing_experiments=pending,
+                        )
+                    experiment = dict(test_store.conn.execute("select * from routing_experiments").fetchone())
+                    report = __import__(
+                        "agentflow_proxy.routing_experiments",
+                        fromlist=["build_routing_experiment_report"],
+                    ).build_routing_experiment_report(test_store, limit=5)
+                    queue_row = dict(test_store.conn.execute(
+                        "select payload_json from managed_outcome_feedback_queue"
+                    ).fetchone())
+                    return experiment, report, json.loads(queue_row["payload_json"])
+                finally:
+                    test_store.conn.close()
+
+        experiment, report, payload = asyncio.run(run_fixture())
+
+        self.assertIsNone(experiment["shadow_status_code"])
+        self.assertEqual(experiment["error"], "shadow-unavailable:stateful-context-reference")
+        experiment_json = json.loads(experiment["experiment_json"])
+        self.assertEqual(experiment_json["status"], "shadow-unavailable")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["status"], "unavailable")
+        self.assertEqual(experiment_json["shadow_request_preflight"]["reason"], "stateful-context-reference")
+        self.assertIn("shadow-unavailable", experiment_json["reason_codes"])
+        self.assertEqual(payload["outcome"]["status"], "shadow-unavailable")
+        self.assertFalse(payload["outcome"]["compared"])
+        [candidate] = report["candidates"]
+        self.assertEqual(candidate["compared_samples"], 0)
+        self.assertEqual(candidate["shadow_unavailable_samples"], 1)
+        self.assertEqual(candidate["shadow_error_samples"], 0)
+        self.assertIn("shadow-unavailable-observed", candidate["promotion_reason_codes"])
 
     def test_codex_routing_experiment_respects_budget_and_sample_skips(self):
         message = {

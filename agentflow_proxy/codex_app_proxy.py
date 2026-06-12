@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -85,6 +86,12 @@ CODEX_APP_SUMMARY_MODEL_HINT = codex_app_summary_model_hint_enabled()
 CODEX_APP_SUMMARY_MODEL_HINT_TARGET = codex_app_summary_model_hint_target()
 CODEX_APP_SUMMARY_MODEL_HINT_CANARY = codex_app_summary_model_hint_canary()
 CODEX_APP_WEBSOCKET_MAX_SIZE = int(os.getenv("AGENTFLOW_CODEX_APP_WEBSOCKET_MAX_SIZE", str(64 * 1024 * 1024)))
+CODEX_APP_SHADOW_EXECUTION = os.getenv("AGENTFLOW_CODEX_APP_SHADOW_EXECUTION", "1") != "0"
+CODEX_APP_SHADOW_OPENAI_UPSTREAM = os.getenv(
+    "AGENTFLOW_CODEX_APP_SHADOW_OPENAI_UPSTREAM",
+    os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com"),
+)
+CODEX_APP_SHADOW_TIMEOUT_SECONDS = float(os.getenv("AGENTFLOW_CODEX_APP_SHADOW_TIMEOUT_SECONDS", "60"))
 CODEX_APP_RULES = [
     rule for rule in (CODEX_APP_POLICY.get("rules") or [])
     if isinstance(rule, dict)
@@ -118,6 +125,10 @@ _CODEX_STALE_RISK_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _CODEX_PATH_LIKE_TEXT_RE = re.compile(r"(^|\s)(/|\.{1,2}/|~/|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)")
+_CODEX_STATEFUL_REFERENCE_RE = re.compile(
+    r"\b(this|current|previous|above|earlier|last)\s+(thread|conversation|chat|session|turn|task|run|state|context)\b",
+    re.IGNORECASE,
+)
 _codex_app_session_alert_windows: dict[tuple[str, str, str], int] = {}
 
 
@@ -1184,6 +1195,192 @@ def _codex_stale_risk_skip_reason(params: dict[str, Any], file_dependency_audit_
     if _CODEX_STALE_RISK_TEXT_RE.search(text) and not file_dependency_audit_meta.get("safe_invalidation_evidence"):
         return "stale-risk-blockers"
     return None
+
+
+def _codex_stateless_shadow_skip_reason(params: dict[str, Any]) -> str | None:
+    unknown_keys = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)
+    if unknown_keys:
+        return "unknown-param-shape"
+    if _contains_action_hint(params):
+        return "action-like-params"
+    if not _is_text_only_input(params.get("input")):
+        return "non-text-input"
+    text = "\n".join(_codex_input_texts(params.get("input"))).strip()
+    if not text:
+        return "empty-input"
+    if _CODEX_STATEFUL_REFERENCE_RE.search(text):
+        return "stateful-context-reference"
+    text_skip_reason = _codex_text_safety_skip_reason(params)
+    if text_skip_reason:
+        return text_skip_reason
+    if _CODEX_PATH_LIKE_TEXT_RE.search(text):
+        return "file-path-reference"
+    if _CODEX_STALE_RISK_TEXT_RE.search(text):
+        return "stale-risk-reference"
+    if not _codex_summary_phase_reason(params):
+        return "workflow-phase-not-stateless-summary"
+    deterministic, reason = _deterministic_sampling(params)
+    if not deterministic:
+        return reason or "non-deterministic-sampling"
+    return None
+
+
+def _codex_shadow_api_key() -> str | None:
+    value = os.getenv("AGENTFLOW_CODEX_APP_SHADOW_OPENAI_API_KEY") or os.getenv("AGENTFLOW_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    return str(value).strip() if value else None
+
+
+def _codex_shadow_preflight(
+    params: dict[str, Any],
+    *,
+    shadow_model: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    texts = _codex_input_texts(params.get("input"))
+    text = "\n\n".join(item.strip() for item in texts if item.strip()).strip()
+    omitted_fields = [
+        key
+        for key in ("threadId", "thread_id", "model", "modelId", "model_id")
+        if key in params
+    ]
+    meta: dict[str, Any] = {
+        "schema": "agentflow.codex_stateless_shadow_preflight.v1",
+        "status": "unavailable",
+        "reason": "not-evaluated",
+        "shadow_model": shadow_model,
+        "replay_surface": "openai_responses",
+        "stateless": True,
+        "input_text_chars": len(text),
+        "input_block_count": len(texts),
+        "omitted_turn_fields": omitted_fields,
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_transcripts_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "thread_ids_included": False,
+            "file_paths_included": False,
+            "credentials_included": False,
+        },
+    }
+    if not CODEX_APP_SHADOW_EXECUTION:
+        meta["reason"] = "shadow-execution-disabled"
+        return None, meta
+    if not shadow_model:
+        meta["reason"] = "missing-shadow-model"
+        return None, meta
+    skip_reason = _codex_stateless_shadow_skip_reason(params)
+    if skip_reason:
+        meta["reason"] = skip_reason
+        if skip_reason == "unknown-param-shape":
+            meta["unknown_keys"] = sorted(str(key) for key in params if str(key) not in CODEX_SAFE_TURN_PARAM_KEYS)[:8]
+        return None, meta
+    if not _codex_shadow_api_key():
+        meta["reason"] = "shadow-openai-api-key-missing"
+        return None, meta
+
+    body: dict[str, Any] = {
+        "model": shadow_model,
+        "input": text,
+        "store": False,
+    }
+    max_tokens = params.get("max_tokens", params.get("maxTokens"))
+    if max_tokens is not None:
+        try:
+            body["max_output_tokens"] = max(1, int(max_tokens))
+        except (TypeError, ValueError):
+            pass
+    if "temperature" in params:
+        body["temperature"] = params["temperature"]
+    top_p = params.get("top_p", params.get("topP"))
+    if top_p is not None:
+        body["top_p"] = top_p
+    meta.update({
+        "status": "executable",
+        "reason": "stateless-summary-text-only-replay",
+        "request_shape": {
+            "endpoint": "/v1/responses",
+            "input_kind": "text",
+            "store": False,
+            "thread_state_included": False,
+            "instructions_included": False,
+            "max_output_tokens_included": "max_output_tokens" in body,
+        },
+    })
+    return body, meta
+
+
+def _openai_usage_tokens(body: dict[str, Any]) -> tuple[int | None, int | None, int]:
+    usage = (body or {}).get("usage") or {}
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    input_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
+    cached_tokens = int(input_details.get("cached_tokens") or 0)
+    return input_tokens, output_tokens, cached_tokens
+
+
+async def _execute_codex_stateless_shadow_request(
+    shadow_body: dict[str, Any],
+    *,
+    shadow_model: str,
+) -> dict[str, Any]:
+    api_key = _codex_shadow_api_key()
+    if not api_key:
+        return {
+            "status_code": None,
+            "response_body": None,
+            "latency_ms": 0,
+            "cost_est_usd": None,
+            "error": "shadow-openai-api-key-missing",
+        }
+    started = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=CODEX_APP_SHADOW_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                CODEX_APP_SHADOW_OPENAI_UPSTREAM.rstrip("/") + "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=shadow_body,
+            )
+        latency_ms = int((time.time() - started) * 1000)
+        try:
+            response_body = response.json()
+        except Exception:
+            response_body = None
+        error = None
+        if response.status_code >= 400:
+            error = "shadow-http-400" if response.status_code == 400 else "shadow-http-error"
+        cost_est = None
+        if isinstance(response_body, dict):
+            shadow_in, shadow_out, cache_read = _openai_usage_tokens(response_body)
+            shadow_out_est = max(0, len(response_output_text(response_body)) // TOKEN_CHARS)
+            raw_cost = estimate_cost(
+                shadow_model,
+                shadow_in if shadow_in is not None else max(0, _input_text_chars(shadow_body.get("input")) // TOKEN_CHARS),
+                shadow_out if shadow_out is not None else shadow_out_est,
+                cache_read=cache_read,
+                provider="openai",
+                processing_mode=codex_app_processing_mode(),
+            )
+            if raw_cost is not None:
+                cost_est = float(raw_cost)
+        return {
+            "status_code": response.status_code,
+            "response_body": response_body,
+            "latency_ms": latency_ms,
+            "cost_est_usd": cost_est,
+            "error": error,
+        }
+    except Exception as exc:
+        return {
+            "status_code": None,
+            "response_body": None,
+            "latency_ms": int((time.time() - started) * 1000),
+            "cost_est_usd": None,
+            "error": repr(exc),
+        }
 
 
 def _deterministic_sampling(params: dict[str, Any]) -> tuple[bool, str | None]:
@@ -2913,6 +3110,7 @@ def _attach_codex_routing_experiment_pending(
         "experiment_meta": experiment_meta,
         "routing_meta": routing_meta,
         "start_routing_meta": start_routing_meta,
+        "params": copy.deepcopy(params),
         "input_text_chars": _input_text_chars(params.get("input")),
         "start_event_id": start_event_id or "",
     }
@@ -3022,6 +3220,7 @@ async def _maybe_run_codex_routing_experiment(
 
     experiment_meta = pending["experiment_meta"]
     routing_meta = pending["routing_meta"]
+    params = pending.get("params") if isinstance(pending.get("params"), dict) else {}
     input_text_chars = int(pending.get("input_text_chars") or 0)
     start_event_id = pending.get("start_event_id") or ""
 
@@ -3041,13 +3240,40 @@ async def _maybe_run_codex_routing_experiment(
     primary_output_text = response_output_text(primary_response_body)
     primary_output_chars = len(primary_output_text)
 
-    # Shadow WebSocket turn would mutate upstream session state; record limitation only
-    shadow_limitation = "websocket-stateful-turn-shadow-unsafe"
-    comparison = compare_response_outputs(primary_response_body if primary_status_code == 200 else {}, None)
-
     experiment_id = str(uuid.uuid4())
     shadow_model = str(experiment_meta.get("shadow_model") or "")
     primary_model = str(experiment_meta.get("primary_model") or routing_meta.get("requested_model") or "")
+    shadow_body, shadow_preflight = _codex_shadow_preflight(params, shadow_model=shadow_model)
+    experiment_meta["shadow_request_preflight"] = shadow_preflight
+
+    shadow_status_code: int | None = None
+    shadow_response_body: dict[str, Any] | None = None
+    shadow_latency_ms: int | None = None
+    shadow_cost_est_usd: float | None = None
+    shadow_error: str | None = None
+    shadow_limitation: str | None = None
+    if primary_status_code != 200:
+        shadow_limitation = "primary-turn-not-successful"
+        experiment_meta["shadow_request_preflight"] = {
+            **shadow_preflight,
+            "status": "unavailable",
+            "reason": shadow_limitation,
+        }
+    elif shadow_body is None:
+        shadow_limitation = str(shadow_preflight.get("reason") or "shadow-unavailable")
+        shadow_latency_ms = 0
+    else:
+        shadow_result = await _execute_codex_stateless_shadow_request(shadow_body, shadow_model=shadow_model)
+        shadow_status_code = shadow_result.get("status_code")
+        shadow_response_body = shadow_result.get("response_body") if isinstance(shadow_result.get("response_body"), dict) else None
+        shadow_latency_ms = shadow_result.get("latency_ms")
+        shadow_cost_est_usd = shadow_result.get("cost_est_usd")
+        shadow_error = shadow_result.get("error")
+
+    comparison = compare_response_outputs(
+        primary_response_body if primary_status_code == 200 else {},
+        shadow_response_body,
+    )
 
     input_tokens_est = max(0, input_text_chars // TOKEN_CHARS)
     output_tokens_est = max(0, primary_output_chars // TOKEN_CHARS)
@@ -3072,12 +3298,12 @@ async def _maybe_run_codex_routing_experiment(
         primary_model=primary_model,
         shadow_model=shadow_model,
         primary_status_code=primary_status_code,
-        shadow_status_code=None,
+        shadow_status_code=shadow_status_code,
         primary_latency_ms=primary_latency_ms,
-        shadow_latency_ms=None,
+        shadow_latency_ms=shadow_latency_ms,
         primary_cost_est_usd=primary_cost_est_usd,
-        shadow_cost_est_usd=None,
-        error=shadow_limitation,
+        shadow_cost_est_usd=shadow_cost_est_usd,
+        error=shadow_error,
     )
     experiment_meta.update({
         "experiment_id": experiment_id,
@@ -3086,7 +3312,7 @@ async def _maybe_run_codex_routing_experiment(
         "primary_model": primary_model,
         "shadow_model": shadow_model,
         "primary_status_code": primary_status_code,
-        "shadow_status_code": None,
+        "shadow_status_code": shadow_status_code,
         "primary_output_chars": comparison["primary_output_chars"],
         "shadow_output_chars": comparison["shadow_output_chars"],
         "primary_output_sha256": comparison["primary_output_sha256"],
@@ -3159,25 +3385,33 @@ async def _maybe_run_codex_routing_experiment(
             routing_reason=routing_meta.get("reason"),
             input_tokens_est=input_tokens_est,
             primary_status_code=primary_status_code,
-            shadow_status_code=None,
+            shadow_status_code=shadow_status_code,
             primary_latency_ms=primary_latency_ms,
-            shadow_latency_ms=None,
+            shadow_latency_ms=shadow_latency_ms,
             primary_output_chars=comparison["primary_output_chars"],
             shadow_output_chars=comparison["shadow_output_chars"],
             primary_output_sha256=comparison["primary_output_sha256"],
             shadow_output_sha256=comparison["shadow_output_sha256"],
             output_similarity=comparison["output_similarity"],
-            passed_threshold=0,
+            passed_threshold=1 if comparison["passed_threshold"] and shadow_status_code is not None and shadow_status_code < 400 else 0,
             primary_cost_est_usd=primary_cost_est_usd,
-            shadow_cost_est_usd=None,
+            shadow_cost_est_usd=shadow_cost_est_usd,
             budget_limit_usd=experiment_meta.get("daily_budget_usd"),
             budget_spent_before_usd=experiment_meta.get("budget_spent_usd"),
             budget_remaining_before_usd=experiment_meta.get("budget_remaining_usd"),
-            budget_spent_after_usd=float(experiment_meta.get("budget_spent_usd") or 0.0),
-            error=shadow_limitation,
+            budget_spent_after_usd=round(
+                float(experiment_meta.get("budget_spent_usd") or 0.0) + float(shadow_cost_est_usd or 0.0),
+                6,
+            ),
+            error=(f"shadow-unavailable:{shadow_limitation}" if shadow_limitation else shadow_error),
             routing_json=stable_json(routing_meta),
             experiment_json=stable_json(experiment_meta),
             primary_response_json=stable_json(primary_response_body) if ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES else None,
+            shadow_response_json=(
+                stable_json(shadow_response_body)
+                if ROUTING_EXPERIMENT_STORE_RESPONSE_BODIES and shadow_response_body is not None and shadow_status_code is not None and shadow_status_code < 400
+                else None
+            ),
         )
     except Exception as exc:
         print(f"AgentFlow Codex routing experiment log skipped: {exc}", file=sys.stderr)

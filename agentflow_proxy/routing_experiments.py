@@ -724,6 +724,9 @@ def routing_experiment_feedback_features(
     unsupported_shape_reason = None
     if isinstance(shadow_preflight, dict) and shadow_preflight.get("status") == "unsupported":
         unsupported_shape_reason = _public_label(shadow_preflight.get("reason"), fallback="unsupported-shape")
+    unavailable_reason = None
+    if isinstance(shadow_preflight, dict) and shadow_preflight.get("status") == "unavailable":
+        unavailable_reason = _public_label(shadow_preflight.get("reason"), fallback="shadow-unavailable")
     compared = (
         primary_status_code is not None
         and primary_status_code < 400
@@ -734,11 +737,15 @@ def routing_experiment_feedback_features(
     status = "compared" if compared else "shadow-unavailable"
     if unsupported_shape_reason:
         status = "shadow-unsupported-shape"
+    elif unavailable_reason:
+        status = "shadow-unavailable"
     elif shadow_status_code == 400:
         status = "shadow-http-400"
     if error:
         if unsupported_shape_reason:
             status = "shadow-unsupported-shape"
+        elif unavailable_reason:
+            status = "shadow-unavailable"
         elif shadow_status_code == 400:
             status = "shadow-http-400"
         else:
@@ -749,12 +756,15 @@ def routing_experiment_feedback_features(
     if unsupported_shape_reason:
         reason_codes.append("shadow-unsupported-shape")
         reason_codes.append(f"unsupported-shadow-shape-{unsupported_shape_reason}")
+    if unavailable_reason:
+        reason_codes.append("shadow-unavailable")
+        reason_codes.append(f"shadow-unavailable-{unavailable_reason}")
     if shadow_status_code is None:
-        if not unsupported_shape_reason:
+        if not unsupported_shape_reason and not unavailable_reason:
             reason_codes.append("shadow-missing")
     elif shadow_status_code >= 400:
         reason_codes.append("shadow-http-400" if shadow_status_code == 400 else "shadow-error")
-    if error and not unsupported_shape_reason and shadow_status_code != 400:
+    if error and not unsupported_shape_reason and not unavailable_reason and shadow_status_code != 400:
         reason_codes.append("shadow-exception")
     if compared and not comparison.get("passed_threshold"):
         reason_codes.append("below-similarity-threshold")
@@ -794,6 +804,7 @@ def routing_experiment_feedback_features(
         "passed_threshold": bool(comparison.get("passed_threshold")),
         "reason_codes": reason_codes,
         "shadow_unsupported_shape_reason": unsupported_shape_reason,
+        "shadow_unavailable_reason": unavailable_reason,
         "shadow_error_class": _public_label(error, fallback="none") if error else None,
         "cost_delta_usd": (
             round(float(primary_cost_est_usd or 0.0) - float(shadow_cost_est_usd or 0.0), 6)
@@ -1029,6 +1040,10 @@ def _score_routing_promotion_candidate(
         if verdict == "promote":
             verdict = "hold"
         reason_codes.append("shadow-unsupported-shape-observed")
+    if int(item.get("shadow_unavailable_samples") or 0) > 0:
+        if verdict == "promote":
+            verdict = "needs_more_samples"
+        reason_codes.append("shadow-unavailable-observed")
     if pass_rate is None:
         if verdict == "promote":
             verdict = "needs_more_samples"
@@ -1225,6 +1240,8 @@ def _comparison_blocker(row: Any) -> str:
     if isinstance(feedback, dict):
         status = str(feedback.get("status") or "")
         reason_codes = {str(item) for item in feedback.get("reason_codes") or []}
+        if status == "shadow-unavailable" or "shadow-unavailable" in reason_codes:
+            return "shadow-unavailable"
         if status == "shadow-unsupported-shape" or "shadow-unsupported-shape" in reason_codes:
             return "shadow-unsupported-shape"
         if status == "shadow-http-400" or "shadow-http-400" in reason_codes:
@@ -1655,6 +1672,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
                 "compared_samples": 0,
                 "primary_error_samples": 0,
                 "shadow_error_samples": 0,
+                "shadow_unavailable_samples": 0,
                 "shadow_http_400_samples": 0,
                 "shadow_unsupported_shape_samples": 0,
                 "fallback_or_retry_count": 0,
@@ -1680,12 +1698,15 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         if not primary_ok:
             item["primary_error_samples"] += 1
         shadow_unsupported_shape = feedback_status == "shadow-unsupported-shape" or "shadow-unsupported-shape" in feedback_reason_codes
+        shadow_unavailable = feedback_status == "shadow-unavailable" or "shadow-unavailable" in feedback_reason_codes
         shadow_http_400 = feedback_status == "shadow-http-400" or "shadow-http-400" in feedback_reason_codes or shadow_status == 400
         if shadow_http_400:
             item["shadow_http_400_samples"] += 1
         if shadow_unsupported_shape:
             item["shadow_unsupported_shape_samples"] += 1
-        if (not shadow_ok or row["error"]) and not shadow_unsupported_shape:
+        if shadow_unavailable:
+            item["shadow_unavailable_samples"] += 1
+        if (not shadow_ok or row["error"]) and not shadow_unsupported_shape and not shadow_unavailable:
             item["shadow_error_samples"] += 1
         if primary_ok and shadow_ok and row["output_similarity"] is not None:
             item["compared_samples"] += 1
