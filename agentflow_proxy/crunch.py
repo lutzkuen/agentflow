@@ -541,6 +541,7 @@ def _apply_terminal_output_compaction_policy_yaml(
     default_policy_source: str,
 ) -> None:
     target = policy["terminal_output_compaction"]
+    action = terminal_compaction.get("action") if isinstance(terminal_compaction.get("action"), dict) else terminal_compaction
     target["enabled"] = _as_bool(terminal_compaction.get("enabled"), target["enabled"])
     target["policy_source"] = str(terminal_compaction.get("policy_source") or target.get("policy_source") or default_policy_source)
     for key in ("rule_id", "candidate_id", "action_id"):
@@ -558,8 +559,8 @@ def _apply_terminal_output_compaction_policy_yaml(
         "max_evidence_lines",
         "min_saved_chars",
     ):
-        if terminal_compaction.get(key) is not None:
-            target[key] = int(terminal_compaction[key])
+        if action.get(key) is not None:
+            target[key] = int(action[key])
     target["block_thinking"] = _as_bool(terminal_compaction.get("block_thinking"), target["block_thinking"])
     canary = terminal_compaction.get("canary") or {}
     if isinstance(canary, dict):
@@ -610,15 +611,23 @@ def _apply_terminal_output_compaction_policy_yaml(
 def _sanitize_terminal_output_compaction_conditions(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
+    aliases = {
+        "phase": "workflow_phase",
+        "expected_saved_tokens_bucket": "expected_saved_token_bucket",
+        "expected_saved_tokens_buckets": "expected_saved_token_buckets",
+    }
     allowed = {
         "source_surface",
         "app_family",
         "category",
         "workflow_phase",
+        "labels",
         "requested_model",
         "model_pattern",
         "text_bucket",
         "token_bucket",
+        "expected_saved_token_bucket",
+        "expected_saved_token_buckets",
         "terminal_output_char_fraction_bucket",
         "terminal_output_char_fraction_buckets",
         "has_tools",
@@ -631,7 +640,7 @@ def _sanitize_terminal_output_compaction_conditions(value: Any) -> dict[str, Any
     }
     sanitized: dict[str, Any] = {}
     for key, raw in value.items():
-        key_text = str(key)
+        key_text = aliases.get(str(key), str(key))
         if key_text not in allowed or raw is None:
             continue
         if isinstance(raw, (str, int, float, bool)):
@@ -673,6 +682,7 @@ def _overlay_terminal_output_compaction_rule(
     default_policy_source: str,
 ) -> dict[str, Any]:
     rule = copy.deepcopy(base)
+    action = item.get("action") if isinstance(item.get("action"), dict) else item
     rule["rules"] = []
     rule["enabled"] = _as_bool(item.get("enabled"), rule.get("enabled", True))
     rule["policy_source"] = str(item.get("policy_source") or rule.get("policy_source") or default_policy_source)
@@ -700,8 +710,8 @@ def _overlay_terminal_output_compaction_rule(
         "max_evidence_lines",
         "min_saved_chars",
     ):
-        if item.get(key) is not None:
-            rule[key] = int(item[key])
+        if action.get(key) is not None:
+            rule[key] = int(action[key])
     if item.get("block_thinking") is not None:
         rule["block_thinking"] = _as_bool(item.get("block_thinking"), bool(rule.get("block_thinking", True)))
     canary = item.get("canary") or item.get("rollout") or {}
@@ -3178,13 +3188,33 @@ def _copy_terminal_output_compaction_policy() -> dict[str, Any]:
     return copy.deepcopy(TERMINAL_OUTPUT_COMPACTION_POLICY)
 
 
-def _terminal_output_compaction_public_policy(policy: dict[str, Any] | None = None) -> dict[str, Any]:
+def _terminal_output_compaction_action_public(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "compact_terminal_output",
+        "keep_recent_turns": int(policy.get("keep_recent_turns") or TERMINAL_COMPACTION_DEFAULT_KEEP_RECENT_TURNS),
+        "min_block_chars": int(policy.get("min_block_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_BLOCK_CHARS),
+        "head_lines": int(policy.get("head_lines") or TERMINAL_COMPACTION_DEFAULT_HEAD_LINES),
+        "tail_lines": int(policy.get("tail_lines") or TERMINAL_COMPACTION_DEFAULT_TAIL_LINES),
+        "max_evidence_lines": int(policy.get("max_evidence_lines") or TERMINAL_COMPACTION_DEFAULT_MAX_EVIDENCE_LINES),
+        "min_saved_chars": int(policy.get("min_saved_chars") or TERMINAL_COMPACTION_DEFAULT_MIN_SAVED_CHARS),
+        "preserve_diagnostics": True,
+        "preserve_tool_protocol": True,
+        "preserve_recent_turns": True,
+    }
+
+
+def _terminal_output_compaction_public_policy(
+    policy: dict[str, Any] | None = None,
+    *,
+    include_rules: bool = True,
+    include_salt: bool = True,
+) -> dict[str, Any]:
     policy = policy or TERMINAL_OUTPUT_COMPACTION_POLICY
     canary = policy.get("canary") or {}
     safety = policy.get("safety_stop") or {}
     fraction = max(0.0, min(1.0, float(canary.get("fraction", 0.0))))
     holdout_fraction = max(0.0, min(1.0, float(canary.get("holdout_fraction", max(0.0, 1.0 - fraction)))))
-    return {
+    public = {
         "schema": "agentflow.terminal_output_compaction_policy.v1",
         "enabled": _as_bool(policy.get("enabled"), False),
         "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
@@ -3205,7 +3235,8 @@ def _terminal_output_compaction_public_policy(policy: dict[str, Any] | None = No
             "enabled": _as_bool(canary.get("enabled"), True),
             "fraction": fraction,
             "holdout_fraction": holdout_fraction,
-            "salt": str(canary.get("salt") or ""),
+            "salt": str(canary.get("salt") or "") if include_salt else "",
+            "salt_configured": bool(canary.get("salt")),
             "unit": str(canary.get("unit") or "request_fingerprint"),
         },
         "safety_stop": {
@@ -3218,6 +3249,26 @@ def _terminal_output_compaction_public_policy(policy: dict[str, Any] | None = No
             "max_error_rate_delta": float(safety.get("max_error_rate_delta", 0.05)),
         },
     }
+    public["action"] = _terminal_output_compaction_action_public(public)
+    if include_rules:
+        rules = policy.get("rules")
+        public["rules"] = [
+            _terminal_output_compaction_public_policy(rule, include_rules=False, include_salt=include_salt)
+            for rule in rules
+            if isinstance(rule, dict)
+        ] if isinstance(rules, list) else []
+        public["rule_count"] = len(public["rules"])
+    return public
+
+
+def terminal_output_compaction_effective_policy() -> dict[str, Any]:
+    """Return sanitized file-backed terminal compaction policy metadata."""
+    public = _terminal_output_compaction_public_policy(TERMINAL_OUTPUT_COMPACTION_POLICY, include_salt=False)
+    public["raw_terminal_text_included"] = False
+    public["raw_request_body_included"] = False
+    public["raw_tool_ids_included"] = False
+    public["policy_file_contents_included"] = False
+    return public
 
 
 def _terminal_output_compaction_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3428,6 +3479,7 @@ def _terminal_output_compaction_features(
     }
     if isinstance(plan, dict):
         targets = [target for target in (plan.get("targets") or []) if isinstance(target, dict)]
+        planned_saved_tokens = _safe_int(plan.get("estimated_saved_tokens"))
         buckets = sorted({
             str(target.get("terminal_output_char_fraction_bucket"))
             for target in targets
@@ -3435,9 +3487,11 @@ def _terminal_output_compaction_features(
         })
         features.update({
             "target_count": len(targets),
-            "planned_saved_tokens": _safe_int(plan.get("estimated_saved_tokens")),
+            "planned_saved_tokens": planned_saved_tokens,
+            "expected_saved_token_bucket": _token_bucket(max(1, planned_saved_tokens)),
             "terminal_output_char_fraction_buckets": buckets,
         })
+        features["expected_saved_token_buckets"] = [features["expected_saved_token_bucket"]]
         if buckets:
             features["terminal_output_char_fraction_bucket"] = buckets[-1]
     return features
@@ -3462,6 +3516,11 @@ def _terminal_output_compaction_rule_matches(
     for key in ("source_surface", "app_family", "category", "workflow_phase", "text_bucket", "token_bucket"):
         if key in conditions and str(features.get(key)) not in _condition_values(conditions[key]):
             blockers.append(f"{key}-not-matched")
+    if "labels" in conditions:
+        expected_labels = _condition_values(conditions["labels"])
+        observed_labels = _condition_values(features.get("labels"))
+        if not expected_labels.issubset(observed_labels):
+            blockers.append("labels-not-matched")
     if "category_not_in" in conditions and str(features.get("category")) in _condition_values(conditions["category_not_in"]):
         blockers.append("category-excluded")
     if "requested_model" in conditions and str(features.get("requested_model")) not in _condition_values(conditions["requested_model"]):
@@ -3494,6 +3553,17 @@ def _terminal_output_compaction_rule_matches(
             return not blockers, blockers
         if _safe_int(features.get("planned_saved_tokens")) < _safe_int(conditions["min_saved_tokens"]):
             blockers.append("min-saved-tokens-not-met")
+    if "expected_saved_token_bucket" in conditions or "expected_saved_token_buckets" in conditions:
+        if not require_plan_conditions:
+            return not blockers, blockers
+        expected = _condition_values(
+            conditions.get("expected_saved_token_bucket")
+            if conditions.get("expected_saved_token_bucket") is not None
+            else conditions.get("expected_saved_token_buckets")
+        )
+        observed = _condition_values(features.get("expected_saved_token_buckets"))
+        if not expected.intersection(observed):
+            blockers.append("expected-saved-token-bucket-not-matched")
     return not blockers, blockers
 
 

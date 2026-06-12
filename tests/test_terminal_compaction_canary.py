@@ -130,9 +130,14 @@ terminal_output_compaction:
         min_saved_tokens: 100
         has_tools: true
         stream: {stream}
-      keep_recent_turns: 2
-      min_block_chars: 500
-      min_saved_chars: 100
+      action:
+        type: compact_terminal_output
+        keep_recent_turns: 2
+        min_block_chars: 500
+        head_lines: 12
+        tail_lines: 16
+        max_evidence_lines: 80
+        min_saved_chars: 100
       canary:
         enabled: true
         canary_fraction: {fraction}
@@ -146,6 +151,61 @@ terminal_output_compaction:
         max_error_rate: 0.5
         max_retry_rate: 1.0
         max_negative_savings_rate: 1.0
+""",
+        encoding="utf-8",
+    )
+
+
+def _write_conditional_policy_report_rules(config: Path) -> None:
+    (config / "crunch_rules.yaml").write_text(
+        """
+enabled: true
+terminal_output_compaction:
+  enabled: true
+  rules:
+    - id: managed-terminal-policy-report
+      enabled: true
+      policy_source: managed-recommended
+      candidate_id: terminal-compaction-candidate-report
+      action_id: terminal-compaction-action-report
+      conditions:
+        source_surface: anthropic_messages
+        app_family: claude_code
+        phase: tool-result
+        category: tool-result
+        text_bucket: 32k_128k_chars
+        labels:
+          - terminal-output
+          - plateau-session
+        expected_saved_tokens_bucket: 1k_2k_tokens
+        model_pattern: sonnet
+        has_tools: true
+        stream: true
+        uses_thinking: false
+      action:
+        type: compact_terminal_output
+        keep_recent_turns: 3
+        min_block_chars: 700
+        head_lines: 9
+        tail_lines: 11
+        max_evidence_lines: 55
+        min_saved_chars: 250
+        preserve_diagnostics: true
+        preserve_tool_protocol: true
+      canary:
+        enabled: true
+        canary_fraction: 0.25
+        holdout_fraction: 0.50
+        canary_salt: private-local-salt
+        canary_unit: request_fingerprint
+      safety_stop:
+        enabled: true
+        min_outcome_samples: 7
+        window: 77
+        max_error_rate: 0.2
+        max_retry_rate: 0.3
+        max_negative_savings_rate: 0.4
+        max_error_rate_delta: 0.05
 """,
         encoding="utf-8",
     )
@@ -189,6 +249,51 @@ class TerminalOutputCompactionCanaryTests(unittest.TestCase):
         self.assertFalse(terminal_meta["enabled"])
         self.assertEqual(terminal_meta["status"], "skipped")
         self.assertEqual(terminal_meta["reason"], "disabled")
+        policy = manual.terminal_output_compaction_effective_policy()
+        self.assertEqual(policy["rule_count"], 0)
+        self.assertEqual(policy["rules"], [])
+
+    def test_conditional_terminal_output_compaction_policy_reports_sanitized_rules(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            _write_conditional_policy_report_rules(config)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+
+            policy = manual.terminal_output_compaction_effective_policy()
+
+        self.assertTrue(policy["enabled"])
+        self.assertEqual(policy["rule_count"], 1)
+        rule = policy["rules"][0]
+        self.assertEqual(rule["rule_id"], "managed-terminal-policy-report")
+        self.assertEqual(rule["candidate_id"], "terminal-compaction-candidate-report")
+        self.assertEqual(rule["action_id"], "terminal-compaction-action-report")
+        self.assertEqual(rule["policy_source"], "managed-recommended")
+        self.assertEqual(rule["conditions"]["workflow_phase"], "tool-result")
+        self.assertEqual(rule["conditions"]["labels"], ["terminal-output", "plateau-session"])
+        self.assertEqual(rule["conditions"]["expected_saved_token_bucket"], "1k_2k_tokens")
+        self.assertEqual(rule["action"]["keep_recent_turns"], 3)
+        self.assertEqual(rule["action"]["min_block_chars"], 700)
+        self.assertEqual(rule["action"]["head_lines"], 9)
+        self.assertEqual(rule["action"]["tail_lines"], 11)
+        self.assertEqual(rule["action"]["max_evidence_lines"], 55)
+        self.assertEqual(rule["action"]["min_saved_chars"], 250)
+        self.assertTrue(rule["action"]["preserve_diagnostics"])
+        self.assertEqual(rule["canary"]["fraction"], 0.25)
+        self.assertEqual(rule["canary"]["holdout_fraction"], 0.5)
+        self.assertEqual(rule["safety_stop"]["min_outcome_samples"], 7)
+        self.assertEqual(rule["safety_stop"]["window"], 77)
+        self.assertEqual(rule["safety_stop"]["max_error_rate"], 0.2)
+
+        rendered = json.dumps(policy, sort_keys=True)
+        self.assertNotIn("RAW_", rendered)
+        self.assertNotIn("toolu_", rendered)
+        self.assertNotIn("private-local-salt", rendered)
+        self.assertTrue(rule["canary"]["salt_configured"])
+        self.assertFalse(policy["raw_terminal_text_included"])
+        self.assertFalse(policy["policy_file_contents_included"])
 
     def test_yaml_canary_fraction_applies_terminal_output_compaction_with_private_metadata(self):
         with TemporaryDirectory() as tmp:

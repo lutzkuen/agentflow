@@ -9607,6 +9607,11 @@ def _terminal_output_compaction_policy_state() -> dict[str, Any]:
     from agentflow_proxy import crunch
 
     policy = getattr(crunch, "TERMINAL_OUTPUT_COMPACTION_POLICY", {}) or {}
+    effective_policy = (
+        crunch.terminal_output_compaction_effective_policy()
+        if hasattr(crunch, "terminal_output_compaction_effective_policy")
+        else {}
+    )
     canary = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
     safety = policy.get("safety_stop") if isinstance(policy.get("safety_stop"), dict) else {}
     file_state = policy_file_status(
@@ -9614,11 +9619,39 @@ def _terminal_output_compaction_policy_state() -> dict[str, Any]:
         loaded_at=getattr(crunch, "CRUNCH_RULES_LOADED_AT", None),
         loaded_snapshot=getattr(crunch, "CRUNCH_RULES_LOADED_FILE", None),
     )
+    raw_effective_rules = effective_policy.get("rules") if isinstance(effective_policy.get("rules"), list) else []
+    effective_rules: list[dict[str, Any]] = []
+    for rule in raw_effective_rules:
+        if not isinstance(rule, dict):
+            continue
+        rule_canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+        effective_rules.append({
+            "enabled": bool(rule.get("enabled")),
+            "policy_source": str(rule.get("policy_source") or "unknown"),
+            "rule_id": rule.get("rule_id"),
+            "candidate_id": rule.get("candidate_id"),
+            "action_id": rule.get("action_id"),
+            "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
+            "action": rule.get("action") if isinstance(rule.get("action"), dict) else {},
+            "canary": {
+                "enabled": bool(rule_canary.get("enabled", True)),
+                "fraction": _as_float(rule_canary.get("fraction")),
+                "holdout_fraction": _as_float(rule_canary.get("holdout_fraction")),
+                "unit": str(rule_canary.get("unit") or "request_fingerprint"),
+                "salt_configured": bool(rule_canary.get("salt_configured")),
+            },
+            "safety_stop": rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else {},
+            "provenance": rule.get("provenance") if isinstance(rule.get("provenance"), dict) else None,
+        })
     return {
         "enabled": bool(policy.get("enabled")),
         "policy_source": str(policy.get("policy_source") or getattr(crunch, "CRUNCH_POLICY_SOURCE", "unknown")),
         "rule_id": str(policy.get("rule_id") or "local-terminal-output-compaction-canary"),
         "candidate_id_configured": policy.get("candidate_id") is not None,
+        "conditions": effective_policy.get("conditions") if isinstance(effective_policy.get("conditions"), dict) else {},
+        "action": effective_policy.get("action") if isinstance(effective_policy.get("action"), dict) else {},
+        "rule_count": len(effective_rules),
+        "rules": effective_rules,
         "rule_file": {
             "configured": bool(getattr(crunch, "CRUNCH_RULES_PATH", None)),
             "path_class": _local_path_class(getattr(crunch, "CRUNCH_RULES_PATH", None)),

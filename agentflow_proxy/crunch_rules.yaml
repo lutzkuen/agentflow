@@ -134,6 +134,54 @@ terminal_output_compaction:
     max_retry_rate: 0.25
     max_negative_savings_rate: 0.25
     max_error_rate_delta: 0.05
+  rules: []
+# Example reviewed conditional terminal-output compaction rule:
+# terminal_output_compaction:
+#   enabled: true
+#   rules:
+#     - id: reviewed-terminal-output-compaction-example
+#       enabled: true
+#       policy_source: managed-recommended
+#       candidate_id: terminal-compaction-candidate-123
+#       action_id: terminal-compaction-rollout-action-123
+#       conditions:
+#         source_surface: anthropic_messages
+#         app_family: claude_code
+#         phase: tool-result
+#         category: tool-result
+#         text_bucket: 32k_128k_chars
+#         labels:
+#           - terminal-output
+#           - plateau-session
+#         expected_saved_token_bucket: 2k_8k_tokens
+#         model_pattern: sonnet
+#         has_tools: true
+#         stream: true
+#         uses_thinking: false
+#       action:
+#         type: compact_terminal_output
+#         keep_recent_turns: 2
+#         min_block_chars: 2000
+#         head_lines: 12
+#         tail_lines: 16
+#         max_evidence_lines: 80
+#         min_saved_chars: 500
+#         preserve_diagnostics: true
+#         preserve_tool_protocol: true
+#       canary:
+#         enabled: true
+#         canary_fraction: 0.10
+#         holdout_fraction: 0.90
+#         canary_salt: sha256:...
+#         canary_unit: request_fingerprint
+#       safety_stop:
+#         enabled: true
+#         min_outcome_samples: 5
+#         window: 500
+#         max_error_rate: 0.1
+#         max_retry_rate: 0.25
+#         max_negative_savings_rate: 0.25
+#         max_error_rate_delta: 0.05
 pattern_modules:
   cacheability:
     enabled: true
