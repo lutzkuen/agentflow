@@ -22,6 +22,7 @@ from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_repla
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
 from agentflow_proxy.openai_cache_replay_report import build_openai_cache_replay_report
+from agentflow_proxy.provider_adoption import capture_provider_tool_adoption
 from agentflow_proxy.stats import (
     stats_openai_cache_replay_impact,
     stats_openai_cache_replay_readiness,
@@ -94,7 +95,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         cache_extra: dict[str, object] | None = None,
         session_id: str = "raw-openai-session-must-not-leak",
         created_at: str | None = None,
-    ) -> None:
+    ) -> str:
+        call_id = str(uuid.uuid4())
         path = "/v1/responses" if endpoint == "responses" else "/v1/chat/completions"
         text_chars = 2400
         input_tokens = text_chars // 4
@@ -120,7 +122,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             cache_json.update(cache_extra)
 
         self.store.log_call(
-            id=str(uuid.uuid4()),
+            id=call_id,
             created_at=created_at or utc_now(),
             path=path,
             requested_model="gpt-5.4-mini",
@@ -169,6 +171,80 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             endpoint=endpoint,
             requested_model_family="gpt-5",
             routed_model_family="gpt-5",
+        )
+        return call_id
+
+    def _capture_openai_provider_adoption(self, fulfilled_call_id: str, *, tool_id: str) -> None:
+        capture_provider_tool_adoption(
+            self.store,
+            provider="openai",
+            path="/v1/responses",
+            call_id=f"tool-use-{fulfilled_call_id}",
+            session_id="raw-openai-session-must-not-leak",
+            request_body={"model": "gpt-5.4-mini", "input": [{"role": "user", "content": "hi"}]},
+            response_body={
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": tool_id,
+                        "name": "lookup",
+                        "arguments": '{"path":"/tmp/private.py"}',
+                    }
+                ]
+            },
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            status_code=200,
+            category="tool-light",
+            routing_meta={"policy_source": "managed-recommended", "phase": "tool-execution"},
+        )
+        capture_provider_tool_adoption(
+            self.store,
+            provider="openai",
+            path="/v1/responses",
+            call_id=fulfilled_call_id,
+            session_id="raw-openai-session-must-not-leak",
+            request_body={
+                "model": "gpt-5.4-mini",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_id,
+                        "output": "secret tool payload",
+                    }
+                ],
+            },
+            response_body={"output": []},
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            status_code=200,
+            category="tool-result",
+            routing_meta={"policy_source": "managed-recommended", "phase": "tool-execution"},
+        )
+
+    def _capture_openai_orphan_provider_adoption(self, call_id: str, *, tool_id: str) -> None:
+        capture_provider_tool_adoption(
+            self.store,
+            provider="openai",
+            path="/v1/responses",
+            call_id=call_id,
+            session_id="raw-openai-session-must-not-leak",
+            request_body={
+                "model": "gpt-5.4-mini",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_id,
+                        "output": "orphan secret tool payload",
+                    }
+                ],
+            },
+            response_body={"output": []},
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            status_code=200,
+            category="tool-result",
+            routing_meta={"policy_source": "managed-recommended", "phase": "tool-execution"},
         )
 
     def test_report_groups_openai_replay_candidates_and_blockers_without_raw_fields(self) -> None:
@@ -427,7 +503,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             }
 
         for index, baseline in enumerate((0.03, 0.04)):
-            self._log_openai_call(
+            call_id = self._log_openai_call(
                 cache_status="hit",
                 cache_reason="exact-match",
                 cache_hit=1,
@@ -443,7 +519,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                     reason="dependency-stable",
                 ),
             )
-        self._log_openai_call(
+            self._capture_openai_provider_adoption(call_id, tool_id=f"call_cache_widen_{index}")
+        call_id = self._log_openai_call(
             cache_status="bypassed",
             cache_reason="canary_holdout",
             cost=0.03,
@@ -458,6 +535,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 reason="canary_holdout",
             ),
         )
+        self._capture_openai_provider_adoption(call_id, tool_id="call_cache_widen_holdout")
         self._log_openai_call(
             cache_status="bypassed",
             cache_reason="session-scope-missing",
@@ -473,13 +551,118 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             ),
         )
 
+        for index, retry_count in enumerate((2, 2)):
+            self._log_openai_call(
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=0.02,
+                retry_count=retry_count,
+                latency_ms=160 + index,
+                cache_extra=replay_meta(
+                    candidate_id="openai-cache-retry-regression",
+                    rule_id="openai-cache-retry-regression-rule",
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    projected=0.02,
+                    reason="dependency-stable",
+                ),
+            )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.02,
+            cost_baseline=0.02,
+            retry_count=0,
+            latency_ms=160,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-retry-regression",
+                rule_id="openai-cache-retry-regression-rule",
+                canary_status="holdout",
+                cohort="canary_holdout",
+                projected=0.02,
+                reason="canary_holdout",
+            ),
+        )
+
+        for index in range(2):
+            call_id = self._log_openai_call(
+                cache_status="hit",
+                cache_reason="exact-match",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=0.02,
+                latency_ms=170 + index,
+                cache_extra=replay_meta(
+                    candidate_id="openai-cache-provider-adoption-risk",
+                    rule_id="openai-cache-provider-adoption-risk-rule",
+                    canary_status="applied",
+                    cohort="canary_applied",
+                    projected=0.02,
+                    reason="dependency-stable",
+                ),
+            )
+            self._capture_openai_orphan_provider_adoption(call_id, tool_id=f"orphan_call_cache_{index}")
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.02,
+            cost_baseline=0.02,
+            latency_ms=170,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-provider-adoption-risk",
+                rule_id="openai-cache-provider-adoption-risk-rule",
+                canary_status="holdout",
+                cohort="canary_holdout",
+                projected=0.02,
+                reason="canary_holdout",
+            ),
+        )
+
+        for index in range(2):
+            self._log_openai_call(
+                cache_status="hit",
+                cache_reason="stale-risk-blockers",
+                cache_hit=1,
+                cost=0.0,
+                cost_baseline=0.02,
+                latency_ms=180 + index,
+                cache_extra={
+                    **replay_meta(
+                        candidate_id="openai-cache-stale-dependency",
+                        rule_id="openai-cache-stale-dependency-rule",
+                        canary_status="applied",
+                        cohort="canary_applied",
+                        projected=0.02,
+                        reason="stale-risk-blockers",
+                    ),
+                    "cache_replay_blocker_reasons": ["stale-risk-blockers"],
+                },
+            )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cost=0.02,
+            cost_baseline=0.02,
+            latency_ms=180,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-stale-dependency",
+                rule_id="openai-cache-stale-dependency-rule",
+                canary_status="holdout",
+                cohort="canary_holdout",
+                projected=0.02,
+                reason="canary_holdout",
+            ),
+        )
+
         raw_candidate = "raw-cache-key / request_id session secret"
         for index, status_code in enumerate((200, 500)):
             self._log_openai_call(
                 cache_status="hit",
                 cache_reason="exact-match",
                 cache_hit=1,
-                cost=0.0 if status_code == 200 else 0.02,
+                cost=0.0 if status_code == 200 else 0.05,
                 cost_baseline=0.02,
                 status_code=status_code,
                 retry_count=1 if status_code == 500 else 0,
@@ -549,19 +732,35 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
 
         self.assertEqual(report["schema"], "agentflow.openai_cache_replay_impact.v1")
         self.assertEqual(report["quality_gate"]["schema"], "agentflow.openai_cache_replay_quality_gate.v1")
-        self.assertEqual(report["summary"]["applied_count"], 4)
-        self.assertEqual(report["summary"]["holdout_count"], 2)
+        self.assertEqual(report["summary"]["applied_count"], 10)
+        self.assertEqual(report["summary"]["holdout_count"], 5)
         self.assertEqual(report["summary"]["blocked_count"], 1)
         self.assertEqual(report["summary"]["invalidated_count"], 1)
         self.assertEqual(report["summary"]["safety_stop_count"], 1)
         by_verdict = {row["verdict"]: row for row in report["candidates"]}
-        self.assertEqual(by_verdict["promote"]["candidate_id"], "openai-cache-promote")
-        self.assertEqual(by_verdict["promote"]["cohort_metrics"]["applied"]["cache_hit_rate"], 1.0)
-        self.assertAlmostEqual(by_verdict["promote"]["observed_savings_usd"], 0.07)
+        self.assertEqual(by_verdict["widen"]["candidate_id"], "openai-cache-promote")
+        self.assertEqual(by_verdict["widen"]["cohort_metrics"]["applied"]["cache_hit_rate"], 1.0)
+        self.assertAlmostEqual(by_verdict["widen"]["observed_savings_usd"], 0.07)
+        self.assertEqual(by_verdict["widen"]["provider_adoption_gate"]["status"], "passed")
+        self.assertIn("hold", by_verdict)
+        self.assertTrue(
+            any("stale-dependency-blocker" in row["reason_codes"] for row in report["candidates"]),
+            report["candidates"],
+        )
+        self.assertTrue(
+            any("retry-rate-regression" in row["reason_codes"] for row in report["candidates"]),
+            report["candidates"],
+        )
+        self.assertTrue(
+            any("provider-adoption-regression" in row["reason_codes"] for row in report["candidates"]),
+            report["candidates"],
+        )
         self.assertIn("rollback-error-rate", by_verdict["rollback"]["reason_codes"])
+        self.assertIn("negative-observed-savings", by_verdict["rollback"]["reason_codes"])
         self.assertIn("safety-stop-observed", by_verdict["rollback"]["reason_codes"])
         self.assertIn("invalidation-rate-above-threshold", by_verdict["rollback"]["reason_codes"])
         self.assertTrue(by_verdict["rollback"]["candidate_id"].startswith("candidate-id:"))
+        self.assertFalse(by_verdict["widen"]["privacy"]["cache_keys_included"])
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["raw_request_bodies_included"])
         self.assertFalse(report["privacy"]["raw_responses_included"])
@@ -604,6 +803,11 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertNotIn("raw response must not leak", rendered)
         self.assertNotIn("raw-cache-key-secret", rendered)
         self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+        self.assertNotIn("secret tool payload", rendered)
+        self.assertNotIn("orphan secret tool payload", rendered)
+        self.assertNotIn("/tmp/private.py", rendered)
+        self.assertNotIn("call_cache_widen_", rendered)
+        self.assertNotIn("orphan_call_cache_", rendered)
         self.assertNotIn(raw_candidate, rendered)
         self.assertNotIn("raw-rule-id / cache key", rendered)
         self.assertNotIn("sha256:" + "a" * 64, rendered)
@@ -672,8 +876,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "raw_cache_metadata": "raw-cache-key-secret req-secret-must-not-leak",
             }
 
-        for baseline in (0.03, 0.04):
-            self._log_openai_call(
+        for index, baseline in enumerate((0.03, 0.04)):
+            call_id = self._log_openai_call(
                 cache_status="hit",
                 cache_reason="exact-match",
                 cache_hit=1,
@@ -688,7 +892,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                     reason="dependency-stable",
                 ),
             )
-        self._log_openai_call(
+            self._capture_openai_provider_adoption(call_id, tool_id=f"call_cache_apply_{index}")
+        call_id = self._log_openai_call(
             cache_status="bypassed",
             cache_reason="canary_holdout",
             cost=0.03,
@@ -927,8 +1132,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 "estimated_saved_cost_usd": projected,
             }
 
-        for baseline in (0.03, 0.04):
-            self._log_openai_call(
+        for index, baseline in enumerate((0.03, 0.04)):
+            call_id = self._log_openai_call(
                 cache_status="hit",
                 cache_reason="exact-match",
                 cache_hit=1,
@@ -943,7 +1148,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                     reason="dependency-stable",
                 ),
             )
-        self._log_openai_call(
+            self._capture_openai_provider_adoption(call_id, tool_id=f"call_cache_apply_{index}")
+        call_id = self._log_openai_call(
             cache_status="bypassed",
             cache_reason="canary_holdout",
             cost=0.03,
@@ -957,6 +1163,7 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                 reason="canary_holdout",
             ),
         )
+        self._capture_openai_provider_adoption(call_id, tool_id="call_cache_apply_holdout")
 
         plan = build_openai_cache_replay_apply_plan(
             self.store,

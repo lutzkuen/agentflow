@@ -21,7 +21,7 @@ PLAN_SCHEMA = "agentflow.openai_cache_replay_apply_plan.v1"
 POLICY_SCHEMA = "agentflow.openai_cache_replay_canary_policy.v1"
 CACHE_CANARY_POLICY_FILE = "cache_canary_policy.yaml"
 
-_READY_VERDICTS = {"promote", "ready"}
+_READY_VERDICTS = {"widen", "promote", "ready"}
 _PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 
 

@@ -516,6 +516,40 @@ def _strip_model_incompatible_params(body: dict[str, Any], routing_meta: dict[st
         routing_meta["stripped_params"] = stripped
 
 
+def _cache_key_variants_for_models(
+    body: dict[str, Any],
+    path: str,
+    *,
+    provider: str,
+    upstream: str,
+    replay_scope: str | None,
+    replay_scope_id: str | None,
+    requested_model: str | None,
+) -> list[tuple[str, dict[str, Any]]]:
+    variants: list[tuple[str, dict[str, Any]]] = []
+
+    def add_variant(candidate: dict[str, Any]) -> None:
+        key = cache_key_for(
+            candidate,
+            path,
+            provider=provider,
+            upstream=upstream,
+            replay_scope=replay_scope,
+            replay_scope_id=replay_scope_id,
+        )
+        if all(existing_key != key for existing_key, _ in variants):
+            variants.append((key, candidate))
+
+    add_variant(body)
+    requested = str(requested_model or "").strip()
+    current = str(body.get("model") or "").strip()
+    if requested and current and requested != current:
+        requested_body = copy.deepcopy(body)
+        requested_body["model"] = requested
+        add_variant(requested_body)
+    return variants
+
+
 _ANTHROPIC_THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
 
 
@@ -1198,14 +1232,18 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             if replay_pattern_rule is not None:
                 cache_meta["replay_scope"] = replay_scope
                 cache_meta["replay_scope_id_available"] = bool(replay_scope_id)
-            key = cache_key_for(
+            stream_cache_key_variants = _cache_key_variants_for_models(
                 crunched,
                 path,
                 provider="anthropic",
                 upstream=context.anthropic_upstream,
                 replay_scope=replay_scope,
                 replay_scope_id=replay_scope_id,
+                requested_model=requested_model,
             )
+            key = stream_cache_key_variants[0][0]
+            if len(stream_cache_key_variants) > 1:
+                cache_meta["cache_key_variant_count"] = len(stream_cache_key_variants)
             if can_stream_cache:
                 replay_allowed = True
                 if replay_pattern_rule is not None:
@@ -1226,7 +1264,13 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             context.store.delete_cache(key)
                 cached = None
             if can_stream_cache:
-                cached, invalidated_reason = context.store.get_cache_with_reason(key)
+                cached = None
+                invalidated_reason = None
+                for lookup_key, _lookup_body in stream_cache_key_variants:
+                    cached, invalidated_reason = context.store.get_cache_with_reason(lookup_key)
+                    if cached is not None or invalidated_reason:
+                        key = lookup_key
+                        break
                 if invalidated_reason:
                     cache_meta["reason"] = invalidated_reason
                     cache_meta["invalidated"] = True
@@ -1458,18 +1502,20 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             "cache_read_input_tokens": cache_read_in,
                             "thinking_output_tokens": thinking_chars // TOKEN_CHARS if thinking_chars else None,
                         }
-                        context.store.set_cache(
-                            key,
-                            str(crunched.get("model")),
-                            len(stable_json(crunched)),
-                            stream_cache_payload(
-                                stream_frames,
-                                provider="anthropic",
-                                usage=stream_usage,
-                                output_text="".join(output_text_parts),
-                            ),
-                            file_deps=file_deps,
-                    )
+                        stream_payload = stream_cache_payload(
+                            stream_frames,
+                            provider="anthropic",
+                            usage=stream_usage,
+                            output_text="".join(output_text_parts),
+                        )
+                        for store_key, store_body in stream_cache_key_variants:
+                            context.store.set_cache(
+                                store_key,
+                                str(store_body.get("model")),
+                                len(stable_json(store_body)),
+                                stream_payload,
+                                file_deps=file_deps,
+                            )
                     thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
                     experiment_meta = routing_meta.get("routing_experiment")
                     if (

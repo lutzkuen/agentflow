@@ -33,6 +33,17 @@ DEFAULT_ROLLBACK_ERROR_RATE = 0.20
 DEFAULT_MIN_SAVINGS_REALIZATION_RATIO = 0.50
 DEFAULT_MAX_EVIDENCE_AGE_HOURS = 72.0
 
+STALE_DEPENDENCY_REASONS = {
+    "dependency-cap-exceeded",
+    "dependency-missing",
+    "file-dependency-changed",
+    "file-dependency-evidence-absent",
+    "file-dependency-invalidated",
+    "file-dependency-missing",
+    "file-watch-disabled",
+    "stale-risk-blockers",
+}
+
 _PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 _RAW_ID_HINT_RE = re.compile(
     r"[/\\]|\s|raw|secret|token|cache[-_]?key|request[-_]?id|session[-_]?id|thread[-_]?id|sha256:[0-9a-f]{32,}",
@@ -203,6 +214,7 @@ def _empty_cohort() -> dict[str, Any]:
         "projected_savings_usd": 0.0,
         "cache_hit_count": 0,
         "invalidation_count": 0,
+        "stale_dependency_count": 0,
     }
 
 
@@ -220,11 +232,13 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "retry_rate": round(_as_int(raw.get("retry_rows")) / count, 6) if count else 0.0,
         "cache_hit_rate": round(_as_int(raw.get("cache_hit_count")) / count, 6) if count else 0.0,
         "invalidation_rate": round(_as_int(raw.get("invalidation_count")) / count, 6) if count else 0.0,
+        "stale_dependency_rate": round(_as_int(raw.get("stale_dependency_count")) / count, 6) if count else 0.0,
         "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
         "cost_est_usd": round(_as_float(raw.get("cost_est_usd")), 8),
         "cost_baseline_usd": round(_as_float(raw.get("cost_baseline_usd")), 8),
         "observed_savings_usd": round(_as_float(raw.get("observed_savings_usd")), 8),
         "projected_savings_usd": round(_as_float(raw.get("projected_savings_usd")), 8),
+        "stale_dependency_count": _as_int(raw.get("stale_dependency_count")),
     }
 
 
@@ -250,6 +264,8 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
         "workflow_phase_buckets": Counter(),
         "cache_decision_buckets": Counter(),
         "invalidation_reason_buckets": Counter(),
+        "dependency_health_buckets": Counter(),
+        "stale_dependency_buckets": Counter(),
         "reason_buckets": Counter(),
         "provider_adoption_observations": [],
         "latest_observed_at": None,
@@ -280,6 +296,30 @@ def _observed_savings(cache: dict[str, Any], row: dict[str, Any], cohort: str) -
     if baseline or actual:
         return baseline - actual
     return _as_float(cache.get("estimated_saved_cost_usd"))
+
+
+def _dependency_health(cache: dict[str, Any]) -> tuple[str, list[str]]:
+    blockers: set[str] = set()
+    for value in cache.get("cache_replay_blocker_reasons") or []:
+        blockers.add(_reason_code(value))
+    for key in ("reason", "invalidation_reason"):
+        value = cache.get(key)
+        if value:
+            blockers.add(_reason_code(value))
+    audit = cache.get("file_dependency_audit") if isinstance(cache.get("file_dependency_audit"), dict) else {}
+    if audit.get("invalidation_reason"):
+        blockers.add(_reason_code(audit.get("invalidation_reason")))
+    if audit and not audit.get("file_dependency_evidence_available") and not audit.get("safe_invalidation_evidence"):
+        blockers.add("file-dependency-missing")
+
+    stale = sorted(reason for reason in blockers if reason in STALE_DEPENDENCY_REASONS or "stale-risk" in reason)
+    if stale:
+        return "stale-risk", stale
+    if cache.get("invalidated") or cache.get("invalidation_reason"):
+        return "invalidated", sorted(blockers)
+    if audit.get("safe_invalidation_evidence") or cache.get("safe_invalidation_evidence"):
+        return "fresh", []
+    return "unknown", []
 
 
 def _call_rows(store_obj: Any, *, limit: int, since: str | None) -> list[dict[str, Any]]:
@@ -338,12 +378,18 @@ def _add_row(
         raw["cache_hit_count"] += 1
     if cohort == "invalidated" or cache.get("invalidated") or cache.get("invalidation_reason"):
         raw["invalidation_count"] += 1
+    dependency_status, stale_dependency_reasons = _dependency_health(cache)
+    if stale_dependency_reasons:
+        raw["stale_dependency_count"] += 1
 
     candidate["status_buckets"][_status_bucket(row.get("status_code"))] += 1
     candidate["endpoint_buckets"][_reason_code(row.get("endpoint") or row.get("source_surface"), "unknown")] += 1
     candidate["category_buckets"][_reason_code(row.get("category"), "unknown")] += 1
     candidate["workflow_phase_buckets"][_reason_code(candidate.get("workflow_phase"), "unknown")] += 1
     candidate["cache_decision_buckets"][_reason_code(f"{cache.get('status') or 'unknown'}:{cache.get('reason') or 'unknown'}")] += 1
+    candidate["dependency_health_buckets"][dependency_status] += 1
+    for reason in stale_dependency_reasons:
+        candidate["stale_dependency_buckets"][reason] += 1
     candidate["reason_buckets"][_reason_code(cache.get("reason") or canary.get("reason"), "unknown")] += 1
     if cache.get("invalidation_reason"):
         candidate["invalidation_reason_buckets"][_reason_code(cache.get("invalidation_reason"))] += 1
@@ -385,7 +431,7 @@ def _decide_gate(
     if _as_int(holdout.get("count")) < _as_int(thresholds["min_holdout_samples"]):
         reason_codes.append("insufficient-holdout-samples")
     if reason_codes:
-        return {"verdict": "need-more-samples", "reason_codes": reason_codes, "warning_codes": warning_codes}
+        return {"verdict": "more-samples", "reason_codes": reason_codes, "warning_codes": warning_codes}
 
     if _as_int(cohorts["safety_stop"].get("count")):
         reason_codes.append("safety-stop-observed")
@@ -400,6 +446,8 @@ def _decide_gate(
 
     if stale.get("stale"):
         reason_codes.append("stale-evidence")
+    if any(_as_int(cohort.get("stale_dependency_count")) for cohort in cohorts.values()):
+        reason_codes.append("stale-dependency-blocker")
     if _as_float(applied.get("error_rate")) > _as_float(thresholds["max_error_rate"]):
         reason_codes.append("applied-error-rate-above-threshold")
     if _as_float(deltas.get("applied_minus_holdout_error_rate")) > _as_float(thresholds["max_error_rate_delta"]):
@@ -425,7 +473,7 @@ def _decide_gate(
 
     if reason_codes:
         return {"verdict": "hold", "reason_codes": sorted(set(reason_codes)), "warning_codes": sorted(set(warning_codes))}
-    return {"verdict": "promote", "reason_codes": ["target-savings-met"], "warning_codes": sorted(set(warning_codes))}
+    return {"verdict": "widen", "reason_codes": ["target-savings-met"], "warning_codes": sorted(set(warning_codes))}
 
 
 def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds: dict[str, Any]) -> dict[str, Any]:
@@ -453,6 +501,8 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
             for key, value in thresholds.items()
             if key.startswith("min_provider_adoption") or key.startswith("max_applied")
         },
+        block_on_missing=True,
+        block_on_insufficient=True,
     )
     gate = _decide_gate(
         cohorts=cohorts,
@@ -485,6 +535,8 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "workflow_phase_breakdown": _counter_rows(candidate["workflow_phase_buckets"]),
         "cache_decision_breakdown": _counter_rows(candidate["cache_decision_buckets"]),
         "invalidation_reason_breakdown": _counter_rows(candidate["invalidation_reason_buckets"]),
+        "dependency_health_breakdown": _counter_rows(candidate["dependency_health_buckets"]),
+        "stale_dependency_breakdown": _counter_rows(candidate["stale_dependency_buckets"]),
         "reason_code_breakdown": _counter_rows(candidate["reason_buckets"]),
         "canary": candidate.get("canary") or {"pattern_hashes_included": False},
         "oldest_observed_at": candidate.get("oldest_observed_at"),
@@ -496,10 +548,10 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "reason_codes": gate["reason_codes"],
         "warning_codes": gate["warning_codes"],
         "next_action": {
-            "promote": "consider_widening_local_openai_cache_replay_rule",
+            "widen": "widen_local_openai_cache_replay_rule",
             "hold": "keep_current_openai_cache_replay_fraction",
             "rollback": "rollback_or_disable_openai_cache_replay_rule",
-            "need-more-samples": "collect_more_applied_and_holdout_cache_replay_evidence",
+            "more-samples": "collect_more_applied_and_holdout_cache_replay_evidence",
         }[gate["verdict"]],
         "privacy": _privacy_summary(),
     }

@@ -258,9 +258,9 @@ def _impact_candidate_rows(impact: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         verdict = str(item.get("verdict") or "unknown")
-        if verdict == "promote" and _as_float(item.get("observed_savings_usd")) > 0:
+        if verdict in {"widen", "promote"} and _as_float(item.get("observed_savings_usd")) > 0:
             readiness = "saving"
-        elif verdict in {"promote", "need-more-samples"}:
+        elif verdict in {"widen", "promote", "more-samples", "need-more-samples"}:
             readiness = "canarying"
         elif verdict == "rollback":
             readiness = "blocked"
