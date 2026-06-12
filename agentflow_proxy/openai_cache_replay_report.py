@@ -205,8 +205,14 @@ def _sanitized_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
             "snapshot_count": _as_int(audit.get("snapshot_count")),
             "snapshot_count_bucket": str(audit.get("snapshot_count_bucket") or "unknown"),
             "candidate_path_count_bucket": str(audit.get("candidate_path_count_bucket") or "unknown"),
+            "raw_candidate_path_count_bucket": str(audit.get("raw_candidate_path_count_bucket") or "unknown"),
+            "distinct_candidate_path_count_bucket": str(
+                audit.get("distinct_candidate_path_count_bucket") or audit.get("candidate_path_count_bucket") or "unknown"
+            ),
             "max_paths": audit.get("max_paths"),
             "cap_exceeded": bool(audit.get("cap_exceeded")),
+            "cap_trimmed": bool(audit.get("cap_trimmed")),
+            "dependency_capture_reason": audit.get("dependency_capture_reason"),
             "present_path_count": _as_int(audit.get("present_path_count")),
             "missing_path_count": _as_int(audit.get("missing_path_count")),
             "changed_path_count": _as_int(audit.get("changed_path_count")),
@@ -226,8 +232,12 @@ def _sanitized_dependency_audit(cache: dict[str, Any]) -> dict[str, Any]:
         "snapshot_count": _as_int(cache.get("file_dependency_count")),
         "snapshot_count_bucket": "unknown",
         "candidate_path_count_bucket": "unknown",
+        "raw_candidate_path_count_bucket": "unknown",
+        "distinct_candidate_path_count_bucket": "unknown",
         "max_paths": None,
         "cap_exceeded": False,
+        "cap_trimmed": False,
+        "dependency_capture_reason": "complete" if evidence else "file-dependency-missing",
         "present_path_count": _as_int(cache.get("file_dependency_count")),
         "missing_path_count": 0,
         "changed_path_count": 0,
@@ -342,6 +352,11 @@ def _merge_audit(left: dict[str, Any] | None, right: dict[str, Any]) -> dict[str
     ):
         merged[key] = _as_int(merged.get(key)) + _as_int(right.get(key))
     merged["cap_exceeded"] = bool(merged.get("cap_exceeded") or right.get("cap_exceeded"))
+    merged["cap_trimmed"] = bool(merged.get("cap_trimmed") or right.get("cap_trimmed"))
+    if merged["cap_exceeded"]:
+        merged["dependency_capture_reason"] = "dependency-cap-exceeded"
+    elif merged["cap_trimmed"]:
+        merged["dependency_capture_reason"] = "dependency-cap-trimmed"
     merged["safe_invalidation_evidence"] = bool(
         merged.get("safe_invalidation_evidence") or right.get("safe_invalidation_evidence")
     )

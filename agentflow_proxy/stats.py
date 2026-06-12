@@ -5208,8 +5208,14 @@ def _cache_file_dependency_audit_from_cache(cache: dict[str, Any]) -> dict[str, 
             "snapshot_count": _as_int(audit.get("snapshot_count")),
             "snapshot_count_bucket": str(audit.get("snapshot_count_bucket") or _size_bucket(audit.get("snapshot_count"))),
             "candidate_path_count_bucket": str(audit.get("candidate_path_count_bucket") or "unknown"),
+            "raw_candidate_path_count_bucket": str(audit.get("raw_candidate_path_count_bucket") or "unknown"),
+            "distinct_candidate_path_count_bucket": str(
+                audit.get("distinct_candidate_path_count_bucket") or audit.get("candidate_path_count_bucket") or "unknown"
+            ),
             "max_paths": audit.get("max_paths"),
             "cap_exceeded": bool(audit.get("cap_exceeded")),
+            "cap_trimmed": bool(audit.get("cap_trimmed")),
+            "dependency_capture_reason": audit.get("dependency_capture_reason"),
             "present_path_count": _as_int(audit.get("present_path_count")),
             "missing_path_count": _as_int(audit.get("missing_path_count")),
             "changed_path_count": _as_int(audit.get("changed_path_count")),
@@ -5233,8 +5239,12 @@ def _cache_file_dependency_audit_from_cache(cache: dict[str, Any]) -> dict[str, 
         "snapshot_count": count,
         "snapshot_count_bucket": _size_bucket(count),
         "candidate_path_count_bucket": _size_bucket(count),
+        "raw_candidate_path_count_bucket": _size_bucket(count),
+        "distinct_candidate_path_count_bucket": _size_bucket(count),
         "max_paths": None,
         "cap_exceeded": False,
+        "cap_trimmed": False,
+        "dependency_capture_reason": "complete",
         "present_path_count": count,
         "missing_path_count": 0,
         "changed_path_count": 1 if reason in {"dependency-changed", "file-dependency-changed"} else 0,
@@ -5437,6 +5447,16 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
                 "deleted_path_count": _as_int(existing_audit.get("deleted_path_count")) + _as_int(unit_audit.get("deleted_path_count")),
                 "created_path_count": _as_int(existing_audit.get("created_path_count")) + _as_int(unit_audit.get("created_path_count")),
                 "cap_exceeded": bool(existing_audit.get("cap_exceeded") or unit_audit.get("cap_exceeded")),
+                "cap_trimmed": bool(existing_audit.get("cap_trimmed") or unit_audit.get("cap_trimmed")),
+                "dependency_capture_reason": (
+                    "dependency-cap-exceeded"
+                    if bool(existing_audit.get("cap_exceeded") or unit_audit.get("cap_exceeded"))
+                    else (
+                        "dependency-cap-trimmed"
+                        if bool(existing_audit.get("cap_trimmed") or unit_audit.get("cap_trimmed"))
+                        else unit_audit.get("dependency_capture_reason")
+                    )
+                ),
                 "safe_invalidation_evidence": bool(
                     existing_audit.get("safe_invalidation_evidence") or unit_audit.get("safe_invalidation_evidence")
                 ),

@@ -611,11 +611,116 @@ pattern_rules:
             })
 
         self.assertTrue(audit["cap_exceeded"])
+        self.assertFalse(audit["cap_trimmed"])
         self.assertEqual(audit["invalidation_reason"], "dependency-cap-exceeded")
+        self.assertEqual(audit["dependency_capture_reason"], "dependency-cap-exceeded")
         self.assertEqual(audit["snapshot_count"], 1)
         self.assertEqual(len(snapshots), 1)
         self.assertFalse(audit["paths_included"])
         self.assertNotIn("a.txt", json.dumps(audit))
+
+    def test_tool_result_dependency_capture_dedupes_repeated_mentions_before_cap(self):
+        os.environ["AGENTFLOW_CACHE_WATCH_MAX_PATHS"] = "3"
+        compact = importlib.reload(cache_module)
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            (tmp_path / "src" / "util.py").write_text("VALUE = 1\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            repeated = "\n".join(
+                f"line {idx}: ./src/app.py:1 ./src/util.py:2 progress {idx}/100"
+                for idx in range(80)
+            )
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": repeated}],
+                    }
+                ],
+            }
+
+            snapshots = compact.cache_file_dependency_snapshots(body)
+            audit = compact.cache_file_dependency_audit(body)
+
+        self.assertEqual(audit["snapshot_count"], 2)
+        self.assertEqual(len(snapshots), 2)
+        self.assertFalse(audit["cap_exceeded"])
+        self.assertTrue(audit["cap_trimmed"])
+        self.assertIsNone(audit["invalidation_reason"])
+        self.assertEqual(audit["dependency_capture_reason"], "dependency-cap-trimmed")
+        self.assertEqual(audit["distinct_candidate_path_count_bucket"], "2_5")
+        self.assertEqual(audit["raw_candidate_path_count_bucket"], "128_plus")
+        self.assertTrue(audit["safe_invalidation_evidence"])
+        self.assertTrue(audit["file_dependency_evidence_available"])
+        rendered = json.dumps(audit, sort_keys=True)
+        self.assertNotIn("src/app.py", rendered)
+        self.assertNotIn("src/util.py", rendered)
+        self.assertNotIn(str(tmp_path), rendered)
+
+    def test_tool_result_dependency_capture_ignores_noisy_shell_fragments(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "pytest 42/100 [====] 3/7 ok https://example.test/a/b ./src/main.py:9",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            snapshots = cache_module.cache_file_dependency_snapshots(body)
+            audit = cache_module.cache_file_dependency_audit(body)
+
+        self.assertEqual(audit["snapshot_count"], 1)
+        self.assertEqual(len(snapshots), 1)
+        self.assertFalse(audit["cap_exceeded"])
+        self.assertFalse(audit["cap_trimmed"])
+        self.assertEqual(audit["dependency_capture_reason"], "complete")
+        self.assertTrue(audit["safe_invalidation_evidence"])
+
+    def test_tool_result_dependency_capture_fails_closed_for_deleted_paths_without_leaking_names(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "src").mkdir()
+            (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+            os.chdir(tmp_path)
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "cat ./src/main.py ./src/deleted.py",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            audit = cache_module.cache_file_dependency_audit(body)
+
+        self.assertEqual(audit["snapshot_count"], 2)
+        self.assertEqual(audit["invalidation_reason"], "dependency-missing")
+        self.assertEqual(audit["dependency_capture_reason"], "complete")
+        self.assertFalse(audit["safe_invalidation_evidence"])
+        self.assertFalse(audit["paths_included"])
+        rendered = json.dumps(audit, sort_keys=True)
+        self.assertNotIn("deleted.py", rendered)
+        self.assertNotIn("main.py", rendered)
 
     def test_file_dependency_fingerprint_metadata_omits_raw_paths_and_records_blockers(self):
         with TemporaryDirectory() as tmp:

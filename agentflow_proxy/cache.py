@@ -769,7 +769,11 @@ def cache_replay_canary_decision(
                 "reason": current_audit.get("invalidation_reason") or "file-dependency-missing",
                 "snapshot_count_bucket": current_audit.get("snapshot_count_bucket"),
                 "candidate_path_count_bucket": current_audit.get("candidate_path_count_bucket"),
+                "raw_candidate_path_count_bucket": current_audit.get("raw_candidate_path_count_bucket"),
+                "distinct_candidate_path_count_bucket": current_audit.get("distinct_candidate_path_count_bucket"),
                 "cap_exceeded": bool(current_audit.get("cap_exceeded")),
+                "cap_trimmed": bool(current_audit.get("cap_trimmed")),
+                "dependency_capture_reason": current_audit.get("dependency_capture_reason"),
                 "paths_included": False,
             },
         })
@@ -1024,6 +1028,7 @@ def _cache_replay_public_id(value: Any, kind: str) -> str | None:
 
 _PATH_TRAILING_JUNK = ".,;:)\\]}>\"'"
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_NUMERIC_PATH_FRAGMENT_RE = re.compile(r"^[+-]?\d+(?:\.\d+)?(?:/[+-]?\d+(?:\.\d+)?)+$")
 
 
 def _walk_strings(value: Any) -> list[str]:
@@ -1037,6 +1042,23 @@ def _walk_strings(value: Any) -> list[str]:
         for item in value:
             strings.extend(_walk_strings(item))
     return strings
+
+
+def _obvious_non_path_fragment(token: str) -> bool:
+    normalized = token.replace("\\", "/")
+    if _NUMERIC_PATH_FRAGMENT_RE.match(normalized):
+        return True
+    segments = [segment for segment in normalized.split("/") if segment and segment not in {".", "..", "~"}]
+    if not segments:
+        return True
+    if (
+        not token.startswith(("/", "./", "../", "~/"))
+        and _WINDOWS_DRIVE_RE.match(token) is None
+        and not any(char.isalpha() for char in normalized)
+        and "." not in normalized
+    ):
+        return True
+    return False
 
 
 def _candidate_path_tokens(text: str) -> list[str]:
@@ -1060,7 +1082,7 @@ def _candidate_path_tokens(text: str) -> list[str]:
             or "/" in token
             or "\\" in token
         )
-        if path_like:
+        if path_like and not _obvious_non_path_fragment(token):
             tokens.append(token)
     return tokens
 
@@ -1097,10 +1119,11 @@ def _cache_file_dependency_scan(
     watch_root = (expanded_root or Path.cwd()).resolve(strict=False)
     limit = max(0, CACHE_FILE_WATCH_MAX_PATHS if max_paths is None else int(max_paths))
     paths: dict[str, Path] = {}
-    candidate_count = 0
+    raw_candidate_count = 0
     seen: set[str] = set()
     for text in _walk_strings(body):
         for token in _candidate_path_tokens(text):
+            raw_candidate_count += 1
             resolved = _resolve_under_root(token, watch_root)
             if resolved is None:
                 continue
@@ -1108,7 +1131,6 @@ def _cache_file_dependency_scan(
             if resolved_key in seen:
                 continue
             seen.add(resolved_key)
-            candidate_count += 1
             if len(paths) < limit:
                 paths[resolved_key] = resolved
 
@@ -1130,7 +1152,8 @@ def _cache_file_dependency_scan(
     audit = cache_file_dependency_audit(
         snapshots=snapshots,
         enabled=CACHE_FILE_WATCH_ENABLED,
-        candidate_count=candidate_count,
+        candidate_count=len(seen),
+        raw_candidate_count=raw_candidate_count,
         max_paths=limit,
         root=watch_root,
     )
@@ -1223,9 +1246,15 @@ def cache_file_dependency_fingerprint(
         "snapshot_count": int(audit.get("snapshot_count") or len(normalized)),
         "snapshot_count_bucket": str(audit.get("snapshot_count_bucket") or _dependency_count_bucket(len(normalized))),
         "candidate_path_count_bucket": str(audit.get("candidate_path_count_bucket") or "unknown"),
+        "raw_candidate_path_count_bucket": str(audit.get("raw_candidate_path_count_bucket") or "unknown"),
+        "distinct_candidate_path_count_bucket": str(
+            audit.get("distinct_candidate_path_count_bucket") or audit.get("candidate_path_count_bucket") or "unknown"
+        ),
         "safe_invalidation_evidence": bool(audit.get("safe_invalidation_evidence")),
         "file_dependency_evidence_available": bool(audit.get("file_dependency_evidence_available")),
         "invalidation_reason": audit.get("invalidation_reason"),
+        "cap_trimmed": bool(audit.get("cap_trimmed")),
+        "dependency_capture_reason": audit.get("dependency_capture_reason"),
         "paths_included": False,
         "path_hashes_included": False,
         "raw_stat_values_included": False,
@@ -1270,6 +1299,7 @@ def cache_file_dependency_audit(
     snapshots: list[dict[str, Any]] | None = None,
     enabled: bool | None = None,
     candidate_count: int | None = None,
+    raw_candidate_count: int | None = None,
     max_paths: int | None = None,
     root: str | Path | None = None,
 ) -> dict[str, Any]:
@@ -1288,7 +1318,9 @@ def cache_file_dependency_audit(
             snapshots = _cache_workspace_scan(root=watch_root, max_paths=limit)
     snapshot_count = len(snapshots or [])
     candidate_total = snapshot_count if candidate_count is None else max(0, int(candidate_count))
+    raw_candidate_total = candidate_total if raw_candidate_count is None else max(0, int(raw_candidate_count))
     cap_exceeded = candidate_total > limit
+    cap_trimmed = bool(raw_candidate_total > limit and not cap_exceeded)
     missing_count = sum(1 for dep in snapshots or [] if not bool(dep.get("exists")))
     present_count = snapshot_count - missing_count
     safe = bool(watch_enabled and snapshot_count > 0 and not cap_exceeded and missing_count == 0)
@@ -1301,6 +1333,11 @@ def cache_file_dependency_audit(
         reason = "file-dependency-missing"
     elif missing_count:
         reason = "dependency-missing"
+    capture_reason = "complete"
+    if cap_exceeded:
+        capture_reason = "dependency-cap-exceeded"
+    elif cap_trimmed:
+        capture_reason = "dependency-cap-trimmed"
     return {
         "schema": "agentflow.cache_file_dependency_audit.v1",
         "file_watch_enabled": bool(watch_enabled),
@@ -1309,8 +1346,12 @@ def cache_file_dependency_audit(
         "snapshot_count": snapshot_count,
         "snapshot_count_bucket": _dependency_count_bucket(snapshot_count),
         "candidate_path_count_bucket": _dependency_count_bucket(candidate_total),
+        "raw_candidate_path_count_bucket": _dependency_count_bucket(raw_candidate_total),
+        "distinct_candidate_path_count_bucket": _dependency_count_bucket(candidate_total),
         "max_paths": limit,
         "cap_exceeded": bool(cap_exceeded),
+        "cap_trimmed": bool(cap_trimmed),
+        "dependency_capture_reason": capture_reason,
         "present_path_count": present_count,
         "missing_path_count": missing_count,
         "changed_path_count": 0,
