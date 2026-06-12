@@ -291,6 +291,10 @@ def create_dashboard_router(
     async def stats_optimization_eval_queue(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_eval_queue(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/optimization-coordinator")
+    async def stats_optimization_coordinator(limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_optimization_coordinator_dashboard(_store(store_obj), limit=limit)
+
     @router.get("/agentflow/stats/optimization-promotion-funnel")
     async def stats_optimization_promotion_funnel(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_promotion_funnel(_store(store_obj), limit=limit)

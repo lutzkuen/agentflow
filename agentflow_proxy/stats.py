@@ -1821,6 +1821,10 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def _money(value: Any) -> float:
+    return round(_as_float(value), 8)
+
+
 def estimate_tokens_from_text_chars(chars: Any) -> int:
     char_count = max(_as_int(chars), 0)
     if char_count <= 0:
@@ -16685,6 +16689,316 @@ async def stats_sessions(store_obj: Any) -> dict[str, Any]:
     }
 
 
+_COORDINATOR_STALE_OR_MISSING_EVIDENCE = {
+    "missing-evidence",
+    "missing-lifecycle-evidence",
+    "missing-canary-evidence",
+    "missing-dependency-evidence",
+    "missing-dependency-freshness-evidence",
+    "stale-evidence",
+    "stale-lifecycle-evidence",
+    "stale-canary-evidence",
+    "aggregate-only-evidence",
+    "insufficient-evidence",
+}
+_COORDINATOR_SAFETY_REASONS = {
+    "rollback",
+    "rollback-required",
+    "safety-stop",
+    "safety-stop-tripped",
+    "safety-stopped",
+    "safety-regression",
+    "quality-regression",
+    "safety-stop-priority",
+}
+
+
+def _increment_count(counts: dict[str, int], key: Any, amount: int = 1) -> None:
+    label = public_label(key, "unknown")
+    counts[label] = counts.get(label, 0) + amount
+
+
+def _increment_tuple_count(counts: dict[tuple[str, ...], int], key: tuple[Any, ...], amount: int = 1) -> None:
+    labels = tuple(public_label(item, "unknown") for item in key)
+    counts[labels] = counts.get(labels, 0) + amount
+
+
+def _tuple_breakdown(counts: dict[tuple[str, ...], int], names: tuple[str, ...], *, limit: int | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        row = {name: value for name, value in zip(names, key)}
+        row["count"] = count
+        rows.append(row)
+        if limit is not None and len(rows) >= limit:
+            break
+    return rows
+
+
+def _coordinator_report_privacy() -> dict[str, bool]:
+    return {
+        "metadata_only": True,
+        "read_only": True,
+        "raw_prompts_included": False,
+        "raw_responses_included": False,
+        "provider_bodies_included": False,
+        "raw_request_bodies_included": False,
+        "terminal_lines_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "tenant_ids_included": False,
+        "secrets_included": False,
+        "policy_file_contents_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "provider_body_changed": False,
+        "policy_files_changed": False,
+    }
+
+
+def _coordinator_meta_from_row(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    decision: dict[str, Any] = {}
+    enforcement: dict[str, Any] = {}
+    for key in ("routing_json", "crunch_json", "cache_json"):
+        meta = _json_obj(row.get(key))
+        if not decision and isinstance(meta.get("optimization_coordinator"), dict):
+            decision = meta["optimization_coordinator"]
+        if not enforcement and isinstance(meta.get("optimization_coordinator_enforcement"), dict):
+            enforcement = meta["optimization_coordinator_enforcement"]
+    return decision, enforcement
+
+
+def _coordinator_state(
+    *,
+    enforcement_enabled: bool,
+    runtime_decision_count: int,
+    rows_with_entries: int,
+    selected_count: int,
+    conflict_count: int,
+    safety_stop_count: int,
+    missing_metadata_count: int,
+) -> str:
+    if safety_stop_count > 0:
+        return "safety-stop"
+    if conflict_count > 0:
+        return "conflict-observed"
+    if selected_count > 0:
+        return "active-selection"
+    if runtime_decision_count == 0 and rows_with_entries > 0:
+        return "dry-run-only"
+    if not enforcement_enabled and runtime_decision_count == 0:
+        return "disabled"
+    if missing_metadata_count > 0:
+        return "missing-metadata"
+    return "no-coordinator-metadata"
+
+
+async def stats_optimization_coordinator_dashboard(store_obj: Any, *, limit: int = 1000) -> dict[str, Any]:
+    from agentflow_proxy.optimization_coordinator_dry_run import build_optimization_coordinator_dry_run
+    from agentflow_proxy.optimization_coordinator_enforcement import optimization_coordinator_enforcement_enabled
+
+    capped = max(1, min(int(limit or 1), 10_000))
+    dry_run = build_optimization_coordinator_dry_run(store_obj, limit=capped, examples=0)
+    rows = []
+    if hasattr(store_obj, "optimization_action_ledger_rows"):
+        rows = [dict(row) for row in store_obj.optimization_action_ledger_rows(limit=capped)]
+
+    selected_counts: dict[str, int] = {}
+    holdout_counts: dict[str, int] = {}
+    suppressed_counts: dict[str, int] = {}
+    reason_counts: dict[tuple[str, str], int] = {}
+    conflict_counts: dict[tuple[str, str, str], int] = {}
+    dimension_counts: dict[tuple[str, str, str, str, str, str], int] = {}
+    status_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    retry_bucket_counts: dict[str, int] = {}
+    savings_by_family: dict[str, float] = {}
+    cost_by_family: dict[str, float] = {}
+    safety_stop_count = 0
+    stale_or_missing_evidence_count = 0
+    selected_count = 0
+    conflict_count = 0
+    rows_with_errors = 0
+    sample_decisions: list[dict[str, Any]] = []
+
+    runtime_decision_count = 0
+    runtime_enforcement_count = 0
+    for index, row in enumerate(rows):
+        decision, enforcement = _coordinator_meta_from_row(row)
+        if not decision and not enforcement:
+            continue
+        if decision:
+            runtime_decision_count += 1
+        if enforcement:
+            runtime_enforcement_count += 1
+
+        selected_family = public_label(
+            decision.get("selected_action_family") or decision.get("selected_family") or enforcement.get("selected_family"),
+            "none",
+        )
+        _increment_count(selected_counts, selected_family)
+        if selected_family != "none":
+            selected_count += 1
+            row_savings = max(0.0, _as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")))
+            savings_by_family[selected_family] = savings_by_family.get(selected_family, 0.0) + row_savings
+            cost_by_family[selected_family] = cost_by_family.get(selected_family, 0.0) + _as_float(row.get("cost_est_usd"))
+
+        canary = decision.get("canary") if isinstance(decision.get("canary"), dict) else {}
+        cohort = public_label(canary.get("cohort"), "unknown")
+        _increment_count(cohort_counts, cohort)
+        if bool(canary.get("holdout")):
+            _increment_count(holdout_counts, selected_family)
+
+        status = public_label(enforcement.get("status") or "observed", "observed")
+        _increment_count(status_counts, status)
+        retry_count = _as_int(row.get("retry_count"))
+        retry_bucket = "0" if retry_count <= 0 else "1" if retry_count == 1 else "2" if retry_count == 2 else "gte_3"
+        _increment_count(retry_bucket_counts, retry_bucket)
+        if _as_int(row.get("status_code")) >= 400 or bool(row.get("error_present")):
+            rows_with_errors += 1
+
+        provider = public_label(row.get("provider") or decision.get("provider_family"), "unknown")
+        source_surface = public_label(row.get("source_surface") or decision.get("source_surface"), "unknown")
+        category = public_label(row.get("category") or decision.get("category"), "unknown")
+        phase = public_label(decision.get("phase"), "unknown")
+        public_session_bucket = public_label(decision.get("public_session_bucket"), "unknown")
+        _increment_tuple_count(
+            dimension_counts,
+            (provider, source_surface, category, phase, public_session_bucket, selected_family),
+        )
+
+        for item in decision.get("suppressed_families") or []:
+            if not isinstance(item, dict):
+                continue
+            family = public_label(item.get("family"), "unknown")
+            _increment_count(suppressed_counts, family)
+            reasons = item.get("reason_codes") if isinstance(item.get("reason_codes"), list) else []
+            if not reasons:
+                reasons = ["unknown"]
+            for raw_reason in reasons:
+                reason = public_label(raw_reason, "unknown")
+                _increment_tuple_count(reason_counts, (family, reason))
+                if reason == "conflicts-with-selected-family":
+                    conflict_count += 1
+                    _increment_tuple_count(conflict_counts, (selected_family, family, reason))
+                if reason in _COORDINATOR_STALE_OR_MISSING_EVIDENCE:
+                    stale_or_missing_evidence_count += 1
+                if reason in _COORDINATOR_SAFETY_REASONS:
+                    safety_stop_count += 1
+
+        decision_reasons = decision.get("reason_codes") if isinstance(decision.get("reason_codes"), list) else []
+        if any(public_label(reason, "unknown") in _COORDINATOR_SAFETY_REASONS for reason in decision_reasons):
+            safety_stop_count += 1
+        if selected_family in {"rollback", "safety-stop", "safety-stopped"}:
+            safety_stop_count += 1
+
+        if len(sample_decisions) < 10:
+            sample_decisions.append({
+                "example_id": public_id(
+                    {
+                        "index": index,
+                        "created_at": row.get("created_at"),
+                        "selected_family": selected_family,
+                        "cohort": cohort,
+                    },
+                    prefix="coordinator-row",
+                    fallback="coordinator-row",
+                ),
+                "created_at": row.get("created_at"),
+                "provider": provider,
+                "source_surface": source_surface,
+                "endpoint": public_label(row.get("endpoint") or decision.get("endpoint"), "unknown"),
+                "category": category,
+                "workflow_phase": phase,
+                "public_session_bucket": public_session_bucket,
+                "selected_family": selected_family,
+                "cohort": cohort,
+                "candidate_count": _as_int(decision.get("candidate_count")),
+                "suppressed_family_count": len(decision.get("suppressed_families") or []),
+                "status": status,
+            })
+
+    rows_with_entries = _as_int(dry_run.get("rows_with_ledger_entries"))
+    missing_metadata_count = max(0, rows_with_entries - runtime_decision_count)
+    enforcement_enabled = optimization_coordinator_enforcement_enabled()
+    state = _coordinator_state(
+        enforcement_enabled=enforcement_enabled,
+        runtime_decision_count=runtime_decision_count,
+        rows_with_entries=rows_with_entries,
+        selected_count=selected_count,
+        conflict_count=conflict_count,
+        safety_stop_count=safety_stop_count,
+        missing_metadata_count=missing_metadata_count,
+    )
+    observed_by_family = [
+        {
+            "family": family,
+            "observed_savings_usd_est": _money(amount),
+            "observed_cost_usd_est": _money(cost_by_family.get(family, 0.0)),
+        }
+        for family, amount in sorted(savings_by_family.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    runtime_error_rate = rows_with_errors / runtime_decision_count if runtime_decision_count else None
+    return {
+        "schema": "agentflow.optimization_coordinator_dashboard.v1",
+        "ok": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "state": state,
+        "summary": {
+            "sampled_call_count": len(rows),
+            "runtime_decision_count": runtime_decision_count,
+            "runtime_enforcement_count": runtime_enforcement_count,
+            "rows_with_ledger_entries": rows_with_entries,
+            "missing_runtime_metadata_count": missing_metadata_count,
+            "selected_count": selected_count,
+            "holdout_count": sum(holdout_counts.values()),
+            "suppressed_family_count": sum(suppressed_counts.values()),
+            "conflict_count": conflict_count,
+            "safety_stop_count": safety_stop_count,
+            "stale_or_missing_evidence_blocker_count": stale_or_missing_evidence_count,
+            "rows_with_errors": rows_with_errors,
+            "runtime_error_rate": runtime_error_rate,
+            "observed_savings_usd_est": _money(sum(savings_by_family.values())),
+            "observed_cost_usd_est": _money(sum(cost_by_family.values())),
+        },
+        "capabilities": {
+            "enforcement_enabled": enforcement_enabled,
+            "dry_run_capable": True,
+            "runtime_metadata_observed": runtime_decision_count > 0,
+            "dry_run_only": runtime_decision_count == 0 and rows_with_entries > 0,
+            "missing_metadata": missing_metadata_count > 0,
+        },
+        "selected_family_counts": _breakdown_from_counts(selected_counts),
+        "holdout_family_counts": _breakdown_from_counts(holdout_counts),
+        "suppressed_family_counts": _breakdown_from_counts(suppressed_counts),
+        "top_suppression_reason_codes": _tuple_breakdown(reason_counts, ("family", "reason"), limit=20),
+        "conflict_buckets": _tuple_breakdown(conflict_counts, ("selected_family", "suppressed_family", "reason"), limit=20),
+        "dimension_breakdown": _tuple_breakdown(
+            dimension_counts,
+            ("provider", "source_surface", "category", "workflow_phase", "public_session_bucket", "selected_family"),
+            limit=50,
+        ),
+        "status_counts": _breakdown_from_counts(status_counts),
+        "cohort_counts": _breakdown_from_counts(cohort_counts),
+        "retry_count_buckets": _breakdown_from_counts(retry_bucket_counts),
+        "observed_savings_by_family": observed_by_family,
+        "dry_run_summary": {
+            "sampled_call_count": dry_run.get("sampled_call_count", 0),
+            "rows_with_ledger_entries": rows_with_entries,
+            "selected_family_counts": dry_run.get("selected_family_counts", []),
+            "suppressed_family_counts": dry_run.get("suppressed_family_counts", []),
+            "top_suppression_reason_codes": dry_run.get("top_suppression_reason_codes", []),
+            "projected_savings_usd_est": dry_run.get("projected_savings_usd_est", 0.0),
+            "projected_savings_by_family": dry_run.get("projected_savings_by_family", []),
+        },
+        "sample_decisions": sample_decisions,
+        "privacy": _coordinator_report_privacy(),
+    }
+
+
 def dashboard_html() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -16796,6 +17110,7 @@ def dashboard_html() -> str:
   <button class="tab-btn" onclick="showTab('policies')">Policies</button>
   <button class="tab-btn" onclick="showTab('openai')">OpenAI optimization</button>
   <button class="tab-btn" onclick="showTab('evalqueue')">Eval queue</button>
+  <button class="tab-btn" onclick="showTab('coordinator')">Coordinator</button>
   <button class="tab-btn" onclick="showTab('managed')">Managed</button>
   <button class="tab-btn" onclick="showTab('phaserouting')">Phase routing</button>
   <button class="tab-btn" onclick="showTab('phasememory')">Phase memory</button>
@@ -17527,6 +17842,54 @@ def dashboard_html() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-coordinator">
+<div class="section">
+  <h2>Cross-family coordinator state</h2>
+  <table data-table-id="optimization-coordinator-summary" data-filter-label="Filter coordinator summary">
+    <thead><tr>
+      <th data-sort-type="text">State</th><th data-sort-type="number">Runtime</th><th data-sort-type="number">Dry-run entries</th><th data-sort-type="number">Missing metadata</th><th data-sort-type="number">Selected</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Suppressed</th><th data-sort-type="number">Conflicts</th><th data-sort-type="number">Safety stops</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Capabilities</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-coordinator-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Family selection health</h2>
+  <table data-table-id="optimization-coordinator-families" data-filter-label="Filter coordinator families">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Selected</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Suppressed</th><th data-sort-type="money">Observed savings</th><th data-sort-type="money">Observed cost</th>
+    </tr></thead>
+    <tbody id="optimization-coordinator-families-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Suppression and conflict reasons</h2>
+  <table data-table-id="optimization-coordinator-reasons" data-filter-label="Filter coordinator reasons">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Reason</th><th data-sort-type="number">Count</th>
+    </tr></thead>
+    <tbody id="optimization-coordinator-reasons-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Coordinator dimensions</h2>
+  <table class="activity-table" data-table-id="optimization-coordinator-dimensions" data-filter-label="Filter coordinator dimensions">
+    <thead><tr>
+      <th data-sort-type="text">Provider</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Session bucket</th><th data-sort-type="text">Selected</th><th data-sort-type="number">Count</th>
+    </tr></thead>
+    <tbody id="optimization-coordinator-dimensions-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Recent coordinator decisions</h2>
+  <table class="activity-table" data-table-id="optimization-coordinator-samples" data-filter-label="Filter coordinator decisions">
+    <thead><tr>
+      <th data-sort-type="time">Time</th><th data-sort-type="text">Provider</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Selected</th><th data-sort-type="text">Cohort</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Suppressed</th><th data-sort-type="text">Status</th>
+    </tr></thead>
+    <tbody id="optimization-coordinator-samples-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <div class="tab-panel" id="tab-managed">
 <div class="section">
   <h2>Managed recommendation status</h2>
@@ -18121,7 +18484,7 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','terminal','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
+  const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','terminal','scaffold','errors','limiter','policies','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
@@ -20236,6 +20599,100 @@ async function refreshOptimizationEvalQueue(){
     applyAllDataTables();
   }catch(e){}
 }
+
+function coordinatorBadge(state){
+  if(state==='active-selection')return'hit';
+  if(state==='conflict-observed'||state==='dry-run-only'||state==='missing-metadata')return'routed';
+  if(state==='safety-stop')return'err';
+  return'miss';
+}
+async function refreshOptimizationCoordinator(){
+  try{
+    const r=await fetch('/agentflow/stats/optimization-coordinator?limit=1000');
+    const d=await r.json();
+    const s=d.summary||{};
+    const c=d.capabilities||{};
+    const dry=d.dry_run_summary||{};
+    const privacy=d.privacy||{};
+    const capabilityBadges=[
+      c.enforcement_enabled?'<span class="badge hit">enforcement on</span>':'<span class="badge miss">enforcement off</span>',
+      c.dry_run_capable?'<span class="badge hit">dry-run capable</span>':'<span class="badge err">no dry-run</span>',
+      c.runtime_metadata_observed?'<span class="badge hit">runtime metadata</span>':'<span class="badge miss">no runtime metadata</span>',
+      c.missing_metadata?'<span class="badge routed">missing metadata</span>':'<span class="badge hit">metadata current</span>'
+    ].join(' ');
+    const privacyBadges=[
+      privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>',
+      privacy.raw_prompts_included?'<span class="badge err">raw prompts</span>':'<span class="badge hit">raw prompts omitted</span>',
+      privacy.raw_responses_included?'<span class="badge err">raw responses</span>':'<span class="badge hit">raw responses omitted</span>',
+      privacy.provider_bodies_included||privacy.raw_request_bodies_included?'<span class="badge err">provider body</span>':'<span class="badge hit">provider bodies omitted</span>',
+      privacy.terminal_lines_included?'<span class="badge err">terminal text</span>':'<span class="badge hit">terminal text omitted</span>',
+      privacy.file_paths_included?'<span class="badge err">file paths</span>':'<span class="badge hit">file paths omitted</span>',
+      privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>',
+      privacy.request_ids_included||privacy.session_ids_included?'<span class="badge err">raw IDs</span>':'<span class="badge hit">raw IDs omitted</span>',
+      privacy.policy_file_contents_included?'<span class="badge err">policy contents</span>':'<span class="badge hit">policy contents omitted</span>'
+    ].join(' ');
+    document.getElementById('optimization-coordinator-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${coordinatorBadge(d.state)}">${esc(d.state||'unknown')}</span></td>
+      <td class="tokens">${(s.runtime_decision_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.rows_with_ledger_entries||0).toLocaleString()}</td>
+      <td class="tokens">${(s.missing_runtime_metadata_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.selected_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.suppressed_family_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.conflict_count||0).toLocaleString()}</td>
+      <td class="${(s.safety_stop_count||0)>0?'cost':'tokens'}">${(s.safety_stop_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.observed_savings_usd_est||0,6)}</td>
+      <td class="savings">${fmt(dry.projected_savings_usd_est||0,6)}</td>
+      <td class="flags">${capabilityBadges}</td>
+      <td class="flags">${privacyBadges}</td>
+    </tr>`;
+    const byFamily={};
+    (d.selected_family_counts||[]).forEach(row=>{const key=row.value||row.family||'unknown';byFamily[key]=byFamily[key]||{family:key,selected:0,holdout:0,suppressed:0,savings:0,cost:0};byFamily[key].selected=row.count||0;});
+    (d.holdout_family_counts||[]).forEach(row=>{const key=row.value||row.family||'unknown';byFamily[key]=byFamily[key]||{family:key,selected:0,holdout:0,suppressed:0,savings:0,cost:0};byFamily[key].holdout=row.count||0;});
+    (d.suppressed_family_counts||[]).forEach(row=>{const key=row.value||row.family||'unknown';byFamily[key]=byFamily[key]||{family:key,selected:0,holdout:0,suppressed:0,savings:0,cost:0};byFamily[key].suppressed=row.count||0;});
+    (d.observed_savings_by_family||[]).forEach(row=>{const key=row.family||'unknown';byFamily[key]=byFamily[key]||{family:key,selected:0,holdout:0,suppressed:0,savings:0,cost:0};byFamily[key].savings=row.observed_savings_usd_est||0;byFamily[key].cost=row.observed_cost_usd_est||0;});
+    const familyRows=Object.values(byFamily).sort((a,b)=>(b.selected+b.suppressed+b.holdout)-(a.selected+a.suppressed+a.holdout)||String(a.family).localeCompare(String(b.family)));
+    document.getElementById('optimization-coordinator-families-tbody').innerHTML=familyRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.family||'unknown')}</span></td>
+      <td class="tokens">${(row.selected||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout||0).toLocaleString()}</td>
+      <td class="tokens">${(row.suppressed||0).toLocaleString()}</td>
+      <td class="savings">${fmt(row.savings||0,6)}</td>
+      <td class="cost">${fmt(row.cost||0,6)}</td>
+    </tr>`).join('')||'<tr><td colspan="6" style="color:#8b949e">No runtime coordinator family metadata observed yet</td></tr>';
+    const reasonRows=d.top_suppression_reason_codes||[];
+    document.getElementById('optimization-coordinator-reasons-tbody').innerHTML=reasonRows.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.family||'unknown')}</span></td>
+      <td><span class="badge ${row.reason==='conflicts-with-selected-family'?'routed':row.reason&&row.reason.indexOf('safety')>=0?'err':'miss'}">${esc(row.reason||'unknown')}</span></td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No runtime suppressions recorded yet</td></tr>';
+    const dims=d.dimension_breakdown||[];
+    document.getElementById('optimization-coordinator-dimensions-tbody').innerHTML=dims.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.provider||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td>${esc(row.category||'unknown')}</td>
+      <td>${esc(row.workflow_phase||'unknown')}</td>
+      <td><span class="badge miss">${esc(row.public_session_bucket||'unknown')}</span></td>
+      <td><span class="badge ${row.selected_family&&row.selected_family!=='none'?'hit':'miss'}">${esc(row.selected_family||'none')}</span></td>
+      <td class="tokens">${(row.count||0).toLocaleString()}</td>
+    </tr>`).join('')||'<tr><td colspan="7" style="color:#8b949e">No coordinator dimensions recorded yet</td></tr>';
+    const samples=d.sample_decisions||[];
+    document.getElementById('optimization-coordinator-samples-tbody').innerHTML=samples.map(row=>`<tr>
+      <td class="ts">${ago(row.created_at)}</td>
+      <td><span class="badge provider">${esc(row.provider||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td>${esc(row.endpoint||'unknown')}</td>
+      <td>${esc(row.category||'unknown')}</td>
+      <td>${esc(row.workflow_phase||'unknown')}</td>
+      <td><span class="badge ${row.selected_family&&row.selected_family!=='none'?'hit':'miss'}">${esc(row.selected_family||'none')}</span></td>
+      <td><span class="badge ${row.cohort==='coordinator_holdout'?'routed':row.cohort==='coordinator_canary'?'hit':'miss'}">${esc(row.cohort||'unknown')}</span></td>
+      <td class="tokens">${(row.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.suppressed_family_count||0).toLocaleString()}</td>
+      <td><span class="badge provider">${esc(row.status||'unknown')}</span></td>
+    </tr>`).join('')||'<tr><td colspan="11" style="color:#8b949e">No recent coordinator runtime decisions observed yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshManaged(){
   try{
     const [managedResponse,safetyResponse,rolloutResponse,coverageResponse]=await Promise.all([
@@ -20829,6 +21286,7 @@ refreshClaudeRoutingPromotionFunnel();
 refreshShadowRoutingPromotionReadiness();
 refreshOptimizationPromotionFunnel();
 refreshOptimizationEvalQueue();
+refreshOptimizationCoordinator();
 refreshManaged();
 refreshPhaseRouting();
 refreshSessionPhaseMemory();
@@ -20858,6 +21316,7 @@ setInterval(refreshClaudeRoutingPromotionFunnel,30000);
 setInterval(refreshShadowRoutingPromotionReadiness,30000);
 setInterval(refreshOptimizationPromotionFunnel,30000);
 setInterval(refreshOptimizationEvalQueue,30000);
+setInterval(refreshOptimizationCoordinator,30000);
 setInterval(refreshManaged,30000);
 setInterval(refreshPhaseRouting,30000);
 setInterval(refreshSessionPhaseMemory,30000);
