@@ -3894,6 +3894,113 @@ def optimization_action_ledger_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def optimization_coordinator_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run cross-family optimization coordinator decisions against local metadata")
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Optional managed rollout action bundle JSON path, or '-' for stdin.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument("--provider", help="Only inspect rows for this provider, for example openai or anthropic.")
+    parser.add_argument("--source-surface", help="Only inspect rows for this source surface, for example openai_responses.")
+    parser.add_argument("--canary-fraction", type=float, help="Coordinator canary fraction override for the dry run.")
+    parser.add_argument("--holdout-fraction", type=float, help="Coordinator holdout fraction override for the dry run.")
+    parser.add_argument(
+        "--local-salt",
+        help="Coordinator cohort salt override. The salt is used for hashing but is not emitted in the report.",
+    )
+    parser.add_argument("--examples", type=int, default=20, help="Maximum sanitized example decisions to include, default: 20.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    rollout_actions = None
+    if args.path is not None:
+        rollout_actions, read_error, _stdin_used = _read_policy_json_arg(args.path, stdin=stdin, stdin_used=False)
+        if read_error:
+            result = {
+                "schema": "agentflow.optimization_coordinator_dry_run.v1",
+                "ok": False,
+                "dry_run": True,
+                "read_only": True,
+                "db_path": args.db,
+                "validation": read_error,
+                "error": {"type": "read_failed", "message": "managed rollout action bundle could not be read"},
+                "privacy": {
+                    "metadata_only": True,
+                    "provider_calls_made": False,
+                    "managed_server_calls_made": False,
+                    "policy_files_changed": False,
+                    "provider_body_changed": False,
+                },
+            }
+            if args.pretty:
+                stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+            else:
+                _write_json(stdout, result)
+            return 1
+
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+    from agentflow_proxy.optimization_coordinator_dry_run import build_optimization_coordinator_dry_run
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_optimization_coordinator_dry_run(
+            store,
+            rollout_actions=rollout_actions,
+            limit=args.limit,
+            provider=args.provider,
+            source_surface=args.source_surface,
+            local_salt=args.local_salt,
+            canary_fraction=args.canary_fraction,
+            holdout_fraction=args.holdout_fraction,
+            examples=args.examples,
+        )
+    finally:
+        store.conn.close()
+    result["db_path"] = args.db
+    from agentflow_proxy.policy_events import log_policy_event
+
+    log_policy_event(
+        "optimization-coordinator-dry-run",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "db_path": args.db,
+            "path": args.path,
+            "dry_run": True,
+            "sampled_call_count": result.get("sampled_call_count"),
+            "decision_count": result.get("decision_count"),
+            "projected_savings_usd_est": result.get("projected_savings_usd_est"),
+            "exit_code": 0,
+        },
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def provider_tool_adoption_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     from agentflow_proxy.provider_adoption import provider_tool_adoption_report_cli as _provider_tool_adoption_report_cli
 
@@ -7412,6 +7519,10 @@ def openai_cache_replay_report_main() -> None:
 
 def optimization_action_ledger_main() -> None:
     raise SystemExit(optimization_action_ledger_cli())
+
+
+def optimization_coordinator_dry_run_main() -> None:
+    raise SystemExit(optimization_coordinator_dry_run_cli())
 
 
 def provider_tool_adoption_report_main() -> None:

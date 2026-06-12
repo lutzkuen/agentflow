@@ -845,6 +845,7 @@ class SQLiteStore:
                    status_code, latency_ms, input_tokens_est, actual_input_tokens,
                    cost_est_usd, cost_baseline_usd, category, provider, source_surface,
                    endpoint, requested_model_family, routed_model_family,
+                   retry_count, case when error is not null then 1 else 0 end as error_present,
                    routing_json, crunch_json, cache_json
             from calls
             order by created_at desc
