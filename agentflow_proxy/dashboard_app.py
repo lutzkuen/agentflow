@@ -239,6 +239,19 @@ def create_dashboard_router(
             min_repeated_rows=min_repeated_rows,
         )
 
+    @router.get("/agentflow/stats/terminal-output-compaction")
+    async def stats_terminal_output_compaction(
+        limit: int = 1000,
+        min_text_chars: int = 8000,
+        max_plateau_delta_ratio: float = 0.03,
+    ) -> dict[str, Any]:
+        return await stats_views.stats_terminal_output_compaction_opportunity(
+            _store(store_obj),
+            limit=limit,
+            min_text_chars=min_text_chars,
+            max_plateau_delta_ratio=max_plateau_delta_ratio,
+        )
+
     @router.get("/agentflow/stats/repeated-scaffold-impact")
     async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit)

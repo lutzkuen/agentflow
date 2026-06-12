@@ -61,6 +61,7 @@ agentflow-openai-old-context-summary-report = "agentflow_proxy.cli:openai_old_co
 agentflow-openai-cache-replay-report = "agentflow_proxy.cli:openai_cache_replay_report_main"
 agentflow-provider-tool-adoption-report = "agentflow_proxy.cli:provider_tool_adoption_report_main"
 agentflow-repeated-scaffold-opportunity = "agentflow_proxy.cli:repeated_scaffold_opportunity_main"
+agentflow-terminal-output-compaction-opportunity = "agentflow_proxy.cli:terminal_output_compaction_opportunity_main"
 agentflow-repeated-scaffold-impact = "agentflow_proxy.cli:repeated_scaffold_impact_main"
 agentflow-repeated-scaffold-activation = "agentflow_proxy.cli:repeated_scaffold_activation_main"
 agentflow-openai-cache-replay-impact = "agentflow_proxy.cli:openai_cache_replay_impact_main"

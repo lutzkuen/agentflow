@@ -3898,6 +3898,60 @@ def repeated_scaffold_opportunity_cli(argv: Sequence[str] | None = None, *, stdo
     return 0
 
 
+def terminal_output_compaction_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure terminal-output compaction opportunity for plateaued tool-result sessions")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--min-text-chars",
+        type=int,
+        default=8000,
+        help="Minimum adjacent call text size for plateau detection, default: 8000",
+    )
+    parser.add_argument(
+        "--max-plateau-delta-ratio",
+        type=float,
+        default=0.03,
+        help="Maximum adjacent text size delta ratio for plateau detection, default: 0.03",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+    from agentflow_proxy.terminal_compaction_report import build_terminal_output_compaction_opportunity_report
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_terminal_output_compaction_opportunity_report(
+            store,
+            limit=args.limit,
+            min_text_chars=args.min_text_chars,
+            max_plateau_delta_ratio=args.max_plateau_delta_ratio,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def repeated_scaffold_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report repeated-scaffold crunch canary impact and rollback gates")
     parser.add_argument(
@@ -7131,6 +7185,10 @@ def provider_tool_adoption_report_main() -> None:
 
 def repeated_scaffold_opportunity_main() -> None:
     raise SystemExit(repeated_scaffold_opportunity_cli())
+
+
+def terminal_output_compaction_opportunity_main() -> None:
+    raise SystemExit(terminal_output_compaction_opportunity_cli())
 
 
 def repeated_scaffold_impact_main() -> None:

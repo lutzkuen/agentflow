@@ -658,6 +658,105 @@ class DashboardImportTests(unittest.TestCase):
             event_tmp.cleanup()
             policy_tmp.cleanup()
 
+    def test_terminal_output_compaction_dashboard_endpoint_is_content_free(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        store = Store(tmp.name)
+        try:
+            terminal_text = "\n".join(
+                [
+                    "$ pytest tests/test_dashboard_secret.py",
+                    "FAILED tests/test_dashboard_secret.py::test_hidden - AssertionError: raw-dashboard-terminal-secret",
+                    "Traceback (most recent call last):",
+                    '  File "/workspace/private/tests/test_dashboard_secret.py", line 9, in test_hidden',
+                    "2026-06-12T10:00:00Z ERROR pid=1234 dashboard secret failed",
+                ]
+                * 80
+            )
+            body = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "raw-dashboard-tool-use-id",
+                                "content": [{"type": "text", "text": terminal_text}],
+                            }
+                        ],
+                    }
+                ]
+            }
+            for idx, text_chars in enumerate((48000, 48200)):
+                store.log_call(
+                    id=f"dashboard-terminal-compaction-{idx}",
+                    created_at=f"2026-06-12T10:0{idx}:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=100,
+                    input_tokens_est=text_chars // 4,
+                    output_tokens_est=100,
+                    actual_input_tokens=text_chars // 4,
+                    actual_output_tokens=100,
+                    cost_est_usd=0.04,
+                    cost_baseline_usd=0.04,
+                    crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+                    routing_json=stable_json({
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "text_chars": text_chars,
+                        "has_tools": True,
+                    }),
+                    cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                    error=None,
+                    request_json=stable_json(body),
+                    response_json=stable_json({"text": "raw dashboard response must not leak"}),
+                    session_id="raw-dashboard-session-id",
+                    category="tool-result",
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                    retry_count=0,
+                    thinking_output_tokens=0,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                    requested_model_family="sonnet",
+                    routed_model_family="sonnet",
+                )
+
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+            response = client.get("/agentflow/stats/terminal-output-compaction?limit=10")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["schema"], "agentflow.terminal_output_compaction_opportunity.v1")
+            self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
+            self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+            self.assertFalse(payload["privacy"]["session_ids_included"])
+            rendered = json.dumps(payload, sort_keys=True)
+            for forbidden in (
+                "raw-dashboard-terminal-secret",
+                "raw-dashboard-tool-use-id",
+                "raw-dashboard-session-id",
+                "tests/test_dashboard_secret.py",
+                "/workspace/private",
+            ):
+                self.assertNotIn(forbidden, rendered)
+        finally:
+            store.conn.close()
+            tmp.close()
+
     def test_managed_openai_activation_dashboard_uses_metadata_only_sources(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()

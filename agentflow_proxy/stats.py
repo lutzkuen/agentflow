@@ -9521,6 +9521,23 @@ async def stats_repeated_scaffold_opportunity(
     )
 
 
+async def stats_terminal_output_compaction_opportunity(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    min_text_chars: int = 8000,
+    max_plateau_delta_ratio: float = 0.03,
+) -> dict[str, Any]:
+    from agentflow_proxy.terminal_compaction_report import build_terminal_output_compaction_opportunity_report
+
+    return build_terminal_output_compaction_opportunity_report(
+        store_obj,
+        limit=limit,
+        min_text_chars=min_text_chars,
+        max_plateau_delta_ratio=max_plateau_delta_ratio,
+    )
+
+
 async def stats_repeated_scaffold_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
 
