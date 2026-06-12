@@ -688,6 +688,146 @@ def _openai_optimization_lifecycle_status(
     }
 
 
+def _optimization_coordinator_lifecycle_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    public_rows = (
+        store.managed_outcome_feedback_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_rows")
+        else []
+    )
+    row_count = 0
+    family_event_count = 0
+    queue_state_counts: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
+    phase_counts: dict[str, int] = {}
+    selected_counts: dict[str, int] = {}
+    suppressed_counts: dict[str, int] = {}
+    lifecycle_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    status_bucket_counts: dict[str, int] = {}
+    retry_bucket_counts: dict[str, int] = {}
+    error_bucket_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    family_breakdown: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        payload = _safe_payload_json(row)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if metadata.get("schema") != "agentflow.optimization_coordinator_lifecycle_feedback.v1":
+            continue
+        events = [item for item in metadata.get("family_events") or [] if isinstance(item, dict)]
+        if not events:
+            continue
+        row_count += 1
+        queue_state = _queue_state(row.get("status"))
+        event_type = str(payload.get("event_type") or metadata.get("event_type") or "unknown")
+        event_phase = str(metadata.get("event_phase") or "unknown")
+        selected_family = str(metadata.get("selected_family") or "none")
+        _add_count(queue_state_counts, queue_state)
+        _add_count(event_counts, event_type)
+        _add_count(phase_counts, event_phase)
+        _add_count(selected_counts, selected_family)
+        _add_count(status_bucket_counts, metadata.get("status_bucket"))
+        _add_count(retry_bucket_counts, metadata.get("retry_bucket"))
+        _add_count(error_bucket_counts, metadata.get("error_bucket"))
+        for family in metadata.get("suppressed_families") or []:
+            _add_count(suppressed_counts, family)
+        for reason in metadata.get("reason_codes") or []:
+            _add_count(reason_counts, reason)
+        for event in events:
+            family_event_count += 1
+            family = str(event.get("action_family") or "unknown")
+            lifecycle = str(event.get("lifecycle_status") or event.get("cohort") or "unknown")
+            _add_count(lifecycle_counts, lifecycle)
+            if event.get("candidate_id"):
+                _add_count(candidate_counts, event.get("candidate_id"))
+            for reason in event.get("reason_codes") or []:
+                _add_count(reason_counts, reason)
+            family_item = family_breakdown.setdefault(
+                family,
+                {
+                    "action_family": family,
+                    "event_count": 0,
+                    "queue_state_breakdown": {},
+                    "event_type_breakdown": {},
+                    "event_phase_breakdown": {},
+                    "lifecycle_status_breakdown": {},
+                    "reason_code_breakdown": {},
+                    "candidate_id_breakdown": {},
+                    "payload_json_included": False,
+                },
+            )
+            family_item["event_count"] += 1
+            for key, value in (
+                ("queue_state_breakdown", queue_state),
+                ("event_type_breakdown", event_type),
+                ("event_phase_breakdown", event_phase),
+                ("lifecycle_status_breakdown", lifecycle),
+            ):
+                _add_count(family_item[key], value)
+            if event.get("candidate_id"):
+                _add_count(family_item["candidate_id_breakdown"], event.get("candidate_id"))
+            for reason in event.get("reason_codes") or []:
+                _add_count(family_item["reason_code_breakdown"], reason)
+
+    retryable_failures = sum(
+        1
+        for row in public_rows
+        if row.get("source_surface") == "optimization_coordinator_lifecycle" and row.get("status") == "retryable-error"
+    )
+    dropped_privacy_violations = sum(
+        1
+        for row in public_rows
+        if row.get("source_surface") == "optimization_coordinator_lifecycle"
+        and row.get("status") == "dropped-after-limit"
+        and "unsafe" in str(row.get("last_error") or "").lower()
+    )
+
+    family_items: list[dict[str, Any]] = []
+    for item in family_breakdown.values():
+        converted = dict(item)
+        for key in (
+            "queue_state_breakdown",
+            "event_type_breakdown",
+            "event_phase_breakdown",
+            "lifecycle_status_breakdown",
+            "reason_code_breakdown",
+            "candidate_id_breakdown",
+        ):
+            converted[key] = breakdown_from_counts(converted[key])
+        family_items.append(converted)
+    family_items.sort(key=lambda item: (-int(item["event_count"]), str(item["action_family"])))
+
+    return {
+        "schema": "agentflow.optimization_coordinator_lifecycle_queue_status.v1",
+        "queue_rows": row_count,
+        "family_event_count": family_event_count,
+        "retryable_failures": retryable_failures,
+        "dropped_privacy_violations": dropped_privacy_violations,
+        "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
+        "event_type_breakdown": breakdown_from_counts(event_counts),
+        "event_phase_breakdown": breakdown_from_counts(phase_counts),
+        "selected_family_breakdown": breakdown_from_counts(selected_counts),
+        "suppressed_family_breakdown": breakdown_from_counts(suppressed_counts),
+        "lifecycle_status_breakdown": breakdown_from_counts(lifecycle_counts),
+        "reason_code_breakdown": breakdown_from_counts(reason_counts),
+        "status_bucket_breakdown": breakdown_from_counts(status_bucket_counts),
+        "retry_bucket_breakdown": breakdown_from_counts(retry_bucket_counts),
+        "error_bucket_breakdown": breakdown_from_counts(error_bucket_counts),
+        "candidate_id_breakdown": breakdown_from_counts(candidate_counts),
+        "family_breakdown": family_items,
+        "payload_json_included": False,
+    }
+
+
 def public_feedback_row(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     optimization_unit_id = row.get("optimization_unit_id")
     if optimization_unit_id in (0, "0"):
@@ -781,6 +921,7 @@ def managed_feedback_status_result(
     routing_promotion_lifecycle = _routing_promotion_lifecycle_status(store, source_surface=source_surface)
     terminal_output_compaction_lifecycle = _terminal_output_compaction_lifecycle_status(store, source_surface=source_surface)
     openai_optimization_lifecycle = _openai_optimization_lifecycle_status(store, source_surface=source_surface)
+    optimization_coordinator_lifecycle = _optimization_coordinator_lifecycle_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
         "ok": True,
@@ -794,6 +935,7 @@ def managed_feedback_status_result(
         "routing_promotion_lifecycle": routing_promotion_lifecycle,
         "terminal_output_compaction_lifecycle": terminal_output_compaction_lifecycle,
         "openai_optimization_lifecycle": openai_optimization_lifecycle,
+        "optimization_coordinator_lifecycle": optimization_coordinator_lifecycle,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
         "oldest_pending": public_feedback_row(oldest_pending, now=now) if oldest_pending else None,

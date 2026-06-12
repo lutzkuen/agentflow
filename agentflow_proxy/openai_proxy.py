@@ -53,6 +53,10 @@ from agentflow_proxy.openai_optimization_governor import (
     selected_openai_governor_family,
 )
 from agentflow_proxy.optimization_coordinator_enforcement import enforce_optimization_coordinator
+from agentflow_proxy.optimization_coordinator_feedback import (
+    optimization_coordinator_lifecycle_feedback_public_meta,
+    queue_optimization_coordinator_lifecycle_feedback as queue_optimization_coordinator_lifecycle_event,
+)
 from agentflow_proxy.provider_adoption import capture_provider_tool_adoption, openai_stream_tool_use_ids
 from agentflow_proxy.optimization.openai_features import (
     openai_call_store_fields,
@@ -83,6 +87,46 @@ from agentflow_proxy.store import stable_json, utc_now
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
+
+
+async def _queue_optimization_coordinator_lifecycle_feedback(
+    context: ProviderContext,
+    *,
+    routing_meta: dict[str, Any],
+    crunch_meta: dict[str, Any],
+    cache_meta: dict[str, Any],
+    enforcement: dict[str, Any],
+    status_code: int | None = None,
+    retry_count: int | None = None,
+    cost_est_usd: float | None = None,
+    cost_baseline_usd: float | None = None,
+) -> None:
+    decision = routing_meta.get("optimization_coordinator")
+    if not isinstance(decision, dict):
+        return
+    try:
+        meta = await queue_optimization_coordinator_lifecycle_event(
+            context.store,
+            decision,
+            enforcement=enforcement,
+            status_code=status_code,
+            retry_count=retry_count,
+            cost_est_usd=cost_est_usd,
+            cost_baseline_usd=cost_baseline_usd,
+            flush_immediately=False,
+        )
+        public_meta = optimization_coordinator_lifecycle_feedback_public_meta(meta)
+    except Exception as exc:
+        public_meta = {
+            "enabled": False,
+            "status": "skipped",
+            "reason": "coordinator-lifecycle-feedback-error",
+            "error_type": type(exc).__name__,
+            "payload_included": False,
+        }
+    enforcement["lifecycle_feedback"] = public_meta
+    for meta_obj in (routing_meta, crunch_meta, cache_meta):
+        meta_obj["optimization_coordinator_lifecycle_feedback"] = public_meta
 
 
 def _openai_cache_replay_blockers(
@@ -840,7 +884,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         stream=True,
                         session_id=session_id,
                     )
-                    enforce_optimization_coordinator(
+                    coordinator_enforcement = enforce_optimization_coordinator(
                         routing_meta=routing_meta,
                         crunch_meta=crunch_meta,
                         cache_meta=stream_cache_meta,
@@ -855,6 +899,17 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                         session_id=session_id,
                         provider_body=crunched,
                         local_routed_model=local_policy.local_routed_model,
+                    )
+                    await _queue_optimization_coordinator_lifecycle_feedback(
+                        context,
+                        routing_meta=routing_meta,
+                        crunch_meta=crunch_meta,
+                        cache_meta=stream_cache_meta,
+                        enforcement=coordinator_enforcement,
+                        status_code=status_code,
+                        retry_count=stream_retry_count,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost_baseline,
                     )
                     attach_openai_outcome_summary(
                         path=path,
@@ -1004,6 +1059,13 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
         if "cache_replay" in coordinator_enforcement.get("suppressed_managed_families", []):
             can_cache = False
             can_semantic_cache = False
+        await _queue_optimization_coordinator_lifecycle_feedback(
+            context,
+            routing_meta=routing_meta,
+            crunch_meta=crunch_meta,
+            cache_meta=cache_meta,
+            enforcement=coordinator_enforcement,
+        )
         replay_scope, replay_scope_id, replay_pattern_rule = cache_replay_scope_for_meta(cache_meta, session_id)
         if replay_pattern_rule is not None:
             cache_meta["replay_scope"] = replay_scope

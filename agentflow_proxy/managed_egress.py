@@ -90,6 +90,7 @@ LIFECYCLE_METADATA_COMMAND_SCHEMAS = {
     "agentflow.old_context_summary_lifecycle_metadata.v1",
     "agentflow.phase_routing_lifecycle_metadata.v1",
     "agentflow.optimization_promotion_lifecycle_feedback.v1",
+    "agentflow.optimization_coordinator_lifecycle_feedback.v1",
     "agentflow.repeated_scaffold_lifecycle_feedback.v1",
     "agentflow.rollout_action_lifecycle_metadata.v1",
     "agentflow.terminal_output_compaction_lifecycle_feedback.v1",
