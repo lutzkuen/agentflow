@@ -9525,6 +9525,21 @@ async def stats_repeated_scaffold_opportunity(
     )
 
 
+async def stats_instruction_dedup_opportunity(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    min_repeated_rows: int = 2,
+) -> dict[str, Any]:
+    from agentflow_proxy.instruction_dedup_report import build_instruction_dedup_opportunity_report
+
+    return build_instruction_dedup_opportunity_report(
+        store_obj,
+        limit=limit,
+        min_repeated_rows=min_repeated_rows,
+    )
+
+
 async def stats_terminal_output_compaction_opportunity(
     store_obj: Any,
     *,

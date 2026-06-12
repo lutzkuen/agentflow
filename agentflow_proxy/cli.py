@@ -4054,6 +4054,53 @@ def repeated_scaffold_opportunity_cli(argv: Sequence[str] | None = None, *, stdo
     return 0
 
 
+def instruction_dedup_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure instruction-section deduplication opportunity")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls and Codex app events to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--min-repeated-rows",
+        type=int,
+        default=2,
+        help="Minimum rows per hidden instruction fingerprint before a group is considered repeated, default: 2",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.instruction_dedup_report import build_instruction_dedup_opportunity_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_instruction_dedup_opportunity_report(
+            store,
+            limit=args.limit,
+            min_repeated_rows=args.min_repeated_rows,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def terminal_output_compaction_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure terminal-output compaction opportunity for plateaued tool-result sessions")
     parser.add_argument(
@@ -7531,6 +7578,10 @@ def provider_tool_adoption_report_main() -> None:
 
 def repeated_scaffold_opportunity_main() -> None:
     raise SystemExit(repeated_scaffold_opportunity_cli())
+
+
+def instruction_dedup_opportunity_main() -> None:
+    raise SystemExit(instruction_dedup_opportunity_cli())
 
 
 def terminal_output_compaction_opportunity_main() -> None:
