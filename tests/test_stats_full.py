@@ -4887,6 +4887,40 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(by_blocker["true-one-off-miss"], 1)
         self.assertEqual(by_blocker["current-state"], 1)
 
+        burn_down = result["blocker_burn_down"]
+        self.assertEqual(result["summary"]["blocker_burn_down_rows"], 3)
+        self.assertEqual(burn_down[0]["next_action_family"], "tool_call_safety")
+        self.assertEqual(burn_down[0]["source_surface"], "anthropic_messages")
+        self.assertEqual(burn_down[0]["workflow_phase"], "tool-result")
+        self.assertEqual(burn_down[0]["category"], "tool-result")
+        self.assertEqual(burn_down[0]["calls"], 2)
+        self.assertEqual(burn_down[0]["shape_groups"], 1)
+        self.assertEqual(burn_down[0]["projected_cost_bucket"], "1c_5c")
+        self.assertAlmostEqual(burn_down[0]["projected_repeated_call_cost_usd"], 0.035)
+        self.assertIn("tool-call-disabled", burn_down[0]["blockers"])
+        self.assertIn("file-dependency-missing", burn_down[0]["blockers"])
+        self.assertFalse(burn_down[0]["raw_prompts_included"])
+        self.assertFalse(burn_down[0]["file_paths_included"])
+        self.assertEqual(result["summary"]["top_blocker_burn_down_next_action_family"], "tool_call_safety")
+        self.assertAlmostEqual(result["summary"]["top_blocker_burn_down_projected_cost_usd"], 0.035)
+        action_by_family = {row["next_action_family"]: row for row in burn_down}
+        self.assertEqual(action_by_family["canary_policy_loading"]["blockers"], ["none"])
+        self.assertAlmostEqual(action_by_family["canary_policy_loading"]["projected_repeated_call_cost_usd"], 0.025)
+        self.assertEqual(action_by_family["streaming_replay"]["projected_cost_bucket"], "1c_5c")
+        self.assertAlmostEqual(action_by_family["streaming_replay"]["projected_repeated_call_cost_usd"], 0.015)
+
+    def test_cache_replayability_burn_down_empty_dataset(self):
+        result = asyncio.run(stats_views.stats_cache_replayability(server.store, limit=10))
+
+        self.assertEqual(result["schema"], "agentflow.cache_replayability.v1")
+        self.assertEqual(result["summary"]["candidate_rows"], 0)
+        self.assertEqual(result["summary"]["blocker_burn_down_rows"], 0)
+        self.assertEqual(result["summary"]["top_blocker_burn_down_projected_cost_usd"], 0.0)
+        self.assertIsNone(result["summary"]["top_blocker_burn_down_next_action_family"])
+        self.assertEqual(result["blocker_burn_down"], [])
+        self.assertFalse(result["privacy"]["raw_prompts_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+
     def test_cache_replayability_endpoint_and_dashboard_are_read_only_metadata(self):
         server.store.log_call(
             id=str(uuid.uuid4()),
@@ -4934,6 +4968,8 @@ class StatsFullTest(unittest.TestCase):
             self.assertFalse(data["privacy"]["raw_prompts_included"])
             self.assertNotIn("private request body", json.dumps(data))
             html = client.get("/agentflow/dashboard").text
+            self.assertIn("Cache blocker burn-down", html)
+            self.assertIn("cache-blocker-burn-down-tbody", html)
             self.assertIn("Skipped cache replayability", html)
             self.assertIn("cache-replayability-tbody", html)
 

@@ -5070,6 +5070,168 @@ def _cache_replayability_blockers(unit: dict[str, Any]) -> list[str]:
     return sorted(blockers)
 
 
+def _cache_replay_cost_bucket(cost: Any) -> str:
+    value = _as_float(cost)
+    if value <= 0:
+        return "none"
+    if value < 0.01:
+        return "lt_1c"
+    if value < 0.05:
+        return "1c_5c"
+    if value < 0.25:
+        return "5c_25c"
+    if value < 1.0:
+        return "25c_1usd"
+    return "gte_1usd"
+
+
+def _cache_replay_next_action(blockers: list[str]) -> dict[str, str]:
+    blocker_set = set(blockers)
+    dependency_blockers = {
+        "file-dependency-missing",
+        "dependency-missing",
+        "dependency-cap-exceeded",
+        "dependency-changed",
+        "dependency-deleted",
+        "dependency-created",
+        "file-watch-disabled",
+    }
+    stale_blockers = {"current-state", "user-specific", "low-cacheability"}
+    if "tool-call-disabled" in blocker_set:
+        return {
+            "family": "tool_call_safety",
+            "label": "Review tool-call cache safety and invalidation gates",
+        }
+    if dependency_blockers & blocker_set:
+        return {
+            "family": "dependency_evidence",
+            "label": "Capture or validate file dependency evidence",
+        }
+    if "streaming" in blocker_set or "streaming-not-allowed" in blocker_set:
+        return {
+            "family": "streaming_replay",
+            "label": "Canary session-scoped streaming replay",
+        }
+    if "semantic-cache-disabled" in blocker_set:
+        return {
+            "family": "canary_policy_loading",
+            "label": "Load a reviewed cache replay policy or canary",
+        }
+    if "session-context-changed" in blocker_set:
+        return {
+            "family": "canary_policy_loading",
+            "label": "Load a reviewed session-scoped replay policy",
+        }
+    if "missing-cache-metadata" in blocker_set:
+        return {
+            "family": "cache_metadata",
+            "label": "Record cache decision metadata before replay",
+        }
+    if "turn-level-only" in blocker_set:
+        return {
+            "family": "turn_level_replay",
+            "label": "Promote turn-level replay interfaces",
+        }
+    if stale_blockers & blocker_set:
+        return {
+            "family": "cacheability_evidence",
+            "label": "Improve cacheability evidence before replay",
+        }
+    if "true-one-off-miss" in blocker_set:
+        return {
+            "family": "none",
+            "label": "No repeated-shape burn-down action",
+        }
+    return {
+        "family": "canary_policy_loading",
+        "label": "Load a reviewed exact replay canary policy",
+    }
+
+
+def _cache_replay_blocker_burn_down(groups: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    buckets: dict[tuple[tuple[str, ...], str, str, str, str], dict[str, Any]] = {}
+    for group in groups:
+        if not bool(group.get("repeated")):
+            continue
+        blockers = sorted(str(item) for item in group.get("replayability_blockers") or [])
+        if not blockers:
+            blockers = ["none"]
+        next_action = _cache_replay_next_action(blockers)
+        key = (
+            tuple(blockers),
+            str(group.get("source_surface") or "unknown"),
+            str(group.get("workflow_phase") or "unknown"),
+            str(group.get("category") or "unknown"),
+            next_action["family"],
+        )
+        bucket = buckets.setdefault(
+            key,
+            {
+                "blockers": blockers,
+                "blocker_combination": " + ".join(blockers),
+                "next_action_family": next_action["family"],
+                "next_action_label": next_action["label"],
+                "source_surface": str(group.get("source_surface") or "unknown"),
+                "granularity": str(group.get("granularity") or "unknown"),
+                "workflow_phase": str(group.get("workflow_phase") or "unknown"),
+                "category": str(group.get("category") or "unknown"),
+                "replay_candidate_classes": {},
+                "shape_groups": 0,
+                "calls": 0,
+                "sessions": 0,
+                "estimated_cost_usd": 0.0,
+                "baseline_cost_usd": 0.0,
+                "projected_repeated_call_cost_usd": 0.0,
+                "projected_cost_bucket": "none",
+                "example_shape_fingerprints": [],
+                "raw_prompts_included": False,
+                "raw_responses_included": False,
+                "file_paths_included": False,
+                "cache_keys_included": False,
+                "raw_session_ids_included": False,
+            },
+        )
+        bucket["shape_groups"] += 1
+        bucket["calls"] += _as_int(group.get("count"))
+        bucket["sessions"] += _as_int(group.get("sessions"))
+        bucket["estimated_cost_usd"] += _as_float(group.get("estimated_cost_usd"))
+        bucket["baseline_cost_usd"] += _as_float(group.get("baseline_cost_usd"))
+        bucket["projected_repeated_call_cost_usd"] += _as_float(group.get("projected_repeated_call_cost_usd"))
+        replay_class = str(group.get("replay_candidate_class") or "unknown")
+        bucket["replay_candidate_classes"][replay_class] = bucket["replay_candidate_classes"].get(replay_class, 0) + 1
+        fingerprint = str(group.get("replay_fingerprint") or "")
+        if fingerprint and fingerprint not in bucket["example_shape_fingerprints"] and len(bucket["example_shape_fingerprints"]) < 3:
+            bucket["example_shape_fingerprints"].append(fingerprint)
+
+    rows: list[dict[str, Any]] = []
+    for bucket in buckets.values():
+        replay_classes = [
+            {"value": key, "count": count}
+            for key, count in sorted(
+                bucket.pop("replay_candidate_classes").items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ]
+        projected_cost = float(bucket["projected_repeated_call_cost_usd"])
+        bucket["estimated_cost_usd"] = round(float(bucket["estimated_cost_usd"]), 6)
+        bucket["baseline_cost_usd"] = round(float(bucket["baseline_cost_usd"]), 6)
+        bucket["projected_repeated_call_cost_usd"] = round(projected_cost, 6)
+        bucket["projected_cost_bucket"] = _cache_replay_cost_bucket(projected_cost)
+        bucket["replay_candidate_classes"] = replay_classes
+        rows.append(bucket)
+
+    rows.sort(
+        key=lambda row: (
+            _as_float(row.get("projected_repeated_call_cost_usd")),
+            _as_float(row.get("estimated_cost_usd")),
+            _as_int(row.get("calls")),
+            str(row.get("blocker_combination") or ""),
+        ),
+        reverse=True,
+    )
+    return rows[: max(1, int(limit or 25))]
+
+
 def _cacheability_meta_from_row(
     *,
     routing: dict[str, Any],
@@ -5710,6 +5872,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
         for row in blocker_counts.values()
     ]
     blocker_rows.sort(key=lambda row: (row["calls"], row["projected_repeated_call_cost_usd"], row["estimated_cost_usd"]), reverse=True)
+    blocker_burn_down = _cache_replay_blocker_burn_down(groups, limit=limit)
     session_memory_proposals = _session_memory_replay_proposal_rows(units, limit=limit)
     session_memory_status_counts: dict[str, int] = {}
     for row in session_memory_proposals:
@@ -5743,6 +5906,17 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             "unsafe_repeated_estimated_cost_usd": round(unsafe_repeated_cost, 6),
             "no_repeated_shape_exists": repeated_groups == 0,
             "repeated_shape_exists_but_cache_is_unsafe": unsafe_repeated_rows > 0,
+            "blocker_burn_down_rows": len(blocker_burn_down),
+            "top_blocker_burn_down_projected_cost_usd": (
+                _as_float(blocker_burn_down[0].get("projected_repeated_call_cost_usd"))
+                if blocker_burn_down
+                else 0.0
+            ),
+            "top_blocker_burn_down_next_action_family": (
+                blocker_burn_down[0].get("next_action_family")
+                if blocker_burn_down
+                else None
+            ),
             "session_memory_replay_proposal_count": sum(_as_int(row.get("count")) for row in session_memory_proposals),
             "session_memory_replay_eligible_count": sum(
                 _as_int(row.get("count"))
@@ -5756,6 +5930,7 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             ),
         },
         "blocker_breakdown": blocker_rows,
+        "blocker_burn_down": blocker_burn_down,
         "session_memory_replay_proposal_breakdown": _breakdown_from_counts(session_memory_status_counts),
         "session_memory_replay_proposals": session_memory_proposals,
         "groups": groups[: max(1, int(limit or 25))],
@@ -15250,6 +15425,15 @@ def dashboard_html() -> str:
   </table>
 </div>
 <div class="section">
+  <h2>Cache blocker burn-down</h2>
+  <table data-table-id="cache-blocker-burn-down" data-filter-label="Filter cache blocker burn-down">
+    <thead><tr>
+      <th data-sort-type="money">Repeated cost</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Phase/category</th><th data-sort-type="number">Calls</th><th data-sort-type="number">Shapes</th><th data-sort-type="text">Blockers</th><th data-sort-type="text">Cost bucket</th>
+    </tr></thead>
+    <tbody id="cache-blocker-burn-down-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Skipped cache replayability</h2>
   <table data-table-id="cache-replayability" data-filter-label="Filter cache replayability groups">
     <thead><tr>
@@ -16780,6 +16964,22 @@ async function refreshCache(){
       </tr>`;
     }).join('')||'<tr><td colspan="13" style="color:#8b949e">No cache replay confidence metadata recorded yet</td></tr>';
     const replay=d.cache_replayability||{};
+    const burnRows=replay.blocker_burn_down||[];
+    document.getElementById('cache-blocker-burn-down-tbody').innerHTML=burnRows.map(row=>{
+      const blockers=(row.blockers||[]).map(b=>`<span class="badge ${b==='none'?'hit':b==='true-one-off-miss'?'miss':'routed'}">${esc(b)}</span>`).join(' ')||'<span class="badge hit">none</span>';
+      const classes=(row.replay_candidate_classes||[]).slice(0,2).map(item=>`<span class="badge provider">${esc(item.value)} ${(item.count||0).toLocaleString()}</span>`).join(' ');
+      const actionCls=row.next_action_family==='none'?'hit':row.next_action_family==='dependency_evidence'||row.next_action_family==='tool_call_safety'?'err':'routed';
+      return `<tr>
+        <td class="cost">${fmt(row.projected_repeated_call_cost_usd||0,5)}</td>
+        <td class="flags"><span class="badge ${actionCls}">${esc(row.next_action_family||'unknown')}</span><div class="sub">${esc(row.next_action_label||'')}</div></td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="flags"><span class="badge miss">${esc(row.workflow_phase||'unknown')}</span> <span class="badge provider">${esc(row.category||'unknown')}</span></td>
+        <td class="tokens">${(row.calls||0).toLocaleString()}</td>
+        <td class="tokens">${(row.shape_groups||0).toLocaleString()}</td>
+        <td class="flags">${blockers} ${classes}</td>
+        <td><span class="badge provider">${esc(row.projected_cost_bucket||'none')}</span></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="8" style="color:#8b949e">No repeated cache blocker combinations recorded yet</td></tr>';
     const replayRows=replay.groups||[];
     document.getElementById('cache-replayability-tbody').innerHTML=replayRows.map(row=>{
       const blockers=(row.replayability_blockers||[]).map(b=>`<span class="badge ${b==='true-one-off-miss'?'miss':'routed'}">${esc(b)}</span>`).join(' ')||'<span class="badge hit">none</span>';
