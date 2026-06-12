@@ -83,6 +83,62 @@ SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.
 MAX_THINKING_BUDGET_TOKENS = int(os.getenv("AGENTFLOW_MAX_THINKING_BUDGET_TOKENS", "0"))
 
 
+def _anthropic_preflight_routing_meta(
+    body: dict[str, Any],
+    *,
+    requested_model: str,
+    category: str | None,
+) -> dict[str, Any]:
+    text = extract_text(body)
+    return {
+        "enabled": False,
+        "requested_model": requested_model,
+        "routed_model": str(body.get("model") or requested_model),
+        "reason": "preflight feature extraction before local mutation",
+        "text_chars": len(text),
+        "has_tools": has_tools(body),
+        "category": category,
+        "policy_source": "preflight",
+        "provider": "anthropic",
+        "prompt_difficulty_features": prompt_difficulty_features_from_text(text),
+    }
+
+
+def _managed_crunch_profile_from_recommendation(
+    recommendation_meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(recommendation_meta, dict) or recommendation_meta.get("status") != "received":
+        return None
+
+    crunch = recommendation_meta.get("crunch")
+    if not isinstance(crunch, dict):
+        return None
+
+    if not any(
+        key in crunch
+        for key in (
+            "repeated_provider_scaffolding",
+            "old_context_summarization",
+            "enhanced_crunch",
+            "threshold_chars",
+            "thresholds",
+            "profile",
+        )
+    ):
+        return None
+
+    profile = copy.deepcopy(crunch)
+    profile["policy_source"] = str(
+        profile.get("policy_source")
+        or recommendation_meta.get("policy_source")
+        or "managed-recommended"
+    )
+    for key in ("policy_id", "candidate_id", "recommendation_id"):
+        if profile.get(key) is None and recommendation_meta.get(key) is not None:
+            profile[key] = recommendation_meta[key]
+    return profile
+
+
 def _record_routing_rate_limit_fallback(
     routing_meta: dict[str, Any],
     *,
@@ -757,7 +813,38 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 f"placement={summary_meta.get('placement')}",
                 file=sys.stderr,
             )
-        crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
+        preflight_routing_meta = _anthropic_preflight_routing_meta(
+            raw_body,
+            requested_model=str(raw_body.get("model") or requested_model),
+            category=category,
+        )
+        preflight_cache_meta = cache_decision_meta("skipped", "preflight")
+        preflight_crunch_meta = {"old_context_summarization": summary_meta}
+        preflight_input_tokens = estimate_tokens_from_text(extract_text(raw_body))
+        preflight_recommendation_unit = build_optimization_unit(
+            provider="anthropic",
+            path=path,
+            requested_model=str(raw_body.get("model") or requested_model),
+            routed_model=str(raw_body.get("model") or requested_model),
+            routing_meta=preflight_routing_meta,
+            crunch_meta=preflight_crunch_meta,
+            cache_meta=preflight_cache_meta,
+            category=category,
+            stream=stream,
+            input_tokens_est=preflight_input_tokens,
+            session_id=session_id,
+        )
+        preflight_pattern_features = pattern_feature_diagnostics(preflight_recommendation_unit)
+        recommendation_meta = await fetch_recommendation(preflight_recommendation_unit)
+        managed_crunch_profile = _managed_crunch_profile_from_recommendation(recommendation_meta)
+        if managed_crunch_profile:
+            crunched, crunch_meta = crunch_body(
+                raw_body,
+                store_obj=context.store,
+                managed_profile=managed_crunch_profile,
+            )
+        else:
+            crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
         crunch_meta["old_context_summarization"] = summary_meta
         crunched, prompt_cached = inject_prompt_cache(crunched)
         if STRIP_THINKING_HISTORY and category == "tool-result" and not _has_top_level_thinking(crunched):
@@ -829,7 +916,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             session_id=session_id,
         )
         routing_meta["managed_pattern_features"] = pattern_feature_diagnostics(recommendation_unit)
-        recommendation_meta = await fetch_recommendation(recommendation_unit)
+        routing_meta["managed_preflight_pattern_features"] = preflight_pattern_features
         recommendation_meta = apply_recommendation_to_body(
             provider="anthropic",
             body=crunched,

@@ -16,6 +16,7 @@ HAS_RUNTIME_DEPS = all(
 if HAS_RUNTIME_DEPS:
     from fastapi.testclient import TestClient
 
+    from agentflow_proxy import crunch as crunch_module
     from agentflow_proxy import routing_experiments
     from agentflow_proxy import openai_proxy, server
     from agentflow_proxy.limiter import TierBackoffActive
@@ -387,6 +388,92 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(managed["status"], "received")
         self.assertTrue(managed["applied"])
         self.assertTrue(managed["changed_model"])
+
+    def test_anthropic_managed_scaffold_crunch_profile_applies_before_forwarding(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        scaffold = (
+            "Managed provider scaffold.\n"
+            + "\n".join(f"stable managed instruction line {idx}" for idx in range(24))
+        )
+        pattern_hash = "sha256:" + crunch_module.sha256_text(crunch_module.normalize_text(scaffold))
+        ManagedFeedbackAsyncClient.recommendation_body = {
+            "confidence": 0.92,
+            "policy_id": "policy-managed-scaffold",
+            "reason": "managed scaffold canary",
+            "crunch": {
+                "profile": "managed",
+                "repeated_provider_scaffolding": {
+                    "enabled": True,
+                    "min_request_chars": 1,
+                    "min_section_chars": 100,
+                    "keep_recent_messages": 1,
+                    "keep_recent_matches": 0,
+                    "max_replacements": 4,
+                    "rules": [
+                        {
+                            "id": "managed-scaffold-rule",
+                            "enabled": True,
+                            "candidate_id": "candidate-managed-scaffold",
+                            "pattern_hashes": [pattern_hash],
+                            "min_repeated_count": 2,
+                            "keep_recent_matches": 0,
+                            "max_applications": 4,
+                            "rollout": {
+                                "canary_enabled": True,
+                                "canary_fraction": 1.0,
+                                "canary_salt": "managed-scaffold-test",
+                                "canary_unit": "request_fingerprint",
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "messages": [
+                {"role": "user", "content": scaffold + "\n\nOld task details."},
+                {"role": "assistant", "content": "ack"},
+                {"role": "user", "content": scaffold + "\n\nNewest task tail must remain."},
+            ],
+        }
+
+        with self._managed_feedback_env(), patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[0]["kind"], "recommendation")
+        self.assertEqual(ManagedFeedbackAsyncClient.calls[1]["kind"], "upstream")
+        recommendation = ManagedFeedbackAsyncClient.calls[0]["json"]
+        forwarded = ManagedFeedbackAsyncClient.calls[1]["json"]
+        self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(recommendation)))
+        self.assertNotIn("stable managed instruction line", str(recommendation))
+        self.assertIn("repeated provider scaffolding omitted", forwarded["messages"][0]["content"])
+        self.assertIn("Old task details.", forwarded["messages"][0]["content"])
+        self.assertEqual(forwarded["messages"][2]["content"], request_body["messages"][2]["content"])
+
+        [row] = server.store.conn.execute("select routing_json, crunch_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        crunch = json.loads(row["crunch_json"])
+        provider_meta = crunch["repeated_provider_scaffolding"]
+        self.assertEqual(provider_meta["status"], "applied")
+        self.assertEqual(provider_meta["policy_source"], "managed-recommended")
+        self.assertEqual(provider_meta["applied_count"], 1)
+        self.assertEqual(provider_meta["rules"][0]["rule_id"], "managed-scaffold-rule")
+        self.assertEqual(provider_meta["rules"][0]["candidate_id"], "candidate-managed-scaffold")
+        self.assertEqual(provider_meta["rules"][0]["policy_source"], "managed-recommended")
+        self.assertEqual(routing["managed_recommendation"]["status"], "received")
+        self.assertEqual(routing["managed_recommendation"]["apply_reason"], "missing-target-model")
+        self.assertNotIn("stable managed instruction line", row["crunch_json"])
 
     def test_anthropic_managed_recommendation_rejects_replacement_prompt(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
