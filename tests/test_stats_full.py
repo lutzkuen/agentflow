@@ -7322,6 +7322,202 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("secret-session-digest", rendered)
         self.assertNotIn("raw-local-session", rendered)
 
+    def test_provider_adoption_health_reports_applied_holdout_rates_without_raw_ids(self):
+        def log_call_with_window(suffix, *, cohort, status, reason, family="phase_routing"):
+            call_id = f"provider-adoption-call-secret-{suffix}"
+            server.store.log_call(
+                id=call_id,
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=100,
+                input_tokens_est=200,
+                output_tokens_est=20,
+                actual_input_tokens=200,
+                actual_output_tokens=20,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.003,
+                crunch_json=stable_json({"changed": False, "policy_source": "local-default"}),
+                routing_json=stable_json({
+                    "applied": cohort == "canary_applied",
+                    "policy_source": "local-manual",
+                    "phase_canary": {
+                        "status": cohort,
+                        "cohort": cohort,
+                        "policy_id": "phase-tool-result-haiku",
+                    },
+                }),
+                cache_json=stable_json({"status": "skipped", "policy_source": "local-default"}),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw provider adoption prompt secret"}]}),
+                response_json=stable_json({"content": "raw provider adoption response secret"}),
+                session_id="provider-adoption-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                requested_model_family="sonnet",
+                routed_model_family="haiku",
+            )
+            server.store.log_provider_tool_adoption_window(
+                id=f"provider-adoption-window-secret-{suffix}",
+                created_at=utc_now(),
+                updated_at=utc_now(),
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+                app_family="claude",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-haiku-4-5-20251001",
+                category="tool-result",
+                workflow_phase="tool-result",
+                policy_source="local-manual",
+                policy_ids_json=stable_json([family]),
+                call_id=call_id,
+                fulfilled_call_id=call_id if status == "fulfilled" else None,
+                session_digest="sha256:provider-adoption-session-digest-secret",
+                correlation_digest="sha256:provider-adoption-tool-digest-secret",
+                status=status,
+                reason=reason,
+                age_bucket="0_1m",
+                tool_use_count=1,
+                tool_result_count=1 if status == "fulfilled" else 0,
+                metadata_json=stable_json({"raw_tool_payload": "provider adoption raw tool secret"}),
+            )
+
+        log_call_with_window("applied-ok", cohort="canary_applied", status="fulfilled", reason="matched-subsequent-tool-result")
+        log_call_with_window("applied-risk", cohort="canary_applied", status="abandoned", reason="ttl-expired-without-tool-result")
+        log_call_with_window("holdout-ok", cohort="canary_holdout", status="fulfilled", reason="matched-subsequent-tool-result")
+
+        payload = asyncio.run(stats_views.stats_provider_adoption_health(server.store, limit=20))
+        rendered = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(payload["schema"], "agentflow.provider_adoption_dashboard_health.v1")
+        self.assertEqual(payload["summary"]["window_count"], 3)
+        self.assertEqual(payload["summary"]["fulfilled_count"], 2)
+        cohorts = {
+            (row["optimization_family"], row["cohort"]): row
+            for row in payload["cohort_health"]
+        }
+        self.assertEqual(cohorts[("phase_routing", "applied")]["window_count"], 2)
+        self.assertEqual(cohorts[("phase_routing", "applied")]["fulfilled_count"], 1)
+        self.assertEqual(cohorts[("phase_routing", "holdout")]["window_count"], 1)
+        self.assertEqual(cohorts[("phase_routing", "holdout")]["adoption_rate"], 1.0)
+        comparison = payload["cohort_comparisons"][0]
+        self.assertEqual(comparison["optimization_family"], "phase_routing")
+        self.assertEqual(comparison["applied_windows"], 2)
+        self.assertEqual(comparison["holdout_windows"], 1)
+        self.assertEqual(payload["blocker_reason_breakdown"][0]["value"], "ttl-expired-without-tool-result")
+        self.assertTrue(payload["privacy"]["metadata_only"])
+        self.assertFalse(payload["privacy"]["raw_tool_payloads_included"])
+
+        for forbidden in (
+            "provider-adoption-call-secret",
+            "provider-adoption-window-secret",
+            "provider-adoption-session-secret",
+            "provider-adoption-session-digest-secret",
+            "provider-adoption-tool-digest-secret",
+            "raw provider adoption prompt secret",
+            "raw provider adoption response secret",
+            "provider adoption raw tool secret",
+            "request_json",
+            "response_json",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_provider_adoption_health_endpoint_and_dashboard_are_read_only_metadata(self):
+        call_id = "provider-adoption-dashboard-call-secret"
+        server.store.log_call(
+            id=call_id,
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=100,
+            input_tokens_est=200,
+            output_tokens_est=20,
+            actual_input_tokens=200,
+            actual_output_tokens=20,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False, "policy_source": "local-default"}),
+            routing_json=stable_json({
+                "applied": True,
+                "policy_source": "local-manual",
+                "phase_canary": {"status": "canary_applied", "cohort": "canary_applied"},
+            }),
+            cache_json=stable_json({"status": "skipped", "policy_source": "local-default"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="provider-adoption-dashboard-session-secret",
+            category="tool-result",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            retry_count=0,
+            provider="anthropic",
+        )
+        server.store.log_provider_tool_adoption_window(
+            id="provider-adoption-dashboard-window-secret",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            app_family="claude",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-haiku-4-5-20251001",
+            category="tool-result",
+            workflow_phase="tool-result",
+            policy_source="local-manual",
+            policy_ids_json="[]",
+            call_id=call_id,
+            fulfilled_call_id=call_id,
+            session_digest="sha256:provider-adoption-dashboard-session-digest-secret",
+            correlation_digest="sha256:provider-adoption-dashboard-tool-digest-secret",
+            status="fulfilled",
+            reason="matched-subsequent-tool-result",
+            age_bucket="0_1m",
+            tool_use_count=1,
+            tool_result_count=1,
+            metadata_json=None,
+        )
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream=None,
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        client = TestClient(app)
+        endpoint = client.get("/agentflow/stats/provider-adoption-health?limit=20")
+        dashboard = client.get("/agentflow/dashboard")
+        rendered = json.dumps(endpoint.json(), sort_keys=True) + dashboard.text
+
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertIn("Provider adoption quality health", dashboard.text)
+        self.assertIn("provider-adoption-cohorts-tbody", dashboard.text)
+        self.assertIn("fetch('/agentflow/stats/provider-adoption-health?limit=5000')", dashboard.text)
+        self.assertNotIn("provider-adoption-dashboard-call-secret", rendered)
+        self.assertNotIn("provider-adoption-dashboard-window-secret", rendered)
+        self.assertNotIn("provider-adoption-dashboard-session-secret", rendered)
+        self.assertNotIn("provider-adoption-dashboard-session-digest-secret", rendered)
+        self.assertNotIn("provider-adoption-dashboard-tool-digest-secret", rendered)
+        self.assertNotIn("<form", dashboard.text.lower())
+        self.assertNotIn("contenteditable", dashboard.text.lower())
+
     def test_usage_by_owner_groups_provider_calls_and_codex_turns(self):
         old_engineer = os.environ.get("AGENTFLOW_ENGINEER")
         old_app = os.environ.get("AGENTFLOW_APP")
@@ -7504,7 +7700,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(">Codex debug</button>", html)
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
-        self.assertIn("const tabs=['safety','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
+        self.assertIn("const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions']", html)
 
     def test_dashboard_exposes_codex_quota_token_usage_panel(self):
         html = stats_views.dashboard_html()

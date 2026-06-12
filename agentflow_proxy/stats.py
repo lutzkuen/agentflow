@@ -13374,6 +13374,286 @@ async def stats_quality_signals(store_obj: Any, limit: int = 500) -> dict[str, A
     }
 
 
+PROVIDER_ADOPTION_RISK_STATUSES = {"abandoned", "orphan_result", "unknown"}
+
+
+def _provider_adoption_label(value: Any, *, fallback: str = "unknown") -> str:
+    return public_label(value, fallback=fallback)
+
+
+def _provider_adoption_model_family(row: dict[str, Any]) -> str:
+    family = row.get("routed_model_family") or row.get("requested_model_family")
+    if family:
+        return _provider_adoption_label(family)
+    model = row.get("routed_model") or row.get("requested_model")
+    return _provider_adoption_label(model_tier(str(model or "")), fallback="unknown")
+
+
+def _provider_adoption_normalized_cohort(value: Any) -> str:
+    label = _provider_adoption_label(value, fallback="")
+    if label in {"applied", "canary_applied", "active"}:
+        return "applied"
+    if label in {"holdout", "canary_holdout"}:
+        return "holdout"
+    if label in {"safety_stopped", "safety-stop", "safety_stopped"}:
+        return "safety_stopped"
+    return label or "unknown"
+
+
+def _provider_adoption_policy_id(value: Any) -> str | None:
+    return public_id(value, prefix="policy")
+
+
+def _provider_adoption_cohort_entries(row: dict[str, Any]) -> list[dict[str, str]]:
+    routing = _json_obj(row.get("routing_json"))
+    crunch = _json_obj(row.get("crunch_json"))
+    cache = _json_obj(row.get("cache_json"))
+    entries: list[dict[str, str]] = []
+
+    def add(family: str, meta: Any, *, nested_key: str | None = None) -> None:
+        candidate = meta.get(nested_key) if isinstance(meta, dict) and nested_key else meta
+        if not isinstance(candidate, dict):
+            return
+        cohort = _provider_adoption_normalized_cohort(
+            candidate.get("cohort") or candidate.get("canary_cohort") or candidate.get("status")
+        )
+        if cohort == "unknown" and candidate.get("applied") is not True:
+            return
+        if cohort == "unknown" and candidate.get("applied") is True:
+            cohort = "applied"
+        item: dict[str, str] = {
+            "optimization_family": _provider_adoption_label(family),
+            "cohort": cohort,
+            "policy_source": _provider_adoption_label(candidate.get("policy_source") or row.get("policy_source")),
+        }
+        policy_id = _provider_adoption_policy_id(
+            candidate.get("policy_id") or candidate.get("candidate_id") or candidate.get("rule_id")
+        )
+        if policy_id:
+            item["policy_id"] = policy_id
+        if item not in entries:
+            entries.append(item)
+
+    add("routing_experiment", routing, nested_key="routing_experiment")
+    add("phase_routing", routing, nested_key="phase_canary")
+    add("openai_routing", routing, nested_key="openai_canary")
+    managed = routing.get("managed_recommendation")
+    if isinstance(managed, dict):
+        add("managed_recommendation", managed)
+        add("managed_recommendation", managed, nested_key="canary")
+    add("old_context_summarization", crunch, nested_key="old_context_summarization")
+    add("cache_replay", cache, nested_key="cache_replay_canary")
+    if cache.get("status") in {"holdout", "applied", "canary_holdout", "canary_applied"}:
+        add("cache", cache)
+
+    if entries:
+        return entries[:20]
+
+    optimized = bool(
+        row.get("cache_hit")
+        or cache.get("status") == "hit"
+        or crunch.get("changed")
+        or routing.get("applied")
+        or (
+            row.get("requested_model")
+            and row.get("routed_model")
+            and row.get("requested_model") != row.get("routed_model")
+        )
+    )
+    return [{
+        "optimization_family": "overall",
+        "cohort": "optimized" if optimized else "baseline",
+        "policy_source": _provider_adoption_label(row.get("policy_source")),
+    }]
+
+
+def _new_provider_adoption_bucket(key: dict[str, str]) -> dict[str, Any]:
+    return {
+        **key,
+        "window_count": 0,
+        "fulfilled_count": 0,
+        "pending_count": 0,
+        "abandoned_count": 0,
+        "orphan_result_count": 0,
+        "unknown_count": 0,
+        "risk_window_count": 0,
+        "tool_use_count": 0,
+        "tool_result_count": 0,
+        "_blocker_counts": {},
+    }
+
+
+def _add_provider_adoption_row(bucket: dict[str, Any], row: dict[str, Any]) -> None:
+    status = _provider_adoption_label(row.get("status"))
+    reason = _provider_adoption_label(row.get("reason"))
+    bucket["window_count"] += 1
+    bucket["tool_use_count"] += _as_int(row.get("tool_use_count"))
+    bucket["tool_result_count"] += _as_int(row.get("tool_result_count"))
+    if status == "fulfilled":
+        bucket["fulfilled_count"] += 1
+    elif status == "pending":
+        bucket["pending_count"] += 1
+    elif status == "abandoned":
+        bucket["abandoned_count"] += 1
+    elif status == "orphan_result":
+        bucket["orphan_result_count"] += 1
+    else:
+        bucket["unknown_count"] += 1
+    if status in PROVIDER_ADOPTION_RISK_STATUSES:
+        bucket["risk_window_count"] += 1
+    if status != "fulfilled":
+        counts = bucket["_blocker_counts"]
+        counts[reason] = counts.get(reason, 0) + 1
+
+
+def _finalize_provider_adoption_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    total = max(_as_int(bucket.get("window_count")), 1)
+    blockers = _breakdown_from_counts(bucket.pop("_blocker_counts", {}))
+    bucket["adoption_rate"] = bucket["fulfilled_count"] / total
+    bucket["risk_rate"] = bucket["risk_window_count"] / total
+    bucket["pending_rate"] = bucket["pending_count"] / total
+    bucket["top_blockers"] = blockers[:5]
+    bucket["health"] = (
+        "healthy"
+        if bucket["window_count"] and bucket["risk_window_count"] == 0
+        else "watch"
+        if bucket["window_count"]
+        else "no-data"
+    )
+    return bucket
+
+
+async def stats_provider_adoption_health(store_obj: Any, limit: int = 5000) -> dict[str, Any]:
+    if hasattr(store_obj, "abandon_stale_provider_tool_adoption_windows"):
+        store_obj.abandon_stale_provider_tool_adoption_windows(now=utc_now())
+    if hasattr(store_obj, "provider_tool_adoption_health_rows"):
+        rows = store_obj.provider_tool_adoption_health_rows(limit=limit)
+    else:
+        rows = store_obj.provider_tool_adoption_window_rows(limit=limit)
+
+    summary = _new_provider_adoption_bucket({
+        "scope": "all",
+        "optimization_family": "all",
+        "cohort": "all",
+        "policy_source": "all",
+    })
+    cohort_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+    dimension_buckets: dict[tuple[str, ...], dict[str, Any]] = {}
+    status_counts: dict[str, int] = {}
+
+    for raw in rows:
+        row = dict(raw)
+        status = _provider_adoption_label(row.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        _add_provider_adoption_row(summary, row)
+
+        base = {
+            "source_surface": _provider_adoption_label(row.get("source_surface")),
+            "app_family": _provider_adoption_label(row.get("app_family")),
+            "model_family": _provider_adoption_model_family(row),
+            "category": _provider_adoption_label(row.get("category")),
+            "workflow_phase": _provider_adoption_label(row.get("workflow_phase")),
+        }
+        for cohort in _provider_adoption_cohort_entries(row):
+            cohort_key = (
+                cohort["optimization_family"],
+                cohort["cohort"],
+                cohort["policy_source"],
+            )
+            cohort_bucket = cohort_buckets.setdefault(
+                cohort_key,
+                _new_provider_adoption_bucket({
+                    "optimization_family": cohort["optimization_family"],
+                    "cohort": cohort["cohort"],
+                    "policy_source": cohort["policy_source"],
+                }),
+            )
+            _add_provider_adoption_row(cohort_bucket, row)
+
+            dim_key = (
+                base["source_surface"],
+                base["app_family"],
+                base["model_family"],
+                base["category"],
+                base["workflow_phase"],
+                cohort["optimization_family"],
+                cohort["cohort"],
+                cohort["policy_source"],
+            )
+            dim_bucket = dimension_buckets.setdefault(
+                dim_key,
+                _new_provider_adoption_bucket({
+                    **base,
+                    "optimization_family": cohort["optimization_family"],
+                    "cohort": cohort["cohort"],
+                    "policy_source": cohort["policy_source"],
+                }),
+            )
+            _add_provider_adoption_row(dim_bucket, row)
+
+    cohort_rows = [_finalize_provider_adoption_bucket(bucket) for bucket in cohort_buckets.values()]
+    cohort_rows.sort(key=lambda item: (-item["window_count"], item["optimization_family"], item["cohort"]))
+    dimension_rows = [_finalize_provider_adoption_bucket(bucket) for bucket in dimension_buckets.values()]
+    dimension_rows.sort(key=lambda item: (-item["window_count"], item["source_surface"], item["optimization_family"], item["cohort"]))
+
+    by_family: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in cohort_rows:
+        by_family.setdefault(row["optimization_family"], {})[row["cohort"]] = row
+    comparisons: list[dict[str, Any]] = []
+    for family, cohorts in sorted(by_family.items()):
+        applied = cohorts.get("applied")
+        holdout = cohorts.get("holdout")
+        if not applied and not holdout:
+            continue
+        applied_rate = applied.get("adoption_rate") if applied else None
+        holdout_rate = holdout.get("adoption_rate") if holdout else None
+        comparisons.append({
+            "optimization_family": family,
+            "applied_windows": _as_int(applied.get("window_count")) if applied else 0,
+            "holdout_windows": _as_int(holdout.get("window_count")) if holdout else 0,
+            "applied_adoption_rate": applied_rate,
+            "holdout_adoption_rate": holdout_rate,
+            "applied_minus_holdout_adoption_rate": (
+                applied_rate - holdout_rate
+                if applied_rate is not None and holdout_rate is not None
+                else None
+            ),
+            "applied_risk_rate": applied.get("risk_rate") if applied else None,
+            "holdout_risk_rate": holdout.get("risk_rate") if holdout else None,
+            "health": (
+                "healthy"
+                if applied and holdout and applied.get("risk_rate", 0) <= holdout.get("risk_rate", 0)
+                else "watch"
+            ),
+        })
+
+    finalized_summary = _finalize_provider_adoption_bucket(summary)
+    return {
+        "generated_at": utc_now(),
+        "schema": "agentflow.provider_adoption_dashboard_health.v1",
+        "window_schema": "agentflow.provider_tool_adoption_window.v1",
+        "row_count": len(rows),
+        "status_counts": dict(sorted(status_counts.items())),
+        "summary": finalized_summary,
+        "cohort_health": cohort_rows[:50],
+        "cohort_comparisons": comparisons[:50],
+        "dimension_breakdown": dimension_rows[:100],
+        "blocker_reason_breakdown": finalized_summary.get("top_blockers", []),
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "tool_ids_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "provider_bodies_included": False,
+            "correlation_digests_included": False,
+        },
+    }
+
+
 async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
     buckets: dict[str, dict[str, Any]] = {}
@@ -15207,6 +15487,7 @@ def dashboard_html() -> str:
 
 <div class="tabs">
   <button class="tab-btn" onclick="showTab('safety')">Safety</button>
+  <button class="tab-btn" onclick="showTab('adoption')">Adoption quality</button>
   <button class="tab-btn active" onclick="showTab('activity')">Recent calls</button>
   <button class="tab-btn" onclick="showTab('usage')">Usage by app / engineer</button>
   <button class="tab-btn" onclick="showTab('codex')">Codex quota</button>
@@ -15253,6 +15534,47 @@ def dashboard_html() -> str:
     </tr></thead>
     <tbody id="safety-managed-feedback-tbody"></tbody>
   </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-adoption">
+<div class="section">
+  <h2>Provider adoption quality health</h2>
+  <table data-table-id="provider-adoption-summary" data-filter-label="Filter provider adoption summary">
+    <thead><tr>
+      <th data-sort-type="number">Windows</th><th data-sort-type="percent">Fulfilled</th><th data-sort-type="percent">Risk</th><th data-sort-type="number">Pending</th><th data-sort-type="number">Abandoned</th><th data-sort-type="number">Orphan</th><th data-sort-type="text">Top blockers</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="provider-adoption-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Applied vs holdout adoption</h2>
+  <table data-table-id="provider-adoption-comparisons" data-filter-label="Filter provider adoption comparisons">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Applied fulfilled</th><th data-sort-type="percent">Holdout fulfilled</th><th data-sort-type="percent">Delta</th><th data-sort-type="percent">Applied risk</th><th data-sort-type="percent">Holdout risk</th><th data-sort-type="text">Health</th>
+    </tr></thead>
+    <tbody id="provider-adoption-comparisons-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Adoption by optimization cohort</h2>
+  <table data-table-id="provider-adoption-cohorts" data-filter-label="Filter provider adoption cohorts">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="text">Cohort</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Windows</th><th data-sort-type="percent">Fulfilled</th><th data-sort-type="number">Pending</th><th data-sort-type="number">Risk windows</th><th data-sort-type="percent">Risk rate</th><th data-sort-type="text">Top blockers</th>
+    </tr></thead>
+    <tbody id="provider-adoption-cohorts-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Adoption dimensions</h2>
+  <div class="table-wrap">
+  <table class="activity-table" data-table-id="provider-adoption-dimensions" data-filter-label="Filter provider adoption dimensions">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">App</th><th data-sort-type="text">Model family</th><th data-sort-type="text">Category</th><th data-sort-type="text">Phase</th><th data-sort-type="text">Family</th><th data-sort-type="text">Cohort</th><th data-sort-type="number">Windows</th><th data-sort-type="percent">Fulfilled</th><th data-sort-type="number">Pending</th><th data-sort-type="number">Risk</th><th data-sort-type="text">Policy</th><th data-sort-type="text">Top blockers</th>
+    </tr></thead>
+    <tbody id="provider-adoption-dimensions-tbody"></tbody>
+  </table>
+  </div>
 </div>
 </div>
 
@@ -16437,13 +16759,87 @@ async function loadFullStats(){
 }
 
 function showTab(name){
-  const tabs=['safety','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
+  const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','scaffold','errors','limiter','policies','openai','evalqueue','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
     b.classList.toggle('active',tabs[i]===name);
   });
+}
+
+function adoptionBadge(value){
+  if(value==='healthy')return'hit';
+  if(value==='watch')return'routed';
+  if(value==='no-data')return'miss';
+  return'provider';
+}
+
+async function refreshProviderAdoptionHealth(){
+  try{
+    const r=await fetch('/agentflow/stats/provider-adoption-health?limit=5000');
+    const d=await r.json();
+    const summary=d.summary||{};
+    const privacy=d.privacy||{};
+    const privacyBadges=[
+      privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">metadata unclear</span>',
+      privacy.raw_prompts_included?'<span class="badge err">raw prompts</span>':'<span class="badge hit">raw prompts omitted</span>',
+      privacy.raw_tool_payloads_included?'<span class="badge err">tool payloads</span>':'<span class="badge hit">tool payloads omitted</span>',
+      privacy.request_ids_included?'<span class="badge err">request ids</span>':'<span class="badge hit">request ids omitted</span>',
+      privacy.session_ids_included?'<span class="badge err">session ids</span>':'<span class="badge hit">session ids omitted</span>'
+    ].join(' ');
+    document.getElementById('provider-adoption-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(summary.window_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(summary.adoption_rate||0)}</td>
+      <td class="${(summary.risk_rate||0)>0?'cost':'tokens'}">${fmtPctValue(summary.risk_rate||0)}</td>
+      <td class="tokens">${(summary.pending_count||0).toLocaleString()}</td>
+      <td class="tokens">${(summary.abandoned_count||0).toLocaleString()}</td>
+      <td class="tokens">${(summary.orphan_result_count||0).toLocaleString()}</td>
+      <td class="flags">${blockerBadges(summary.top_blockers||[])}</td>
+      <td class="flags">${privacyBadges}</td>
+    </tr>`;
+    const comparisons=d.cohort_comparisons||[];
+    document.getElementById('provider-adoption-comparisons-tbody').innerHTML=comparisons.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.optimization_family||'unknown')}</span></td>
+      <td class="tokens">${(row.applied_windows||0).toLocaleString()}</td>
+      <td class="tokens">${(row.holdout_windows||0).toLocaleString()}</td>
+      <td class="tokens">${row.applied_adoption_rate==null?'—':fmtPctValue(row.applied_adoption_rate)}</td>
+      <td class="tokens">${row.holdout_adoption_rate==null?'—':fmtPctValue(row.holdout_adoption_rate)}</td>
+      <td class="${(row.applied_minus_holdout_adoption_rate||0)<0?'cost':'savings'}">${row.applied_minus_holdout_adoption_rate==null?'—':fmtPctValue(row.applied_minus_holdout_adoption_rate)}</td>
+      <td class="${(row.applied_risk_rate||0)>0?'cost':'tokens'}">${row.applied_risk_rate==null?'—':fmtPctValue(row.applied_risk_rate)}</td>
+      <td class="${(row.holdout_risk_rate||0)>0?'cost':'tokens'}">${row.holdout_risk_rate==null?'—':fmtPctValue(row.holdout_risk_rate)}</td>
+      <td><span class="badge ${adoptionBadge(row.health)}">${esc(row.health||'unknown')}</span></td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No applied/holdout provider adoption cohorts observed yet</td></tr>';
+    const cohorts=d.cohort_health||[];
+    document.getElementById('provider-adoption-cohorts-tbody').innerHTML=cohorts.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.optimization_family||'unknown')}</span></td>
+      <td><span class="badge ${row.cohort==='applied'?'hit':row.cohort==='holdout'?'routed':'miss'}">${esc(row.cohort||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+      <td class="tokens">${(row.window_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(row.adoption_rate||0)}</td>
+      <td class="tokens">${(row.pending_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.risk_window_count||0).toLocaleString()}</td>
+      <td class="${(row.risk_rate||0)>0?'cost':'tokens'}">${fmtPctValue(row.risk_rate||0)}</td>
+      <td class="flags">${blockerBadges(row.top_blockers||[])}</td>
+    </tr>`).join('')||'<tr><td colspan="9" style="color:#8b949e">No provider adoption windows recorded yet</td></tr>';
+    const dims=d.dimension_breakdown||[];
+    document.getElementById('provider-adoption-dimensions-tbody').innerHTML=dims.map(row=>`<tr>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td>${esc(row.app_family||'unknown')}</td>
+      <td>${esc(row.model_family||'unknown')}</td>
+      <td>${esc(row.category||'unknown')}</td>
+      <td>${esc(row.workflow_phase||'unknown')}</td>
+      <td>${esc(row.optimization_family||'unknown')}</td>
+      <td><span class="badge ${row.cohort==='applied'?'hit':row.cohort==='holdout'?'routed':'miss'}">${esc(row.cohort||'unknown')}</span></td>
+      <td class="tokens">${(row.window_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(row.adoption_rate||0)}</td>
+      <td class="tokens">${(row.pending_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.risk_window_count||0).toLocaleString()}</td>
+      <td><span class="badge provider">${esc(row.policy_source||'unknown')}</span></td>
+      <td class="flags">${blockerBadges(row.top_blockers||[])}</td>
+    </tr>`).join('')||'<tr><td colspan="13" style="color:#8b949e">No provider adoption dimensions recorded yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
 }
 
 async function refreshUsage(){
@@ -18846,6 +19242,7 @@ async function refreshSessions(){
 
 initDataTables();
 refreshSafety();
+refreshProviderAdoptionHealth();
 refreshActivity();
 refreshUsage();
 refreshCodexReadiness();
@@ -18875,6 +19272,7 @@ refreshPhaseRouting();
 refreshSessionPhaseMemory();
 refreshSessions();
 setInterval(refreshSafety,30000);
+setInterval(refreshProviderAdoptionHealth,30000);
 setInterval(refreshActivity,5000);
 setInterval(refreshUsage,30000);
 setInterval(refreshCodexReadiness,30000);

@@ -784,6 +784,25 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def provider_tool_adoption_health_rows(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        rows = self.conn.execute(
+            """
+            select w.created_at, w.updated_at, w.provider, w.source_surface, w.endpoint,
+                   w.app_family, w.requested_model, w.routed_model, w.category,
+                   w.workflow_phase, w.policy_source, w.policy_ids_json, w.status,
+                   w.reason, w.age_bucket, w.tool_use_count, w.tool_result_count,
+                   c.requested_model_family, c.routed_model_family, c.cache_hit,
+                   c.routing_json, c.crunch_json, c.cache_json
+            from provider_tool_adoption_windows w
+            left join calls c on c.id = w.call_id
+            order by w.created_at desc
+            limit ?
+            """,
+            (capped,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def provider_tool_adoption_windows_for_call_ids(self, call_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
         ids = [str(call_id) for call_id in call_ids if call_id]
         if not ids:
