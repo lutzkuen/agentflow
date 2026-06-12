@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
+from pathlib import Path
 from typing import Any
 
+import yaml
+
+from agentflow_proxy.cache import cache_pattern_rules_from_policy_payload
+from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, build_openai_cache_replay_report
 from agentflow_proxy.store import utc_now
@@ -61,6 +67,144 @@ def _verdict_counts(impact: dict[str, Any]) -> dict[str, int]:
     if counts:
         return counts
     return dict(Counter(str(row.get("verdict") or "unknown") for row in impact.get("candidates") or [] if isinstance(row, dict)))
+
+
+def _canary_policy_candidates() -> list[Path]:
+    paths: list[Path] = []
+    env_path = os.getenv("AGENTFLOW_CACHE_CANARY_POLICY")
+    if env_path:
+        paths.append(Path(env_path).expanduser())
+    paths.append(Path.cwd() / "config" / "cache_canary_policy.yaml")
+    paths.append(Path.home() / ".agentflow" / "cache_canary_policy.yaml")
+    return paths
+
+
+def _first_existing_canary_policy_path() -> Path | None:
+    for path in _canary_policy_candidates():
+        if path.exists():
+            return path
+    return None
+
+
+def _top_breakdown(rows: Any, *, limit: int = 8) -> list[dict[str, Any]]:
+    return rows[:limit] if isinstance(rows, list) else []
+
+
+def _staged_policy_status(*, loaded_by_runtime: bool, dry_run: dict[str, Any]) -> tuple[str, list[str]]:
+    summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
+    reasons = _breakdown_map(dry_run.get("reason_breakdown"))
+    blockers = _breakdown_map(dry_run.get("blocker_breakdown"))
+    projected_applied = _as_int(summary.get("projected_applied_rows"))
+    holdout = _as_int(summary.get("holdout_rows"))
+    matched = _as_int(summary.get("matched_rows"))
+    invalidation = _as_int(summary.get("invalidation_required_rows"))
+    blocked = _as_int(summary.get("blocked_rows"))
+    if not loaded_by_runtime:
+        return "staged-policy-not-loaded", ["runtime-cache-policy-reload-required"]
+    if matched <= 0:
+        reason = "staged-policy-hash-mismatch"
+        if reasons.get("pattern-features-missing"):
+            reason = "pattern-features-missing"
+        elif reasons.get("pattern-hash-mismatch") or reasons.get("no-matching-rule"):
+            reason = "staged-policy-hash-mismatch"
+        return reason, [reason]
+    if holdout > 0 and projected_applied <= 0:
+        return "holdout-only-traffic", ["canary-holdout-only"]
+    if invalidation > 0 and projected_applied <= 0:
+        top = next(iter(blockers), "safe-invalidation-required")
+        return "dependency-invalidation-blocked", [top]
+    if projected_applied > 0:
+        return "staged-policy-can-run", ["awaiting-observed-cache-replay-lifecycle"]
+    if blocked > 0:
+        top = next(iter(blockers), "staged-policy-blocked")
+        return "staged-policy-blocked", [top]
+    return "staged-policy-no-runnable-traffic", ["no-runnable-canary-traffic"]
+
+
+def _staged_canary_policy_diagnostics(store_obj: Any, *, limit: int) -> dict[str, Any]:
+    path = _first_existing_canary_policy_path()
+    if path is None:
+        return {
+            "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+            "status": "staged-policy-missing",
+            "blockers": ["staged-canary-policy-missing"],
+            "configured_policy_path": None,
+            "runtime_loaded_policy_path": None,
+            "runtime_loaded": False,
+            "policy_rule_count": 0,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": _privacy_summary(),
+        }
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return {
+            "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+            "status": "staged-policy-unreadable",
+            "blockers": ["staged-canary-policy-unreadable"],
+            "configured_policy_path": str(path),
+            "read_error_type": type(exc).__name__,
+            "runtime_loaded_policy_path": None,
+            "runtime_loaded": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": _privacy_summary(),
+        }
+    if not isinstance(data, dict):
+        data = {}
+    rules = cache_pattern_rules_from_policy_payload(data)
+    if not rules:
+        return {
+            "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+            "status": "staged-policy-empty",
+            "blockers": ["staged-canary-policy-empty"],
+            "configured_policy_path": str(path),
+            "runtime_loaded_policy_path": None,
+            "runtime_loaded": False,
+            "policy_rule_count": 0,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "privacy": _privacy_summary(),
+        }
+
+    # Import after reading the file so tests can reload the cache module under a patched environment.
+    from agentflow_proxy import cache as cache_module
+
+    runtime_path = getattr(cache_module, "CACHE_CANARY_RULES_PATH", None)
+    loaded_by_runtime = runtime_path is not None and Path(str(runtime_path)).expanduser() == path
+    dry_run = build_openai_cache_replay_dry_run(store_obj, data, limit=limit)
+    status, blockers = _staged_policy_status(loaded_by_runtime=loaded_by_runtime, dry_run=dry_run)
+    summary = dry_run.get("summary") if isinstance(dry_run.get("summary"), dict) else {}
+    return {
+        "schema": "agentflow.openai_cache_replay_staged_canary_diagnostics.v1",
+        "status": status,
+        "blockers": blockers,
+        "configured_policy_path": str(path),
+        "runtime_loaded_policy_path": str(runtime_path) if runtime_path else None,
+        "runtime_loaded": loaded_by_runtime,
+        "policy_rule_count": len(rules),
+        "dry_run_summary": {
+            "openai_rows_considered": _as_int(summary.get("openai_rows_considered")),
+            "policy_rule_count": _as_int(summary.get("policy_rule_count")),
+            "matched_rows": _as_int(summary.get("matched_rows")),
+            "projected_applied_rows": _as_int(summary.get("projected_applied_rows")),
+            "holdout_rows": _as_int(summary.get("holdout_rows")),
+            "blocked_rows": _as_int(summary.get("blocked_rows")),
+            "invalidation_required_rows": _as_int(summary.get("invalidation_required_rows")),
+            "projected_hits": _as_int(summary.get("projected_hits")),
+            "projected_savings_usd": summary.get("projected_savings_usd"),
+            "cache_table_mutated": bool(summary.get("cache_table_mutated")),
+            "provider_calls_made": _as_int(summary.get("provider_calls_made")),
+            "cache_entries_written": _as_int(summary.get("cache_entries_written")),
+        },
+        "reason_breakdown": _top_breakdown(dry_run.get("reason_breakdown")),
+        "blocker_breakdown": _top_breakdown(dry_run.get("blocker_breakdown")),
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy_summary(),
+    }
 
 
 def _top_state(opportunity: dict[str, Any], impact: dict[str, Any]) -> tuple[str, str]:
@@ -200,6 +344,16 @@ def build_openai_cache_replay_readiness_report(
     opportunity_rows = _opportunity_candidate_rows(opportunity) if not impact_rows else []
     verdict_counts = _verdict_counts(impact)
     blocker_counts = _breakdown_map(opportunity.get("blocker_reason_breakdown"))
+    staged_policy = _staged_canary_policy_diagnostics(
+        store_obj,
+        limit=max(opportunity_limit, impact_limit),
+    )
+    if (
+        state == "blocked"
+        and not _as_int(imp.get("observed_openai_cache_replay_metadata_row_count"))
+        and staged_policy.get("status") not in {None, "staged-policy-can-run"}
+    ):
+        state_reason = str(staged_policy.get("status") or state_reason)
 
     return {
         "schema": SCHEMA,
@@ -230,7 +384,16 @@ def build_openai_cache_replay_readiness_report(
                 8,
             ),
             "observed_savings_usd": imp.get("observed_savings_usd"),
+            "staged_canary_policy_status": staged_policy.get("status"),
             "top_blockers": _counter_rows(Counter(blocker_counts))[:6],
+        },
+        "lifecycle_diagnostics": {
+            "schema": "agentflow.openai_cache_replay_lifecycle_diagnostics.v1",
+            "observed_replay_metadata_rows": _as_int(imp.get("observed_openai_cache_replay_metadata_row_count")),
+            "applied_count": _as_int(imp.get("applied_count")),
+            "holdout_count": _as_int(imp.get("holdout_count")),
+            "staged_canary_policy": staged_policy,
+            "privacy": _privacy_summary(),
         },
         "state_breakdown": _state_counts(state, opportunity, impact),
         "cohort_breakdown": impact.get("cohort_breakdown") or [],

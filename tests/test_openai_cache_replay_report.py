@@ -663,6 +663,89 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, rendered)
 
+    def test_openai_cache_replay_readiness_explains_missing_staged_canary_policy(self) -> None:
+        self._log_openai_call(request_fingerprint="raw-readiness-request-fingerprint")
+        self._log_openai_call(request_fingerprint="raw-readiness-request-fingerprint")
+
+        with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(Path(self.tmpdir.name) / "missing.yaml")}):
+            report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+
+        self.assertEqual(report["state"], "blocked")
+        self.assertEqual(report["state_reason"], "staged-policy-missing")
+        diagnostics = report["lifecycle_diagnostics"]["staged_canary_policy"]
+        self.assertEqual(diagnostics["status"], "staged-policy-missing")
+        self.assertIn("staged-canary-policy-missing", diagnostics["blockers"])
+        self.assertEqual(report["summary"]["staged_canary_policy_status"], "staged-policy-missing")
+        encoded = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw-readiness-request-fingerprint", encoded)
+        self.assertFalse(diagnostics["privacy"]["request_fingerprints_included"])
+        self.assertFalse(diagnostics["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(diagnostics["provider_calls_made"])
+
+    def test_openai_cache_replay_readiness_diagnoses_staged_policy_can_run(self) -> None:
+        pattern_hash = "sha256:" + "d" * 64
+        policy = {
+            "schema": "agentflow.openai_cache_replay_canary_policy.v1",
+            "policy_source": "managed-recommended",
+            "pattern_rules": [
+                {
+                    "id": "openai-cache-readiness-staged-rule",
+                    "candidate_id": "openai-cache-readiness-staged-candidate",
+                    "conditions": {
+                        "pattern_hashes": [pattern_hash],
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "category": "chat",
+                        "has_tools": False,
+                        "stream": False,
+                        "replayability_levels": ["local-exact-response"],
+                    },
+                    "action": {
+                        "type": "exact_cache_pattern",
+                        "scope": "session",
+                    },
+                    "rollout": {
+                        "canary_enabled": True,
+                        "canary_fraction": 1.0,
+                        "canary_salt": "openai-readiness-staged-test",
+                        "canary_unit": "request_fingerprint",
+                    },
+                }
+            ],
+        }
+        policy_path = Path(self.tmpdir.name) / "cache_canary_policy.yaml"
+        policy_path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+        for index, cost in enumerate((0.01, 0.03)):
+            self._log_openai_call(
+                request_fingerprint="raw-staged-readiness-request-fingerprint",
+                pattern_hashes=[pattern_hash],
+                cost=cost,
+                created_at=f"2026-06-11T08:0{index}:00+00:00",
+            )
+
+        from agentflow_proxy import cache as cache_module
+
+        try:
+            with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(policy_path)}):
+                importlib.reload(cache_module)
+                report = build_openai_cache_replay_readiness_report(self.store, opportunity_limit=20, impact_limit=20)
+        finally:
+            importlib.reload(cache_module)
+
+        diagnostics = report["lifecycle_diagnostics"]["staged_canary_policy"]
+        self.assertEqual(diagnostics["status"], "staged-policy-can-run")
+        self.assertTrue(diagnostics["runtime_loaded"])
+        self.assertEqual(diagnostics["policy_rule_count"], 1)
+        self.assertEqual(diagnostics["dry_run_summary"]["projected_applied_rows"], 2)
+        self.assertEqual(diagnostics["dry_run_summary"]["projected_hits"], 1)
+        self.assertFalse(diagnostics["dry_run_summary"]["cache_table_mutated"])
+        self.assertFalse(diagnostics["provider_calls_made"])
+        encoded = json.dumps(report, sort_keys=True)
+        self.assertNotIn(pattern_hash, encoded)
+        self.assertNotIn("raw-staged-readiness-request-fingerprint", encoded)
+        self.assertFalse(diagnostics["privacy"]["pattern_hashes_included"])
+        self.assertFalse(diagnostics["privacy"]["request_fingerprints_included"])
+
     def test_openai_cache_replay_apply_writes_local_canary_overlay(self) -> None:
         pattern_hash = "sha256:" + "e" * 64
         candidate_id = "openai-cache-apply-candidate"
