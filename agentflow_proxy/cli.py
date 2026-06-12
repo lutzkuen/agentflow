@@ -2106,6 +2106,12 @@ def managed_rollout_actions_review_cli(
         },
     )
     _attach_rollout_lifecycle_feedback(review, command="review", db_path=str(args.db))
+    _attach_terminal_output_compaction_lifecycle_feedback(
+        review,
+        command="review",
+        db_path=str(args.db),
+        result_key="managed_terminal_output_compaction_lifecycle_feedback",
+    )
     _write_rollout_actions_result(stdout if review["ok"] else stderr, review, pretty=args.pretty)
     return 0 if review["ok"] else 1
 
@@ -2648,6 +2654,12 @@ def managed_rollout_actions_apply_cli(
         },
     )
     _attach_rollout_lifecycle_feedback(result, command="apply", db_path=str(args.db))
+    _attach_terminal_output_compaction_lifecycle_feedback(
+        result,
+        command="apply",
+        db_path=str(args.db),
+        result_key="managed_terminal_output_compaction_lifecycle_feedback",
+    )
     _write_rollout_actions_result(stdout, result, pretty=args.pretty)
     return 0 if result["ok"] else 1
 
@@ -4011,6 +4023,7 @@ def terminal_output_compaction_dry_run_cli(argv: Sequence[str] | None = None, *,
             min_text_chars=args.min_text_chars,
             max_plateau_delta_ratio=args.max_plateau_delta_ratio,
         )
+        _attach_terminal_output_compaction_lifecycle_feedback(result, command="review", store=store)
     finally:
         store.conn.close()
     if args.pretty:
@@ -4072,6 +4085,7 @@ def terminal_output_compaction_impact_cli(argv: Sequence[str] | None = None, *, 
             max_non_positive_savings_rate=args.max_non_positive_savings_rate,
             rollback_error_rate=args.rollback_error_rate,
         )
+        _attach_terminal_output_compaction_lifecycle_feedback(result, command="impact", store=store)
     finally:
         store.conn.close()
     if args.pretty:
@@ -4249,6 +4263,57 @@ def _attach_repeated_scaffold_lifecycle_feedback(result: dict[str, Any], store: 
         }
 
     result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta(meta)
+
+
+def _attach_terminal_output_compaction_lifecycle_feedback(
+    result: dict[str, Any],
+    *,
+    command: str,
+    store: Any | None = None,
+    db_path: str | None = None,
+    result_key: str = "managed_lifecycle_feedback",
+) -> None:
+    from agentflow_proxy import recommendations
+    from agentflow_proxy.terminal_compaction_feedback import (
+        build_terminal_output_compaction_lifecycle_feedback,
+        queue_terminal_output_compaction_lifecycle_feedback,
+    )
+
+    payload = build_terminal_output_compaction_lifecycle_feedback(result, command=command)
+    if payload is None:
+        return
+
+    close_store = False
+    local_store = store
+    if local_store is None:
+        if not db_path:
+            return
+        local_store = _open_store_for_db(str(db_path))
+        close_store = True
+    try:
+        meta = asyncio.run(
+            queue_terminal_output_compaction_lifecycle_feedback(
+                local_store,
+                result,
+                command=command,
+                flush_immediately=False,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+            "auth_configured": recommendations.managed_auth_configured(),
+        }
+    finally:
+        if close_store and local_store is not None:
+            local_store.conn.close()
+
+    result[result_key] = _public_lifecycle_feedback_meta(meta)
 
 
 def _attach_openai_cache_replay_lifecycle_feedback(result: dict[str, Any], *, db_path: str) -> None:

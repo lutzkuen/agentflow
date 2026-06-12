@@ -461,6 +461,121 @@ def _routing_promotion_lifecycle_status(
     }
 
 
+def _terminal_output_compaction_lifecycle_status(
+    store: Any,
+    *,
+    source_surface: str | None,
+) -> dict[str, Any]:
+    rows = (
+        store.managed_outcome_feedback_payload_rows(source_surface=source_surface, limit=10000)
+        if hasattr(store, "managed_outcome_feedback_payload_rows")
+        else []
+    )
+    row_count = 0
+    action_count = 0
+    queue_state_counts: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
+    lifecycle_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    candidate_status: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        payload = _safe_payload_json(row)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        if metadata.get("schema") != "agentflow.terminal_output_compaction_lifecycle_feedback.v1":
+            continue
+        snapshots = [item for item in metadata.get("action_snapshots") or [] if isinstance(item, dict)]
+        if not snapshots:
+            continue
+        row_count += 1
+        queue_state = _queue_state(row.get("status"))
+        event_type = str(payload.get("event_type") or metadata.get("event_type") or metadata.get("command") or "unknown")
+        _add_count(queue_state_counts, queue_state)
+        _add_count(event_counts, event_type)
+        for snapshot in snapshots:
+            action_count += 1
+            candidate_id = str(snapshot.get("candidate_id") or "unknown")
+            rule_id = str(snapshot.get("rule_id") or "unknown")
+            lifecycle_status = str(snapshot.get("lifecycle_status") or snapshot.get("decision_status") or event_type or "unknown")
+            _add_count(lifecycle_counts, lifecycle_status)
+            _add_count(candidate_counts, candidate_id)
+            _add_count(rule_counts, rule_id)
+            for key, count in (snapshot.get("actual_cohort_counts") or snapshot.get("cohort_counts") or {}).items():
+                _add_count(cohort_counts, key, int(count or 0))
+            for reason in snapshot.get("reason_codes") or snapshot.get("blockers") or []:
+                _add_count(reason_counts, reason)
+
+            candidate = candidate_status.setdefault(
+                candidate_id,
+                {
+                    "candidate_id": candidate_id,
+                    "queue_rows": 0,
+                    "action_count": 0,
+                    "rule_id_breakdown": {},
+                    "queue_state_breakdown": {},
+                    "event_type_breakdown": {},
+                    "lifecycle_status_breakdown": {},
+                    "cohort_count_breakdown": {},
+                    "reason_code_breakdown": {},
+                    "net_savings_usd": 0.0,
+                    "projected_saved_tokens": 0,
+                    "payload_json_included": False,
+                },
+            )
+            candidate["queue_rows"] += 1
+            candidate["action_count"] += 1
+            for key, value in (
+                ("rule_id_breakdown", rule_id),
+                ("queue_state_breakdown", queue_state),
+                ("event_type_breakdown", event_type),
+                ("lifecycle_status_breakdown", lifecycle_status),
+            ):
+                _add_count(candidate[key], value)
+            for cohort_key, count in (snapshot.get("actual_cohort_counts") or snapshot.get("cohort_counts") or {}).items():
+                _add_count(candidate["cohort_count_breakdown"], cohort_key, int(count or 0))
+            for reason in snapshot.get("reason_codes") or snapshot.get("blockers") or []:
+                _add_count(candidate["reason_code_breakdown"], reason)
+            try:
+                candidate["net_savings_usd"] += float(snapshot.get("net_savings_usd") or 0.0)
+            except (TypeError, ValueError):
+                pass
+            candidate["projected_saved_tokens"] += int(snapshot.get("projected_saved_tokens") or 0)
+
+    candidate_breakdown: list[dict[str, Any]] = []
+    for bucket in candidate_status.values():
+        item = dict(bucket)
+        for key in (
+            "rule_id_breakdown",
+            "queue_state_breakdown",
+            "event_type_breakdown",
+            "lifecycle_status_breakdown",
+            "cohort_count_breakdown",
+            "reason_code_breakdown",
+        ):
+            item[key] = breakdown_from_counts(item[key])
+        item["net_savings_usd"] = round(float(item["net_savings_usd"]), 8)
+        candidate_breakdown.append(item)
+    candidate_breakdown.sort(key=lambda item: (-int(item["action_count"]), str(item["candidate_id"])))
+
+    return {
+        "schema": "agentflow.terminal_output_compaction_lifecycle_queue_status.v1",
+        "queue_rows": row_count,
+        "action_count": action_count,
+        "queue_state_breakdown": breakdown_from_counts(queue_state_counts),
+        "event_type_breakdown": breakdown_from_counts(event_counts),
+        "lifecycle_status_breakdown": breakdown_from_counts(lifecycle_counts),
+        "candidate_id_breakdown": breakdown_from_counts(candidate_counts),
+        "rule_id_breakdown": breakdown_from_counts(rule_counts),
+        "cohort_count_breakdown": breakdown_from_counts(cohort_counts),
+        "reason_code_breakdown": breakdown_from_counts(reason_counts),
+        "candidate_breakdown": candidate_breakdown,
+        "payload_json_included": False,
+    }
+
+
 def _openai_optimization_lifecycle_status(
     store: Any,
     *,
@@ -664,6 +779,7 @@ def managed_feedback_status_result(
     routing_experiments = _routing_experiment_status(store, source_surface=source_surface)
     codex_app_canaries = _codex_app_canary_lifecycle_status(store, source_surface=source_surface)
     routing_promotion_lifecycle = _routing_promotion_lifecycle_status(store, source_surface=source_surface)
+    terminal_output_compaction_lifecycle = _terminal_output_compaction_lifecycle_status(store, source_surface=source_surface)
     openai_optimization_lifecycle = _openai_optimization_lifecycle_status(store, source_surface=source_surface)
     return {
         "schema": "agentflow.managed_feedback_status.v1",
@@ -676,6 +792,7 @@ def managed_feedback_status_result(
         "routing_experiments": routing_experiments,
         "codex_app_canaries": codex_app_canaries,
         "routing_promotion_lifecycle": routing_promotion_lifecycle,
+        "terminal_output_compaction_lifecycle": terminal_output_compaction_lifecycle,
         "openai_optimization_lifecycle": openai_optimization_lifecycle,
         "status_breakdown": breakdown_from_counts(status_counts),
         "source_surface_breakdown": breakdown_from_counts(source_counts),
