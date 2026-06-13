@@ -4154,6 +4154,72 @@ def instruction_dedup_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: 
     return 0
 
 
+def instruction_dedup_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report instruction-section deduplication canary impact and lifecycle gates")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Recent provider calls to inspect, default: 500, max: 10000")
+    parser.add_argument("--since", help="Only inspect calls at or after this ISO timestamp.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied rows per candidate, default: 2.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout rows per candidate, default: 1.")
+    parser.add_argument("--max-error-rate", type=float, default=0.05, help="Applied error rate hold threshold, default: 0.05.")
+    parser.add_argument("--max-error-rate-delta", type=float, default=0.05, help="Applied-minus-holdout error rollback threshold, default: 0.05.")
+    parser.add_argument("--max-retry-rate-delta", type=float, default=0.10, help="Applied-minus-holdout retry rollback threshold, default: 0.10.")
+    parser.add_argument("--max-latency-regression-ms", type=int, default=2000, help="Applied-minus-holdout latency hold threshold, default: 2000.")
+    parser.add_argument("--min-net-savings-usd", type=float, default=0.0, help="Minimum applied net savings for widen, default: 0.")
+    parser.add_argument(
+        "--max-negative-net-savings-rate",
+        type=float,
+        default=0.0,
+        help="Applied negative net savings rate hold threshold, default: 0.0.",
+    )
+    parser.add_argument("--rollback-error-rate", type=float, default=0.20, help="Absolute applied error rate rollback threshold, default: 0.20.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.instruction_dedup_impact import build_instruction_dedup_impact_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_instruction_dedup_impact_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+            max_error_rate=args.max_error_rate,
+            max_error_rate_delta=args.max_error_rate_delta,
+            max_retry_rate_delta=args.max_retry_rate_delta,
+            max_latency_regression_ms=args.max_latency_regression_ms,
+            min_net_savings_usd=args.min_net_savings_usd,
+            max_negative_net_savings_rate=args.max_negative_net_savings_rate,
+            rollback_error_rate=args.rollback_error_rate,
+        )
+        _attach_instruction_dedup_lifecycle_feedback(result, store=store)
+        from agentflow_proxy.instruction_dedup_feedback import SOURCE_SURFACE as INSTRUCTION_DEDUP_LIFECYCLE_SOURCE_SURFACE
+        from agentflow_proxy.optimization.feedback import managed_feedback_status_result
+
+        queue_status = managed_feedback_status_result(
+            store,
+            source_surface=INSTRUCTION_DEDUP_LIFECYCLE_SOURCE_SURFACE,
+            sample_limit=5,
+        )
+        result["managed_lifecycle_feedback_queue"] = queue_status
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def terminal_output_compaction_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure terminal-output compaction opportunity for plateaued tool-result sessions")
     parser.add_argument(
@@ -4492,6 +4558,47 @@ def _attach_repeated_scaffold_lifecycle_feedback(result: dict[str, Any], store: 
                 store,
                 payload,
                 source_surface=REPEATED_SCAFFOLD_LIFECYCLE_SOURCE_SURFACE,
+                flush_immediately=False,
+            )
+        )
+    except Exception as exc:
+        meta = {
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "error",
+            "reason": "queue-failed",
+            "error": repr(exc),
+            "auth_configured": recommendations.managed_auth_configured(),
+        }
+
+    result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta(meta)
+
+
+def _attach_instruction_dedup_lifecycle_feedback(result: dict[str, Any], store: Any) -> None:
+    from agentflow_proxy import recommendations
+    from agentflow_proxy.instruction_dedup_feedback import (
+        build_instruction_dedup_lifecycle_feedback,
+        queue_instruction_dedup_lifecycle_feedback,
+    )
+
+    payload = build_instruction_dedup_lifecycle_feedback(result)
+    if payload is None:
+        result["managed_lifecycle_feedback"] = _public_lifecycle_feedback_meta({
+            "enabled": recommendations.recommendations_enabled(),
+            "server_url": recommendations.recommendation_server_url(),
+            "endpoint": recommendations.POLICY_EVENTS_PATH,
+            "status": "skipped",
+            "reason": "no-instruction-dedup-lifecycle-candidates",
+            "auth_configured": recommendations.managed_auth_configured(),
+        })
+        return
+
+    try:
+        meta = asyncio.run(
+            queue_instruction_dedup_lifecycle_feedback(
+                store,
+                result,
                 flush_immediately=False,
             )
         )
@@ -7639,6 +7746,10 @@ def instruction_dedup_opportunity_main() -> None:
 
 def instruction_dedup_dry_run_main() -> None:
     raise SystemExit(instruction_dedup_dry_run_cli())
+
+
+def instruction_dedup_impact_main() -> None:
+    raise SystemExit(instruction_dedup_impact_cli())
 
 
 def terminal_output_compaction_opportunity_main() -> None:

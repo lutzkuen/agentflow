@@ -9541,6 +9541,28 @@ async def stats_instruction_dedup_opportunity(
     )
 
 
+async def stats_instruction_dedup_impact(
+    store_obj: Any,
+    *,
+    limit: int = 500,
+    since: str | None = None,
+) -> dict[str, Any]:
+    from agentflow_proxy.instruction_dedup_feedback import SOURCE_SURFACE
+    from agentflow_proxy.instruction_dedup_impact import build_instruction_dedup_impact_report
+
+    result = build_instruction_dedup_impact_report(
+        store_obj,
+        limit=limit,
+        since=since,
+    )
+    result["managed_lifecycle_feedback_queue"] = _managed_feedback_queue_health(
+        store_obj,
+        sample_limit=5,
+        source_surface=SOURCE_SURFACE,
+    )
+    return result
+
+
 async def stats_terminal_output_compaction_opportunity(
     store_obj: Any,
     *,

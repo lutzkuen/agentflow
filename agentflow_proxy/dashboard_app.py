@@ -250,6 +250,17 @@ def create_dashboard_router(
             min_repeated_rows=min_repeated_rows,
         )
 
+    @router.get("/agentflow/stats/instruction-dedup-impact")
+    async def stats_instruction_dedup_impact(
+        limit: int = 500,
+        since: str | None = None,
+    ) -> dict[str, Any]:
+        return await stats_views.stats_instruction_dedup_impact(
+            _store(store_obj),
+            limit=limit,
+            since=since,
+        )
+
     @router.get("/agentflow/stats/terminal-output-compaction")
     async def stats_terminal_output_compaction(
         opportunity_limit: int = 1000,
