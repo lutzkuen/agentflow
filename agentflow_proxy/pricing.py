@@ -218,6 +218,91 @@ def pricing_basis(
     }
 
 
+def _cost_from_per_million(tokens: int, price_per_million: Any) -> float | None:
+    try:
+        price = float(price_per_million)
+    except (TypeError, ValueError):
+        return None
+    return (max(int(tokens or 0), 0) / 1_000_000) * price
+
+
+def provider_prompt_cache_accounting(
+    model: str,
+    *,
+    provider: str = "anthropic",
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    processing_mode: str | None = None,
+) -> dict[str, Any]:
+    """Return provider-side prompt-cache economics using the provider pricing table."""
+
+    creation_tokens = max(int(cache_creation_tokens or 0), 0)
+    read_tokens = max(int(cache_read_tokens or 0), 0)
+    basis = pricing_basis(model, provider=provider, processing_mode=processing_mode)
+    input_price = basis.get("input_usd_per_million")
+    cached_input_price = basis.get("cached_input_usd_per_million")
+    creation_price = basis.get("cache_creation_input_usd_per_million")
+
+    full_read_cost = _cost_from_per_million(read_tokens, input_price)
+    cached_read_cost = _cost_from_per_million(read_tokens, cached_input_price)
+    read_discount = None
+    if full_read_cost is not None and cached_read_cost is not None:
+        read_discount = max(full_read_cost - cached_read_cost, 0.0)
+
+    full_creation_cost = _cost_from_per_million(creation_tokens, input_price)
+    creation_cost = _cost_from_per_million(
+        creation_tokens,
+        creation_price if creation_price is not None else input_price,
+    )
+    creation_premium = None
+    if full_creation_cost is not None and creation_cost is not None:
+        creation_premium = max(creation_cost - full_creation_cost, 0.0)
+
+    net_discount = None
+    if read_discount is not None and creation_premium is not None:
+        net_discount = read_discount - creation_premium
+
+    actual_provider_cache_cost = None
+    if cached_read_cost is not None and creation_cost is not None:
+        actual_provider_cache_cost = cached_read_cost + creation_cost
+
+    return {
+        "schema": "agentflow.provider_prompt_cache_accounting.v1",
+        "provider": basis["provider"],
+        "model": model,
+        "matched_model": basis.get("matched_model"),
+        "processing_mode": basis.get("processing_mode"),
+        "pricing_source": basis.get("source"),
+        "pricing_version": basis.get("version"),
+        "pricing_basis": basis,
+        "cost_known": bool(
+            basis.get("cost_known")
+            and input_price is not None
+            and cached_input_price is not None
+            and (creation_price is not None or input_price is not None)
+        ),
+        "read_tokens": read_tokens,
+        "creation_tokens": creation_tokens,
+        "input_usd_per_million": input_price,
+        "cached_input_usd_per_million": cached_input_price,
+        "cache_creation_input_usd_per_million": creation_price,
+        "full_price_equivalent_read_cost_usd": full_read_cost or 0.0,
+        "actual_cached_read_cost_usd": cached_read_cost or 0.0,
+        "read_discount_usd": read_discount or 0.0,
+        "full_price_equivalent_creation_cost_usd": full_creation_cost or 0.0,
+        "creation_cost_usd": creation_cost or 0.0,
+        "creation_premium_usd": creation_premium or 0.0,
+        "actual_provider_cache_cost_usd": actual_provider_cache_cost or 0.0,
+        "net_provider_cache_discount_usd": net_discount or 0.0,
+        "net_provider_cache_economics_usd": net_discount or 0.0,
+        "semantics": (
+            "provider-side prompt-cache accounting; read_discount is gross cached-read "
+            "discount versus full input price, creation_premium is the extra write cost "
+            "above normal input price, and net_provider_cache_discount subtracts that premium"
+        ),
+    }
+
+
 def codex_app_pricing_basis() -> dict[str, Any]:
     return pricing_basis(codex_app_model(), provider="openai", processing_mode=codex_app_processing_mode())
 

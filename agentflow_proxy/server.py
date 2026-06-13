@@ -110,8 +110,13 @@ def _recent_session_spending_summary(hours: int = 24, limit: int = 10) -> list[d
             routed_cost = estimate_cost(routed_model, input_tokens, output_tokens, provider=provider) or 0.0
             bucket["routing_savings_usd"] += max(requested_cost - routed_cost, 0.0)
         if cache_read_tokens:
-            full_read_cost = estimate_cost(model, cache_read_tokens, 0, provider=provider) or 0.0
-            bucket["prompt_cache_savings_usd"] += 0.90 * full_read_cost
+            accounting = provider_prompt_cache_accounting(
+                model,
+                provider=provider,
+                cache_creation_tokens=cache_creation_tokens,
+                cache_read_tokens=cache_read_tokens,
+            )
+            bucket["prompt_cache_savings_usd"] += float(accounting.get("read_discount_usd") or 0.0)
         if thinking_tokens:
             bucket["thinking_cost_usd"] += estimate_cost(model, 0, thinking_tokens, provider=provider) or 0.0
 
@@ -151,7 +156,7 @@ from agentflow_proxy import anthropic_proxy, openai_proxy, provider_handlers
 from agentflow_proxy.admin import create_admin_router
 from agentflow_proxy.provider_context import ProviderContext
 from agentflow_proxy.dashboard_app import create_dashboard_router
-from agentflow_proxy.pricing import estimate_cost
+from agentflow_proxy.pricing import estimate_cost, provider_prompt_cache_accounting
 from agentflow_proxy.limiter import (
     TierLimiter,
 )

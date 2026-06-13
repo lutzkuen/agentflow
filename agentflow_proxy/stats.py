@@ -23,7 +23,12 @@ from agentflow_proxy.codex_app_policy import (
 )
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
-from agentflow_proxy.pricing import codex_app_pricing_basis, estimate_blended_input_savings, estimate_cost
+from agentflow_proxy.pricing import (
+    codex_app_pricing_basis,
+    estimate_blended_input_savings,
+    estimate_cost,
+    provider_prompt_cache_accounting,
+)
 from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.quality import (
     derive_codex_turn_quality_signals,
@@ -14133,17 +14138,12 @@ def _provider_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     crunch_savings = max(crunch_gross - _as_float(summary.get("summary_cost_est_usd")), 0.0)
 
     cache_savings = 0.003 if _as_int(r.get("cache_hit")) else 0.0
-    if cache_read_tokens:
-        full_read_cost = estimate_cost(str(target_model or ""), cache_read_tokens, 0, provider=provider) or 0.0
-        cached_read_input_tokens = cache_read_tokens if provider == "openai" else 0
-        cached_read_cost = estimate_cost(
-            str(target_model or ""),
-            cached_read_input_tokens,
-            0,
-            cache_read=cache_read_tokens,
-            provider=provider,
-        ) or 0.0
-        cache_savings += max(full_read_cost - cached_read_cost, 0.0)
+    prompt_cache = provider_prompt_cache_accounting(
+        str(target_model or ""),
+        provider=provider,
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+    )
 
     token_basis = "provider-reported"
     if r.get("actual_input_tokens") is None and r.get("actual_output_tokens") is None:
@@ -14164,6 +14164,8 @@ def _provider_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         "routing_savings_usd": routing_savings,
         "crunch_savings_usd": crunch_savings,
         "cache_savings_usd": cache_savings,
+        "provider_prompt_cache_discount_usd": _as_float(prompt_cache.get("read_discount_usd")),
+        "provider_prompt_cache_net_discount_usd": _as_float(prompt_cache.get("net_provider_cache_discount_usd")),
         "hard_floor_usd": cost,
         "policy_sources": _policy_sources_from(routing, crunch, cache),
         "is_today": bool(r.get("is_today")),
@@ -14198,6 +14200,8 @@ def _codex_accounting_unit(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "routing_savings_usd": routing_savings,
         "crunch_savings_usd": crunch_savings,
         "cache_savings_usd": cache_savings,
+        "provider_prompt_cache_discount_usd": 0.0,
+        "provider_prompt_cache_net_discount_usd": 0.0,
         "hard_floor_usd": _as_float(outcome_features.get("hard_floor_usd")),
         "policy_sources": list(optimization_features.get("policy_sources") or []),
         "is_today": bool(dict(row).get("is_today")),
@@ -14226,6 +14230,8 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
         "routing_savings_usd": 0.0,
         "crunch_savings_usd": 0.0,
         "cache_savings_usd": 0.0,
+        "provider_prompt_cache_discount_usd": 0.0,
+        "provider_prompt_cache_net_discount_usd": 0.0,
         "hard_floor_usd": 0.0,
         "_token_bases": set(),
         "_cost_bases": set(),
@@ -14248,6 +14254,8 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
             "routing_savings_usd",
             "crunch_savings_usd",
             "cache_savings_usd",
+            "provider_prompt_cache_discount_usd",
+            "provider_prompt_cache_net_discount_usd",
             "hard_floor_usd",
         ):
             bucket[field] += _as_float(unit.get(field))
@@ -14280,6 +14288,8 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
                 "routing_savings_usd": 0.0,
                 "crunch_savings_usd": 0.0,
                 "cache_savings_usd": 0.0,
+                "provider_prompt_cache_discount_usd": 0.0,
+                "provider_prompt_cache_net_discount_usd": 0.0,
                 "hard_floor_usd": 0.0,
                 "_token_bases": set(),
                 "_cost_bases": set(),
@@ -14293,6 +14303,7 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
             ("routing", "routing_savings_usd"),
             ("crunching", "crunch_savings_usd"),
             ("cache", "cache_savings_usd"),
+            ("provider_prompt_cache", "provider_prompt_cache_discount_usd"),
         ):
             savings = _as_float(unit.get(field))
             if savings <= 0:
@@ -14323,6 +14334,8 @@ def _accounting_rollup(units: list[dict[str, Any]]) -> dict[str, Any]:
             "routing_savings_usd",
             "crunch_savings_usd",
             "cache_savings_usd",
+            "provider_prompt_cache_discount_usd",
+            "provider_prompt_cache_net_discount_usd",
             "hard_floor_usd",
         ):
             finalized[field] = round(float(finalized[field]), 6)
@@ -15519,19 +15532,106 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
 
     prompt_cache_savings = 0.0
     today_prompt_cache_savings = 0.0
+    prompt_cache_cached_read_cost = 0.0
+    today_prompt_cache_cached_read_cost = 0.0
+    prompt_cache_creation_cost = 0.0
+    today_prompt_cache_creation_cost = 0.0
+    prompt_cache_creation_premium = 0.0
+    today_prompt_cache_creation_premium = 0.0
+    prompt_cache_net_discount = 0.0
+    today_prompt_cache_net_discount = 0.0
+    prompt_cache_accounting_by_model: list[dict[str, Any]] = []
     cache_read_by_model = q("""
         select coalesce(routed_model, requested_model) as model,
+               sum(coalesce(cache_creation_input_tokens, 0)) as creation_tok,
                sum(cache_read_input_tokens) as read_tok,
+               sum(case when date(created_at) = date('now') then coalesce(cache_creation_input_tokens, 0) else 0 end) as today_creation_tok,
                sum(case when date(created_at) = date('now') then cache_read_input_tokens else 0 end) as today_read_tok,
                coalesce(provider, 'anthropic') as provider
-        from calls where cache_read_input_tokens > 0
+        from calls
+        where coalesce(cache_read_input_tokens, 0) > 0
+           or coalesce(cache_creation_input_tokens, 0) > 0
         group by coalesce(provider, 'anthropic'), coalesce(routed_model, requested_model)
     """)
     for row in cache_read_by_model:
-        full_cost = estimate_cost(row["model"], row["read_tok"], 0, provider=row["provider"]) or 0
-        prompt_cache_savings += 0.90 * full_cost
-        today_full_cost = estimate_cost(row["model"], row["today_read_tok"] or 0, 0, provider=row["provider"]) or 0
-        today_prompt_cache_savings += 0.90 * today_full_cost
+        accounting = provider_prompt_cache_accounting(
+            row["model"],
+            provider=row["provider"],
+            cache_creation_tokens=_as_int(row.get("creation_tok")),
+            cache_read_tokens=_as_int(row.get("read_tok")),
+        )
+        today_accounting = provider_prompt_cache_accounting(
+            row["model"],
+            provider=row["provider"],
+            cache_creation_tokens=_as_int(row.get("today_creation_tok")),
+            cache_read_tokens=_as_int(row.get("today_read_tok")),
+        )
+        prompt_cache_savings += _as_float(accounting.get("read_discount_usd"))
+        today_prompt_cache_savings += _as_float(today_accounting.get("read_discount_usd"))
+        prompt_cache_cached_read_cost += _as_float(accounting.get("actual_cached_read_cost_usd"))
+        today_prompt_cache_cached_read_cost += _as_float(today_accounting.get("actual_cached_read_cost_usd"))
+        prompt_cache_creation_cost += _as_float(accounting.get("creation_cost_usd"))
+        today_prompt_cache_creation_cost += _as_float(today_accounting.get("creation_cost_usd"))
+        prompt_cache_creation_premium += _as_float(accounting.get("creation_premium_usd"))
+        today_prompt_cache_creation_premium += _as_float(today_accounting.get("creation_premium_usd"))
+        prompt_cache_net_discount += _as_float(accounting.get("net_provider_cache_discount_usd"))
+        today_prompt_cache_net_discount += _as_float(today_accounting.get("net_provider_cache_discount_usd"))
+        prompt_cache_accounting_by_model.append({
+            "provider": accounting["provider"],
+            "model": accounting["model"],
+            "matched_model": accounting.get("matched_model"),
+            "processing_mode": accounting.get("processing_mode"),
+            "pricing_source": accounting.get("pricing_source"),
+            "pricing_version": accounting.get("pricing_version"),
+            "cost_known": accounting.get("cost_known"),
+            "read_tokens": accounting["read_tokens"],
+            "creation_tokens": accounting["creation_tokens"],
+            "read_discount_usd": round(_as_float(accounting.get("read_discount_usd")), 8),
+            "actual_cached_read_cost_usd": round(_as_float(accounting.get("actual_cached_read_cost_usd")), 8),
+            "creation_cost_usd": round(_as_float(accounting.get("creation_cost_usd")), 8),
+            "creation_premium_usd": round(_as_float(accounting.get("creation_premium_usd")), 8),
+            "net_provider_cache_discount_usd": round(_as_float(accounting.get("net_provider_cache_discount_usd")), 8),
+            "today": {
+                "read_tokens": today_accounting["read_tokens"],
+                "creation_tokens": today_accounting["creation_tokens"],
+                "read_discount_usd": round(_as_float(today_accounting.get("read_discount_usd")), 8),
+                "actual_cached_read_cost_usd": round(_as_float(today_accounting.get("actual_cached_read_cost_usd")), 8),
+                "creation_cost_usd": round(_as_float(today_accounting.get("creation_cost_usd")), 8),
+                "creation_premium_usd": round(_as_float(today_accounting.get("creation_premium_usd")), 8),
+                "net_provider_cache_discount_usd": round(_as_float(today_accounting.get("net_provider_cache_discount_usd")), 8),
+            },
+            "pricing_basis": accounting.get("pricing_basis"),
+        })
+
+    prompt_cache_accounting = {
+        "schema": "agentflow.provider_prompt_cache_accounting_rollup.v1",
+        "label": "provider prompt-cache discount/economics",
+        "boundary": "provider-side prompt-cache pricing; separate from AgentFlow local exact-cache replay savings",
+        "totals": {
+            "read_tokens": int(prompt_cache_read_tokens),
+            "creation_tokens": int(prompt_cache_creation_tokens),
+            "full_price_equivalent_read_cost_usd": round(prompt_cache_savings + prompt_cache_cached_read_cost, 8),
+            "actual_cached_read_cost_usd": round(prompt_cache_cached_read_cost, 8),
+            "read_discount_usd": round(prompt_cache_savings, 8),
+            "creation_cost_usd": round(prompt_cache_creation_cost, 8),
+            "creation_premium_usd": round(prompt_cache_creation_premium, 8),
+            "net_provider_cache_discount_usd": round(prompt_cache_net_discount, 8),
+        },
+        "today": {
+            "read_tokens": int(s("select sum(cache_read_input_tokens) from calls where date(created_at) = date('now')") or 0),
+            "creation_tokens": int(s("select sum(cache_creation_input_tokens) from calls where date(created_at) = date('now')") or 0),
+            "full_price_equivalent_read_cost_usd": round(today_prompt_cache_savings + today_prompt_cache_cached_read_cost, 8),
+            "actual_cached_read_cost_usd": round(today_prompt_cache_cached_read_cost, 8),
+            "read_discount_usd": round(today_prompt_cache_savings, 8),
+            "creation_cost_usd": round(today_prompt_cache_creation_cost, 8),
+            "creation_premium_usd": round(today_prompt_cache_creation_premium, 8),
+            "net_provider_cache_discount_usd": round(today_prompt_cache_net_discount, 8),
+        },
+        "by_model": sorted(
+            prompt_cache_accounting_by_model,
+            key=lambda item: (str(item.get("provider") or ""), str(item.get("model") or "")),
+        ),
+    }
 
     thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls") or 0)
     today_thinking_output_tokens = int(s("select sum(thinking_output_tokens) from calls where date(created_at) = date('now')") or 0)
@@ -15955,6 +16055,18 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "prompt_cache_hit_rate": prompt_cache_hit_rate,
             "prompt_cache_savings_usd": round(prompt_cache_savings, 6),
             "today_prompt_cache_savings_usd": round(today_prompt_cache_savings, 6),
+            "provider_prompt_cache_label": "provider prompt-cache discount/economics",
+            "provider_prompt_cache_boundary": "provider-side pricing; separate from AgentFlow local exact-cache replay savings",
+            "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
+            "today_provider_prompt_cache_discount_usd": round(today_prompt_cache_savings, 6),
+            "provider_prompt_cache_cached_read_cost_usd": round(prompt_cache_cached_read_cost, 6),
+            "today_provider_prompt_cache_cached_read_cost_usd": round(today_prompt_cache_cached_read_cost, 6),
+            "provider_prompt_cache_creation_cost_usd": round(prompt_cache_creation_cost, 6),
+            "today_provider_prompt_cache_creation_cost_usd": round(today_prompt_cache_creation_cost, 6),
+            "provider_prompt_cache_creation_premium_usd": round(prompt_cache_creation_premium, 6),
+            "today_provider_prompt_cache_creation_premium_usd": round(today_prompt_cache_creation_premium, 6),
+            "provider_prompt_cache_net_discount_usd": round(prompt_cache_net_discount, 6),
+            "today_provider_prompt_cache_net_discount_usd": round(today_prompt_cache_net_discount, 6),
             "thinking_output_tokens": thinking_output_tokens,
             "today_thinking_output_tokens": today_thinking_output_tokens,
             "thinking_cost_usd": round(thinking_cost, 6),
@@ -16008,6 +16120,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_replay_readiness": cache_replay_readiness,
         "cache_replay_activation_health": cache_replay_activation_health,
         "old_context_summary_opportunity": old_context_summary_opportunity,
+        "provider_prompt_cache_accounting": prompt_cache_accounting,
         "pattern_decision_breakdown": pattern_decision_breakdown,
         "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
         "error_breakdown": error_breakdown,
@@ -17378,7 +17491,7 @@ def dashboard_html() -> str:
   <h2>Provider prompt-cache discount</h2>
   <table data-table-id="provider-prompt-cache" data-filter-label="Filter provider prompt cache">
     <thead><tr>
-      <th data-sort-type="number">Creation tokens</th><th data-sort-type="number">Read tokens</th><th data-sort-type="percent">Read hit rate</th><th data-sort-type="money">Discount today</th><th data-sort-type="money">Discount all time</th><th data-sort-type="text">Boundary</th>
+      <th data-sort-type="number">Creation tokens</th><th data-sort-type="number">Read tokens</th><th data-sort-type="percent">Read hit rate</th><th data-sort-type="money">Read discount today</th><th data-sort-type="money">Read discount all time</th><th data-sort-type="money">Cached read cost</th><th data-sort-type="money">Creation cost</th><th data-sort-type="money">Creation premium</th><th data-sort-type="money">Net discount</th><th data-sort-type="text">Boundary</th>
     </tr></thead>
     <tbody id="provider-prompt-cache-tbody"></tbody>
   </table>
@@ -19080,7 +19193,11 @@ async function refreshCache(){
       <td class="tokens">${fmtPctValue(summary.prompt_cache_hit_rate||0)}</td>
       <td class="savings">${fmt(summary.today_prompt_cache_savings_usd||0,6)}</td>
       <td class="savings">${fmt(summary.prompt_cache_savings_usd||0,6)}</td>
-      <td class="flags"><span class="badge provider">provider-side Anthropic/OpenAI prompt-cache accounting</span> <span class="badge miss">separate from local exact replay</span></td>
+      <td class="savings">${fmt(summary.provider_prompt_cache_cached_read_cost_usd||0,6)}</td>
+      <td class="savings">${fmt(summary.provider_prompt_cache_creation_cost_usd||0,6)}</td>
+      <td class="savings">${fmt(summary.provider_prompt_cache_creation_premium_usd||0,6)}</td>
+      <td class="savings">${fmt(summary.provider_prompt_cache_net_discount_usd||0,6)}</td>
+      <td class="flags"><span class="badge provider">provider prompt-cache discount/economics</span> <span class="badge miss">separate from AgentFlow local exact-cache replay savings</span></td>
     </tr>`;
     const reasonRows=[
       ...((local.lookup_breakdown||[]).map(row=>({...row,type:'lookup'}))),

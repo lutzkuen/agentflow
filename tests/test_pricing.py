@@ -7,10 +7,45 @@ from agentflow_proxy.pricing import (
     estimate_blended_input_savings,
     estimate_cost,
     pricing_basis,
+    provider_prompt_cache_accounting,
 )
 
 
 class PricingTest(unittest.TestCase):
+    def test_anthropic_prompt_cache_accounting_splits_read_discount_and_write_premium(self):
+        accounting = provider_prompt_cache_accounting(
+            "claude-sonnet-4-6",
+            provider="anthropic",
+            cache_creation_tokens=1_000,
+            cache_read_tokens=2_000,
+        )
+
+        self.assertEqual(accounting["pricing_source"], "embedded-agentflow-defaults")
+        self.assertEqual(accounting["pricing_version"], "2026-06-08")
+        self.assertEqual(accounting["input_usd_per_million"], 3.0)
+        self.assertAlmostEqual(accounting["cached_input_usd_per_million"], 0.3, places=8)
+        self.assertEqual(accounting["cache_creation_input_usd_per_million"], 3.75)
+        self.assertAlmostEqual(accounting["full_price_equivalent_read_cost_usd"], 0.006, places=8)
+        self.assertAlmostEqual(accounting["actual_cached_read_cost_usd"], 0.0006, places=8)
+        self.assertAlmostEqual(accounting["read_discount_usd"], 0.0054, places=8)
+        self.assertAlmostEqual(accounting["creation_cost_usd"], 0.00375, places=8)
+        self.assertAlmostEqual(accounting["creation_premium_usd"], 0.00075, places=8)
+        self.assertAlmostEqual(accounting["net_provider_cache_discount_usd"], 0.00465, places=8)
+
+    def test_openai_prompt_cache_accounting_uses_cached_input_tuple(self):
+        accounting = provider_prompt_cache_accounting(
+            "gpt-5-codex",
+            provider="openai",
+            cache_read_tokens=2_000,
+        )
+
+        self.assertEqual(accounting["pricing_source"], "https://developers.openai.com/api/docs/pricing")
+        self.assertEqual(accounting["input_usd_per_million"], 1.25)
+        self.assertEqual(accounting["cached_input_usd_per_million"], 0.125)
+        self.assertAlmostEqual(accounting["full_price_equivalent_read_cost_usd"], 0.0025, places=8)
+        self.assertAlmostEqual(accounting["actual_cached_read_cost_usd"], 0.00025, places=8)
+        self.assertAlmostEqual(accounting["read_discount_usd"], 0.00225, places=8)
+
     def test_openai_cached_input_uses_provider_price(self):
         cost = estimate_cost(
             "gpt-5-codex",

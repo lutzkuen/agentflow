@@ -1576,7 +1576,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(accounting["total_tokens"], 365)
         self.assertEqual(result["executive_summary"]["tokens_today"]["total_tokens"], 365)
         self.assertGreater(savings[("anthropic_messages", "crunching")], 0)
-        self.assertGreater(savings[("anthropic_messages", "cache")], 0)
+        self.assertNotIn(("anthropic_messages", "cache"), savings)
+        self.assertGreater(savings[("anthropic_messages", "provider_prompt_cache")], 0)
         self.assertGreater(savings[("openai_responses", "routing")], 0)
         self.assertNotIn(("codex_turn", "routing"), savings)
         json.dumps(result)
@@ -7310,6 +7311,96 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(summary["thinking_cost_usd"], 0.0015, places=6)
         json.dumps(summary)
 
+    def test_provider_prompt_cache_accounting_uses_provider_pricing_and_stays_out_of_local_cache_savings(self):
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model="claude-sonnet-4-6",
+            stream=1,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=100,
+            actual_output_tokens=10,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="anthropic-prompt-cache",
+            category="chat",
+            cache_creation_input_tokens=1_000,
+            cache_read_input_tokens=2_000,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="anthropic",
+        )
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/responses",
+            requested_model="gpt-5-codex",
+            routed_model="gpt-5-codex",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=1,
+            input_tokens_est=100,
+            output_tokens_est=10,
+            actual_input_tokens=2_000,
+            actual_output_tokens=10,
+            cost_est_usd=0.0,
+            cost_baseline_usd=0.0,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=None,
+            cache_json=stable_json({"status": "miss", "reason": "exact-miss"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="openai-prompt-cache",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=2_000,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="openai",
+        )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        summary = result["summary"]
+        prompt_cache = result["provider_prompt_cache_accounting"]
+        by_provider = {row["provider"]: row for row in prompt_cache["by_model"]}
+        savings = {
+            (row["source_surface"], row["optimization_type"]): row["savings_usd"]
+            for row in result["today_savings_by_source_surface"]
+        }
+
+        self.assertEqual(prompt_cache["label"], "provider prompt-cache discount/economics")
+        self.assertIn("separate from AgentFlow local exact-cache", prompt_cache["boundary"])
+        self.assertAlmostEqual(by_provider["anthropic"]["read_discount_usd"], 0.0054, places=8)
+        self.assertAlmostEqual(by_provider["anthropic"]["actual_cached_read_cost_usd"], 0.0006, places=8)
+        self.assertAlmostEqual(by_provider["anthropic"]["creation_cost_usd"], 0.00375, places=8)
+        self.assertAlmostEqual(by_provider["anthropic"]["creation_premium_usd"], 0.00075, places=8)
+        self.assertEqual(by_provider["anthropic"]["pricing_source"], "embedded-agentflow-defaults")
+        self.assertEqual(by_provider["anthropic"]["pricing_version"], "2026-06-08")
+        self.assertAlmostEqual(by_provider["openai"]["read_discount_usd"], 0.00225, places=8)
+        self.assertAlmostEqual(by_provider["openai"]["actual_cached_read_cost_usd"], 0.00025, places=8)
+        self.assertAlmostEqual(summary["provider_prompt_cache_discount_usd"], 0.00765, places=8)
+        self.assertAlmostEqual(summary["provider_prompt_cache_net_discount_usd"], 0.0069, places=8)
+        self.assertAlmostEqual(summary["cache_savings_usd"], 0.0, places=8)
+        self.assertNotIn(("anthropic_messages", "cache"), savings)
+        self.assertNotIn(("openai_responses", "cache"), savings)
+        self.assertAlmostEqual(savings[("anthropic_messages", "provider_prompt_cache")], 0.0054, places=8)
+        self.assertAlmostEqual(savings[("openai_responses", "provider_prompt_cache")], 0.00225, places=8)
+        json.dumps(result)
+
     def test_activity_stats_normalize_provider_calls_and_codex_turns(self):
         provider_id = str(uuid.uuid4())
         server.store.log_call(
@@ -8039,7 +8130,8 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(bucket["codex_cost_est_usd"], 0.00056, places=6)
         self.assertAlmostEqual(bucket["spend_usd"], 0.05056, places=6)
         self.assertAlmostEqual(bucket["baseline_cost_usd"], 0.07556, places=6)
-        self.assertAlmostEqual(bucket["cache_savings_usd"], 0.000563, places=6)
+        self.assertAlmostEqual(bucket["cache_savings_usd"], 0.0, places=6)
+        self.assertAlmostEqual(bucket["prompt_cache_read_savings_usd"], 0.000563, places=6)
         self.assertAlmostEqual(bucket["captured_savings_usd"], 0.025, places=6)
         self.assertAlmostEqual(bucket["hard_floor_usd"], 0.05056, places=6)
         self.assertEqual(
