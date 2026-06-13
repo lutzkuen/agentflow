@@ -123,6 +123,54 @@ class StatsFullTest(unittest.TestCase):
         self.assertAlmostEqual(summary["crunch_savings_usd"], 0.00057, places=6)
         self.assertAlmostEqual(summary["today_crunch_savings_usd"], 0.00057, places=6)
 
+    def test_executive_health_errors_use_today_boundary(self):
+        today = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
+        yesterday = today - timedelta(days=1)
+
+        def log_call(suffix: str, created_at: datetime, status_code: int) -> None:
+            server.store.log_call(
+                id=f"health-errors-{suffix}",
+                created_at=created_at.isoformat(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=status_code,
+                latency_ms=10,
+                input_tokens_est=10,
+                output_tokens_est=10,
+                actual_input_tokens=10,
+                actual_output_tokens=10,
+                cost_est_usd=0.001,
+                cost_baseline_usd=0.001,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=None,
+                cache_json=None,
+                error="HTTP error" if status_code >= 400 else None,
+                request_json=None,
+                response_json=None,
+                session_id=f"session-{suffix}",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        log_call("today-error", today, 500)
+        log_call("yesterday-error", yesterday, 500)
+        log_call("today-success", today, 200)
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        health = result["executive_summary"]["health"]
+
+        self.assertEqual(health["errors"], 1)
+        self.assertEqual(health["errors_today"], 1)
+        self.assertEqual(health["total_errors"], 2)
+        self.assertEqual(sum(row["count"] for row in result["today_error_breakdown"]), 1)
+        self.assertEqual(sum(row["count"] for row in result["error_breakdown"]), 2)
+
     def test_policy_state_exposes_codex_app_surface_cache_disabled(self):
         with patch.dict(
             os.environ,
@@ -8291,12 +8339,16 @@ class StatsFullTest(unittest.TestCase):
 
         self.assertEqual(html.count("class=\"card\""), 2)
         self.assertEqual(html.count("class=\"card green\""), 1)
-        self.assertEqual(html.count("class=\"card yellow\""), 1)
+        self.assertEqual(html.count("class=\"card yellow\""), 0)
         self.assertEqual(html.count("class=\"card blue\""), 1)
         self.assertIn("Tokens today", html)
         self.assertIn("Calculated spend", html)
-        self.assertIn("Hard floor", html)
-        self.assertIn("Ops health", html)
+        self.assertNotIn("Hard floor", html)
+        self.assertNotIn("c-floor", html)
+        self.assertNotIn("hard_floor_usd", html)
+        self.assertNotIn("Ops health", html)
+        self.assertIn("Errors today", html)
+        self.assertIn("errors_today", html)
         self.assertIn("executive_summary", html)
         self.assertIn("today_buckets", html)
         self.assertIn("Codex estimated", html)

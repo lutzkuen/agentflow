@@ -15455,6 +15455,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     routed_count = s("select count(*) from calls where requested_model != routed_model and routed_model is not null") or 0
     crunched_count = s("select count(*) from calls where json_extract(crunch_json, '$.changed') = 1") or 0
     errors = s("select count(*) from calls where status_code >= 400") or 0
+    today_errors = s("select count(*) from calls where status_code >= 400 and date(created_at) = date('now')") or 0
 
     # Estimate routing savings: calls where model was downgraded, cost diff
     routing_savings = 0.0
@@ -15975,7 +15976,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "health": {
-            "errors": errors,
+            "errors": today_errors,
+            "errors_today": today_errors,
+            "total_errors": errors,
             "avg_latency_ms": round(avg_latency),
             "rate_limit_cooldowns": None,
         },
@@ -17350,8 +17353,7 @@ def dashboard_html() -> str:
   <div class="card"><div class="label">Tokens today</div><div class="value" id="c-tokens-today">—</div><div class="sub" id="c-tokens-sub">— provider split</div><div class="sub" id="c-tokens-codex">— Codex telemetry</div></div>
   <div class="card"><div class="label">Calculated spend</div><div class="value" id="c-spend">—</div><div class="sub" id="c-spend-sub">— total</div></div>
   <div class="card green"><div class="label">Savings</div><div class="value" id="c-savings">—</div><div class="sub" id="c-savings-sub">— buckets</div></div>
-  <div class="card yellow"><div class="label">Hard floor</div><div class="value" id="c-floor">—</div><div class="sub" id="c-floor-sub">— baseline minus feasible savings</div></div>
-  <div class="card blue"><div class="label">Ops health</div><div class="value" id="c-health">—</div><div class="sub" id="c-health-sub">— latency</div><div class="sub" id="c-health-cooldown">— cooldowns</div></div>
+  <div class="card blue"><div class="label">Errors today</div><div class="value" id="c-health">—</div><div class="sub" id="c-health-sub">— latency</div><div class="sub" id="c-health-cooldown">— cooldowns</div></div>
 </div>
 
 <div class="tabs">
@@ -17492,7 +17494,7 @@ def dashboard_html() -> str:
   <div class="table-wrap">
   <table class="activity-table" data-table-id="usage" data-filter-label="Filter usage buckets">
     <thead><tr>
-      <th data-sort-type="text">Bucket</th><th data-sort-type="number">Turns</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="number">Tokens</th><th data-sort-type="money">Spend</th><th data-sort-type="money">Captured savings</th><th data-sort-type="money">Hard floor</th><th data-sort-type="percent">Optimized</th><th data-sort-type="number">Errors</th><th data-sort-type="text">Remaining saving potential</th><th data-sort-type="text">Cost basis</th>
+      <th data-sort-type="text">Bucket</th><th data-sort-type="number">Turns</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="number">Tokens</th><th data-sort-type="money">Spend</th><th data-sort-type="money">Captured savings</th><th data-sort-type="percent">Optimized</th><th data-sort-type="number">Errors</th><th data-sort-type="text">Remaining saving potential</th><th data-sort-type="text">Cost basis</th>
     </tr></thead>
     <tbody id="usage-tbody"></tbody>
   </table>
@@ -18920,13 +18922,12 @@ async function refreshUsage(){
         <td class="tokens">${fmtTok(totalTokens)} total · ${fmtTok(row.provider_total_tokens||0)} provider · ${fmtTok(row.codex_total_tokens_est||0)} Codex est</td>
         <td class="cost">${(row.provider_cost_known||row.codex_cost_known)?fmt(row.spend_usd||0,5):'—'}</td>
         <td class="savings">${fmt(row.captured_savings_usd||0,5)}</td>
-        <td class="cost">${row.hard_floor_usd==null?'—':fmt(row.hard_floor_usd,5)}</td>
         <td class="tokens">${optimized}</td>
         <td>${errors}</td>
         <td class="flags">${usageHints(row)}</td>
         <td class="flags"><span class="badge provider">${esc(row.cost_basis)}</span> ${codexCost}</td>
       </tr>`;
-    }).join('')||'<tr><td colspan="12" style="color:#8b949e">No app or engineer usage today</td></tr>';
+    }).join('')||'<tr><td colspan="11" style="color:#8b949e">No app or engineer usage today</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
@@ -19202,7 +19203,6 @@ async function refresh(){
     const spend=e.spend||{};
     const savings=e.savings||{};
     const buckets=savings.today_buckets||{};
-    const floor=e.hard_floor||{};
     const health=e.health||{};
     const sourceText=surfaces.length
       ? surfaces.map(row=>shortSurface(row.source_surface)+': '+fmtTok(row.total_tokens||0)+' '+(row.token_basis||'tokens')).join(' · ')
@@ -19219,9 +19219,7 @@ async function refresh(){
     const agentflowBuckets=savings.today_agentflow_generated_buckets||buckets;
     document.getElementById('c-savings').textContent=fmt((acct.routing_savings_usd||0)+(acct.crunch_savings_usd||0)+(acct.cache_savings_usd||0)||savings.today_agentflow_generated_savings_usd??savings.today_total_savings_usd??0,4);
     document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??agentflowBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??agentflowBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??agentflowBuckets.exact_local_cache_usd??0,4);
-    document.getElementById('c-floor').textContent=fmt(acct.hard_floor_usd??floor.today_unavoidable_provider_spend_usd??0,4);
-    document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_calculated_cost_usd??spend.today_baseline_provider_cost_usd??0,4)+' - AgentFlow savings '+fmt(savings.today_agentflow_generated_savings_usd??savings.today_total_savings_usd??0,4)+'; Codex estimated';
-    document.getElementById('c-health').textContent=(health.errors||0).toLocaleString()+' errors';
+    document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
 
     document.getElementById('status').textContent='updated '+new Date().toLocaleTimeString();
