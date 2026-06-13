@@ -45,6 +45,25 @@ def _thinking_tool_result_body(secret: str) -> dict:
     }
 
 
+def _active_unverified_thinking_body(secret: str) -> dict:
+    return {
+        "thinking": {"type": "enabled", "budget_tokens": 4096},
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": (f"active private chain {secret} /workspace/private/unsafe.py\n" * 500),
+                    },
+                    {"type": "text", "text": "assistant continuity"},
+                ],
+            },
+            {"role": "user", "content": "raw prompt continuation must not leak"},
+        ],
+    }
+
+
 def _log_call(
     store: Store,
     call_id: str,
@@ -177,6 +196,34 @@ class AnthropicThinkingCompactionReportTests(unittest.TestCase):
             "private chain of thought",
             "/workspace/private",
             "raw response must not leak",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_report_blocks_active_and_unverified_body_contexts_privately(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "active-unverified-body",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    request_json=_active_unverified_thinking_body("raw-active-unverified-secret"),
+                )
+                payload = build_anthropic_thinking_compaction_opportunity_report(store, limit=10)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(payload["summary"]["metadata_candidate_count"], 1)
+        self.assertEqual(payload["summary"]["body_verified_candidate_count"], 0)
+        blockers = {item["value"] for item in payload["blocker_reason_breakdown"]}
+        self.assertIn("active-top-level-thinking-request", blockers)
+        self.assertIn("tool-result-thinking-continuation-unverified", blockers)
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw-active-unverified-secret",
+            "raw prompt continuation",
+            "active private chain",
+            "/workspace/private/unsafe.py",
         ):
             self.assertNotIn(forbidden, rendered)
 

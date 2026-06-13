@@ -696,7 +696,10 @@ def _apply_fraction_canary_yaml(target_canary: dict[str, Any], raw_canary: Any) 
         ("holdout_fraction", "holdout_fraction"),
     ):
         if raw_canary.get(source_key) is not None:
-            target_canary[target_key] = max(0.0, min(1.0, float(raw_canary[source_key])))
+            try:
+                target_canary[target_key] = max(0.0, min(1.0, float(raw_canary[source_key])))
+            except (TypeError, ValueError):
+                pass
     if raw_canary.get("salt") is not None:
         target_canary["salt"] = str(raw_canary["salt"])
     if raw_canary.get("canary_salt") is not None:
@@ -4621,8 +4624,14 @@ def _anthropic_thinking_compaction_public_policy(
             "fraction": fraction,
             "holdout_fraction": holdout_fraction,
             "salt": str(canary.get("salt") or "") if include_salt else "",
+            "salt_included": bool(include_salt and canary.get("salt")),
             "salt_configured": bool(canary.get("salt")),
             "unit": str(canary.get("unit") or "thinking_block_local_fingerprint"),
+            "validation_errors": sorted({
+                public_label(item, "invalid-canary-configuration")
+                for item in canary.get("validation_errors", [])
+                if str(item)
+            }) if isinstance(canary.get("validation_errors"), list) else [],
         },
         "safety_stop": {
             "enabled": _as_bool(safety.get("enabled"), True),
@@ -4658,7 +4667,7 @@ def anthropic_thinking_compaction_effective_policy() -> dict[str, Any]:
 
 
 def _anthropic_thinking_compaction_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
-    public = _anthropic_thinking_compaction_public_policy(policy)
+    public = _anthropic_thinking_compaction_public_policy(policy, include_salt=False)
     return {
         "schema": "agentflow.anthropic_thinking_history_compaction_decision.v1",
         "enabled": public["enabled"],
@@ -4884,6 +4893,9 @@ def _anthropic_thinking_compaction_canary_decision(
     )
     decision["schema"] = "agentflow.anthropic_thinking_history_compaction_canary_decision.v1"
     decision["holdout_fraction"] = canary["holdout_fraction"]
+    decision.pop("salt", None)
+    decision["salt_included"] = False
+    decision["salt_configured"] = bool(canary.get("salt_configured"))
     decision["raw_request_body_included"] = False
     decision["raw_thinking_text_included"] = False
     decision["thinking_block_fingerprints_included"] = False
@@ -5098,6 +5110,28 @@ def _apply_anthropic_thinking_history_compaction_canary(
 
     policy = selected_policy
     public = _anthropic_thinking_compaction_public_policy(policy)
+    validation_errors = public["canary"].get("validation_errors") or []
+    if validation_errors:
+        meta = _anthropic_thinking_compaction_base_meta("bypass", "policy-validation-error", policy=policy)
+        meta.update({
+            "category": category,
+            "before_chars": before_chars,
+            "after_chars": before_chars,
+            "tokens_saved_est": 0,
+            "validation_errors": validation_errors,
+            "reason_codes": ["policy-validation-error", *validation_errors],
+            "evaluated_rules": evaluated_rules,
+            "configured_rule_count": len(_anthropic_thinking_candidate_policies(base_policy)),
+            "lifecycle_feedback": {
+                "schema": "agentflow.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
+                "status": "policy_validation_error",
+                "cohort": "blocked",
+                "candidate_id": None,
+                "metadata_only": True,
+                "raw_payload_included": False,
+            },
+        })
+        return body, meta
     candidate_id = _anthropic_thinking_compaction_candidate_id(policy, selected_targets)
     planned_body = copy.deepcopy(body)
     messages = planned_body.get("messages")

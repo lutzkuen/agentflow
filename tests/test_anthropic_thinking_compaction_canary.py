@@ -90,6 +90,27 @@ anthropic_thinking_history_compaction:
     )
 
 
+def _write_invalid_canary_rules(config: Path) -> None:
+    (config / "crunch_rules.yaml").write_text(
+        """
+enabled: true
+thinking_deduplication:
+  enabled: false
+anthropic_thinking_history_compaction:
+  enabled: true
+  rule_id: raw-invalid-rule-id
+  min_text_chars: 1000
+  min_block_chars: 1000
+  canary:
+    enabled: true
+    canary_fraction: raw-invalid-canary-fraction-secret
+    holdout_fraction: 0.0
+    canary_salt: raw-invalid-canary-salt-secret
+""",
+        encoding="utf-8",
+    )
+
+
 def _log_prior_canary(
     store: Store,
     *,
@@ -200,6 +221,9 @@ class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
         self.assertNotIn("private reasoning", rendered)
         self.assertNotIn("toolu_private_id", rendered)
         self.assertNotIn("/private/file.py", rendered)
+        self.assertNotIn("thinking-canary-test", rendered)
+        self.assertFalse(compaction["canary"]["salt_included"])
+        self.assertNotIn("salt", compaction["canary"])
 
     def test_holdout_assignment_is_deterministic_and_forwards_unchanged(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -245,6 +269,29 @@ class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
             redacted_meta["anthropic_thinking_history_compaction"]["reason"],
             {"redacted-thinking-block", "no-eligible-thinking-history-blocks"},
         )
+
+    def test_invalid_canary_policy_blocks_without_leaking_policy_values(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            _write_invalid_canary_rules(config)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = _tool_result_body(_thinking("invalid-policy"), _thinking("invalid-policy"))
+
+            crunched, meta = manual.crunch_body(body, provider="anthropic", source_surface="anthropic_messages", endpoint="messages")
+
+        compaction = meta["anthropic_thinking_history_compaction"]
+        self.assertEqual(crunched, body)
+        self.assertEqual(compaction["status"], "bypass")
+        self.assertEqual(compaction["reason"], "policy-validation-error")
+        self.assertIn("invalid-canary-canary-fraction", compaction["validation_errors"])
+        self.assertEqual(compaction["lifecycle_feedback"]["status"], "policy_validation_error")
+        rendered = json.dumps(compaction, sort_keys=True)
+        self.assertNotIn("raw-invalid-canary-fraction-secret", rendered)
+        self.assertNotIn("raw-invalid-canary-salt-secret", rendered)
+        self.assertNotIn("private reasoning", rendered)
 
     def test_safety_stop_disables_further_application_after_failed_canary_sample(self) -> None:
         with TemporaryDirectory() as tmp:

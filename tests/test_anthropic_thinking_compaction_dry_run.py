@@ -65,6 +65,46 @@ def _unsafe_active_thinking_body(secret: str) -> dict:
     return body
 
 
+def _unresolved_tool_dependency_body(secret: str) -> dict:
+    thinking = _thinking_text(secret)
+    return {
+        "model": "claude-sonnet-4-6",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": thinking},
+                    {"type": "text", "text": "assistant fallback before unresolved tool"},
+                    {
+                        "type": "tool_use",
+                        "id": "raw-unresolved-tool-id-must-not-leak",
+                        "name": "Read",
+                        "input": {"file_path": "/workspace/private/unresolved.py"},
+                    },
+                ],
+            },
+            {"role": "user", "content": "not the matching tool result"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": thinking},
+                    {"type": "text", "text": "newer duplicate fallback"},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "different-tool-id",
+                        "content": "raw delayed tool payload must not leak",
+                    }
+                ],
+            },
+        ],
+    }
+
+
 def _log_call(
     store: Store,
     call_id: str,
@@ -202,6 +242,40 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         self.assertIn("active-top-level-thinking-request", blockers)
         self.assertTrue(all(plan["status"] == "blocked" for plan in payload["plans"]))
         self.assertNotIn("raw-active-thinking-secret", json.dumps(payload, sort_keys=True))
+
+    def test_dry_run_blocks_unsupported_shapes_and_unresolved_tool_dependencies_privately(self):
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "unsupported-shape",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    request_json={"model": "claude-sonnet-4-6", "messages": "raw prompt string must not leak"},
+                )
+                _log_call(
+                    store,
+                    "unresolved-tool-dependency",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    request_json=_unresolved_tool_dependency_body("raw-unresolved-thinking-secret"),
+                )
+                payload = build_anthropic_thinking_compaction_dry_run(store, limit=10)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(payload["summary"]["planned_candidate_count"], 0)
+        blockers = {item["value"] for item in payload["blocker_reason_breakdown"]}
+        self.assertIn("unsupported-content-block-shape", blockers)
+        self.assertIn("unresolved-tool-use-dependency", blockers)
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw prompt string must not leak",
+            "raw-unresolved-thinking-secret",
+            "raw-unresolved-tool-id-must-not-leak",
+            "raw delayed tool payload",
+            "/workspace/private/unresolved.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_dry_run_leaves_stored_provider_request_body_unchanged(self):
         body = _safe_tool_result_body(
