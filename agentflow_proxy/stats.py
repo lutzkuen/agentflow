@@ -17224,6 +17224,11 @@ def dashboard_html() -> str:
   .tabs{display:flex;padding:0 24px;border-bottom:1px solid #30363d}
   .tab-btn{background:none;border:none;border-bottom:2px solid transparent;color:#8b949e;cursor:pointer;font-family:inherit;font-size:13px;margin-bottom:-1px;padding:10px 16px}
   .tab-btn.active{border-bottom-color:#58a6ff;color:#f0f6fc}
+  .panel-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 24px 16px}
+  .panel-btn{background:#161b22;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;cursor:pointer;font-family:inherit;font-size:12px;padding:7px 10px}
+  .panel-btn:hover{border-color:#58a6ff;color:#f0f6fc}
+  .research-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));padding:0 24px 24px}
+  .research-grid .panel-btn{text-align:left;width:100%}
   .tab-panel{display:none}
   .tab-panel.active{display:block}
   .section{padding:0 24px 24px}
@@ -17271,6 +17276,7 @@ def dashboard_html() -> str:
     .card{min-width:130px;padding:12px}
     .tabs{padding:0 12px;overflow-x:auto}
     .tab-btn{padding:10px 12px;white-space:nowrap}
+    .panel-actions,.research-grid{padding-left:12px;padding-right:12px;margin-left:0;margin-right:0}
     .section{padding:0 12px 18px}
     .table-tools{max-width:none}
   }
@@ -17293,27 +17299,40 @@ def dashboard_html() -> str:
 </div>
 
 <div class="tabs">
-  <button class="tab-btn" onclick="showTab('safety')">Safety</button>
-  <button class="tab-btn" onclick="showTab('adoption')">Adoption quality</button>
-  <button class="tab-btn active" onclick="showTab('activity')">Recent calls</button>
-  <button class="tab-btn" onclick="showTab('usage')">Usage by app / engineer</button>
-  <button class="tab-btn" onclick="showTab('codex')">Codex quota</button>
-  <button class="tab-btn" onclick="showTab('weekly')">7-day stats</button>
-  <button class="tab-btn" onclick="showTab('categories')">By category</button>
-  <button class="tab-btn" onclick="showTab('cache')">Cache</button>
-  <button class="tab-btn" onclick="showTab('terminal')">Terminal compaction</button>
-  <button class="tab-btn" onclick="showTab('scaffold')">Scaffold crunch</button>
-  <button class="tab-btn" onclick="showTab('errors')">Errors</button>
-  <button class="tab-btn" onclick="showTab('limiter')">Limiter</button>
-  <button class="tab-btn" onclick="showTab('policies')">Policies</button>
-  <button class="tab-btn" onclick="showTab('openai')">OpenAI optimization</button>
-  <button class="tab-btn" onclick="showTab('evalqueue')">Eval queue</button>
-  <button class="tab-btn" onclick="showTab('coordinator')">Coordinator</button>
-  <button class="tab-btn" onclick="showTab('managed')">Managed</button>
-  <button class="tab-btn" onclick="showTab('phaserouting')">Phase routing</button>
-  <button class="tab-btn" onclick="showTab('phasememory')">Phase memory</button>
-  <button class="tab-btn" onclick="showTab('oldcontext')">Old-context summary</button>
-  <button class="tab-btn" onclick="showTab('sessions')">Sessions</button>
+  <button class="tab-btn" data-tab-name="safety" onclick="showTab('safety')">Safety</button>
+  <button class="tab-btn active" data-tab-name="activity" onclick="showTab('activity')">Recent calls</button>
+  <button class="tab-btn" data-tab-name="usage" onclick="showTab('usage')">Usage by app / engineer</button>
+  <button class="tab-btn" data-tab-name="codex" onclick="showTab('codex')">Codex quota</button>
+  <button class="tab-btn" data-tab-name="weekly" onclick="showTab('weekly')">7-day stats</button>
+  <button class="tab-btn" data-tab-name="categories" onclick="showTab('categories')">By category</button>
+  <button class="tab-btn" data-tab-name="cache" onclick="showTab('cache')">Cache</button>
+  <button class="tab-btn" data-tab-name="errors" onclick="showTab('errors')">Errors</button>
+  <button class="tab-btn" data-tab-name="limiter" onclick="showTab('limiter')">Limiter</button>
+  <button class="tab-btn" data-tab-name="policies" onclick="showTab('policies')">Policies</button>
+  <button class="tab-btn" data-tab-name="sessions" onclick="showTab('sessions')">Sessions</button>
+  <button class="tab-btn" data-tab-name="research" onclick="showTab('research')">Research</button>
+</div>
+
+<div class="tab-panel" id="tab-research">
+<div class="section">
+  <h2>On-demand research</h2>
+</div>
+<div class="research-grid">
+  <button class="panel-btn" onclick="showTab('adoption')">Adoption quality</button>
+  <button class="panel-btn" onclick="showTab('terminal')">Terminal compaction</button>
+  <button class="panel-btn" onclick="showTab('scaffold')">Scaffold crunch</button>
+  <button class="panel-btn" onclick="showTab('openai')">OpenAI optimization</button>
+  <button class="panel-btn" onclick="showTab('evalqueue')">Eval queue</button>
+  <button class="panel-btn" onclick="showTab('coordinator')">Coordinator</button>
+  <button class="panel-btn" onclick="showTab('managed')">Managed optimizer</button>
+  <button class="panel-btn" onclick="showTab('phaserouting')">Phase routing</button>
+  <button class="panel-btn" onclick="showTab('phasememory')">Phase memory</button>
+  <button class="panel-btn" onclick="showTab('oldcontext')">Old-context summary</button>
+</div>
+</div>
+
+<div class="panel-actions">
+  <button class="panel-btn" onclick="refreshCurrentPanel()">Refresh panel</button>
 </div>
 
 <div class="tab-panel" id="tab-safety">
@@ -18688,16 +18707,26 @@ async function loadFullStats(){
 }
 
 let activeTabName='activity';
+const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research'];
+const researchTabs=['adoption','terminal','scaffold','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext'];
+const tabs=[...operationalTabs,...researchTabs];
+function isResearchTab(name){
+  return researchTabs.includes(name);
+}
 function showTab(name){
-  const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','terminal','scaffold','errors','limiter','policies','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
     document.getElementById('tab-'+t).classList.toggle('active',t===name);
   });
-  document.querySelectorAll('.tab-btn').forEach((b,i)=>{
-    b.classList.toggle('active',tabs[i]===name);
+  document.querySelectorAll('.tab-btn').forEach(b=>{
+    const tabName=b.getAttribute('data-tab-name');
+    b.classList.toggle('active',tabName===(isResearchTab(name)?'research':name));
   });
   activeTabName=name;
   refreshActiveTab({force:true});
+}
+function refreshCurrentPanel(){
+  refreshShell();
+  refreshActiveTab({force:true,manual:true});
 }
 
 function adoptionBadge(value){
@@ -21506,7 +21535,7 @@ const tabRefreshers={
   codex:[refreshCodexReadiness,refreshCodexQuota,refreshCodexCanaryImpact],
   weekly:[refreshWeekly],
   categories:[refreshCategories],
-  cache:[refreshCache,refreshOpenAICacheReplayReadiness],
+  cache:[refreshCache],
   terminal:[refreshTerminalOutputCompaction],
   scaffold:[refreshRepeatedScaffold],
   errors:[refreshErrors],
@@ -21540,12 +21569,16 @@ function refreshShell(){
 }
 function refreshActiveTab(options={}){
   if(document.hidden&&!options.force)return;
+  if(isResearchTab(activeTabName)&&!options.force){
+    setPollingStatus('research on demand');
+    return;
+  }
   const refreshers=tabRefreshers[activeTabName]||[];
   const now=Date.now();
   if(!options.force&&tabLastRefresh[activeTabName]&&now-tabLastRefresh[activeTabName]<ACTIVE_TAB_REFRESH_MS)return;
   tabLastRefresh[activeTabName]=now;
   runRefreshers(refreshers);
-  setPollingStatus('heavy views cached up to 60s');
+  setPollingStatus(isResearchTab(activeTabName)?'research loaded on demand':'operational active tab');
 }
 function resetDashboardPolling(){
   dashboardTimers.forEach(timer=>clearInterval(timer));
