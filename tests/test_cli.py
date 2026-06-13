@@ -210,6 +210,214 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 upstream,
             ])
 
+    def test_activate_codex_writes_user_config_and_default_openai_dependency(self):
+        with TemporaryDirectory() as tmp:
+            codex_config = Path(tmp) / "home" / ".codex" / "config.toml"
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), 'openai_base_url = "http://127.0.0.1:4003/v1"\n')
+            config = json.loads((Path(tmp) / "agentflow" / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["codex", "openai"])
+            self.assertEqual(config["targets"]["codex"]["depends_on"], "openai")
+            self.assertEqual(config["targets"]["codex"]["codex_config_path"], str(codex_config))
+            self.assertEqual(config["targets"]["codex"]["local_base_url"], "http://127.0.0.1:4003/v1")
+            self.assertIn("OpenAI target was not configured; created the default OpenAI activation profile.", stdout.getvalue())
+            self.assertNotIn("sk-", codex_config.read_text(encoding="utf-8"))
+
+    def test_activate_codex_is_idempotent(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            codex_config = Path(tmp) / "config.toml"
+
+            first = cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+            second_stdout = io.StringIO()
+            second = cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=second_stdout,
+            )
+
+            self.assertEqual(first, 0)
+            self.assertEqual(second, 0)
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), 'openai_base_url = "http://127.0.0.1:4003/v1"\n')
+            self.assertFalse(list(codex_config.parent.glob("config.toml.agentflow.bak*")))
+            self.assertIn("Codex config changed: false", second_stdout.getvalue())
+
+    def test_activate_codex_preserves_unrelated_toml_and_comments(self):
+        with TemporaryDirectory() as tmp:
+            codex_config = Path(tmp) / "config.toml"
+            codex_config.write_text(
+                '# keep this comment\nmodel = "gpt-5-codex"\nopenai_base_url = "https://api.openai.com/v1" # route\n[projects]\ntrusted = true\n',
+                encoding="utf-8",
+            )
+
+            code = cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            updated = codex_config.read_text(encoding="utf-8")
+            self.assertIn('# keep this comment\nmodel = "gpt-5-codex"\n', updated)
+            self.assertIn('openai_base_url = "http://127.0.0.1:4003/v1" # route\n', updated)
+            self.assertIn("[projects]\ntrusted = true\n", updated)
+
+    def test_activate_codex_replaces_stale_url_when_openai_local_url_changes(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            codex_config = Path(tmp) / "config.toml"
+            cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+            cli.agentflow_cli(
+                ["activate", "openai", "--config-dir", str(config_dir), "--local-base-url", "http://127.0.0.1:4999/v1"],
+                stdout=io.StringIO(),
+            )
+
+            code = cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn('openai_base_url = "http://127.0.0.1:4999/v1"', codex_config.read_text(encoding="utf-8"))
+            config = json.loads((config_dir / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["targets"]["codex"]["local_base_url"], "http://127.0.0.1:4999/v1")
+
+    def test_activate_codex_dry_run_does_not_write_files(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            codex_config = Path(tmp) / "config.toml"
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(
+                [
+                    "activate",
+                    "codex",
+                    "--config-dir",
+                    str(config_dir),
+                    "--codex-config",
+                    str(codex_config),
+                    "--dry-run",
+                ],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertFalse(codex_config.exists())
+            self.assertFalse((config_dir / "activation.json").exists())
+            self.assertIn(f"Codex config file: {codex_config}", stdout.getvalue())
+            self.assertIn("Codex OpenAI base URL: http://127.0.0.1:4003/v1", stdout.getvalue())
+
+    def test_activate_codex_creates_backup_before_modifying_existing_config(self):
+        with TemporaryDirectory() as tmp:
+            codex_config = Path(tmp) / "config.toml"
+            original = 'model = "gpt-5-codex"\n'
+            codex_config.write_text(original, encoding="utf-8")
+
+            code = cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+
+            self.assertEqual(code, 0)
+            backup = codex_config.with_name("config.toml.agentflow.bak")
+            self.assertTrue(backup.exists())
+            self.assertEqual(backup.read_text(encoding="utf-8"), original)
+            self.assertIn("openai_base_url", codex_config.read_text(encoding="utf-8"))
+
+    def test_activate_codex_does_not_write_or_print_api_keys(self):
+        with TemporaryDirectory() as tmp:
+            codex_config = Path(tmp) / "config.toml"
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "sk-openai-secret",
+                    "AGENTFLOW_OPENAI_API_KEY": "sk-proxy-secret",
+                },
+                clear=False,
+            ):
+                code = cli.agentflow_cli(
+                    ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow"), "--codex-config", str(codex_config)],
+                    stdout=stdout,
+                )
+
+            self.assertEqual(code, 0)
+            activation_raw = (Path(tmp) / "agentflow" / "activation.json").read_text(encoding="utf-8")
+            codex_raw = codex_config.read_text(encoding="utf-8")
+            output = stdout.getvalue()
+            for secret in ("sk-openai-secret", "sk-proxy-secret"):
+                self.assertNotIn(secret, activation_raw)
+                self.assertNotIn(secret, codex_raw)
+                self.assertNotIn(secret, output)
+
+    def test_activate_codex_default_path_does_not_touch_project_local_config(self):
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            project_config = workspace / ".codex" / "config.toml"
+            project_config.parent.mkdir()
+            project_config.write_text('openai_base_url = "https://api.openai.com/v1"\n', encoding="utf-8")
+            home = Path(tmp) / "home"
+            home.mkdir()
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(workspace)
+                with patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                    code = cli.agentflow_cli(
+                        ["activate", "codex", "--config-dir", str(Path(tmp) / "agentflow")],
+                        stdout=io.StringIO(),
+                    )
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(project_config.read_text(encoding="utf-8"), 'openai_base_url = "https://api.openai.com/v1"\n')
+            self.assertEqual(
+                (home / ".codex" / "config.toml").read_text(encoding="utf-8"),
+                'openai_base_url = "http://127.0.0.1:4003/v1"\n',
+            )
+
+    def test_activate_codex_refuses_explicit_project_local_config(self):
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            project_config = workspace / ".codex" / "config.toml"
+            project_config.parent.mkdir()
+            project_config.write_text('openai_base_url = "https://api.openai.com/v1"\n', encoding="utf-8")
+            stderr = io.StringIO()
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(workspace)
+                code = cli.agentflow_cli(
+                    [
+                        "activate",
+                        "codex",
+                        "--config-dir",
+                        str(Path(tmp) / "agentflow"),
+                        "--codex-config",
+                        str(project_config),
+                    ],
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertEqual(code, 2)
+            self.assertIn("refusing to modify project-local .codex/config.toml", stderr.getvalue())
+            self.assertEqual(project_config.read_text(encoding="utf-8"), 'openai_base_url = "https://api.openai.com/v1"\n')
+
 
 class PolicyReloadCliTests(unittest.TestCase):
     def setUp(self):

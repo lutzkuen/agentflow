@@ -32,6 +32,22 @@ MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 
 
 def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
+    if result["target"] == "codex":
+        prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
+        stdout.write(f"{prefix} AgentFlow target: codex\n")
+        stdout.write(f"Codex OpenAI base URL: {result['local_base_url']}\n")
+        stdout.write(f"Codex config file: {result['codex_config_path']}\n")
+        stdout.write(f"Codex config changed: {str(result['codex_config_changed']).lower()}\n")
+        if result.get("codex_config_backup_path"):
+            stdout.write(f"Backup file: {result['codex_config_backup_path']}\n")
+        stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
+        if result.get("openai_target_created"):
+            stdout.write("OpenAI target was not configured; created the default OpenAI activation profile.\n")
+        stdout.write(f"Run configured proxy: {result['run_command']}\n")
+        stdout.write(f"Config file: {result['config_path']}\n")
+        stdout.write("API keys are not stored or printed by activation.\n")
+        return
+
     prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
     stdout.write(f"{prefix} AgentFlow target: {result['target']}\n")
     stdout.write(f"Local base URL for clients: {result['local_base_url']}\n")
@@ -116,6 +132,24 @@ def agentflow_cli(
     activate_claude.add_argument("--health-url", default=None, help=argparse.SUPPRESS)
     activate_claude.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
 
+    activate_codex = activate_subparsers.add_parser("codex", help="Configure Codex VS Code/Codex CLI OpenAI base URL.")
+    activate_codex.add_argument(
+        "--codex-config",
+        default=None,
+        help="User-level Codex config.toml path, default: ~/.codex/config.toml.",
+    )
+    activate_codex.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    activate_codex.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
+    activate_codex.add_argument(
+        "--force",
+        action="store_true",
+        help="Confirm an explicit Codex config update while still refusing project-local .codex/config.toml.",
+    )
+
     run_parser = subparsers.add_parser(
         "run",
         parents=[config_parent],
@@ -134,6 +168,20 @@ def agentflow_cli(
         args.config_dir = os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
 
     if args.command == "activate":
+        if args.target == "codex":
+            try:
+                result = activation.activate_codex(
+                    config_dir=args.config_dir,
+                    codex_config_path=args.codex_config,
+                    dry_run=bool(args.dry_run),
+                    force=bool(args.force),
+                )
+            except activation.ActivationError as exc:
+                stderr.write(str(exc) + "\n")
+                return 2
+            _write_activation_summary(stdout, result)
+            return 0
+
         if args.target == "claude" and args.anthropic_base_url and args.claude_base_url:
             stderr.write("--anthropic-base-url and --claude-base-url are aliases; pass only one.\n")
             return 2
