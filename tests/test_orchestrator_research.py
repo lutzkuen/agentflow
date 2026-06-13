@@ -433,6 +433,53 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("req-secret-12345", rendered)
         self.assertNotIn("session-secret-67890", rendered)
 
+    def test_repeated_pass_diagnostics_are_ignored_for_blocker_issue_generation(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "Test verdict: PASS.",
+                        "Test verdict: PASS.",
+                        "cache replay omitted reason=aggregate-only candidate_id=cache-candidate-secret",
+                        "routing candidate skipped blocker=aggregate-only request_id=req-secret-12345",
+                        "managed recommendation omitted reason=provider-capability-mismatch session_id=session-secret-67890",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        self.assertEqual(diagnostics[0]["reason"], "pass")
+        self.assertGreaterEqual(diagnostics[0]["count"], 2)
+
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertTrue(any("aggregate only diagnostics" in title for title in created_titles))
+        self.assertFalse(any("pass diagnostics" in title for title in created_titles))
+
+        repeated_issue = [item for item in plan["backlog_changes"]["create_issues"] if "aggregate only diagnostics" in item["title"].lower()][0]
+        self.assertIn("Source lever:", repeated_issue["body"])
+        self.assertIn("Expected unblock path:", repeated_issue["body"])
+        self.assertIn("metadata-only privacy", repeated_issue["body"])
+
+        candidates = plan["evidence"]["optimization_candidates"]
+        diagnostic_candidates = [item for item in candidates if item["lever"] == "activation-feedback"]
+        self.assertTrue(diagnostic_candidates)
+        self.assertEqual(diagnostic_candidates[0]["blocker"], "repeated-aggregate-only")
+        self.assertNotEqual(diagnostic_candidates[0]["projected_savings_signal"]["diagnostic_reason"], "pass")
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("cache-candidate-secret", rendered)
+        self.assertNotIn("req-secret-12345", rendered)
+        self.assertNotIn("session-secret-67890", rendered)
+
     def test_privacy_redacts_raw_fields_paths_and_ids(self):
         plan = build_research_plan(
             issues=[

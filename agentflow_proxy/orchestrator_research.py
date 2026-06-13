@@ -54,15 +54,151 @@ _KNOWN_DIAGNOSTIC_TERMS = (
     "need-more-samples",
     "missing dependency evidence",
     "missing-dependency-evidence",
+    "missing lifecycle feedback",
+    "missing-lifecycle-feedback",
     "stale quality evidence",
     "stale-quality-evidence",
+    "stale lifecycle evidence",
+    "stale-lifecycle-evidence",
+    "high retry rate",
+    "high-retry-rate",
+    "high error rate",
+    "high-error-rate",
     "holdout regression",
     "holdout-regression",
+    "non-positive savings",
+    "non-positive-savings",
     "privacy-blocked",
     "aggregate-only",
     "safety-stop",
+    "provider capability mismatch",
+    "provider-capability-mismatch",
     "unsupported local executor",
     "unsupported-local-executor",
+    "no local representation",
+    "no-local-representation",
+)
+
+_PASS_DIAGNOSTIC_REASONS = {
+    "pass",
+    "passed",
+    "verdict-pass",
+    "test-verdict-pass",
+    "quality-gate-passed",
+    "offline-fixture-passed",
+    "eval-pass-threshold-met",
+    "canary-holdout-thresholds-met",
+    "promotion-thresholds-met",
+}
+
+_DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
+    {
+        "class": "safety-stop",
+        "priority": 10,
+        "aliases": ("safety-stop", "safety-stopped", "safety_stop"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Review the safety stop and either resolve the safe bypass condition or keep the affected activation blocked with a narrow reason.",
+        "acceptance_check": "The next report shows the safety-stop count reduced for the affected cohort or records an explicit keep-blocked reason.",
+    },
+    {
+        "class": "regression",
+        "priority": 15,
+        "aliases": ("regression", "regressed", "holdout-regression", "quality-regression", "error-regression"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Rollback, disable, or narrow the candidate until applied and holdout evidence no longer shows a regression.",
+        "acceptance_check": "A bounded canary or eval report shows no applied-vs-holdout regression before activation is reconsidered.",
+    },
+    {
+        "class": "high-retry-error-rate",
+        "priority": 20,
+        "aliases": ("high-retry-rate", "high-error-rate", "retry-rate-above-threshold", "error-rate-above-threshold"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Identify the provider, local action, or canary cohort causing elevated retry/error pressure and reduce it before widening.",
+        "acceptance_check": "The affected cohort reports retry and error rates below the activation threshold in the next metadata window.",
+    },
+    {
+        "class": "missing-lifecycle-feedback",
+        "priority": 30,
+        "aliases": (
+            "missing-lifecycle-feedback",
+            "lifecycle-feedback-missing",
+            "missing-feedback",
+            "missing-canary-lifecycle",
+        ),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Emit applied, holdout, fallback, retry, error, and savings lifecycle feedback for the affected activation path.",
+        "acceptance_check": "Lifecycle feedback includes applied and holdout cohort counts plus savings and omission reason fields.",
+    },
+    {
+        "class": "stale-evidence",
+        "priority": 35,
+        "aliases": ("stale-evidence", "stale-quality-evidence", "stale-lifecycle-evidence", "stale-canary-evidence"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Refresh the canary, eval, or rollout evidence inside the configured evidence window.",
+        "acceptance_check": "A later report uses fresh evidence timestamps before creating an activation or widening issue.",
+    },
+    {
+        "class": "aggregate-only",
+        "priority": 40,
+        "aliases": ("aggregate-only", "aggregate_only", "aggregate-only-feedback"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Add privacy-safe candidate/cohort-level lifecycle fields without exposing prompts, provider bodies, request IDs, session IDs, or raw identifiers.",
+        "acceptance_check": "The affected report can name the candidate/cohort state needed for review while preserving metadata-only privacy.",
+    },
+    {
+        "class": "unsupported-provider-action",
+        "priority": 45,
+        "aliases": (
+            "unsupported-provider-action",
+            "unsupported-action",
+            "unsupported-local-executor",
+            "provider-capability-mismatch",
+            "capability-mismatch",
+        ),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Map the recommendation to a supported local executor capability or keep the provider/action pair explicitly omitted.",
+        "acceptance_check": "The provider capability matrix reports supported local execution or a machine-readable omitted action.",
+    },
+    {
+        "class": "no-local-representation",
+        "priority": 50,
+        "aliases": ("no-local-representation", "local-representation-missing", "not-representable-locally"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Define the file-backed local rule, dry-run, canary, or review-only bundle representation for the recommendation.",
+        "acceptance_check": "A local rule or review artifact can represent the recommendation without managed enforcement or provider body rewrites.",
+    },
+    {
+        "class": "non-positive-savings",
+        "priority": 55,
+        "aliases": ("non-positive-savings", "negative-savings", "zero-savings", "savings-not-positive"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Keep the candidate out of activation until observed or projected savings per 1000 calls becomes positive.",
+        "acceptance_check": "The candidate reports positive savings per 1000 calls or remains explicitly omitted as non-actionable.",
+    },
+    {
+        "class": "missing-dependency-evidence",
+        "priority": 60,
+        "aliases": ("missing-dependency-evidence", "missing-dependency", "need-more-samples", "insufficient-samples"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Collect the missing dependency, sample, holdout, or invalidation evidence before activation.",
+        "acceptance_check": "The next report includes the missing evidence or a narrower blocked reason with the remaining gap.",
+    },
+    {
+        "class": "privacy-blocked",
+        "priority": 65,
+        "aliases": ("privacy-blocked", "privacy-blocker", "privacy"),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Replace the blocked evidence with metadata-only fields or keep the optimization out of unattended issue generation.",
+        "acceptance_check": "Generated evidence remains metadata-only and excludes prompts, provider bodies, file paths, request IDs, session IDs, and raw identifiers.",
+    },
+    {
+        "class": "unclassified-skip-or-blocker",
+        "priority": 90,
+        "aliases": ("unclassified-skip-or-blocker",),
+        "backlog_action": "create-ready-issue",
+        "unblock_path": "Trace the unclassified skip/blocker to a bounded diagnostic reason before creating activation work.",
+        "acceptance_check": "The next research plan reports a classified reason or a narrow issue for the emitting report.",
+    },
 )
 
 
@@ -224,6 +360,60 @@ def _diagnostics_from_logs(log_sources: Iterable[str | Path], *, limit: int = 10
         {"reason": reason, "count": count, "example": examples.get(reason, "")}
         for reason, count in counter.most_common(limit)
     ]
+
+
+def _diagnostic_taxonomy(reason: Any) -> dict[str, Any] | None:
+    text = str(reason or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if not text or text in _PASS_DIAGNOSTIC_REASONS:
+        return None
+    if text.startswith("pass-") or text.endswith("-passed"):
+        return None
+    for entry in _DIAGNOSTIC_TAXONOMY:
+        aliases = tuple(str(alias).lower().replace("_", "-").replace(" ", "-") for alias in entry["aliases"])
+        if any(text == alias or alias in text for alias in aliases):
+            return entry
+    return None
+
+
+def _diagnostic_source_lever(reason: str, diagnostic_class: str) -> str:
+    text = f"{reason} {diagnostic_class}".lower()
+    if "cache" in text or "replay" in text:
+        return "cache"
+    if "routing" in text or "canary" in text or "model" in text:
+        return "routing"
+    if "crunch" in text or "compaction" in text or "summary" in text or "dedup" in text:
+        return "crunch"
+    if "managed" in text or "provider-capability" in text or "unsupported" in text:
+        return "managed-recommendation"
+    return "activation-feedback"
+
+
+def _actionable_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    actionable: list[dict[str, Any]] = []
+    for index, item in enumerate(diagnostics):
+        reason = str(item.get("reason") or "")
+        taxonomy = _diagnostic_taxonomy(reason)
+        if taxonomy is None:
+            continue
+        diagnostic_class = str(taxonomy["class"])
+        enriched = dict(item)
+        enriched.update(
+            {
+                "diagnostic_class": diagnostic_class,
+                "source_lever": _diagnostic_source_lever(reason, diagnostic_class),
+                "backlog_action": taxonomy["backlog_action"],
+                "expected_unblock_path": taxonomy["unblock_path"],
+                "acceptance_check": taxonomy["acceptance_check"],
+                "_priority": _to_int(taxonomy["priority"], 100),
+                "_index": index,
+            }
+        )
+        actionable.append(enriched)
+    actionable.sort(key=lambda row: (_to_int(row.get("_priority"), 100), -_to_int(row.get("count")), _to_int(row.get("_index"))))
+    for row in actionable:
+        row.pop("_priority", None)
+        row.pop("_index", None)
+    return actionable
 
 
 def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
@@ -515,18 +705,27 @@ def _crunch_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] | None:
-    actionable = [item for item in diagnostics if str(item.get("reason") or "") != "pass"]
+    actionable = _actionable_diagnostics(diagnostics)
     if not actionable:
         return None
     top = actionable[0]
     reason = str(top.get("reason") or "unknown-diagnostic")
     count = _to_int(top.get("count"))
     return _candidate(
-        lever="activation-feedback",
+        lever=str(top.get("source_lever") or "activation-feedback"),
         provider_surface_bucket="mixed",
-        blocker=f"repeated-{reason}",
-        estimated_savings_path="Promote repeated blocker diagnostics into a narrow issue that unlocks the affected routing, crunching, cache, or managed recommendation path.",
-        projected_savings_signal={"diagnostic_reason": reason, "observations": count},
+        blocker=f"repeated-{top.get('diagnostic_class') or reason}",
+        estimated_savings_path=str(
+            top.get("expected_unblock_path")
+            or "Promote repeated blocker diagnostics into a narrow issue that unlocks the affected routing, crunching, cache, or managed recommendation path."
+        ),
+        projected_savings_signal={
+            "diagnostic_reason": reason,
+            "diagnostic_class": top.get("diagnostic_class"),
+            "observations": count,
+            "backlog_action": top.get("backlog_action"),
+            "acceptance_check": top.get("acceptance_check"),
+        },
         confidence="medium" if count > 1 else "low",
         sequencing="File after direct cache/routing/crunch candidates unless the diagnostic is a safety stop or privacy blocker.",
         score=float(count) * 10.0,
@@ -636,9 +835,16 @@ def _proposal_from_low_backlog(
     ]
     if stats_summary:
         evidence.append(f"Recent metadata summary: {json.dumps(stats_summary, sort_keys=True)}")
-    if diagnostics:
+    actionable_diagnostics = _actionable_diagnostics(diagnostics)
+    if actionable_diagnostics:
+        top = actionable_diagnostics[0]
+        evidence.append(
+            f"Top actionable diagnostic: {top['diagnostic_class']} from {top['source_lever']} "
+            f"({top['count']} observations; backlog action: {top['backlog_action']})."
+        )
+    elif diagnostics:
         top = diagnostics[0]
-        evidence.append(f"Top repeated diagnostic: {top['reason']} ({top['count']} observations).")
+        evidence.append(f"Top repeated diagnostic is non-actionable evidence: {top['reason']} ({top['count']} observations).")
     return {
         "repo": "lutzkuen/agentflow",
         "title": "Generate next backlog milestone from local telemetry evidence",
@@ -668,7 +874,18 @@ def _proposal_from_low_backlog(
 
 def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
     reason = str(diagnostic.get("reason") or "unknown-diagnostic")
-    title_reason = reason.replace("-", " ")
+    diagnostic_class = str(diagnostic.get("diagnostic_class") or reason)
+    source_lever = str(diagnostic.get("source_lever") or _diagnostic_source_lever(reason, diagnostic_class))
+    backlog_action = str(diagnostic.get("backlog_action") or "create-ready-issue")
+    expected_unblock_path = str(
+        diagnostic.get("expected_unblock_path")
+        or "Promote repeated blocker diagnostics into a narrow issue that unlocks the affected routing, crunching, cache, or managed recommendation path."
+    )
+    acceptance_check = str(
+        diagnostic.get("acceptance_check")
+        or "The repeated diagnostic is represented by a concrete GitHub issue or an updated blocked issue comment."
+    )
+    title_reason = diagnostic_class.replace("-", " ")
     return {
         "repo": "lutzkuen/agentflow",
         "title": f"Turn repeated {title_reason} diagnostics into an actionable optimization issue",
@@ -681,16 +898,21 @@ def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, 
             ),
             evidence=[
                 f"Diagnostic reason: {reason}",
+                f"Diagnostic class: {diagnostic_class}",
+                f"Source lever: {source_lever}",
+                f"Backlog action: {backlog_action}",
                 f"Observed count: {diagnostic.get('count', 0)}",
                 f"Sanitized example: {diagnostic.get('example', '')}",
+                f"Expected unblock path: {expected_unblock_path}",
             ],
             implementation=[
                 "Trace the diagnostic to the local report, rollout, or canary gate that emits it.",
+                f"Focus the follow-up on the {source_lever} path and the taxonomy action `{backlog_action}`.",
                 "Decide whether the blocker needs more samples, safer policy metadata, a rollback, or a narrower feature slice.",
                 "Create or update the smallest issue that directly unlocks the affected routing, crunching, caching, or replay milestone.",
             ],
             acceptance=[
-                "The repeated diagnostic is represented by a concrete GitHub issue or an updated blocked issue comment.",
+                acceptance_check,
                 "The issue includes an implementation path and a measurable acceptance check tied to the diagnostic.",
                 "Generated text remains metadata-only and contains no raw prompts, provider bodies, file paths, or request/session IDs.",
             ],
@@ -1097,8 +1319,15 @@ def _blocked_comment(issue: dict[str, Any], diagnostics: list[dict[str, Any]], s
     evidence = [
         f"Blocked issue has been stale for {issue.get('age_days', 'unknown')} days.",
     ]
-    if diagnostics:
-        evidence.append(f"Top current diagnostic: {diagnostics[0]['reason']} ({diagnostics[0]['count']} observations).")
+    actionable_diagnostics = _actionable_diagnostics(diagnostics)
+    if actionable_diagnostics:
+        top = actionable_diagnostics[0]
+        evidence.append(
+            f"Top current actionable diagnostic: {top['diagnostic_class']} from {top['source_lever']} "
+            f"({top['count']} observations; expected unblock: {top['expected_unblock_path']})."
+        )
+    elif diagnostics:
+        evidence.append(f"Top current diagnostic is non-actionable evidence: {diagnostics[0]['reason']} ({diagnostics[0]['count']} observations).")
     if stats_summary:
         evidence.append(f"Current sanitized stats summary: {json.dumps(stats_summary, sort_keys=True)}")
     body = _issue_body(
@@ -1165,8 +1394,9 @@ def build_research_plan(
         openai_routing_proposal = _proposal_from_openai_routing_canary_feedback(summary)
         if openai_routing_proposal is not None:
             create_issues.append(openai_routing_proposal)
-        if diagnostics and diagnostics[0].get("count", 0) > 1:
-            create_issues.append(_proposal_from_repeated_diagnostic(diagnostics[0]))
+        repeated_actionable_diagnostics = [item for item in _actionable_diagnostics(diagnostics) if _to_int(item.get("count")) > 1]
+        if repeated_actionable_diagnostics:
+            create_issues.append(_proposal_from_repeated_diagnostic(repeated_actionable_diagnostics[0]))
         for issue in blocked_stale[:3]:
             comment_issues.append(_blocked_comment(issue, diagnostics, summary))
 
