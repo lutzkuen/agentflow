@@ -19501,7 +19501,9 @@ async function refresh(){
     document.getElementById('c-spend').textContent=fmt(acct.cost_est_usd??spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
     document.getElementById('c-spend-sub').textContent=fmt(acctTotal.cost_est_usd??spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
     const agentflowBuckets=savings.today_agentflow_generated_buckets||buckets;
-    document.getElementById('c-savings').textContent=fmt((acct.routing_savings_usd||0)+(acct.crunch_savings_usd||0)+(acct.cache_savings_usd||0)||savings.today_agentflow_generated_savings_usd??savings.today_total_savings_usd??0,4);
+    const accountAgentflowSavings=(acct.routing_savings_usd??0)+(acct.crunch_savings_usd??0)+(acct.cache_savings_usd??0);
+    const todayAgentflowSavings=(accountAgentflowSavings||savings.today_agentflow_generated_savings_usd)??0;
+    document.getElementById('c-savings').textContent=fmt(todayAgentflowSavings,4);
     document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??agentflowBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??agentflowBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??agentflowBuckets.exact_local_cache_usd??0,4);
     document.getElementById('c-health').textContent=(health.errors_today??health.errors??0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';

@@ -3,6 +3,9 @@ import asyncio
 import importlib.util
 import os
 import json
+import re
+import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +23,7 @@ if HAS_RUNTIME_DEPS:
     import httpx
     from fastapi.testclient import TestClient
 
+    from agentflow_proxy import stats as stats_views
     import agentflow_proxy.dashboard_app as dashboard_app
     from agentflow_proxy.dashboard_app import create_dashboard_app
     from agentflow_proxy.store import Store, stable_json, utc_now
@@ -413,6 +417,28 @@ class DashboardImportTests(unittest.TestCase):
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_dashboard_inline_javascript_syntax_checks_with_node(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available")
+
+        html = stats_views.dashboard_html()
+        scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+        self.assertTrue(scripts)
+        self.assertIn("/agentflow/stats/full", scripts[-1])
+
+        with tempfile.NamedTemporaryFile("w", suffix=".js") as script_file:
+            script_file.write("\n".join(scripts))
+            script_file.flush()
+            result = subprocess.run(
+                [node, "--check", script_file.name],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_repeated_scaffold_dashboard_endpoints_are_content_free(self):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
