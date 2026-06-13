@@ -71,6 +71,10 @@ from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
 from agentflow_proxy.terminal_features import terminal_log_features_from_text
+from agentflow_proxy.codex_terminal_transcript_compaction import (
+    FAMILY as TERMINAL_COMPACTION_FAMILY,
+    codex_terminal_transcript_compaction_decision,
+)
 
 load_dotenv()
 
@@ -98,6 +102,8 @@ CODEX_APP_RULES = [
     rule for rule in (CODEX_APP_POLICY.get("rules") or [])
     if isinstance(rule, dict)
 ]
+CODEX_TERMINAL_COMPACTION_POLICY: dict = CODEX_APP_POLICY.get("terminal_transcript_compaction") or {}
+CODEX_TERMINAL_COMPACTION_ENABLED: bool = bool(CODEX_TERMINAL_COMPACTION_POLICY.get("enabled"))
 CODEX_APP_SESSION_COST_ALERT_USD = float(os.getenv(
     "AGENTFLOW_CODEX_APP_SESSION_COST_ALERT_USD",
     os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"),
@@ -3080,8 +3086,26 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
                         ttl_seconds=CODEX_APP_CACHE_TTL_SECONDS,
                     )
                     cache_meta[_INTERNAL_CACHE_KEY] = cache_key
+    terminal_compaction_meta: dict | None = None
+    if CODEX_TERMINAL_COMPACTION_ENABLED:
+        _cache_replay = cache_meta.get(_INTERNAL_REPLAY_FRAME_KEY) is not None
+        _coordinator_ledger = {
+            "exact_cache_replay": _cache_replay,
+            "managed_recommendation": False,
+        }
+        _tc_params, _tc_result = codex_terminal_transcript_compaction_decision(
+            routed_params,
+            policy=CODEX_TERMINAL_COMPACTION_POLICY,
+            coordinator_ledger=_coordinator_ledger,
+            before_chars=len(stable_json(routed_params)),
+        )
+        terminal_compaction_meta = _tc_result.get(TERMINAL_COMPACTION_FAMILY)
+        if terminal_compaction_meta and terminal_compaction_meta.get("applied") and not _cache_replay:
+            optimized["params"] = _tc_params
     if optimized == msg:
-        metadata = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+        metadata: dict[str, Any] = {"routing": routing_meta, "crunch": crunch_meta, "cache": cache_meta}
+        if terminal_compaction_meta:
+            metadata[TERMINAL_COMPACTION_FAMILY] = terminal_compaction_meta
         _attach_codex_local_pattern_features(raw, metadata)
         return raw, metadata
     forwarded = json.dumps(optimized, separators=(",", ":"), ensure_ascii=False)
@@ -3090,6 +3114,8 @@ def _optimize_client_message(raw: str | bytes) -> tuple[str | bytes, dict[str, d
         "crunch": crunch_meta,
         "cache": cache_meta,
     }
+    if terminal_compaction_meta:
+        metadata[TERMINAL_COMPACTION_FAMILY] = terminal_compaction_meta
     _attach_codex_local_pattern_features(forwarded, metadata)
     return forwarded, metadata
 
