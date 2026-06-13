@@ -153,14 +153,46 @@ def execute_openai_local_policy(
     """Apply local crunch, route, cache-profile, and safe managed actions without provider I/O."""
     managed_crunch_profile = crunch_profile_from_decision(policy_decision)
     managed_cache_profile = cache_profile_from_decision(policy_decision)
+    source_surface = str(preflight.feature_unit.get("source_surface") or "openai_responses")
+    endpoint = str(preflight.feature_unit.get("endpoint") or preflight.path)
+    pre_crunch_routing_meta = {
+        "provider": "openai",
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "category": category,
+        "workflow_phase": category,
+    }
+
+    def call_cruncher(**kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            return cruncher(**kwargs)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            fallback = {"store_obj": kwargs.get("store_obj")}
+            if kwargs.get("managed_profile") is not None:
+                fallback["managed_profile"] = kwargs.get("managed_profile")
+            return cruncher(kwargs["raw_body"], **fallback)
+
     if managed_crunch_profile:
-        provider_body, crunch_meta = cruncher(
-            raw_body,
+        provider_body, crunch_meta = call_cruncher(
+            raw_body=raw_body,
             store_obj=store_obj,
             managed_profile=managed_crunch_profile,
+            routing_meta=pre_crunch_routing_meta,
+            provider="openai",
+            source_surface=source_surface,
+            endpoint=endpoint,
         )
     else:
-        provider_body, crunch_meta = cruncher(raw_body, store_obj=store_obj)
+        provider_body, crunch_meta = call_cruncher(
+            raw_body=raw_body,
+            store_obj=store_obj,
+            routing_meta=pre_crunch_routing_meta,
+            provider="openai",
+            source_surface=source_surface,
+            endpoint=endpoint,
+        )
 
     routed_model, routing_meta = router(provider_body)
     resolved_requested_model = str(provider_body.get("model") or requested_model)

@@ -619,6 +619,207 @@ pattern_rules:
         self.assertEqual(meta["pattern_rules"]["configured_count"], 0)
         self.assertEqual(meta["pattern_rules"]["applied_count"], 0)
 
+    def _write_instruction_dedup_policy(self, config: Path, *, fraction: float = 1.0, holdout: float = 0.0) -> None:
+        (config / "crunch_rules.yaml").write_text(
+            f"""
+enabled: true
+instruction_section_deduplication:
+  enabled: true
+  policy_source: local-manual
+  min_section_chars: 80
+  min_repeated_count: 2
+  keep_recent_sections: 1
+  max_replacements: 4
+  replacement_notice: "[repeated instruction section omitted by AgentFlow test]"
+  canary:
+    enabled: true
+    fraction: {fraction}
+    holdout_fraction: {holdout}
+    salt: instruction-dedup-test
+    unit: instruction_section_fingerprint
+  safety_stop:
+    enabled: false
+""",
+            encoding="utf-8",
+        )
+
+    def _instruction_body(self, section: str) -> dict[str, object]:
+        return {
+            "model": "claude-sonnet-4-6",
+            "system": [
+                {"type": "text", "text": section},
+                {"type": "text", "text": section},
+            ],
+            "messages": [{"role": "user", "content": "Proceed without repeating instructions."}],
+        }
+
+    def test_instruction_section_dedup_default_policy_is_noop(self):
+        manual = importlib.reload(crunch_module)
+        section = ("Default disabled instruction section. " + "Keep this local-only instruction. " * 8).strip()
+        body = self._instruction_body(section)
+
+        crunched, meta = manual.crunch_body(body)
+
+        self.assertEqual(crunched, body)
+        dedup = meta["instruction_section_deduplication"]
+        self.assertFalse(dedup["enabled"])
+        self.assertEqual(dedup["status"], "skipped")
+        self.assertEqual(dedup["reason"], "disabled")
+
+    def test_instruction_section_dedup_canary_applied_and_holdout_are_deterministic(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            self._write_instruction_dedup_policy(config, fraction=0.5, holdout=0.5)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+
+            observed = {}
+            for index in range(80):
+                variant = chr(ord("a") + (index % 26)) * (1 + index // 26)
+                section = (
+                    f"Canary instruction section variant {variant}. "
+                    + "Follow these stable coding-agent operating rules without exposing private text. " * 5
+                ).strip()
+                body = self._instruction_body(section)
+                crunched, meta = manual.crunch_body(body, provider="anthropic", source_surface="anthropic_messages", endpoint="messages")
+                dedup = meta["instruction_section_deduplication"]
+                observed.setdefault(dedup["status"], (body, crunched, dedup))
+                if {"applied", "holdout"}.issubset(observed):
+                    break
+
+            self.assertIn("applied", observed)
+            self.assertIn("holdout", observed)
+            applied_body, applied_crunched, applied = observed["applied"]
+            holdout_body, holdout_crunched, holdout_meta = observed["holdout"]
+            self.assertNotEqual(applied_crunched, applied_body)
+            self.assertIn("AgentFlow test", applied_crunched["system"][0]["text"])
+            self.assertEqual(applied_crunched["system"][1]["text"], applied_body["system"][1]["text"])
+            self.assertEqual(applied["applied_count"], 1)
+            self.assertEqual(applied["canary"]["cohort"], "canary_applied")
+            self.assertGreater(applied["tokens_saved_est"], 0)
+            self.assertEqual(holdout_crunched, holdout_body)
+            self.assertEqual(holdout_meta["holdout_count"], 1)
+            self.assertEqual(holdout_meta["rules"][0]["canary"]["cohort"], "canary_holdout")
+            rendered = json.dumps(applied, sort_keys=True)
+            self.assertNotIn("Follow these stable", rendered)
+            self.assertNotIn("sha256:", rendered)
+
+            second_crunched, second_meta = manual.crunch_body(
+                holdout_body,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+            )
+            self.assertEqual(second_crunched, holdout_body)
+            self.assertEqual(second_meta["instruction_section_deduplication"]["rules"][0]["canary"], holdout_meta["rules"][0]["canary"])
+
+    def test_instruction_section_dedup_applies_openai_and_codex_instruction_blocks(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            self._write_instruction_dedup_policy(config, fraction=1.0, holdout=0.0)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            section = ("OpenAI/Codex instruction section. " + "Keep deterministic local instructions intact in the newest copy. " * 5).strip()
+            openai_body = {
+                "model": "gpt-5.4",
+                "instructions": section,
+                "input": [
+                    {"role": "developer", "content": [{"type": "input_text", "text": section}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": "Do the task."}]},
+                ],
+            }
+            codex_body = {
+                "model": "gpt-5-codex",
+                "instructions": section,
+                "input": [
+                    {"role": "developer", "content": [{"type": "input_text", "text": section}]},
+                    {"role": "user", "content": "start turn"},
+                ],
+            }
+
+            openai_crunched, openai_meta = manual.crunch_body(
+                openai_body,
+                provider="openai",
+                source_surface="openai_responses",
+                endpoint="responses",
+            )
+            codex_crunched, codex_meta = manual.crunch_body(
+                codex_body,
+                provider="openai",
+                source_surface="codex_turn",
+                endpoint="app_server",
+            )
+
+            self.assertEqual(openai_meta["instruction_section_deduplication"]["status"], "applied")
+            self.assertIn("AgentFlow test", openai_crunched["instructions"])
+            self.assertEqual(openai_crunched["input"][0]["content"][0]["text"], section)
+            self.assertEqual(codex_meta["instruction_section_deduplication"]["status"], "applied")
+            self.assertEqual(codex_meta["instruction_section_deduplication"]["source_surface"], "codex_turn")
+            self.assertIn("AgentFlow test", codex_crunched["instructions"])
+            self.assertEqual(codex_crunched["input"][0]["content"][0]["text"], section)
+
+    def test_instruction_section_dedup_preserves_tool_and_thinking_payloads(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            self._write_instruction_dedup_policy(config, fraction=1.0, holdout=0.0)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            section = ("Risky instruction section. " + "Do not mutate protocol bearing requests. " * 6).strip()
+            tool_body = self._instruction_body(section)
+            tool_body["messages"].append({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tool-1", "name": "read", "input": {"path": "file.py"}}],
+            })
+            thinking_body = self._instruction_body(section)
+            thinking_body["messages"].append({
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "private chain state"}],
+            })
+
+            tool_crunched, tool_meta = manual.crunch_body(tool_body)
+            thinking_crunched, thinking_meta = manual.crunch_body(thinking_body)
+
+            self.assertEqual(tool_crunched, tool_body)
+            self.assertEqual(tool_meta["instruction_section_deduplication"]["reason"], "tool-protocol-risk")
+            self.assertEqual(thinking_crunched, thinking_body)
+            self.assertEqual(thinking_meta["instruction_section_deduplication"]["reason"], "thinking-content-risk")
+
+    def test_instruction_section_dedup_coordinator_suppression_prevents_mutation(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            self._write_instruction_dedup_policy(config, fraction=1.0, holdout=0.0)
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            section = ("Coordinator instruction section. " + "This would normally be removed from the older copy. " * 6).strip()
+            body = self._instruction_body(section)
+            routing_meta = {
+                "category": "chat",
+                "workflow_phase": "planning",
+                "optimization_coordinator": {
+                    "selected_family": "cache_replay",
+                    "reason_codes": ["selected-cache-replay"],
+                    "suppressed_families": [
+                        {"family": "instruction_section_deduplication", "reason_codes": ["conflicts-with-coordinator-selection"]}
+                    ],
+                },
+            }
+
+            crunched, meta = manual.crunch_body(body, routing_meta=routing_meta)
+
+            dedup = meta["instruction_section_deduplication"]
+            self.assertEqual(crunched, body)
+            self.assertEqual(dedup["status"], "suppressed")
+            self.assertEqual(dedup["reason"], "coordinator-conflict")
+            self.assertIn("coordinator-conflict", dedup["reason_codes"])
+
     def test_repeated_provider_scaffolding_compacts_anthropic_messages_under_reviewed_rule(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

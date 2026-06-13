@@ -1135,9 +1135,20 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                 raw_body,
                 store_obj=context.store,
                 managed_profile=managed_crunch_profile,
+                routing_meta=preflight_routing_meta,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
             )
         else:
-            crunched, crunch_meta = crunch_body(raw_body, store_obj=context.store)
+            crunched, crunch_meta = crunch_body(
+                raw_body,
+                store_obj=context.store,
+                routing_meta=preflight_routing_meta,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+            )
         crunch_meta["old_context_summarization"] = summary_meta
         crunched, prompt_cached = inject_prompt_cache(crunched)
         if STRIP_THINKING_HISTORY and category == "tool-result" and not _has_top_level_thinking(crunched):

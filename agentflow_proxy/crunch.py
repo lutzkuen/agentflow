@@ -1940,6 +1940,655 @@ def _body_uses_thinking(body: dict[str, Any]) -> bool:
     return False
 
 
+INSTRUCTION_DEDUP_MIN_SECTION_CHARS = 80
+_INSTRUCTION_LONG_HEX_RE = re.compile(r"\b[0-9a-f]{8,}\b", re.IGNORECASE)
+_INSTRUCTION_NUMBER_RE = re.compile(r"\b\d+\b")
+_INSTRUCTION_PATH_RE = re.compile(r"(?:^|\s)(?:/|\.{1,2}/|[A-Za-z]:\\)[^\s]{2,}")
+_INSTRUCTION_SPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_instruction_text(value: str) -> str:
+    text = value.strip().lower()
+    text = _INSTRUCTION_PATH_RE.sub(" <path> ", text)
+    text = _INSTRUCTION_LONG_HEX_RE.sub("<hex>", text)
+    text = _INSTRUCTION_NUMBER_RE.sub("<n>", text)
+    return _INSTRUCTION_SPACE_RE.sub(" ", text).strip()
+
+
+def _instruction_hash_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _instruction_source_allowed(value: str, allowed: list[Any]) -> bool:
+    if not allowed:
+        return True
+    return value in {str(item) for item in allowed}
+
+
+def _instruction_rule_matches(basis: dict[str, Any], section_fingerprint: str, rule: dict[str, Any]) -> bool:
+    if not _as_bool(rule.get("enabled"), True):
+        return False
+    fingerprints = {str(item) for item in rule.get("instruction_section_fingerprints") or []}
+    if fingerprints and section_fingerprint not in fingerprints:
+        return False
+    if not _instruction_source_allowed(str(basis.get("source_surface") or ""), rule.get("source_surfaces") or []):
+        return False
+    if not _instruction_source_allowed(str(basis.get("category") or ""), rule.get("categories") or []):
+        return False
+    if not _instruction_source_allowed(str(basis.get("workflow_phase") or ""), rule.get("workflow_phases") or []):
+        return False
+    return True
+
+
+def _instruction_base_rule(policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(policy.get("rule_id") or "instruction-section-dedup-policy"),
+        "candidate_id": policy.get("candidate_id"),
+        "enabled": _as_bool(policy.get("enabled"), False),
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "instruction_section_fingerprints": [],
+        "source_surfaces": [str(item) for item in policy.get("source_surfaces") or []],
+        "categories": [str(item) for item in policy.get("categories") or []],
+        "workflow_phases": [str(item) for item in policy.get("workflow_phases") or []],
+        "min_section_chars": int(policy.get("min_section_chars") or 700),
+        "min_repeated_count": int(policy.get("min_repeated_count") or 2),
+        "keep_recent_sections": int(policy.get("keep_recent_sections") or 1),
+        "replacement_notice": str(policy.get("replacement_notice") or "[repeated instruction section omitted by AgentFlow]"),
+        "max_replacements": int(policy.get("max_replacements") or 0),
+        "canary": copy.deepcopy(policy.get("canary") if isinstance(policy.get("canary"), dict) else {}),
+        "safety_stop": copy.deepcopy(policy.get("safety_stop") if isinstance(policy.get("safety_stop"), dict) else {}),
+    }
+
+
+def _select_instruction_dedup_rule(policy: dict[str, Any], basis: dict[str, Any], section_fingerprint: str) -> dict[str, Any] | None:
+    for rule in policy.get("rules") or []:
+        if isinstance(rule, dict) and _instruction_rule_matches(basis, section_fingerprint, rule):
+            return copy.deepcopy(rule)
+    base = _instruction_base_rule(policy)
+    return base if _instruction_rule_matches(basis, section_fingerprint, base) else None
+
+
+def _instruction_dedup_cohort(rule: dict[str, Any], section_fingerprint: str, basis: dict[str, Any]) -> dict[str, Any]:
+    raw_canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
+    enabled = _as_bool(raw_canary.get("enabled"), True)
+    try:
+        fraction = max(0.0, min(1.0, float(raw_canary.get("fraction", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        fraction = 0.0
+    holdout_raw = raw_canary.get("holdout_fraction")
+    try:
+        holdout_fraction = None if holdout_raw is None else max(0.0, min(1.0, float(holdout_raw)))
+    except (TypeError, ValueError):
+        holdout_fraction = None
+    holdout = holdout_fraction if holdout_fraction is not None else 0.0
+    if fraction + holdout > 1.0:
+        fraction = max(0.0, 1.0 - holdout)
+    cohort_basis = {
+        "salt": str(raw_canary.get("salt") or ""),
+        "rule_id": rule.get("id"),
+        "unit": raw_canary.get("unit") or "instruction_section_fingerprint",
+        "fingerprint": section_fingerprint,
+        "surface": basis.get("source_surface"),
+        "category": basis.get("category"),
+        "phase": basis.get("workflow_phase"),
+    }
+    digest = hashlib.sha256(json.dumps(cohort_basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    if not enabled:
+        cohort = "disabled"
+        selected = False
+        is_holdout = False
+    elif score < holdout:
+        cohort = "holdout"
+        selected = False
+        is_holdout = True
+    elif score < holdout + fraction:
+        cohort = "canary"
+        selected = True
+        is_holdout = False
+    else:
+        cohort = "not_selected"
+        selected = False
+        is_holdout = False
+    return {
+        "enabled": enabled,
+        "cohort": cohort,
+        "selected": selected,
+        "holdout": is_holdout,
+        "canary_fraction": fraction,
+        "holdout_fraction": holdout_fraction,
+        "holdout_configured": holdout_fraction is not None,
+        "cohort_key_hash": digest[:16],
+        "cohort_score": round(score, 12),
+        "cohort_basis": "public-metadata-plus-hidden-instruction-fingerprint",
+        "salt_included": False,
+        "fingerprint_included": False,
+    }
+
+
+def _instruction_dedup_coordinator_compatibility(row_meta: dict[str, Any]) -> dict[str, Any]:
+    decision = row_meta.get("optimization_coordinator")
+    if not isinstance(decision, dict):
+        return {"status": "unknown", "compatible": True, "reason_codes": [], "selected_family": None}
+    selected = str(decision.get("selected_family") or decision.get("selected_action_family") or "none")
+    reasons = [str(item) for item in decision.get("reason_codes") or [] if str(item)]
+    suppressed = decision.get("suppressed_families") if isinstance(decision.get("suppressed_families"), list) else []
+    for item in suppressed:
+        if not isinstance(item, dict):
+            continue
+        family = str(item.get("family") or "")
+        if family in {"pattern_crunch", "prompt_role", "instruction_section_deduplication"} or "prompt_role" in family:
+            reasons.extend(str(reason) for reason in item.get("reason_codes") or [] if str(reason))
+    if selected not in {"none", "pattern_crunch", "prompt_role", "instruction_section_deduplication"}:
+        reasons.append("conflicts-with-coordinator-selection")
+        return {"status": "conflict", "compatible": False, "reason_codes": sorted(set(reasons)), "selected_family": selected}
+    if "coordinator-holdout" in reasons or "coordinator-canary-not-selected" in reasons:
+        return {"status": "blocked", "compatible": False, "reason_codes": sorted(set(reasons)), "selected_family": selected}
+    return {"status": "compatible", "compatible": True, "reason_codes": sorted(set(reasons)), "selected_family": selected}
+
+
+def _instruction_dedup_provider_and_surface(
+    body: dict[str, Any],
+    *,
+    provider: str | None = None,
+    source_surface: str | None = None,
+    endpoint: str | None = None,
+) -> tuple[str, str, str]:
+    provider_text = str(provider or "").strip().lower()
+    surface_text = str(source_surface or "").strip()
+    endpoint_text = str(endpoint or "").strip()
+    model = str(body.get("model") or "").lower()
+    if surface_text == "codex_turn" or "codex" in model:
+        return "openai", "codex_turn", endpoint_text or "responses"
+    if provider_text in {"openai", "anthropic"}:
+        inferred_surface = surface_text
+        if not inferred_surface:
+            inferred_surface = "anthropic_messages" if provider_text == "anthropic" else "openai_responses"
+        inferred_endpoint = endpoint_text or ("messages" if provider_text == "anthropic" else "responses")
+        return provider_text, inferred_surface, inferred_endpoint
+    if "system" in body and "instructions" not in body:
+        return "anthropic", surface_text or "anthropic_messages", endpoint_text or "messages"
+    return "openai", surface_text or "openai_responses", endpoint_text or "responses"
+
+
+def _instruction_dedup_text_from_content(content: Any) -> list[tuple[Any, Any, str]]:
+    entries: list[tuple[Any, Any, str]] = []
+    if isinstance(content, str):
+        return []
+    if isinstance(content, list):
+        for index, block in enumerate(content):
+            if isinstance(block, str):
+                entries.append((content, index, block))
+            elif isinstance(block, dict):
+                block_type = str(block.get("type") or "").strip().lower()
+                if block_type in {"text", "input_text"} and isinstance(block.get("text"), str):
+                    entries.append((block, "text", block["text"]))
+        return entries
+    return entries
+
+
+def _instruction_dedup_entries(body: dict[str, Any], *, provider: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+
+    def add(container: Any, key: Any, text: str, source_field: str, order: int) -> None:
+        if not isinstance(text, str) or not text.strip():
+            return
+        normalized = _normalize_instruction_text(text)
+        if len(normalized) < INSTRUCTION_DEDUP_MIN_SECTION_CHARS:
+            return
+        entries.append({
+            "container": container,
+            "key": key,
+            "text": text,
+            "chars": len(text),
+            "normalized": normalized,
+            "fingerprint": _instruction_hash_text(normalized),
+            "source_field": source_field,
+            "order": order,
+        })
+
+    order = 0
+    provider_l = provider.lower()
+    if provider_l == "anthropic":
+        system = body.get("system")
+        if isinstance(system, str):
+            add(body, "system", system, "anthropic.system", order)
+            order += 1
+        elif isinstance(system, list):
+            for index, block in enumerate(system):
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                    add(block, "text", block["text"], f"anthropic.system[{index}].text", order)
+                    order += 1
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            for msg_index, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "").strip().lower()
+                if role not in {"system", "developer"}:
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    add(message, "content", content, "anthropic.messages.system_or_developer", order)
+                    order += 1
+                for container, key, text in _instruction_dedup_text_from_content(content):
+                    add(container, key, text, f"anthropic.messages[{msg_index}].system_or_developer", order)
+                    order += 1
+        return entries
+
+    instructions = body.get("instructions")
+    if isinstance(instructions, str):
+        add(body, "instructions", instructions, "openai.instructions", order)
+        order += 1
+    elif isinstance(instructions, list):
+        for index, block in enumerate(instructions):
+            if isinstance(block, dict) and block.get("type") in {"text", "input_text"} and isinstance(block.get("text"), str):
+                add(block, "text", block["text"], f"openai.instructions[{index}].text", order)
+                order += 1
+
+    for field_name in ("messages", "input"):
+        value = body.get(field_name)
+        if not isinstance(value, list):
+            continue
+        for msg_index, message in enumerate(value):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "").strip().lower()
+            if role not in {"system", "developer"}:
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                add(message, "content", content, f"openai.{field_name}.system_or_developer", order)
+                order += 1
+            for container, key, text in _instruction_dedup_text_from_content(content):
+                add(container, key, text, f"openai.{field_name}[{msg_index}].system_or_developer", order)
+                order += 1
+    return entries
+
+
+def _set_instruction_dedup_entry(entry: dict[str, Any], text: str) -> None:
+    container = entry.get("container")
+    key = entry.get("key")
+    if isinstance(container, dict) and isinstance(key, str):
+        container[key] = text
+    elif isinstance(container, list) and isinstance(key, int):
+        container[key] = text
+
+
+def _instruction_dedup_meta(policy: dict[str, Any], status: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema": "agentflow.instruction_section_deduplication.v1",
+        "enabled": bool(policy.get("enabled")),
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "applied": False,
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "rule_path": str(CRUNCH_RULES_PATH),
+        "configured_rule_count": len(policy.get("rules") or []),
+        "selected_rule_id": None,
+        "candidate_id": None,
+        "source_surface": None,
+        "provider": None,
+        "endpoint": None,
+        "category": None,
+        "workflow_phase": None,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "eligible_section_count": 0,
+        "matched_section_count": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "projected_saved_usd": 0.0,
+        "reason_codes": [] if reason in {"disabled", "no-instruction-sections"} else [reason],
+        "rules": [],
+        "canary": None,
+        "coordinator_compatibility": None,
+        "privacy": {
+            "metadata_only_output": True,
+            "raw_instruction_text_included": False,
+            "instruction_section_fingerprint_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "provider_body_included": False,
+        },
+        "tool_protocol_preserved": True,
+        "thinking_preserved": True,
+        "provider_responses_preserved": True,
+        "policy_file_changed": False,
+        "managed_server_call_made": False,
+    }
+
+
+def _instruction_dedup_public_canary(canary: dict[str, Any]) -> dict[str, Any]:
+    public = copy.deepcopy(canary)
+    cohort = str(public.get("cohort") or "")
+    if cohort == "canary":
+        public["cohort"] = "canary_applied"
+        public["status"] = "applied"
+    elif cohort == "holdout":
+        public["cohort"] = "canary_holdout"
+        public["status"] = "holdout"
+    elif cohort == "not_selected":
+        public["status"] = "skipped"
+    elif cohort == "disabled":
+        public["status"] = "disabled"
+    public["salt_included"] = False
+    public["fingerprint_included"] = False
+    return public
+
+
+def _instruction_dedup_rule_meta(rule: dict[str, Any], canary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rule_id": str(rule.get("id") or "instruction-section-dedup-policy"),
+        "candidate_id": rule.get("candidate_id") if isinstance(rule.get("candidate_id"), str) else None,
+        "enabled": bool(rule.get("enabled", True)),
+        "policy_source": str(rule.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "min_section_chars": int(rule.get("min_section_chars") or INSTRUCTION_DEDUP_MIN_SECTION_CHARS),
+        "min_repeated_count": int(rule.get("min_repeated_count") or 2),
+        "keep_recent_sections": int(rule.get("keep_recent_sections") or 1),
+        "max_replacements": int(rule.get("max_replacements") or 0),
+        "matched_section_count": 0,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "saved_chars": 0,
+        "tokens_saved_est": 0,
+        "projected_saved_usd": 0.0,
+        "canary": canary,
+        "reason_codes": [],
+        "instruction_section": {
+            "fingerprint_present": True,
+            "fingerprint_included": False,
+            "raw_text_included": False,
+            "source_fields": [],
+        },
+    }
+
+
+def _instruction_dedup_savings_usd(model: Any, provider: str, saved_tokens: int) -> float:
+    basis = pricing_basis(str(model or ""), provider=provider if provider in {"anthropic", "openai"} else "openai")
+    input_per_mtok = float(basis.get("input_per_mtok") or 0.0)
+    return round(max(0, saved_tokens) * input_per_mtok / 1_000_000, 8)
+
+
+def _instruction_dedup_safety_stop(
+    store_obj: Any | None,
+    *,
+    rule: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any] | None:
+    safety = rule.get("safety_stop") if isinstance(rule.get("safety_stop"), dict) else policy.get("safety_stop")
+    if not isinstance(safety, dict) or not _as_bool(safety.get("enabled"), True):
+        return None
+    if store_obj is None or not hasattr(store_obj, "conn"):
+        return None
+    min_samples = max(0, int(safety.get("min_outcome_samples") or 5))
+    window = max(min_samples, int(safety.get("window") or 500))
+    rule_id = str(rule.get("id") or "instruction-section-dedup-policy")
+    candidate_id = rule.get("candidate_id")
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select status_code, retry_count, cost_est_usd, cost_baseline_usd, crunch_json
+            from calls
+            where crunch_json is not null
+            order by created_at desc
+            limit ?
+            """,
+            (window,),
+        ).fetchall()
+    except Exception:
+        return None
+    samples = 0
+    errors = 0
+    retries = 0
+    negative_savings = 0
+    for row in rows:
+        row_dict = dict(row)
+        try:
+            meta = json.loads(row_dict.get("crunch_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        dedup = meta.get("instruction_section_deduplication")
+        if not isinstance(dedup, dict):
+            continue
+        if str(dedup.get("selected_rule_id") or "") != rule_id:
+            continue
+        if candidate_id and dedup.get("candidate_id") != candidate_id:
+            continue
+        if dedup.get("status") != "applied" and not dedup.get("applied"):
+            continue
+        samples += 1
+        if int(row_dict.get("status_code") or 0) >= 400:
+            errors += 1
+        if int(row_dict.get("retry_count") or 0) > 0:
+            retries += 1
+        cost = row_dict.get("cost_est_usd")
+        baseline = row_dict.get("cost_baseline_usd")
+        if cost is not None and baseline is not None and float(cost) > float(baseline):
+            negative_savings += 1
+    if samples < min_samples:
+        return None
+    error_rate = errors / samples if samples else 0.0
+    retry_rate = retries / samples if samples else 0.0
+    negative_rate = negative_savings / samples if samples else 0.0
+    reasons: list[str] = []
+    if error_rate > float(safety.get("max_error_rate") or 0.1):
+        reasons.append("instruction-dedup-error-rate-safety-stop")
+    if retry_rate > float(safety.get("max_retry_rate") or 0.25):
+        reasons.append("instruction-dedup-retry-rate-safety-stop")
+    if negative_rate > float(safety.get("max_negative_savings_rate") or 0.25):
+        reasons.append("instruction-dedup-negative-savings-safety-stop")
+    if not reasons:
+        return None
+    return {
+        "schema": "agentflow.instruction_section_dedup_safety_stop.v1",
+        "status": "safety_stopped",
+        "reason_codes": reasons,
+        "sample_count": samples,
+        "error_count": errors,
+        "retry_count": retries,
+        "negative_savings_count": negative_savings,
+        "error_rate": round(error_rate, 6),
+        "retry_rate": round(retry_rate, 6),
+        "negative_savings_rate": round(negative_rate, 6),
+        "rule_id": rule_id,
+        "candidate_id": candidate_id,
+        "metadata_only": True,
+        "provider_body_included": False,
+    }
+
+
+def _apply_instruction_section_deduplication(
+    body: dict[str, Any],
+    *,
+    store_obj: Any | None = None,
+    routing_meta: dict[str, Any] | None = None,
+    provider: str | None = None,
+    source_surface: str | None = None,
+    endpoint: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy = copy.deepcopy(INSTRUCTION_SECTION_DEDUP_POLICY)
+    policy["policy_source"] = str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE)
+    meta = _instruction_dedup_meta(policy, "skipped", "disabled")
+    before_chars = len(stable_json(body))
+    meta["before_chars"] = before_chars
+    meta["after_chars"] = before_chars
+    if not _as_bool(policy.get("enabled"), False):
+        return body, meta
+
+    provider_name, surface, endpoint_name = _instruction_dedup_provider_and_surface(
+        body,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
+    )
+    category = str((routing_meta or {}).get("category") or _crunch_request_category(body))
+    phase = str((routing_meta or {}).get("workflow_phase") or category)
+    meta.update({
+        "enabled": True,
+        "status": "skipped",
+        "reason": "no-instruction-sections",
+        "reason_codes": [],
+        "source_surface": surface,
+        "provider": provider_name,
+        "endpoint": endpoint_name,
+        "category": category,
+        "workflow_phase": phase,
+    })
+
+    if not _instruction_source_allowed(surface, policy.get("source_surfaces") or []):
+        meta["reason"] = "unsafe-source-surface"
+        meta["reason_codes"] = ["unsafe-source-surface"]
+        return body, meta
+    if _content_has_tool_protocol(body) and (
+        _as_bool(policy.get("block_tool_protocol"), True) or _as_bool(policy.get("block_tool_payloads"), True)
+    ):
+        meta["reason"] = "tool-protocol-risk"
+        meta["reason_codes"] = ["tool-protocol-risk"]
+        return body, meta
+    if _body_uses_thinking(body) and _as_bool(policy.get("block_thinking"), True):
+        meta["reason"] = "thinking-content-risk"
+        meta["reason_codes"] = ["thinking-content-risk"]
+        return body, meta
+
+    compatibility = _instruction_dedup_coordinator_compatibility(routing_meta or {})
+    meta["coordinator_compatibility"] = compatibility
+    if not compatibility.get("compatible"):
+        meta["status"] = "suppressed"
+        meta["reason"] = "coordinator-conflict"
+        meta["reason_codes"] = ["coordinator-conflict", *[str(item) for item in compatibility.get("reason_codes") or []]]
+        return body, meta
+
+    entries = _instruction_dedup_entries(body, provider=provider_name)
+    meta["eligible_section_count"] = len(entries)
+    if not entries:
+        return body, meta
+    by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        by_fingerprint.setdefault(str(entry.get("fingerprint") or ""), []).append(entry)
+
+    basis = {
+        "source_surface": surface,
+        "category": category,
+        "workflow_phase": phase,
+    }
+    applied_count = 0
+    holdout_count = 0
+    saved_chars = 0
+    reason_codes: set[str] = set()
+    max_total = max(0, int(policy.get("max_replacements") or 0))
+    model = body.get("model")
+
+    for fingerprint, occurrences in sorted(by_fingerprint.items(), key=lambda item: min(int(e["order"]) for e in item[1])):
+        rule = _select_instruction_dedup_rule(policy, basis, fingerprint)
+        if rule is None:
+            reason_codes.add("no-matching-instruction-dedup-rule")
+            continue
+        canary = _instruction_dedup_public_canary(
+            _instruction_dedup_cohort(rule, fingerprint, basis)
+        )
+        rule_meta = _instruction_dedup_rule_meta(rule, canary)
+        source_fields = sorted({str(entry.get("source_field") or "unknown") for entry in occurrences})
+        rule_meta["instruction_section"]["source_fields"] = source_fields
+        meta["rules"].append(rule_meta)
+        repeated_count = len(occurrences)
+        rule_meta["matched_section_count"] = repeated_count
+        meta["matched_section_count"] += repeated_count
+        min_repeated = max(1, int(rule.get("min_repeated_count") or policy.get("min_repeated_count") or 2))
+        min_chars = max(0, int(rule.get("min_section_chars") or policy.get("min_section_chars") or INSTRUCTION_DEDUP_MIN_SECTION_CHARS))
+        keep_recent = max(0, int(rule.get("keep_recent_sections") or policy.get("keep_recent_sections") or 1))
+        max_rule = max(0, int(rule.get("max_replacements") or policy.get("max_replacements") or 0))
+        if repeated_count < min_repeated:
+            reason_codes.add("insufficient-repeated-instruction-sections")
+            rule_meta["reason_codes"].append("insufficient-repeated-instruction-sections")
+            continue
+        if not canary.get("holdout_configured"):
+            reason_codes.add("missing-holdout-configuration")
+            rule_meta["reason_codes"].append("missing-holdout-configuration")
+            continue
+        if canary.get("status") == "holdout":
+            count = max(0, repeated_count - keep_recent)
+            holdout_count += count
+            rule_meta["holdout_count"] += count
+            reason_codes.add("instruction-dedup-holdout")
+            rule_meta["reason_codes"].append("instruction-dedup-holdout")
+            continue
+        if not canary.get("selected"):
+            reason = "instruction-dedup-canary-not-selected"
+            if canary.get("status") == "disabled":
+                reason = "instruction-dedup-canary-disabled"
+            reason_codes.add(reason)
+            rule_meta["reason_codes"].append(reason)
+            continue
+        safety_stop = _instruction_dedup_safety_stop(store_obj, rule=rule, policy=policy)
+        if safety_stop:
+            meta["safety_stop"] = safety_stop
+            meta["status"] = "safety_stopped"
+            meta["reason"] = "local-canary-safety-stop"
+            meta["reason_codes"] = sorted({"local-canary-safety-stop", *safety_stop.get("reason_codes", [])})
+            rule_meta["reason_codes"].append("local-canary-safety-stop")
+            rule_meta["safety_stop"] = safety_stop
+            return body, meta
+        protected_start = max(0, repeated_count - keep_recent)
+        replacements_for_rule = 0
+        for occurrence_index, entry in enumerate(sorted(occurrences, key=lambda item: int(item["order"]))):
+            if occurrence_index >= protected_start:
+                reason_codes.add("kept-recent-instruction-section")
+                continue
+            if len(str(entry.get("normalized") or "")) < min_chars:
+                reason_codes.add("instruction-section-below-min-chars")
+                rule_meta["reason_codes"].append("instruction-section-below-min-chars")
+                continue
+            if max_total and applied_count >= max_total:
+                reason_codes.add("max-replacements-reached")
+                break
+            if max_rule and replacements_for_rule >= max_rule:
+                reason_codes.add("rule-max-replacements-reached")
+                break
+            notice = str(rule.get("replacement_notice") or policy.get("replacement_notice") or "[repeated instruction section omitted by AgentFlow]")
+            if len(notice) >= len(str(entry.get("text") or "")):
+                reason_codes.add("replacement-not-smaller")
+                rule_meta["reason_codes"].append("replacement-not-smaller")
+                continue
+            before_len = len(str(entry.get("text") or ""))
+            _set_instruction_dedup_entry(entry, notice)
+            saved = before_len - len(notice)
+            applied_count += 1
+            replacements_for_rule += 1
+            saved_chars += saved
+            rule_meta["applied_count"] += 1
+            rule_meta["saved_chars"] += saved
+            rule_meta["tokens_saved_est"] = rule_meta["saved_chars"] // TOKEN_CHARS
+            rule_meta["projected_saved_usd"] = _instruction_dedup_savings_usd(model, provider_name, rule_meta["tokens_saved_est"])
+            if meta["selected_rule_id"] is None:
+                meta["selected_rule_id"] = rule_meta["rule_id"]
+                meta["candidate_id"] = rule_meta["candidate_id"]
+                meta["policy_source"] = rule_meta["policy_source"]
+                meta["canary"] = canary
+
+    after_chars = len(stable_json(body))
+    meta["applied_count"] = applied_count
+    meta["holdout_count"] = holdout_count
+    meta["saved_chars"] = max(0, saved_chars)
+    meta["tokens_saved_est"] = meta["saved_chars"] // TOKEN_CHARS
+    meta["projected_saved_usd"] = _instruction_dedup_savings_usd(model, provider_name, int(meta["tokens_saved_est"]))
+    meta["after_chars"] = after_chars
+    meta["changed"] = applied_count > 0
+    meta["applied"] = applied_count > 0
+    if applied_count > 0:
+        meta["status"] = "applied"
+        meta["reason"] = "instruction-section-dedup-applied"
+    elif holdout_count > 0:
+        meta["status"] = "holdout"
+        meta["reason"] = "instruction-dedup-holdout"
+    elif reason_codes:
+        meta["reason"] = sorted(reason_codes)[0]
+    meta["reason_codes"] = sorted(reason_codes)
+    return body, meta
+
+
 def _provider_text_entries(body: dict[str, Any], policy: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     entries: list[dict[str, Any]] = []
     skips = {
@@ -4239,6 +4888,10 @@ def crunch_body(
     *,
     store_obj: Any | None = None,
     managed_profile: dict[str, Any] | None = None,
+    routing_meta: dict[str, Any] | None = None,
+    provider: str | None = None,
+    source_surface: str | None = None,
+    endpoint: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Conservative request cruncher.
 
@@ -4277,6 +4930,14 @@ def crunch_body(
         policy_source=policy_source,
         rule_path=CRUNCH_RULES_PATH,
         category=category,
+    )
+    new_body, instruction_dedup_meta = _apply_instruction_section_deduplication(
+        new_body,
+        store_obj=store_obj,
+        routing_meta=routing_meta,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
     )
     _provider_scaffolding_saved_chars, provider_scaffolding_meta = _apply_repeated_provider_scaffolding(
         new_body,
@@ -4378,6 +5039,7 @@ def crunch_body(
         "terminal_log_boilerplate": terminal_log_meta,
         "terminal_output_compaction": terminal_output_compaction_meta,
         "pattern_modules": pattern_modules_meta,
+        "instruction_section_deduplication": instruction_dedup_meta,
         "registered_pattern_modules": registered_pattern_modules(),
         "pattern_rules_applied": pattern_rules_meta["applied_count"],
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],

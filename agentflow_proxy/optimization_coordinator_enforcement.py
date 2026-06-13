@@ -14,6 +14,8 @@ CRUNCH_FAMILY_KEYS = {
     "old_context_summary": "old_context_summarization",
     "repeated_scaffold_crunch": "codex_repeated_scaffolding",
     "terminal_output_compaction": "terminal_output_compaction",
+    "instruction_section_deduplication": "instruction_section_deduplication",
+    "prompt_role": "instruction_section_deduplication",
 }
 
 

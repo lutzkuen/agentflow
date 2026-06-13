@@ -1099,7 +1099,19 @@ def _codex_route_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[st
 
 
 def _codex_crunch_params(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    crunched, crunch_meta = crunch_body(params)
+    crunched, crunch_meta = crunch_body(
+        params,
+        provider="openai",
+        source_surface="codex_turn",
+        endpoint="app_server",
+        routing_meta={
+            "provider": "codex_app",
+            "source_surface": "codex_turn",
+            "endpoint": "app_server",
+            "category": "codex_turn",
+            "workflow_phase": "tool-execution",
+        },
+    )
     crunch_meta = dict(crunch_meta)
     if not crunch_meta.get("enabled", True):
         crunch_meta.update({
