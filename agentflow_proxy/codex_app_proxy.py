@@ -68,6 +68,7 @@ from agentflow_proxy.routing_experiments import (
     routing_experiment_outcome_event,
 )
 from agentflow_proxy.prompt_features import prompt_difficulty_features_from_text
+from agentflow_proxy.paths import default_db_path
 from agentflow_proxy.router import route_model
 from agentflow_proxy.store import Store, stable_json, utc_now
 from agentflow_proxy.terminal_features import terminal_log_features_from_text
@@ -78,7 +79,7 @@ from agentflow_proxy.codex_terminal_transcript_compaction import (
 
 load_dotenv()
 
-DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
+DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or str(default_db_path())
 DEFAULT_HOST = os.getenv("AGENTFLOW_CODEX_APP_PROXY_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_CODEX_APP_PROXY_PORT", "4013"))
 DEFAULT_UPSTREAM = os.getenv("AGENTFLOW_CODEX_APP_UPSTREAM", DEFAULT_CODEX_APP_UPSTREAM)

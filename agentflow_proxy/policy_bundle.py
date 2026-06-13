@@ -15,6 +15,7 @@ import yaml
 
 from agentflow_proxy import __version__
 from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE, canonical_source_surface
+from agentflow_proxy.paths import default_db_path
 from agentflow_proxy.pattern_rollout import pattern_canary_decision
 from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import utc_now
@@ -3470,7 +3471,7 @@ def simulate_policy_bundle_impact(
 ) -> dict[str, Any]:
     path = db_path or os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv(
         "AGENTFLOW_DB",
-        str(Path.home() / ".agentflow" / "agentflow.sqlite3"),
+        str(default_db_path()),
     )
     if not isinstance(proposed, dict):
         return {

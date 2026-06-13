@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from agentflow_proxy.paths import agentflow_config_path, safe_expanduser
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -168,8 +170,8 @@ def _safe_draft_id(value: str | None, payload: Any) -> str:
 
 def _draft_workspace_root(path: str | Path | None = None) -> Path:
     if path is not None:
-        return Path(path).expanduser()
-    return Path.home() / ".agentflow" / "policy_drafts"
+        return safe_expanduser(path)
+    return agentflow_config_path("policy_drafts")
 
 
 def _json_clone(value: Any) -> Any:

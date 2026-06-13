@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 
 import yaml
 
+from agentflow_proxy.paths import default_config_dir, safe_expanduser
 from agentflow_proxy.policy_bundle import APPLY_POLICY_SECTIONS
 from agentflow_proxy.policy_files import _draft_workspace_root, utc_now
 
@@ -514,7 +515,7 @@ async def validate_staged_policy_draft(
     review = review_policy_bundle(current, bundle, impact_db_path=db_path, impact_limit=max(0, impact_limit))
     dry_run = apply_policy_bundle(
         bundle,
-        config_dir=config_dir or str(Path.home() / ".agentflow"),
+        config_dir=config_dir or str(default_config_dir()),
         dry_run=True,
         allow_risky=True,
     )
@@ -689,7 +690,7 @@ async def apply_validated_policy_draft(
     from agentflow_proxy.policy_events import log_policy_event
     from agentflow_proxy.policy_files import POLICY_DRAFT_SECTION_FILES
 
-    config_path = Path(config_dir or Path.home() / ".agentflow").expanduser()
+    config_path = safe_expanduser(config_dir) if config_dir is not None else default_config_dir()
     validation = await validate_staged_policy_draft(
         path_or_id,
         workspace=workspace,
@@ -940,7 +941,7 @@ async def rollback_policy_apply(
     from agentflow_proxy.policy_files import POLICY_DRAFT_SECTION_FILES
 
     clean_apply_id = str(apply_id or "").strip()
-    config_path = Path(config_dir or Path.home() / ".agentflow").expanduser()
+    config_path = safe_expanduser(config_dir) if config_dir is not None else default_config_dir()
     privacy = POLICY_DRAFT_APPLY_PRIVACY | {"loopback_admin_calls_made": bool(loopback_admin_calls_made)}
     requested, invalid_sections = _requested_sections(sections)
     if not clean_apply_id:

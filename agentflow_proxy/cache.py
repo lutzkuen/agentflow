@@ -19,6 +19,7 @@ from agentflow_proxy.pattern_safety import (
     evaluate_pattern_canary_safety_stop,
     log_pattern_canary_safety_stop,
 )
+from agentflow_proxy.paths import agentflow_config_path, safe_home_dir
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import stable_json
 
@@ -77,7 +78,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(Path.home() / ".agentflow" / filename)
+    candidates.append(agentflow_config_path(filename))
     return candidates
 
 
@@ -407,7 +408,7 @@ def _dependency_root_policy(root: Path) -> str:
     except ValueError:
         pass
     try:
-        home = Path.home().resolve(strict=False)
+        home = safe_home_dir().resolve(strict=False)
     except RuntimeError:
         return "configured-local-root"
     try:

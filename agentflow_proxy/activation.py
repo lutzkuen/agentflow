@@ -11,6 +11,7 @@ import tempfile
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from agentflow_proxy.paths import default_config_dir as default_agentflow_config_dir, safe_home_dir
 from agentflow_proxy.upstream_url import normalize_openai_upstream_base_url, redact_url
 
 
@@ -48,7 +49,7 @@ def utc_now() -> str:
 
 
 def default_config_dir() -> Path:
-    return Path(os.getenv("AGENTFLOW_CONFIG_DIR") or Path.home() / ".agentflow")
+    return default_agentflow_config_dir()
 
 
 def activation_config_path(config_dir: str | Path | None = None) -> Path:
@@ -57,7 +58,7 @@ def activation_config_path(config_dir: str | Path | None = None) -> Path:
 
 
 def default_codex_config_path() -> Path:
-    return Path.home() / CODEX_CONFIG_RELATIVE_PATH
+    return safe_home_dir() / CODEX_CONFIG_RELATIVE_PATH
 
 
 def empty_config() -> dict[str, Any]:

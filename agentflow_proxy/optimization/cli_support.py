@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+
+from agentflow_proxy.paths import default_db_path as agentflow_default_db_path
 
 
 def default_db_path() -> str:
     return os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv(
         "AGENTFLOW_DB",
-        str(Path.home() / ".agentflow" / "agentflow.sqlite3"),
+        str(agentflow_default_db_path()),
     )
 
 

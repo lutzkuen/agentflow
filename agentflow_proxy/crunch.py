@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.pricing import pricing_basis
 from agentflow_proxy.pattern_rollout import (
     PATTERN_ROLLOUT_SCHEMA,
@@ -297,7 +298,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(Path.home() / ".agentflow" / filename)
+    candidates.append(agentflow_config_path(filename))
     return candidates
 
 

@@ -1,4 +1,6 @@
 import importlib.util
+import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,6 +14,7 @@ HAS_RUNTIME_DEPS = all(
 )
 
 if HAS_RUNTIME_DEPS:
+    import httpx
     from fastapi.testclient import TestClient
 
     from agentflow_proxy import anthropic_proxy, openai_proxy, server
@@ -48,6 +51,30 @@ class FakeRaisingStreamClient:
 
     def stream(self, *args, **kwargs):
         raise RuntimeError("secret stream failure from /tmp/agentflow-token")
+
+
+class FakeSuccessfulAnthropicClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, *args, **kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 4, "output_tokens": 1},
+            },
+        )
 
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime web dependencies are not installed")
@@ -97,6 +124,32 @@ class PublicProxyErrorTest(unittest.TestCase):
         [row] = server.store.conn.execute("select status_code, error from calls").fetchall()
         self.assertEqual(row["status_code"], 500)
         self.assertIn("agentflow-token", row["error"])
+
+    def test_anthropic_request_does_not_500_when_home_directory_unavailable(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "Say ok."}],
+        }
+
+        config_dir = str(Path(self.tmp.name).parent / "agentflow-config")
+        with patch.dict(
+            os.environ,
+            {"HOME": "", "AGENTFLOW_CONFIG_DIR": config_dir, "AGENTFLOW_DB": self.tmp.name},
+            clear=False,
+        ), patch.object(Path, "home", side_effect=RuntimeError("Could not determine home directory.")), patch.object(
+            anthropic_proxy.httpx,
+            "AsyncClient",
+            FakeSuccessfulAnthropicClient,
+        ):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["content"][0]["text"], "ok")
+        [row] = server.store.conn.execute("select status_code, error from calls").fetchall()
+        self.assertEqual(row["status_code"], 200)
+        self.assertIsNone(row["error"])
 
     def test_anthropic_malformed_json_returns_400_without_internal_log(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

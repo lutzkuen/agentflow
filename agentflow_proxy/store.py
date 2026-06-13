@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from agentflow_proxy.paths import default_db_path
+
 
 DEFAULT_SQLITE_RETENTION_DAYS = 7
 RETENTION_DISABLED_VALUES = {"", "0", "false", "no", "off", "disabled", "none"}
@@ -1907,5 +1909,5 @@ def Store(path: str | None = None) -> SQLiteStore | PostgresStore:
             raise ValueError("AGENTFLOW_DATABASE_URL must start with postgresql:// or postgres://")
         return PostgresStore(database_url)
     if path is None:
-        path = str(Path.home() / ".agentflow" / "agentflow.sqlite3")
+        path = str(default_db_path())
     return SQLiteStore(path)

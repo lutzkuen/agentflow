@@ -11,6 +11,7 @@ from agentflow_proxy.cache import cache_pattern_rules_from_policy_payload
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, build_openai_cache_replay_report
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.public_metadata import public_path_state
 from agentflow_proxy.store import utc_now
 
@@ -76,7 +77,7 @@ def _canary_policy_candidates() -> list[Path]:
     if env_path:
         paths.append(Path(env_path).expanduser())
     paths.append(Path.cwd() / "config" / "cache_canary_policy.yaml")
-    paths.append(Path.home() / ".agentflow" / "cache_canary_policy.yaml")
+    paths.append(agentflow_config_path("cache_canary_policy.yaml"))
     return paths
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+from agentflow_proxy.paths import agentflow_config_path, default_db_path, safe_expanduser
 from agentflow_proxy.pricing import estimate_cost
 from agentflow_proxy.session_phase_memory import build_session_phase_memory_for_session
 from agentflow_proxy.store import stable_json
@@ -24,7 +25,7 @@ OPENAI_TINY_DEFAULT = os.getenv("AGENTFLOW_OPENAI_TINY_MODEL", "gpt-5-nano")
 
 ROUTING_ENABLED = os.getenv("AGENTFLOW_ROUTING", "1") != "0"
 OPENAI_ROUTING_ENABLED = os.getenv("AGENTFLOW_OPENAI_ROUTING", "0") == "1"
-ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(Path.home() / ".agentflow" / "routing_rules.yaml"))
+ROUTING_RULES_PATH = os.getenv("AGENTFLOW_ROUTING_RULES", str(agentflow_config_path("routing_rules.yaml")))
 STRIP_THINKING_HISTORY = os.getenv("AGENTFLOW_STRIP_THINKING_HISTORY", "0") == "1"
 
 
@@ -525,14 +526,14 @@ def _load_routing_rules() -> tuple[list[dict], dict[str, Any], dict[str, Any], s
     defaults = _load_routing_yaml(defaults_path) or {"rules": []}
     env_path = os.getenv("AGENTFLOW_ROUTING_RULES")
     if env_path:
-        p = Path(env_path).expanduser()
+        p = safe_expanduser(env_path)
         data = _load_routing_yaml(p)
         if data is not None:
             canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), data.get("phase_canary"))
             openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))
             return _rules_list(data), canary, openai_canary, "local-manual", str(p)
 
-    local_path = Path.home() / ".agentflow" / "routing_rules.yaml"
+    local_path = agentflow_config_path("routing_rules.yaml")
     local = _load_routing_yaml(local_path)
     if local is not None:
         canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), local.get("phase_canary"))
@@ -569,7 +570,7 @@ def _phase_canary_db_path() -> str | None:
         return None
     if database_url and database_url.startswith("sqlite:///"):
         return database_url.removeprefix("sqlite:///")
-    return os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
+    return str(default_db_path())
 
 
 def _cohort_score(payload: dict[str, Any], salt: str) -> tuple[str, float]:

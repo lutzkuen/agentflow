@@ -29,6 +29,7 @@ from agentflow_proxy.openai_old_context_summary_dry_run import (
     _metadata_text_chars,
     _projection,
 )
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.optimization.openai_features import openai_endpoint
 from agentflow_proxy.store import stable_json
 
@@ -64,7 +65,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(Path.home() / ".agentflow" / filename)
+    candidates.append(agentflow_config_path(filename))
     candidates.append(Path(__file__).parent / filename)
     return candidates
 

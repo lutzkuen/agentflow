@@ -29,6 +29,7 @@ from agentflow_proxy.pricing import (
     estimate_cost,
     provider_prompt_cache_accounting,
 )
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.quality import (
     derive_codex_turn_quality_signals,
@@ -1197,7 +1198,7 @@ def _scaffold_canary_policy_candidates() -> list[Path]:
     if env_path:
         candidates.append(Path(env_path).expanduser())
     candidates.append(Path.cwd() / "config" / SCAFFOLD_CANARY_POLICY_FILENAME)
-    candidates.append(Path.home() / ".agentflow" / SCAFFOLD_CANARY_POLICY_FILENAME)
+    candidates.append(agentflow_config_path(SCAFFOLD_CANARY_POLICY_FILENAME))
     return candidates
 
 

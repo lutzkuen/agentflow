@@ -9,6 +9,7 @@ from typing import Any
 from agentflow_proxy.openai_optimization_draft_dry_run import dry_run_openai_optimization_draft
 from agentflow_proxy.openai_optimization_drafts import _scan_safety
 from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
+from agentflow_proxy.paths import default_config_dir, safe_expanduser
 from agentflow_proxy.optimization_promotion_actions import ACTION_SCHEMA, SCHEMA as PROMOTION_ACTIONS_SCHEMA
 from agentflow_proxy.optimization_promotion_canary import apply_optimization_promotion_canaries
 from agentflow_proxy.policy_bundle import validate_policy_bundle
@@ -446,7 +447,7 @@ async def apply_openai_optimization_draft(
     queue_feedback: bool = False,
     apply_id: str | None = None,
 ) -> dict[str, Any]:
-    config_path = Path(config_dir or Path.home() / ".agentflow").expanduser()
+    config_path = safe_expanduser(config_dir) if config_dir is not None else default_config_dir()
     loaded = load_staged_policy_draft(draft, workspace=workspace)
     manifest = loaded.get("manifest") if isinstance(loaded.get("manifest"), dict) else {}
     draft_id = str(manifest.get("draft_id") or draft)

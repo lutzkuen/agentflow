@@ -11,6 +11,7 @@ from typing import Any, Callable
 import yaml
 
 from agentflow_proxy.crunch import build_embedding, sha256_text
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import cosine_similarity, stable_json
 
@@ -102,7 +103,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(Path.home() / ".agentflow" / filename)
+    candidates.append(agentflow_config_path(filename))
     return candidates
 
 

@@ -6,6 +6,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
+from agentflow_proxy.paths import agentflow_config_path
 from agentflow_proxy.policy_files import policy_file_snapshot, policy_file_status, utc_now
 from agentflow_proxy.public_metadata import public_id, public_label, public_path_state
 
@@ -206,7 +207,7 @@ def _manual_rule_candidates(filename: str, env_name: str) -> list[Path]:
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.cwd() / "config" / filename)
-    candidates.append(Path.home() / ".agentflow" / filename)
+    candidates.append(agentflow_config_path(filename))
     return candidates
 
 
