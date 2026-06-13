@@ -126,6 +126,14 @@ def _assistant_tool_use_seen(messages: list[Any]) -> bool:
     return False
 
 
+def _has_assistant_thinking_history(body: dict[str, Any]) -> bool:
+    for msg in body.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+            if any(isinstance(b, dict) and b.get("type") == "thinking" for b in msg["content"]):
+                return True
+    return False
+
+
 def classify_workflow_phase(body: dict[str, Any], category: str | None = None) -> dict[str, str]:
     """Classify Anthropic workflow phase using metadata-only request shape signals."""
     messages = body.get("messages") or []
@@ -148,10 +156,10 @@ def classify_workflow_phase(body: dict[str, Any], category: str | None = None) -
         if isinstance(block.get("type"), str)
     }
 
-    if uses_thinking(body):
+    if _has_top_level_thinking(body):
         return {
             "workflow_phase": "thinking",
-            "workflow_phase_reason": "thinking-flag-or-history",
+            "workflow_phase_reason": "thinking-current-request",
             "workflow_phase_confidence": "high",
         }
 
@@ -159,6 +167,13 @@ def classify_workflow_phase(body: dict[str, Any], category: str | None = None) -
         return {
             "workflow_phase": "tool-execution",
             "workflow_phase_reason": "last-user-tool-result",
+            "workflow_phase_confidence": "high",
+        }
+
+    if _has_assistant_thinking_history(body):
+        return {
+            "workflow_phase": "thinking",
+            "workflow_phase_reason": "thinking-history",
             "workflow_phase_confidence": "high",
         }
 
@@ -212,21 +227,7 @@ def classify_workflow_phase(body: dict[str, Any], category: str | None = None) -
 
 
 def uses_thinking(body: dict[str, Any]) -> bool:
-    if body.get("effort"):
-        return True
-    if body.get("interleaved_thinking"):
-        return True
-    thinking = body.get("thinking")
-    if thinking:
-        if isinstance(thinking, dict) and str(thinking.get("type", "")).lower() == "disabled":
-            pass
-        else:
-            return True
-    for msg in body.get("messages") or []:
-        if isinstance(msg, dict) and msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
-            if any(isinstance(b, dict) and b.get("type") == "thinking" for b in msg["content"]):
-                return True
-    return False
+    return _has_top_level_thinking(body) or _has_assistant_thinking_history(body)
 
 
 def _has_top_level_thinking(body: dict[str, Any]) -> bool:
@@ -241,6 +242,38 @@ def _has_top_level_thinking(body: dict[str, Any]) -> bool:
         else:
             return True
     return False
+
+
+def _allows_tool_result_thinking_history_routing(body: dict[str, Any], category: str) -> bool:
+    return category == "tool-result" and _has_assistant_thinking_history(body) and not _has_top_level_thinking(body)
+
+
+def _thinking_gate_meta(body: dict[str, Any], category: str) -> dict[str, Any]:
+    top_level = _has_top_level_thinking(body)
+    historical = _has_assistant_thinking_history(body)
+    if historical and category == "tool-result" and not top_level:
+        return {
+            "status": "bypassed",
+            "reason": "tool-result-current-turn-without-top-level-thinking",
+            "top_level_thinking": False,
+            "assistant_thinking_history": True,
+            "metadata_only": True,
+        }
+    if top_level or historical:
+        return {
+            "status": "blocked",
+            "reason": "current-thinking-request" if top_level else "assistant-thinking-history",
+            "top_level_thinking": top_level,
+            "assistant_thinking_history": historical,
+            "metadata_only": True,
+        }
+    return {
+        "status": "clear",
+        "reason": "no-thinking-signals",
+        "top_level_thinking": False,
+        "assistant_thinking_history": False,
+        "metadata_only": True,
+    }
 
 
 def strip_thinking_history_blocks(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -1458,6 +1491,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
     category = categorize_request(body)
     phase_meta = classify_workflow_phase(body, category)
     stream = _as_bool(body.get("stream"), False)
+    thinking_gate = _thinking_gate_meta(body, category)
     if not ROUTING_ENABLED:
         return requested, {
             "enabled": False,
@@ -1469,6 +1503,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             "category": category,
             **phase_meta,
             "policy_source": "local-default",
+            "thinking_gate": thinking_gate,
         }
 
     requested_l = requested.lower()
@@ -1494,7 +1529,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             last_session_memory_meta = session_memory_meta
         if matched:
             matched_promoted_rules.add(index)
-            return _route_from_rule(
+            routed, meta = _route_from_rule(
                 rule,
                 requested=requested,
                 text_chars=text_chars,
@@ -1503,6 +1538,8 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
                 phase_meta=phase_meta,
                 session_memory_meta=session_memory_meta,
             )
+            meta["thinking_gate"] = thinking_gate
+            return routed, meta
 
     if ROUTING_PHASE_CANARY.get("enabled"):
         canary_routed, canary_meta = phase_canary_decision(
@@ -1525,7 +1562,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
                 reason = "phase canary safety stop; keep requested model"
             elif canary_meta.get("status") == "ineligible":
                 reason = f"phase canary ineligible: {canary_meta.get('reason')}"
-            return routed, {
+            meta = {
                 "enabled": True,
                 "requested_model": requested,
                 "routed_model": routed,
@@ -1537,8 +1574,10 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
                 "policy_source": ROUTING_RULES_SOURCE,
                 "phase_canary": canary_meta,
             }
+            meta["thinking_gate"] = thinking_gate
+            return routed, meta
 
-    if uses_thinking(body):
+    if uses_thinking(body) and not _allows_tool_result_thinking_history_routing(body, category):
         return requested, {
             "enabled": True,
             "requested_model": requested,
@@ -1549,6 +1588,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             "category": category,
             **phase_meta,
             "policy_source": ROUTING_RULES_SOURCE,
+            "thinking_gate": thinking_gate,
         }
 
     for index, rule in enumerate(ROUTING_RULES):
@@ -1569,7 +1609,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
         if session_memory_meta:
             last_session_memory_meta = session_memory_meta
         if matched:
-            return _route_from_rule(
+            routed, meta = _route_from_rule(
                 rule,
                 requested=requested,
                 text_chars=text_chars,
@@ -1578,6 +1618,8 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
                 phase_meta=phase_meta,
                 session_memory_meta=session_memory_meta,
             )
+            meta["thinking_gate"] = thinking_gate
+            return routed, meta
 
     meta = {
         "enabled": True,
@@ -1589,6 +1631,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
         "category": category,
         **phase_meta,
         "policy_source": ROUTING_RULES_SOURCE,
+        "thinking_gate": thinking_gate,
     }
     if last_session_memory_meta:
         meta["session_phase_memory"] = last_session_memory_meta
