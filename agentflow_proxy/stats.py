@@ -18687,6 +18687,7 @@ async function loadFullStats(){
   return fullStatsInFlight;
 }
 
+let activeTabName='activity';
 function showTab(name){
   const tabs=['safety','adoption','activity','usage','codex','weekly','categories','cache','terminal','scaffold','errors','limiter','policies','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext','sessions'];
   tabs.forEach(t=>{
@@ -18695,6 +18696,8 @@ function showTab(name){
   document.querySelectorAll('.tab-btn').forEach((b,i)=>{
     b.classList.toggle('active',tabs[i]===name);
   });
+  activeTabName=name;
+  refreshActiveTab({force:true});
 }
 
 function adoptionBadge(value){
@@ -18706,7 +18709,7 @@ function adoptionBadge(value){
 
 async function refreshProviderAdoptionHealth(){
   try{
-    const r=await fetch('/agentflow/stats/provider-adoption-health?limit=5000');
+    const r=await fetch('/agentflow/stats/provider-adoption-health?limit=1000');
     const d=await r.json();
     const summary=d.summary||{};
     const privacy=d.privacy||{};
@@ -19153,7 +19156,7 @@ function cacheReplayActivationStateBadge(state){
 const cacheReplayActivationHealthEndpoint='/agentflow/stats/cache-replay-activation-health';
 async function refreshOpenAICacheReplayReadiness(){
   try{
-    const r=await fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=1000&impact_limit=500');
+    const r=await fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100');
     const d=await r.json();
     const s=d.summary||{};
     const privacy=d.privacy||{};
@@ -19487,8 +19490,8 @@ function terminalCompactionStateBadges(states){
 async function refreshTerminalOutputCompaction(){
   try{
     const [r,ar]=await Promise.all([
-      fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500'),
-      fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=1000&impact_limit=500')
+      fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100'),
+      fetch('/agentflow/stats/terminal-output-compaction-activation?opportunity_limit=250&impact_limit=100')
     ]);
     const d=await r.json();
     const activation=await ar.json();
@@ -19607,10 +19610,10 @@ async function refreshTerminalOutputCompaction(){
 async function refreshRepeatedScaffold(){
   try{
     const [hr,or,ir,ar]=await Promise.all([
-      fetch('/agentflow/stats/scaffold-rollout-health?limit=500'),
-      fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=1000&min_repeated_rows=2'),
-      fetch('/agentflow/stats/repeated-scaffold-impact?limit=500'),
-      fetch('/agentflow/stats/repeated-scaffold-activation?limit=500')
+      fetch('/agentflow/stats/scaffold-rollout-health?limit=250'),
+      fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2'),
+      fetch('/agentflow/stats/repeated-scaffold-impact?limit=100'),
+      fetch('/agentflow/stats/repeated-scaffold-activation?limit=100')
     ]);
     const health=await hr.json();
     const opportunity=await or.json();
@@ -20824,7 +20827,7 @@ function coordinatorBadge(state){
 }
 async function refreshOptimizationCoordinator(){
   try{
-    const r=await fetch('/agentflow/stats/optimization-coordinator?limit=1000');
+    const r=await fetch('/agentflow/stats/optimization-coordinator?limit=250');
     const d=await r.json();
     const s=d.summary||{};
     const c=d.capabilities||{};
@@ -20915,7 +20918,7 @@ async function refreshManaged(){
       fetch('/agentflow/stats/managed-recommendations?limit=500'),
       fetch('/agentflow/stats/safety'),
       fetch('/agentflow/stats/rollout-actions/readiness?limit=500'),
-      fetch('/agentflow/stats/local-pattern-coverage?limit=1000')
+      fetch('/agentflow/stats/local-pattern-coverage?limit=250')
     ]);
     const d=await managedResponse.json();
     const safety=await safetyResponse.json();
@@ -21492,69 +21495,79 @@ async function refreshSessions(){
   }catch(e){}
 }
 
+const ACTIVE_TAB_REFRESH_MS=30000;
+const SHELL_REFRESH_MS=5000;
+const BACKGROUND_REFRESH_MS=120000;
+const tabRefreshers={
+  safety:[refreshSafety],
+  adoption:[refreshProviderAdoptionHealth],
+  activity:[refreshActivity],
+  usage:[refreshUsage],
+  codex:[refreshCodexReadiness,refreshCodexQuota,refreshCodexCanaryImpact],
+  weekly:[refreshWeekly],
+  categories:[refreshCategories],
+  cache:[refreshCache,refreshOpenAICacheReplayReadiness],
+  terminal:[refreshTerminalOutputCompaction],
+  scaffold:[refreshRepeatedScaffold],
+  errors:[refreshErrors],
+  limiter:[refreshLimiter],
+  policies:[refreshPolicies],
+  openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
+  evalqueue:[refreshOptimizationEvalQueue],
+  coordinator:[refreshOptimizationCoordinator],
+  managed:[refreshManaged],
+  phaserouting:[refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],
+  phasememory:[refreshSessionPhaseMemory],
+  oldcontext:[refreshSessions],
+  sessions:[refreshSessions]
+};
+const tabLastRefresh={};
+let dashboardTimers=[];
+function runRefreshers(refreshers){
+  refreshers.forEach(fn=>{
+    try{fn();}catch(e){}
+  });
+}
+function setPollingStatus(extra){
+  const status=document.getElementById('status');
+  if(!status)return;
+  const state=document.hidden?'background polling paused':'live · active tab only';
+  status.textContent=extra?`${state} · ${extra}`:state;
+}
+function refreshShell(){
+  if(document.hidden)return;
+  runRefreshers([refresh,refreshLimiter]);
+}
+function refreshActiveTab(options={}){
+  if(document.hidden&&!options.force)return;
+  const refreshers=tabRefreshers[activeTabName]||[];
+  const now=Date.now();
+  if(!options.force&&tabLastRefresh[activeTabName]&&now-tabLastRefresh[activeTabName]<ACTIVE_TAB_REFRESH_MS)return;
+  tabLastRefresh[activeTabName]=now;
+  runRefreshers(refreshers);
+  setPollingStatus('heavy views cached up to 60s');
+}
+function resetDashboardPolling(){
+  dashboardTimers.forEach(timer=>clearInterval(timer));
+  dashboardTimers=[];
+  const shellMs=document.hidden?BACKGROUND_REFRESH_MS:SHELL_REFRESH_MS;
+  const activeMs=document.hidden?BACKGROUND_REFRESH_MS:ACTIVE_TAB_REFRESH_MS;
+  dashboardTimers.push(setInterval(refreshShell,shellMs));
+  dashboardTimers.push(setInterval(refreshActiveTab,activeMs));
+  setPollingStatus();
+}
+document.addEventListener('visibilitychange',()=>{
+  resetDashboardPolling();
+  if(!document.hidden){
+    refreshShell();
+    refreshActiveTab({force:true});
+  }
+});
+
 initDataTables();
-refreshSafety();
-refreshProviderAdoptionHealth();
-refreshActivity();
-refreshUsage();
-refreshCodexReadiness();
-refreshCodexQuota();
-refreshCodexCanaryImpact();
-refresh();
-refreshWeekly();
-refreshCategories();
-refreshCache();
-refreshOpenAICacheReplayReadiness();
-refreshTerminalOutputCompaction();
-refreshRepeatedScaffold();
-refreshErrors();
-refreshLimiter();
-refreshSafety();
-refreshPolicies();
-refreshManagedOpenAIActivation();
-refreshOpenAIOptimizationReadiness();
-refreshOpenAICanaryReadiness();
-refreshOpenAIOldContextSummary();
-refreshOpenAIScoreboard();
-refreshClaudeRoutingPromotionFunnel();
-refreshShadowRoutingPromotionReadiness();
-refreshOptimizationPromotionFunnel();
-refreshOptimizationEvalQueue();
-refreshOptimizationCoordinator();
-refreshManaged();
-refreshPhaseRouting();
-refreshSessionPhaseMemory();
-refreshSessions();
-setInterval(refreshSafety,30000);
-setInterval(refreshProviderAdoptionHealth,30000);
-setInterval(refreshActivity,5000);
-setInterval(refreshUsage,30000);
-setInterval(refreshCodexReadiness,30000);
-setInterval(refreshCodexQuota,30000);
-setInterval(refreshCodexCanaryImpact,30000);
-setInterval(refresh,5000);
-setInterval(refreshWeekly,30000);
-setInterval(refreshCategories,30000);
-setInterval(refreshCache,30000);
-setInterval(refreshOpenAICacheReplayReadiness,30000);
-setInterval(refreshTerminalOutputCompaction,30000);
-setInterval(refreshRepeatedScaffold,30000);
-setInterval(refreshErrors,30000);
-setInterval(refreshLimiter,5000);
-setInterval(refreshPolicies,30000);
-setInterval(refreshManagedOpenAIActivation,30000);
-setInterval(refreshOpenAIOptimizationReadiness,30000);
-setInterval(refreshOpenAICanaryReadiness,30000);
-setInterval(refreshOpenAIScoreboard,30000);
-setInterval(refreshClaudeRoutingPromotionFunnel,30000);
-setInterval(refreshShadowRoutingPromotionReadiness,30000);
-setInterval(refreshOptimizationPromotionFunnel,30000);
-setInterval(refreshOptimizationEvalQueue,30000);
-setInterval(refreshOptimizationCoordinator,30000);
-setInterval(refreshManaged,30000);
-setInterval(refreshPhaseRouting,30000);
-setInterval(refreshSessionPhaseMemory,30000);
-setInterval(refreshSessions,30000);
+refreshShell();
+refreshActiveTab({force:true});
+resetDashboardPolling();
 </script>
 </body>
 </html>"""

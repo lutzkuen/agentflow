@@ -4,7 +4,7 @@ import asyncio
 import os
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -29,6 +29,22 @@ def _full_stats_ttl_s() -> float:
         return 5.0
 
 
+def _expensive_stats_ttl_s() -> float:
+    raw = os.getenv("AGENTFLOW_DASHBOARD_EXPENSIVE_STATS_TTL_SECONDS", "60")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+def _stats_timing_log_threshold_ms() -> float:
+    raw = os.getenv("AGENTFLOW_DASHBOARD_STATS_LOG_MS", "250")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 250.0
+
+
 def create_dashboard_router(
     *,
     store_obj: StoreSource,
@@ -46,6 +62,12 @@ def create_dashboard_router(
     full_stats_cache_at = 0.0
     full_stats_task: asyncio.Task[dict[str, Any]] | None = None
     full_stats_lock = asyncio.Lock()
+    expensive_stats_ttl_s = _expensive_stats_ttl_s()
+    stats_timing_log_threshold_ms = _stats_timing_log_threshold_ms()
+    cached_stats: dict[tuple[Any, ...], dict[str, Any]] = {}
+    cached_stats_at: dict[tuple[Any, ...], float] = {}
+    cached_stats_tasks: dict[tuple[Any, ...], asyncio.Task[dict[str, Any]]] = {}
+    cached_stats_locks: dict[tuple[Any, ...], asyncio.Lock] = {}
 
     async def load_full_stats() -> dict[str, Any]:
         nonlocal full_stats_cache, full_stats_cache_at
@@ -65,6 +87,66 @@ def create_dashboard_router(
         if exc is not None:
             print(f"agentflow_dashboard_full_stats_refresh_error: {exc}", file=sys.stderr)
 
+    def consume_cached_stats_exception(endpoint: str, task: asyncio.Task[dict[str, Any]]) -> None:
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"agentflow_dashboard_stats_refresh_error endpoint={endpoint}: {exc}", file=sys.stderr)
+            return
+        if exc is not None:
+            print(f"agentflow_dashboard_stats_refresh_error endpoint={endpoint}: {exc}", file=sys.stderr)
+
+    async def load_cached_stats(
+        endpoint: str,
+        key: tuple[Any, ...],
+        loader: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        start = time.perf_counter()
+        try:
+            result = await loader()
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            if elapsed_ms >= stats_timing_log_threshold_ms:
+                print(f"agentflow_dashboard_stats_timing endpoint={endpoint} ms={elapsed_ms:.1f}", file=sys.stderr)
+        cached_stats[key] = result
+        cached_stats_at[key] = time.monotonic()
+        return result
+
+    async def cached_expensive_stats(
+        endpoint: str,
+        params: tuple[Any, ...],
+        loader: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        if expensive_stats_ttl_s <= 0:
+            return await load_cached_stats(endpoint, (endpoint, *params), loader)
+
+        key = (endpoint, *params)
+        now = time.monotonic()
+        cached = cached_stats.get(key)
+        cached_at = cached_stats_at.get(key, 0.0)
+        if cached is not None and now - cached_at < expensive_stats_ttl_s:
+            return cached
+
+        lock = cached_stats_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            cached = cached_stats.get(key)
+            cached_at = cached_stats_at.get(key, 0.0)
+            if cached is not None and now - cached_at < expensive_stats_ttl_s:
+                return cached
+            task = cached_stats_tasks.get(key)
+            if task is None or task.done():
+                task = asyncio.create_task(load_cached_stats(endpoint, key, loader))
+                task.add_done_callback(lambda done, endpoint=endpoint: consume_cached_stats_exception(endpoint, done))
+                cached_stats_tasks[key] = task
+            stale = cached
+
+        if stale is not None:
+            return stale
+        return await task
+
     @router.get("/agentflow/stats")
     async def stats() -> dict[str, Any]:
         return await stats_views.stats(_store(store_obj), default_db)
@@ -79,7 +161,11 @@ def create_dashboard_router(
 
     @router.get("/agentflow/stats/provider-adoption-health")
     async def stats_provider_adoption_health(limit: int = 5000) -> dict[str, Any]:
-        return await stats_views.stats_provider_adoption_health(_store(store_obj), limit=limit)
+        return await cached_expensive_stats(
+            "provider-adoption-health",
+            (int(limit),),
+            lambda: stats_views.stats_provider_adoption_health(_store(store_obj), limit=limit),
+        )
 
     @router.get("/agentflow/stats/full")
     async def stats_full() -> dict[str, Any]:
@@ -222,10 +308,14 @@ def create_dashboard_router(
         opportunity_limit: int = 1000,
         impact_limit: int = 500,
     ) -> dict[str, Any]:
-        return await stats_views.stats_openai_cache_replay_readiness(
-            _store(store_obj),
-            opportunity_limit=opportunity_limit,
-            impact_limit=impact_limit,
+        return await cached_expensive_stats(
+            "openai-cache-replay-readiness",
+            (int(opportunity_limit), int(impact_limit)),
+            lambda: stats_views.stats_openai_cache_replay_readiness(
+                _store(store_obj),
+                opportunity_limit=opportunity_limit,
+                impact_limit=impact_limit,
+            ),
         )
 
     @router.get("/agentflow/stats/repeated-scaffold-opportunity")
@@ -233,10 +323,14 @@ def create_dashboard_router(
         limit: int = 1000,
         min_repeated_rows: int = 2,
     ) -> dict[str, Any]:
-        return await stats_views.stats_repeated_scaffold_opportunity(
-            _store(store_obj),
-            limit=limit,
-            min_repeated_rows=min_repeated_rows,
+        return await cached_expensive_stats(
+            "repeated-scaffold-opportunity",
+            (int(limit), int(min_repeated_rows)),
+            lambda: stats_views.stats_repeated_scaffold_opportunity(
+                _store(store_obj),
+                limit=limit,
+                min_repeated_rows=min_repeated_rows,
+            ),
         )
 
     @router.get("/agentflow/stats/instruction-dedup-opportunity")
@@ -271,12 +365,16 @@ def create_dashboard_router(
     ) -> dict[str, Any]:
         if limit is not None:
             opportunity_limit = limit
-        return await stats_views.stats_terminal_output_compaction_readiness(
-            _store(store_obj),
-            opportunity_limit=opportunity_limit,
-            impact_limit=impact_limit,
-            min_text_chars=min_text_chars,
-            max_plateau_delta_ratio=max_plateau_delta_ratio,
+        return await cached_expensive_stats(
+            "terminal-output-compaction",
+            (int(opportunity_limit), int(impact_limit), int(min_text_chars), float(max_plateau_delta_ratio)),
+            lambda: stats_views.stats_terminal_output_compaction_readiness(
+                _store(store_obj),
+                opportunity_limit=opportunity_limit,
+                impact_limit=impact_limit,
+                min_text_chars=min_text_chars,
+                max_plateau_delta_ratio=max_plateau_delta_ratio,
+            ),
         )
 
     @router.get("/agentflow/stats/terminal-output-compaction-activation")
@@ -287,23 +385,39 @@ def create_dashboard_router(
     ) -> dict[str, Any]:
         if limit is not None:
             impact_limit = limit
-        return await stats_views.stats_terminal_output_compaction_activation(
-            _store(store_obj),
-            opportunity_limit=opportunity_limit,
-            impact_limit=impact_limit,
+        return await cached_expensive_stats(
+            "terminal-output-compaction-activation",
+            (int(opportunity_limit), int(impact_limit)),
+            lambda: stats_views.stats_terminal_output_compaction_activation(
+                _store(store_obj),
+                opportunity_limit=opportunity_limit,
+                impact_limit=impact_limit,
+            ),
         )
 
     @router.get("/agentflow/stats/repeated-scaffold-impact")
     async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
-        return await stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit)
+        return await cached_expensive_stats(
+            "repeated-scaffold-impact",
+            (int(limit),),
+            lambda: stats_views.stats_repeated_scaffold_impact(_store(store_obj), limit=limit),
+        )
 
     @router.get("/agentflow/stats/repeated-scaffold-activation")
     async def stats_repeated_scaffold_activation(limit: int = 500) -> dict[str, Any]:
-        return await stats_views.stats_repeated_scaffold_activation(_store(store_obj), limit=limit)
+        return await cached_expensive_stats(
+            "repeated-scaffold-activation",
+            (int(limit),),
+            lambda: stats_views.stats_repeated_scaffold_activation(_store(store_obj), limit=limit),
+        )
 
     @router.get("/agentflow/stats/scaffold-rollout-health")
     async def stats_scaffold_rollout_health(limit: int = 500) -> dict[str, Any]:
-        return await stats_views.stats_scaffold_rollout_health(_store(store_obj), limit=limit)
+        return await cached_expensive_stats(
+            "scaffold-rollout-health",
+            (int(limit),),
+            lambda: stats_views.stats_scaffold_rollout_health(_store(store_obj), limit=limit),
+        )
 
     @router.get("/agentflow/stats/shadow-routing-promotion-readiness")
     async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
@@ -328,7 +442,11 @@ def create_dashboard_router(
 
     @router.get("/agentflow/stats/optimization-coordinator")
     async def stats_optimization_coordinator(limit: int = 1000) -> dict[str, Any]:
-        return await stats_views.stats_optimization_coordinator_dashboard(_store(store_obj), limit=limit)
+        return await cached_expensive_stats(
+            "optimization-coordinator",
+            (int(limit),),
+            lambda: stats_views.stats_optimization_coordinator_dashboard(_store(store_obj), limit=limit),
+        )
 
     @router.get("/agentflow/stats/optimization-promotion-funnel")
     async def stats_optimization_promotion_funnel(limit: int = 500) -> dict[str, Any]:
@@ -340,7 +458,11 @@ def create_dashboard_router(
 
     @router.get("/agentflow/stats/local-pattern-coverage")
     async def stats_local_pattern_coverage(limit: int = 1000) -> dict[str, Any]:
-        return await stats_views.stats_local_pattern_coverage(_store(store_obj), limit=limit)
+        return await cached_expensive_stats(
+            "local-pattern-coverage",
+            (int(limit),),
+            lambda: stats_views.stats_local_pattern_coverage(_store(store_obj), limit=limit),
+        )
 
     @router.get("/agentflow/stats/safety")
     async def stats_safety() -> dict[str, Any]:

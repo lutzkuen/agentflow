@@ -8043,7 +8043,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("Provider adoption quality health", dashboard.text)
         self.assertIn("provider-adoption-cohorts-tbody", dashboard.text)
-        self.assertIn("fetch('/agentflow/stats/provider-adoption-health?limit=5000')", dashboard.text)
+        self.assertIn("fetch('/agentflow/stats/provider-adoption-health?limit=1000')", dashboard.text)
         self.assertNotIn("provider-adoption-dashboard-call-secret", rendered)
         self.assertNotIn("provider-adoption-dashboard-window-secret", rendered)
         self.assertNotIn("provider-adoption-dashboard-session-secret", rendered)
@@ -8246,7 +8246,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("id=\"terminal-compaction-policy-tbody\"", html)
         self.assertIn("id=\"terminal-compaction-candidates-tbody\"", html)
         self.assertIn("id=\"terminal-compaction-impact-tbody\"", html)
-        self.assertIn("fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=1000&impact_limit=500')", html)
+        self.assertIn("fetch('/agentflow/stats/terminal-output-compaction?opportunity_limit=250&impact_limit=100')", html)
         self.assertIn("terminal text omitted", html)
         self.assertIn("policy contents omitted", html)
 
@@ -8367,6 +8367,62 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("async function refreshCategories()", html)
         self.assertIn("async function refreshCache()", html)
         self.assertIn("async function refreshErrors()", html)
+
+    def test_dashboard_polling_is_visibility_and_active_tab_aware(self):
+        html = stats_views.dashboard_html()
+
+        self.assertIn("const tabRefreshers=", html)
+        self.assertIn("document.addEventListener('visibilitychange'", html)
+        self.assertIn("if(document.hidden)return", html)
+        self.assertIn("active tab only", html)
+        self.assertIn("heavy views cached up to 60s", html)
+        self.assertIn("refreshActiveTab({force:true})", html)
+        self.assertIn("setInterval(refreshShell,shellMs)", html)
+        self.assertIn("setInterval(refreshActiveTab,activeMs)", html)
+        self.assertNotIn("setInterval(refreshTerminalOutputCompaction", html)
+        self.assertNotIn("setInterval(refreshRepeatedScaffold", html)
+        self.assertNotIn("setInterval(refreshOptimizationCoordinator", html)
+        self.assertNotIn("\nrefreshTerminalOutputCompaction();", html)
+        self.assertNotIn("\nrefreshRepeatedScaffold();", html)
+        self.assertNotIn("\nrefreshOptimizationCoordinator();", html)
+        self.assertIn("fetch('/agentflow/stats/openai-cache-replay-readiness?opportunity_limit=250&impact_limit=100')", html)
+        self.assertIn("fetch('/agentflow/stats/repeated-scaffold-opportunity?limit=250&min_repeated_rows=2')", html)
+        self.assertIn("fetch('/agentflow/stats/optimization-coordinator?limit=250')", html)
+        self.assertIn("fetch('/agentflow/stats/local-pattern-coverage?limit=250')", html)
+
+    def test_dashboard_expensive_stats_endpoint_uses_short_ttl_cache(self):
+        calls = 0
+
+        async def fake_provider_adoption_health(store_obj, limit=5000):
+            nonlocal calls
+            calls += 1
+            return {
+                "schema": "agentflow.provider_adoption_dashboard_health.v1",
+                "call_count": calls,
+                "limit": limit,
+            }
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream=None,
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        client = TestClient(app)
+
+        with patch("agentflow_proxy.dashboard_app.stats_views.stats_provider_adoption_health", side_effect=fake_provider_adoption_health):
+            first = client.get("/agentflow/stats/provider-adoption-health?limit=20")
+            second = client.get("/agentflow/stats/provider-adoption-health?limit=20")
+            different_query = client.get("/agentflow/stats/provider-adoption-health?limit=21")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(different_query.status_code, 200)
+        self.assertEqual(first.json()["call_count"], 1)
+        self.assertEqual(second.json()["call_count"], 1)
+        self.assertEqual(different_query.json()["call_count"], 2)
+        self.assertEqual(calls, 2)
 
     def test_proxy_dashboard_router_uses_current_store(self):
         response = TestClient(server.app).get("/agentflow/stats")
