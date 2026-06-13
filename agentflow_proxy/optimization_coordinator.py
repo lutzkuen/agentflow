@@ -15,6 +15,7 @@ PRIORITY = (
     "routing",
     "old_context_summary",
     "terminal_output_compaction",
+    "anthropic_thinking_history_compaction",
     "repeated_scaffold_crunch",
 )
 ACTIONABLE_STATUSES = {"eligible", "applied", "hit", "recommended", "selected"}

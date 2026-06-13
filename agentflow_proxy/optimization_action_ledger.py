@@ -17,6 +17,7 @@ FAMILIES = {
     "cache_replay",
     "repeated_scaffold_crunch",
     "terminal_output_compaction",
+    "anthropic_thinking_history_compaction",
 }
 
 RAW_REASON_HINTS = {
@@ -406,6 +407,19 @@ def _terminal_compaction_entry(row: dict[str, Any], routing_meta: dict[str, Any]
     return _finalize_entry(entry, meta, canary)
 
 
+def _anthropic_thinking_compaction_entry(row: dict[str, Any], routing_meta: dict[str, Any], crunch_meta: dict[str, Any]) -> dict[str, Any] | None:
+    meta = crunch_meta.get("anthropic_thinking_history_compaction")
+    if not isinstance(meta, dict) or not meta:
+        return None
+    entry = _base_entry(row, routing_meta, "anthropic_thinking_history_compaction")
+    entry.update({
+        "status": _status_from_meta(meta, applied_default=bool(meta.get("applied") or meta.get("saved_chars"))),
+        "reason_codes": _reason_codes(meta.get("reason_codes"), meta.get("reason"), meta.get("status")),
+    })
+    canary = meta.get("canary") if isinstance(meta.get("canary"), dict) else {}
+    return _finalize_entry(entry, meta, canary)
+
+
 def _pattern_crunch_entries(row: dict[str, Any], routing_meta: dict[str, Any]) -> list[dict[str, Any]]:
     features = routing_meta.get("managed_pattern_features")
     if not isinstance(features, dict):
@@ -445,6 +459,7 @@ def build_optimization_action_ledger(
             _cache_replay_entry(local_row, routing, cache),
             _repeated_scaffold_entry(local_row, routing, crunch),
             _terminal_compaction_entry(local_row, routing, crunch),
+            _anthropic_thinking_compaction_entry(local_row, routing, crunch),
         ):
             if entry is not None:
                 entries.append(entry)
@@ -452,6 +467,7 @@ def build_optimization_action_ledger(
         for entry in (
             _repeated_scaffold_entry(local_row, routing, crunch),
             _terminal_compaction_entry(local_row, routing, crunch),
+            _anthropic_thinking_compaction_entry(local_row, routing, crunch),
         ):
             if entry is not None:
                 entries.append(entry)

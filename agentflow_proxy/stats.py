@@ -853,6 +853,11 @@ async def stats_policies() -> dict[str, Any]:
             },
             "old_context_summarization": _copy_policy(crunch.OLD_CONTEXT_SUMMARY_POLICY),
             "thinking_deduplication": _copy_policy(crunch.THINKING_DEDUP_POLICY),
+            "anthropic_thinking_history_compaction": (
+                crunch.anthropic_thinking_compaction_effective_policy()
+                if hasattr(crunch, "anthropic_thinking_compaction_effective_policy")
+                else _copy_policy(getattr(crunch, "ANTHROPIC_THINKING_COMPACTION_POLICY", {}))
+            ),
             "instruction_section_deduplication": _copy_policy(crunch.INSTRUCTION_SECTION_DEDUP_POLICY),
             "pattern_rules": _copy_policy(crunch.PATTERN_RULES),
             "repeated_provider_scaffolding": _copy_policy(crunch.REPEATED_PROVIDER_SCAFFOLDING_POLICY),

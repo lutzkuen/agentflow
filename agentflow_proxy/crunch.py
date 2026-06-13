@@ -123,6 +123,37 @@ def _default_crunch_policy() -> dict[str, Any]:
             "similarity_threshold": 0.95,
             "skip_latest_assistant": True,
         },
+        "anthropic_thinking_history_compaction": {
+            "enabled": False,
+            "policy_source": "local-default",
+            "rule_id": "local-anthropic-thinking-history-compaction-canary",
+            "candidate_id": None,
+            "action_id": None,
+            "conditions": {},
+            "min_text_chars": 8_000,
+            "min_block_chars": 2_000,
+            "similarity_threshold": 0.95,
+            "replacement_notice": "[AgentFlow: older duplicate thinking history compacted]",
+            "block_top_level_thinking": True,
+            "canary": {
+                "enabled": True,
+                "fraction": 0.0,
+                "holdout_fraction": 1.0,
+                "salt": "",
+                "unit": "thinking_block_local_fingerprint",
+            },
+            "safety_stop": {
+                "enabled": True,
+                "min_outcome_samples": 5,
+                "window": 500,
+                "max_error_rate": 0.1,
+                "max_retry_rate": 0.25,
+                "max_negative_savings_rate": 0.25,
+                "max_missing_usage_rate": 0.1,
+                "max_error_rate_delta": 0.05,
+            },
+            "rules": [],
+        },
         "instruction_section_deduplication": {
             "enabled": False,
             "policy_source": "local-default",
@@ -328,6 +359,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            thinking_compaction = data.get("anthropic_thinking_history_compaction") or data.get("thinking_history_compaction") or {}
+            if isinstance(thinking_compaction, dict):
+                _apply_anthropic_thinking_compaction_policy_yaml(
+                    policy,
+                    thinking_compaction,
+                    default_policy_source="local-manual",
+                )
             instruction_dedup = data.get("instruction_section_deduplication") or {}
             if isinstance(instruction_dedup, dict):
                 _apply_instruction_dedup_policy_yaml(
@@ -390,6 +428,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             thinking_dedup = data.get("thinking_deduplication") or {}
             if isinstance(thinking_dedup, dict):
                 _apply_thinking_dedup_policy_yaml(policy, thinking_dedup)
+            thinking_compaction = data.get("anthropic_thinking_history_compaction") or data.get("thinking_history_compaction") or {}
+            if isinstance(thinking_compaction, dict):
+                _apply_anthropic_thinking_compaction_policy_yaml(
+                    policy,
+                    thinking_compaction,
+                    default_policy_source="local-default",
+                )
             instruction_dedup = data.get("instruction_section_deduplication") or {}
             if isinstance(instruction_dedup, dict):
                 _apply_instruction_dedup_policy_yaml(
@@ -577,6 +622,59 @@ def _apply_thinking_dedup_policy_yaml(policy: dict[str, Any], thinking_dedup: di
         thinking_dedup.get("skip_latest_assistant"),
         target["skip_latest_assistant"],
     )
+
+
+def _apply_anthropic_thinking_compaction_policy_yaml(
+    policy: dict[str, Any],
+    thinking_compaction: dict[str, Any],
+    *,
+    default_policy_source: str,
+) -> None:
+    target = policy["anthropic_thinking_history_compaction"]
+    action = thinking_compaction.get("action") if isinstance(thinking_compaction.get("action"), dict) else thinking_compaction
+    target["enabled"] = _as_bool(thinking_compaction.get("enabled"), target["enabled"])
+    target["policy_source"] = str(thinking_compaction.get("policy_source") or target.get("policy_source") or default_policy_source)
+    for key in ("rule_id", "candidate_id", "action_id", "replacement_notice"):
+        if thinking_compaction.get(key) is not None:
+            target[key] = str(thinking_compaction[key])
+    if isinstance(thinking_compaction.get("conditions"), dict):
+        target["conditions"] = _sanitize_anthropic_thinking_compaction_conditions(thinking_compaction["conditions"])
+    for key in ("min_text_chars", "min_block_chars"):
+        if action.get(key) is not None:
+            target[key] = int(action[key])
+    if action.get("similarity_threshold") is not None:
+        target["similarity_threshold"] = max(0.0, min(1.0, float(action["similarity_threshold"])))
+    target["block_top_level_thinking"] = _as_bool(
+        thinking_compaction.get("block_top_level_thinking"),
+        target["block_top_level_thinking"],
+    )
+    _apply_fraction_canary_yaml(target["canary"], thinking_compaction.get("canary") or thinking_compaction.get("rollout"))
+    safety = thinking_compaction.get("safety_stop") or {}
+    if isinstance(safety, dict):
+        target_safety = target["safety_stop"]
+        target_safety["enabled"] = _as_bool(safety.get("enabled"), target_safety["enabled"])
+        for key in ("min_outcome_samples", "window"):
+            if safety.get(key) is not None:
+                target_safety[key] = int(safety[key])
+        for key in (
+            "max_error_rate",
+            "max_retry_rate",
+            "max_negative_savings_rate",
+            "max_missing_usage_rate",
+            "max_error_rate_delta",
+        ):
+            if safety.get(key) is not None:
+                target_safety[key] = max(0.0, float(safety[key]))
+    rules = thinking_compaction.get("rules")
+    if rules is None and (thinking_compaction.get("conditions") or thinking_compaction.get("candidate_id")):
+        rules = [thinking_compaction]
+    parsed = _parse_anthropic_thinking_compaction_rules_yaml(
+        rules,
+        base_policy=target,
+        default_policy_source=target["policy_source"],
+    )
+    if parsed:
+        target["rules"] = parsed
 
 
 def _list_of_strings(value: Any) -> list[str]:
@@ -1017,6 +1115,110 @@ def _parse_terminal_output_compaction_rules_yaml(
     return rules
 
 
+def _sanitize_anthropic_thinking_compaction_conditions(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    aliases = {"phase": "workflow_phase"}
+    allowed = {
+        "source_surface",
+        "category",
+        "workflow_phase",
+        "requested_model",
+        "model_pattern",
+        "text_bucket",
+        "token_bucket",
+        "has_tools",
+        "stream",
+        "min_text_chars",
+        "max_text_chars",
+        "category_not_in",
+    }
+    sanitized: dict[str, Any] = {}
+    for key, raw in value.items():
+        key_text = aliases.get(str(key), str(key))
+        if key_text not in allowed or raw is None:
+            continue
+        if isinstance(raw, (str, int, float, bool)):
+            sanitized[key_text] = raw
+        elif isinstance(raw, list):
+            sanitized[key_text] = [item for item in raw if isinstance(item, (str, int, float, bool))]
+    return sanitized
+
+
+def _overlay_anthropic_thinking_compaction_rule(
+    base: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    index: int,
+    default_policy_source: str,
+) -> dict[str, Any]:
+    rule = copy.deepcopy(base)
+    action = item.get("action") if isinstance(item.get("action"), dict) else item
+    rule["rules"] = []
+    rule["enabled"] = _as_bool(item.get("enabled"), rule.get("enabled", True))
+    rule["policy_source"] = str(item.get("policy_source") or rule.get("policy_source") or default_policy_source)
+    rule["rule_id"] = str(
+        item.get("id")
+        or item.get("rule_id")
+        or item.get("policy_id")
+        or item.get("candidate_id")
+        or f"anthropic-thinking-history-compaction-rule-{index + 1}"
+    )
+    for key in ("candidate_id", "action_id", "replacement_notice"):
+        if item.get(key) is not None:
+            rule[key] = str(item[key])
+    if isinstance(item.get("conditions"), dict):
+        rule["conditions"] = _sanitize_anthropic_thinking_compaction_conditions(item["conditions"])
+    for key in ("min_text_chars", "min_block_chars"):
+        if action.get(key) is not None:
+            rule[key] = int(action[key])
+    if action.get("similarity_threshold") is not None:
+        rule["similarity_threshold"] = max(0.0, min(1.0, float(action["similarity_threshold"])))
+    if item.get("block_top_level_thinking") is not None:
+        rule["block_top_level_thinking"] = _as_bool(item.get("block_top_level_thinking"), True)
+    _apply_fraction_canary_yaml(rule["canary"], item.get("canary") or item.get("rollout"))
+    safety = item.get("safety_stop") or {}
+    if isinstance(safety, dict):
+        target_safety = rule["safety_stop"]
+        target_safety["enabled"] = _as_bool(safety.get("enabled"), target_safety["enabled"])
+        for key in ("min_outcome_samples", "window"):
+            if safety.get(key) is not None:
+                target_safety[key] = int(safety[key])
+        for key in (
+            "max_error_rate",
+            "max_retry_rate",
+            "max_negative_savings_rate",
+            "max_missing_usage_rate",
+            "max_error_rate_delta",
+        ):
+            if safety.get(key) is not None:
+                target_safety[key] = max(0.0, float(safety[key]))
+    return rule
+
+
+def _parse_anthropic_thinking_compaction_rules_yaml(
+    value: Any,
+    *,
+    base_policy: dict[str, Any],
+    default_policy_source: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        rules.append(
+            _overlay_anthropic_thinking_compaction_rule(
+                base_policy,
+                item,
+                index=index,
+                default_policy_source=default_policy_source,
+            )
+        )
+    return rules
+
+
 def _apply_pattern_modules_policy_yaml(policy: dict[str, Any], pattern_modules: dict[str, Any]) -> None:
     target = policy["pattern_modules"]
     for family, raw_config in pattern_modules.items():
@@ -1280,6 +1482,7 @@ THINKING_DEDUP_ENABLED = bool(THINKING_DEDUP_POLICY["enabled"])
 THINKING_DEDUP_MIN_CHARS = int(THINKING_DEDUP_POLICY["min_chars"])
 THINKING_DEDUP_SIMILARITY_THRESHOLD = float(THINKING_DEDUP_POLICY["similarity_threshold"])
 THINKING_DEDUP_SKIP_LATEST_ASSISTANT = bool(THINKING_DEDUP_POLICY["skip_latest_assistant"])
+ANTHROPIC_THINKING_COMPACTION_POLICY = CRUNCH_POLICY["anthropic_thinking_history_compaction"]
 INSTRUCTION_SECTION_DEDUP_POLICY = CRUNCH_POLICY["instruction_section_deduplication"]
 TERMINAL_LOG_POLICY = CRUNCH_POLICY["terminal_log_boilerplate"]
 TERMINAL_LOG_ENABLED = bool(TERMINAL_LOG_POLICY["enabled"])
@@ -4384,6 +4587,639 @@ def _copy_terminal_output_compaction_policy() -> dict[str, Any]:
     return copy.deepcopy(TERMINAL_OUTPUT_COMPACTION_POLICY)
 
 
+def _copy_anthropic_thinking_compaction_policy() -> dict[str, Any]:
+    return copy.deepcopy(ANTHROPIC_THINKING_COMPACTION_POLICY)
+
+
+def _anthropic_thinking_compaction_public_policy(
+    policy: dict[str, Any] | None = None,
+    *,
+    include_rules: bool = True,
+    include_salt: bool = True,
+) -> dict[str, Any]:
+    policy = policy or ANTHROPIC_THINKING_COMPACTION_POLICY
+    canary = policy.get("canary") or {}
+    safety = policy.get("safety_stop") or {}
+    fraction = max(0.0, min(1.0, float(canary.get("fraction", 0.0))))
+    holdout_fraction = max(0.0, min(1.0, float(canary.get("holdout_fraction", max(0.0, 1.0 - fraction)))))
+    public = {
+        "schema": "agentflow.anthropic_thinking_history_compaction_policy.v1",
+        "enabled": _as_bool(policy.get("enabled"), False),
+        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "rule_path": CRUNCH_RULES_PATH,
+        "rule_id": str(policy.get("rule_id") or "local-anthropic-thinking-history-compaction-canary"),
+        "candidate_id": str(policy.get("candidate_id")) if policy.get("candidate_id") is not None else None,
+        "action_id": str(policy.get("action_id")) if policy.get("action_id") is not None else None,
+        "conditions": _sanitize_anthropic_thinking_compaction_conditions(policy.get("conditions")),
+        "min_text_chars": int(policy.get("min_text_chars") or 8_000),
+        "min_block_chars": int(policy.get("min_block_chars") or 2_000),
+        "similarity_threshold": max(0.0, min(1.0, float(policy.get("similarity_threshold", 0.95)))),
+        "replacement_notice": str(policy.get("replacement_notice") or "[AgentFlow: older duplicate thinking history compacted]"),
+        "block_top_level_thinking": _as_bool(policy.get("block_top_level_thinking"), True),
+        "canary": {
+            "enabled": _as_bool(canary.get("enabled"), True),
+            "fraction": fraction,
+            "holdout_fraction": holdout_fraction,
+            "salt": str(canary.get("salt") or "") if include_salt else "",
+            "salt_configured": bool(canary.get("salt")),
+            "unit": str(canary.get("unit") or "thinking_block_local_fingerprint"),
+        },
+        "safety_stop": {
+            "enabled": _as_bool(safety.get("enabled"), True),
+            "min_outcome_samples": int(safety.get("min_outcome_samples", 5)),
+            "window": int(safety.get("window", 500)),
+            "max_error_rate": float(safety.get("max_error_rate", 0.1)),
+            "max_retry_rate": float(safety.get("max_retry_rate", 0.25)),
+            "max_negative_savings_rate": float(safety.get("max_negative_savings_rate", 0.25)),
+            "max_missing_usage_rate": float(safety.get("max_missing_usage_rate", 0.1)),
+            "max_error_rate_delta": float(safety.get("max_error_rate_delta", 0.05)),
+        },
+    }
+    public["action"] = {
+        "type": "compact_thinking_history_block",
+        "preserve_tool_protocol": True,
+        "preserve_assistant_text_fallback": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+    if include_rules:
+        rules = policy.get("rules")
+        public["rules"] = [
+            _anthropic_thinking_compaction_public_policy(rule, include_rules=False, include_salt=include_salt)
+            for rule in rules
+            if isinstance(rule, dict)
+        ] if isinstance(rules, list) else []
+        public["rule_count"] = len(public["rules"])
+    return public
+
+
+def anthropic_thinking_compaction_effective_policy() -> dict[str, Any]:
+    return _anthropic_thinking_compaction_public_policy(ANTHROPIC_THINKING_COMPACTION_POLICY, include_salt=False)
+
+
+def _anthropic_thinking_compaction_base_meta(status: str, reason: str, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    public = _anthropic_thinking_compaction_public_policy(policy)
+    return {
+        "schema": "agentflow.anthropic_thinking_history_compaction_decision.v1",
+        "enabled": public["enabled"],
+        "status": status,
+        "reason": reason,
+        "changed": False,
+        "applied": False,
+        "policy_source": public["policy_source"],
+        "rule_path": public["rule_path"],
+        "rule_id": public["rule_id"],
+        "candidate_id": public["candidate_id"],
+        "action_id": public["action_id"],
+        "conditions": public["conditions"],
+        "canary": public["canary"],
+        "safety_stop": public["safety_stop"],
+        "raw_thinking_text_included": False,
+        "thinking_block_fingerprints_included": False,
+        "raw_request_body_included": False,
+        "raw_tool_ids_included": False,
+        "raw_session_ids_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
+def _anthropic_thinking_candidate_policies(base_policy: dict[str, Any]) -> list[dict[str, Any]]:
+    rules = base_policy.get("rules")
+    if isinstance(rules, list) and rules:
+        return [copy.deepcopy(rule) for rule in rules if isinstance(rule, dict)]
+    return [copy.deepcopy(base_policy)]
+
+
+def _anthropic_thinking_compaction_features(
+    body: dict[str, Any],
+    *,
+    category: str,
+    before_chars: int,
+    planned_saved_tokens: int = 0,
+) -> dict[str, Any]:
+    return {
+        "source_surface": "anthropic_messages",
+        "category": category,
+        "workflow_phase": category,
+        "text_chars": before_chars,
+        "text_bucket": _text_bucket(before_chars),
+        "token_bucket": _token_bucket(max(1, before_chars // TOKEN_CHARS)),
+        "requested_model": str(body.get("model") or ""),
+        "has_tools": _body_has_tools(body),
+        "stream": bool(body.get("stream")),
+        "planned_saved_tokens": planned_saved_tokens,
+        "expected_saved_token_bucket": _token_bucket(max(1, planned_saved_tokens)),
+    }
+
+
+def _anthropic_thinking_compaction_rule_matches(policy: dict[str, Any], features: dict[str, Any]) -> tuple[bool, list[str]]:
+    conditions = _sanitize_anthropic_thinking_compaction_conditions(policy.get("conditions"))
+    blockers: list[str] = []
+    if not conditions:
+        return True, blockers
+    for key in ("source_surface", "category", "workflow_phase", "text_bucket", "token_bucket"):
+        if key in conditions and str(features.get(key)) not in _condition_values(conditions[key]):
+            blockers.append(f"{key}-not-matched")
+    if "category_not_in" in conditions and str(features.get("category")) in _condition_values(conditions["category_not_in"]):
+        blockers.append("category-excluded")
+    if "requested_model" in conditions and str(features.get("requested_model")) not in _condition_values(conditions["requested_model"]):
+        blockers.append("requested-model-not-matched")
+    if "model_pattern" in conditions:
+        patterns = _condition_values(conditions["model_pattern"])
+        requested = str(features.get("requested_model") or "").lower()
+        if not any(pattern.lower() in requested for pattern in patterns):
+            blockers.append("model-pattern-not-matched")
+    for key in ("has_tools", "stream"):
+        if key in conditions and bool(features.get(key)) != _as_bool(conditions[key], False):
+            blockers.append(f"{key}-not-matched")
+    if "min_text_chars" in conditions and _safe_int(features.get("text_chars")) < _safe_int(conditions["min_text_chars"]):
+        blockers.append("min-text-chars-not-met")
+    if "max_text_chars" in conditions and _safe_int(features.get("text_chars")) > _safe_int(conditions["max_text_chars"]):
+        blockers.append("max-text-chars-exceeded")
+    return not blockers, blockers
+
+
+def _anthropic_thinking_tool_ids(body: dict[str, Any]) -> tuple[set[str], set[str]]:
+    tool_uses: set[str] = set()
+    tool_results: set[str] = set()
+    for msg in body.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        tool_uses.update(_thinking_tool_use_ids(content))
+        tool_results.update(_thinking_tool_result_ids(content))
+    return tool_uses, tool_results
+
+
+def _anthropic_thinking_compaction_targets(body: dict[str, Any], *, policy: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return [], ["unsupported-content-block-shape"]
+    assistant_indexes = [idx for idx, msg in enumerate(messages) if isinstance(msg, dict) and msg.get("role") == "assistant"]
+    assistant_age_by_index = {
+        msg_idx: len(assistant_indexes) - 1 - assistant_order
+        for assistant_order, msg_idx in enumerate(assistant_indexes)
+    }
+    entries: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    min_block_chars = int(policy.get("min_block_chars") or 2_000)
+    similarity_threshold = float(policy.get("similarity_threshold") or 0.95)
+    for msg_idx, msg in enumerate(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            blockers.append("unsupported-content-block-shape")
+            continue
+        assistant_text = _thinking_assistant_text_available(content)
+        tool_use_ids = _thinking_tool_use_ids(content)
+        next_message = messages[msg_idx + 1] if msg_idx + 1 < len(messages) else None
+        next_results = set()
+        if isinstance(next_message, dict) and isinstance(next_message.get("content"), list):
+            next_results = _thinking_tool_result_ids(next_message["content"])
+        unresolved_tool_use = bool(tool_use_ids and not tool_use_ids <= next_results)
+        for block_idx, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") not in _ANTHROPIC_THINKING_BLOCK_TYPES:
+                continue
+            text = _thinking_block_text(block)
+            block_blockers: set[str] = set()
+            if block.get("type") == "redacted_thinking":
+                block_blockers.add("redacted-thinking-block")
+            if block.get("type") == "thinking" and not text:
+                block_blockers.add("unsupported-content-block-shape")
+            if not assistant_text:
+                block_blockers.add("missing-assistant-text-fallback")
+            if msg_idx >= len(messages) - 1:
+                block_blockers.add("latest-message-not-old-history")
+            if unresolved_tool_use:
+                block_blockers.add("unresolved-tool-use-dependency")
+            if len(text) < min_block_chars:
+                block_blockers.add("thinking-block-below-min-chars")
+            normalized = normalize_text(text)
+            fingerprint = "sha256:" + sha256_text(normalized) if normalized else ""
+            entries.append({
+                "message_index": msg_idx,
+                "block_index": block_idx,
+                "chars": len(text),
+                "fingerprint": fingerprint,
+                "shingles": _shingles(normalized) if len(text) >= min_block_chars else frozenset(),
+                "assistant_age": assistant_age_by_index.get(msg_idx, 0),
+                "blockers": block_blockers,
+            })
+    for index, entry in enumerate(entries):
+        duplicate_kind = "none"
+        for newer in entries[index + 1:]:
+            if not newer.get("fingerprint"):
+                continue
+            if entry.get("fingerprint") and entry["fingerprint"] == newer.get("fingerprint"):
+                duplicate_kind = "exact"
+                break
+            if entry.get("shingles") and newer.get("shingles") and _jaccard(entry["shingles"], newer["shingles"]) >= similarity_threshold:
+                duplicate_kind = "near"
+                break
+        entry["duplicate_kind"] = duplicate_kind
+        if duplicate_kind == "none":
+            entry["blockers"].add("no-newer-duplicate-thinking-block")
+    targets = [
+        entry for entry in entries
+        if not entry["blockers"] and entry.get("duplicate_kind") in {"exact", "near"} and entry.get("chars", 0) > 0
+    ]
+    return targets, sorted(set(blockers))
+
+
+def _anthropic_thinking_compaction_candidate_id(policy: dict[str, Any], targets: list[dict[str, Any]]) -> str:
+    if policy.get("candidate_id"):
+        return str(policy["candidate_id"])
+    basis = {
+        "rule_id": policy.get("rule_id"),
+        "targets": [
+            {
+                "fingerprint": target.get("fingerprint"),
+                "message_index": target.get("message_index"),
+                "block_index": target.get("block_index"),
+                "duplicate_kind": target.get("duplicate_kind"),
+            }
+            for target in targets[:24]
+        ],
+    }
+    return "anthropic-thinking-compaction:" + sha256_text(stable_json(basis))[:20]
+
+
+def _anthropic_thinking_compaction_canary_decision(
+    body: dict[str, Any],
+    *,
+    policy: dict[str, Any],
+    candidate_id: str,
+    category: str,
+    before_chars: int,
+    planned_saved_tokens: int,
+) -> dict[str, Any]:
+    public = _anthropic_thinking_compaction_public_policy(policy)
+    canary = public["canary"]
+    rollout = {
+        "schema": PATTERN_ROLLOUT_SCHEMA,
+        "recommendation_mode": "canary-only",
+        "canary_enabled": canary["enabled"],
+        "canary_fraction": canary["fraction"],
+        "canary_salt": canary["salt"],
+        "canary_unit": canary["unit"],
+    }
+    features = _anthropic_thinking_compaction_features(
+        body,
+        category=category,
+        before_chars=before_chars,
+        planned_saved_tokens=planned_saved_tokens,
+    )
+    features["request_fingerprint"] = "sha256:" + sha256_text(stable_json(body))
+    features["thinking_block_fingerprint"] = candidate_id
+    decision = pattern_canary_decision(
+        rollout=rollout,
+        rule_id=public["rule_id"],
+        candidate_id=candidate_id,
+        pattern_hashes=[],
+        features=features,
+    )
+    decision["schema"] = "agentflow.anthropic_thinking_history_compaction_canary_decision.v1"
+    decision["holdout_fraction"] = canary["holdout_fraction"]
+    decision["raw_request_body_included"] = False
+    decision["raw_thinking_text_included"] = False
+    decision["thinking_block_fingerprints_included"] = False
+    return decision
+
+
+def _anthropic_thinking_compaction_meta_from_crunch_json(raw: Any) -> dict[str, Any]:
+    crunch_meta = _json_obj(raw)
+    meta = crunch_meta.get("anthropic_thinking_history_compaction")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _anthropic_thinking_compaction_is_applied(meta: dict[str, Any]) -> bool:
+    canary = meta.get("canary")
+    return bool(meta.get("applied")) and isinstance(canary, dict) and str(canary.get("cohort")) == "canary_applied"
+
+
+def _anthropic_thinking_compaction_is_holdout(meta: dict[str, Any]) -> bool:
+    canary = meta.get("canary")
+    return isinstance(canary, dict) and str(canary.get("cohort")) == "canary_holdout"
+
+
+def evaluate_anthropic_thinking_compaction_safety_stop(
+    store_obj: Any | None,
+    *,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    public = _anthropic_thinking_compaction_public_policy(policy)
+    safety = public["safety_stop"]
+    if not safety["enabled"]:
+        return None
+    if store_obj is None or not hasattr(store_obj, "conn"):
+        return None
+    window = max(1, min(int(safety["window"]), 10_000))
+    try:
+        rows = store_obj.conn.execute(
+            """
+            select status_code, retry_count, actual_input_tokens, actual_output_tokens, crunch_json
+            from calls
+            order by created_at desc
+            limit ?
+            """,
+            (window,),
+        ).fetchall()
+    except Exception:
+        return None
+
+    applied = {"samples": 0, "errors": 0, "retries": 0, "negative_savings": 0, "missing_usage": 0}
+    holdout = {"samples": 0, "errors": 0, "retries": 0}
+    for row in rows:
+        row_dict = dict(row)
+        meta = _anthropic_thinking_compaction_meta_from_crunch_json(row_dict.get("crunch_json"))
+        if not meta or str(meta.get("rule_id") or "") != public["rule_id"]:
+            continue
+        errored = _safe_int(row_dict.get("status_code")) >= 400
+        retried = _safe_int(row_dict.get("retry_count")) > 0
+        missing_usage = _safe_int(row_dict.get("actual_input_tokens")) <= 0 or _safe_int(row_dict.get("actual_output_tokens")) <= 0
+        if _anthropic_thinking_compaction_is_applied(meta):
+            applied["samples"] += 1
+            applied["errors"] += int(errored)
+            applied["retries"] += int(retried)
+            applied["missing_usage"] += int(missing_usage)
+            applied["negative_savings"] += int(_safe_int(meta.get("tokens_saved_est")) <= 0)
+        elif _anthropic_thinking_compaction_is_holdout(meta):
+            holdout["samples"] += 1
+            holdout["errors"] += int(errored)
+            holdout["retries"] += int(retried)
+
+    samples = applied["samples"]
+    min_samples = max(1, int(safety["min_outcome_samples"]))
+    if samples < min_samples:
+        return None
+    error_rate = _rate(applied["errors"], samples)
+    retry_rate = _rate(applied["retries"], samples)
+    negative_savings_rate = _rate(applied["negative_savings"], samples)
+    missing_usage_rate = _rate(applied["missing_usage"], samples)
+    holdout_error_rate = _rate(holdout["errors"], holdout["samples"])
+    triggers: list[dict[str, Any]] = []
+    if error_rate >= float(safety["max_error_rate"]):
+        triggers.append({"metric": "error_rate", "value": round(error_rate, 4), "threshold": safety["max_error_rate"]})
+    if retry_rate >= float(safety["max_retry_rate"]):
+        triggers.append({"metric": "retry_rate", "value": round(retry_rate, 4), "threshold": safety["max_retry_rate"]})
+    if negative_savings_rate >= float(safety["max_negative_savings_rate"]):
+        triggers.append({"metric": "negative_savings_rate", "value": round(negative_savings_rate, 4), "threshold": safety["max_negative_savings_rate"]})
+    if missing_usage_rate >= float(safety["max_missing_usage_rate"]):
+        triggers.append({"metric": "missing_usage_rate", "value": round(missing_usage_rate, 4), "threshold": safety["max_missing_usage_rate"]})
+    if holdout["samples"] >= min_samples and (error_rate - holdout_error_rate) >= float(safety["max_error_rate_delta"]):
+        triggers.append({
+            "metric": "error_rate_delta_vs_holdout",
+            "value": round(error_rate - holdout_error_rate, 4),
+            "threshold": safety["max_error_rate_delta"],
+        })
+    if not triggers:
+        return None
+    return {
+        "schema": "agentflow.anthropic_thinking_history_compaction_safety_stop.v1",
+        "stopped": True,
+        "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+        "rule_id": public["rule_id"],
+        "candidate_id": public["candidate_id"],
+        "sample_count": samples,
+        "holdout_sample_count": holdout["samples"],
+        "error_count": applied["errors"],
+        "retry_count": applied["retries"],
+        "negative_savings_count": applied["negative_savings"],
+        "missing_usage_count": applied["missing_usage"],
+        "error_rate": round(error_rate, 4),
+        "retry_rate": round(retry_rate, 4),
+        "negative_savings_rate": round(negative_savings_rate, 4),
+        "missing_usage_rate": round(missing_usage_rate, 4),
+        "holdout_error_rate": round(holdout_error_rate, 4),
+        "min_outcome_samples": min_samples,
+        "window": window,
+        "triggers": triggers,
+        "raw_payload_included": False,
+    }
+
+
+def _apply_anthropic_thinking_history_compaction_canary(
+    body: dict[str, Any],
+    *,
+    store_obj: Any | None = None,
+    policy_source: str,
+    category: str,
+    provider: str | None,
+    source_surface: str | None,
+    endpoint: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    base_policy = _copy_anthropic_thinking_compaction_policy()
+    base_policy["policy_source"] = str(base_policy.get("policy_source") or policy_source)
+    meta = _anthropic_thinking_compaction_base_meta("skipped", "disabled", policy=base_policy)
+    before_chars = len(stable_json(body))
+    meta["before_chars"] = before_chars
+    meta["after_chars"] = before_chars
+    meta["tokens_saved_est"] = 0
+    if not _as_bool(base_policy.get("enabled"), False):
+        return body, meta
+    if str(provider or "anthropic").lower() != "anthropic":
+        meta["reason"] = "non-anthropic-provider"
+        return body, meta
+    if source_surface and str(source_surface) != "anthropic_messages":
+        meta["reason"] = "non-anthropic-source-surface"
+        return body, meta
+    if endpoint and str(endpoint) != "messages":
+        meta["reason"] = "non-anthropic-messages-endpoint"
+        return body, meta
+    if category != "tool-result":
+        meta["reason"] = "non-tool-result-category"
+        meta["category"] = category
+        return body, meta
+    if before_chars < int(base_policy.get("min_text_chars") or 8_000):
+        meta["reason"] = "below-min-text-size"
+        return body, meta
+    if _as_bool(base_policy.get("block_top_level_thinking"), True) and _thinking_top_level_active(body):
+        meta["reason"] = "active-top-level-thinking-request"
+        return body, meta
+
+    initial_features = _anthropic_thinking_compaction_features(body, category=category, before_chars=before_chars)
+    evaluated_rules: list[dict[str, Any]] = []
+    selected_policy: dict[str, Any] | None = None
+    selected_targets: list[dict[str, Any]] = []
+    target_blockers: list[str] = []
+    for raw_policy in _anthropic_thinking_candidate_policies(base_policy):
+        policy = copy.deepcopy(raw_policy)
+        policy["policy_source"] = str(policy.get("policy_source") or policy_source)
+        public = _anthropic_thinking_compaction_public_policy(policy)
+        rule_eval = {
+            "rule_id": public["rule_id"],
+            "candidate_id": public["candidate_id"],
+            "action_id": public["action_id"],
+            "enabled": public["enabled"],
+            "policy_source": public["policy_source"],
+            "conditions": public["conditions"],
+            "status": "skipped",
+            "reasons": [],
+        }
+        if not public["enabled"]:
+            rule_eval["reasons"].append("disabled")
+            evaluated_rules.append(rule_eval)
+            continue
+        matched, blockers = _anthropic_thinking_compaction_rule_matches(policy, initial_features)
+        if not matched:
+            rule_eval["reasons"].extend(blockers)
+            evaluated_rules.append(rule_eval)
+            continue
+        targets, blockers = _anthropic_thinking_compaction_targets(body, policy=policy)
+        if not targets:
+            rule_eval["reasons"].extend(blockers or ["no-eligible-thinking-history-blocks"])
+            evaluated_rules.append(rule_eval)
+            target_blockers.extend(blockers)
+            continue
+        rule_eval.update({"status": "matched", "target_count": len(targets)})
+        evaluated_rules.append(rule_eval)
+        selected_policy = policy
+        selected_targets = targets
+        break
+    meta["evaluated_rules"] = evaluated_rules
+    meta["configured_rule_count"] = len(_anthropic_thinking_candidate_policies(base_policy))
+    if selected_policy is None:
+        first_reason = None
+        for rule_eval in evaluated_rules:
+            reasons = rule_eval.get("reasons") if isinstance(rule_eval, dict) else None
+            if isinstance(reasons, list) and reasons:
+                first_reason = str(reasons[0])
+                break
+        meta.update({
+            "reason": first_reason or (target_blockers[0] if target_blockers else "no-eligible-thinking-history-blocks"),
+            "category": category,
+            "blockers": sorted(set(target_blockers)),
+        })
+        return body, meta
+
+    policy = selected_policy
+    public = _anthropic_thinking_compaction_public_policy(policy)
+    candidate_id = _anthropic_thinking_compaction_candidate_id(policy, selected_targets)
+    planned_body = copy.deepcopy(body)
+    messages = planned_body.get("messages")
+    if not isinstance(messages, list):
+        meta.update({"status": "bypass", "reason": "unsupported-content-block-shape"})
+        return body, meta
+    by_message: dict[int, set[int]] = {}
+    for target in selected_targets:
+        by_message.setdefault(int(target["message_index"]), set()).add(int(target["block_index"]))
+    for msg_idx, block_indexes in by_message.items():
+        message = messages[msg_idx]
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            meta.update({"status": "bypass", "reason": "unsupported-content-block-shape"})
+            return body, meta
+        message["content"] = [
+            block for block_idx, block in enumerate(content)
+            if block_idx not in block_indexes
+        ]
+        if not message["content"]:
+            meta.update({"status": "bypass", "reason": "thinking-history-only-assistant-message"})
+            return body, meta
+    before_tool_uses, before_tool_results = _anthropic_thinking_tool_ids(body)
+    after_tool_uses, after_tool_results = _anthropic_thinking_tool_ids(planned_body)
+    if before_tool_uses != after_tool_uses or before_tool_results != after_tool_results:
+        meta.update({"status": "bypass", "reason": "tool-protocol-reconstruction-mismatch"})
+        return body, meta
+    if body.get("stream") != planned_body.get("stream") or body.get("model") != planned_body.get("model"):
+        meta.update({"status": "bypass", "reason": "provider-protocol-shape-mismatch"})
+        return body, meta
+    planned_after = len(stable_json(planned_body))
+    planned_saved = before_chars - planned_after
+    if planned_saved <= 0:
+        meta.update({"status": "bypass", "reason": "compaction-savings-anomaly"})
+        return body, meta
+    planned_saved_tokens = planned_saved // TOKEN_CHARS
+    target_summaries = [
+        {
+            "kind": "assistant_thinking_history",
+            "duplicate_kind": str(target.get("duplicate_kind") or "unknown"),
+            "assistant_age_bucket": _assistant_age_bucket(_safe_int(target.get("assistant_age"))),
+            "size_bucket": _thinking_size_bucket(_safe_int(target.get("chars"))),
+            "before_chars": _safe_int(target.get("chars")),
+            "fingerprint_present": bool(target.get("fingerprint")),
+            "fingerprint_included": False,
+            "raw_text_included": False,
+        }
+        for target in selected_targets[:20]
+    ]
+    meta = _anthropic_thinking_compaction_base_meta("planned", "eligible", policy=policy)
+    meta.update({
+        "candidate_id": candidate_id,
+        "category": category,
+        "target_count": len(selected_targets),
+        "before_chars": before_chars,
+        "planned_after_chars": planned_after,
+        "planned_saved_chars": planned_saved,
+        "planned_saved_tokens": planned_saved_tokens,
+        "after_chars": before_chars,
+        "tokens_saved_est": 0,
+        "target_summaries": target_summaries,
+        "evaluated_rules": evaluated_rules,
+        "configured_rule_count": len(_anthropic_thinking_candidate_policies(base_policy)),
+        "lifecycle_feedback": {
+            "schema": "agentflow.anthropic_thinking_history_compaction_lifecycle_feedback.v1",
+            "status": "planned",
+            "cohort": "pending",
+            "candidate_id": public_id(candidate_id, prefix="candidate"),
+            "metadata_only": True,
+            "raw_payload_included": False,
+        },
+    })
+
+    canary = _anthropic_thinking_compaction_canary_decision(
+        body,
+        policy=policy,
+        candidate_id=candidate_id,
+        category=category,
+        before_chars=before_chars,
+        planned_saved_tokens=planned_saved_tokens,
+    )
+    meta["canary"] = canary
+    if canary.get("enabled") and not canary.get("selected", True):
+        cohort = str(canary.get("cohort") or "canary_holdout")
+        meta.update({
+            "status": "holdout",
+            "reason": str(canary.get("reason") or "canary_holdout"),
+            "holdout": True,
+            "after_chars": before_chars,
+            "tokens_saved_est": 0,
+        })
+        meta["lifecycle_feedback"].update({"status": "holdout", "cohort": cohort})
+        return body, meta
+
+    safety_stop = evaluate_anthropic_thinking_compaction_safety_stop(store_obj, policy=policy)
+    if safety_stop:
+        meta.update({
+            "status": "bypass",
+            "reason": LOCAL_CANARY_SAFETY_STOP_REASON,
+            "safety_stop_state": "stopped",
+            "safety_stop": safety_stop,
+            "after_chars": before_chars,
+            "tokens_saved_est": 0,
+        })
+        meta["lifecycle_feedback"].update({"status": "safety_stop", "cohort": "safety_stop"})
+        log_pattern_canary_safety_stop(safety_stop)
+        return body, meta
+
+    meta.update({
+        "status": "applied",
+        "reason": "thinking-history-compaction-applied",
+        "changed": True,
+        "applied": True,
+        "after_chars": planned_after,
+        "saved_chars": planned_saved,
+        "tokens_saved_est": planned_saved_tokens,
+        "compaction_cost_usd": 0.0,
+    })
+    meta["lifecycle_feedback"].update({"status": "applied", "cohort": str(canary.get("cohort") or "canary_applied")})
+    return planned_body, meta
+
+
 def _terminal_output_compaction_action_public(policy: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "compact_terminal_output",
@@ -5253,6 +6089,10 @@ def crunch_body(
             "policy_source": policy_source,
             "rule_path": CRUNCH_RULES_PATH,
             "managed_profile": managed_profile,
+            "anthropic_thinking_history_compaction": _anthropic_thinking_compaction_base_meta(
+                "skipped",
+                "global-crunch-disabled",
+            ),
             "anthropic_thinking_history": build_anthropic_thinking_history_metadata(
                 body if isinstance(body, dict) else None,
                 provider=provider,
@@ -5275,6 +6115,15 @@ def crunch_body(
         category=category,
         policy_source=policy_source,
         rule_path=CRUNCH_RULES_PATH,
+    )
+    new_body, thinking_compaction_meta = _apply_anthropic_thinking_history_compaction_canary(
+        new_body,
+        store_obj=store_obj,
+        policy_source=policy_source,
+        category=category,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
     )
     new_body, terminal_output_compaction_meta = _apply_terminal_output_compaction_canary(
         new_body,
@@ -5396,6 +6245,7 @@ def crunch_body(
         "terminal_log_boilerplate_simplified": terminal_log_meta["simplified_line_count"],
         "terminal_log_boilerplate_saved_chars": terminal_log_meta["saved_chars"],
         "terminal_log_boilerplate": terminal_log_meta,
+        "anthropic_thinking_history_compaction": thinking_compaction_meta,
         "terminal_output_compaction": terminal_output_compaction_meta,
         "pattern_modules": pattern_modules_meta,
         "instruction_section_deduplication": instruction_dedup_meta,
