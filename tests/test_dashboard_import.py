@@ -2280,6 +2280,7 @@ class DashboardImportTests(unittest.TestCase):
             )
             client = TestClient(app)
             response = client.get("/agentflow/stats/claude-routing-promotion-funnel?limit=50")
+            yield_response = client.get("/agentflow/stats/post-fix-shadow-yield?window_hours=0&limit=50")
             dashboard = client.get("/agentflow/dashboard")
 
             self.assertEqual(response.status_code, 200)
@@ -2300,12 +2301,20 @@ class DashboardImportTests(unittest.TestCase):
             self.assertTrue(any(row["eligible_unsampled_count"] >= 1 for row in payload["candidates"]))
             self.assertTrue(any(row["compared_count"] >= 3 for row in payload["candidates"]))
             self.assertTrue(any(row["canary_widened_count"] >= 1 for row in payload["candidates"]))
+            self.assertEqual(yield_response.status_code, 200)
+            yield_payload = yield_response.json()
+            self.assertEqual(yield_payload["schema"], "agentflow.post_fix_shadow_yield.v1")
+            self.assertGreaterEqual(yield_payload["summary"]["sample_count"], 3)
+            self.assertGreaterEqual(yield_payload["summary"]["compared_count"], 3)
+            self.assertFalse(yield_payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(yield_payload["privacy"]["request_ids_included"])
             self.assertEqual(dashboard.status_code, 200)
             self.assertIn("Claude routing promotion funnel", dashboard.text)
             self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
             self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
+            self.assertIn("post-fix-shadow-yield-tbody", dashboard.text)
 
-            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            rendered = json.dumps(payload, sort_keys=True) + json.dumps(yield_payload, sort_keys=True) + dashboard.text
             for forbidden in (
                 "raw claude canary prompt must stay local",
                 "claude-canary-request-secret",

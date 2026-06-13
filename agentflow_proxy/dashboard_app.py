@@ -309,6 +309,19 @@ def create_dashboard_router(
     async def stats_shadow_routing_promotion_readiness(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_shadow_routing_promotion_readiness(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/post-fix-shadow-yield")
+    async def stats_post_fix_shadow_yield(
+        limit: int = 50,
+        since: str | None = None,
+        window_hours: float = 24.0,
+    ) -> dict[str, Any]:
+        return await stats_views.stats_post_fix_shadow_yield(
+            _store(store_obj),
+            limit=limit,
+            since=since,
+            window_hours=window_hours,
+        )
+
     @router.get("/agentflow/stats/optimization-eval-queue")
     async def stats_optimization_eval_queue(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_eval_queue(_store(store_obj), limit=limit)

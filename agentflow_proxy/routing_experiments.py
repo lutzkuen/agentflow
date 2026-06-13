@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1228,6 +1228,24 @@ def _count_rows(mapping: dict[str, int], *, key_name: str = "reason") -> list[di
     ]
 
 
+def _since_cutoff_iso(*, since: str | None = None, window_hours: float | None = 24.0) -> str | None:
+    if since:
+        parsed = _parse_utc(since)
+        if parsed is not None:
+            return parsed.isoformat()
+        return str(since)
+    if window_hours is None:
+        return None
+    try:
+        hours = float(window_hours)
+    except (TypeError, ValueError):
+        hours = 24.0
+    if hours <= 0:
+        return None
+    now = _parse_utc(utc_now()) or datetime.now(timezone.utc)
+    return (now - timedelta(hours=hours)).isoformat()
+
+
 def _experiment_from_routing_json(value: Any) -> dict[str, Any]:
     routing = _parse_jsonish(value)
     experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
@@ -1259,6 +1277,332 @@ def _comparison_blocker(row: Any) -> str:
     if row["output_similarity"] is None:
         return "similarity-missing"
     return "compared"
+
+
+def _feedback_status_and_reason(row: Any) -> tuple[str, str]:
+    experiment = _parse_jsonish(row["experiment_json"]) if "experiment_json" in row.keys() else {}
+    feedback = experiment.get("optimization_feedback") if isinstance(experiment, dict) else {}
+    if isinstance(feedback, dict):
+        status = _public_label(feedback.get("status"), fallback="")
+        reason_codes = [
+            _public_label(reason, fallback="")
+            for reason in feedback.get("reason_codes") or []
+            if reason not in (None, "")
+        ]
+        if status:
+            reason = reason_codes[0] if reason_codes else _comparison_blocker(row)
+            return status, reason
+    blocker = _comparison_blocker(row)
+    if blocker == "compared":
+        return "compared", "passed" if row["passed_threshold"] else "below-similarity-threshold"
+    return blocker, blocker
+
+
+def _post_fix_shadow_yield_candidate_key(
+    *,
+    provider: Any,
+    source_surface: Any,
+    category: Any,
+    requested_model: Any,
+    shadow_model: Any,
+) -> tuple[str, str, str, str, str]:
+    return (
+        _public_label(provider),
+        _public_label(source_surface),
+        _public_label(category),
+        _public_label(requested_model, fallback=""),
+        _public_label(shadow_model, fallback="none"),
+    )
+
+
+def _new_post_fix_shadow_yield_row(key: tuple[str, str, str, str, str]) -> dict[str, Any]:
+    return {
+        "provider": key[0],
+        "source_surface": key[1],
+        "category": key[2],
+        "requested_model": key[3],
+        "shadow_model": key[4],
+        "sample_count": 0,
+        "compared_count": 0,
+        "uncompared_count": 0,
+        "clean_yield": 0.0,
+        "selected_decision_count": 0,
+        "skipped_decision_count": 0,
+        "eligible_unsampled_count": 0,
+        "passed_threshold_count": 0,
+        "shadow_cost_usd": 0.0,
+        "reason_counts": {},
+        "status_counts": {},
+        "decision_reason_counts": {},
+        "managed_feedback_status_counts": {},
+        "last_sample_at": None,
+        "last_decision_at": None,
+    }
+
+
+def _finalize_post_fix_shadow_yield_row(row: dict[str, Any]) -> dict[str, Any]:
+    sample_count = int(row.get("sample_count") or 0)
+    compared_count = int(row.get("compared_count") or 0)
+    row["clean_yield"] = round(compared_count / sample_count, 4) if sample_count else 0.0
+    row["pass_rate"] = (
+        round(int(row.get("passed_threshold_count") or 0) / compared_count, 4)
+        if compared_count else None
+    )
+    row["shadow_cost_usd"] = round(float(row.get("shadow_cost_usd") or 0.0), 6)
+    row["reason_counts"] = _count_rows(row.get("reason_counts") or {})
+    row["status_counts"] = _count_rows(row.get("status_counts") or {}, key_name="status")
+    row["decision_reason_counts"] = _count_rows(row.get("decision_reason_counts") or {})
+    row["managed_feedback_status_counts"] = _count_rows(
+        row.get("managed_feedback_status_counts") or {},
+        key_name="status",
+    )
+    return row
+
+
+def build_post_fix_shadow_yield_report(
+    store_obj: Any,
+    *,
+    since: str | None = None,
+    window_hours: float | None = 24.0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 50), 1000))
+    cutoff = _since_cutoff_iso(since=since, window_hours=window_hours)
+    conn = store_obj.conn
+    where_samples = ""
+    sample_params: list[Any] = []
+    if cutoff:
+        where_samples = "where created_at >= ?"
+        sample_params.append(cutoff)
+    try:
+        sample_rows = conn.execute(
+            f"""
+            select created_at,
+                   coalesce(provider, 'anthropic') as provider,
+                   coalesce(source_surface, 'anthropic_messages') as source_surface,
+                   requested_model,
+                   routed_model,
+                   primary_model,
+                   shadow_model,
+                   coalesce(category, 'unknown') as category,
+                   primary_status_code,
+                   shadow_status_code,
+                   output_similarity,
+                   passed_threshold,
+                   shadow_cost_est_usd,
+                   error,
+                   routing_json,
+                   experiment_json
+            from routing_experiments
+            {where_samples}
+            order by created_at desc
+            limit 50000
+            """,
+            tuple(sample_params),
+        ).fetchall()
+    except Exception:
+        sample_rows = []
+
+    rows_by_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    status_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    managed_feedback_status_counts: dict[str, int] = {}
+    compared_count = 0
+    total_shadow_cost = 0.0
+    last_sample_at = None
+    for raw_row in sample_rows:
+        row = dict(raw_row)
+        status, reason = _feedback_status_and_reason(raw_row)
+        key = _post_fix_shadow_yield_candidate_key(
+            provider=row.get("provider"),
+            source_surface=row.get("source_surface"),
+            category=row.get("category"),
+            requested_model=row.get("requested_model"),
+            shadow_model=row.get("shadow_model") or row.get("routed_model"),
+        )
+        item = rows_by_key.setdefault(key, _new_post_fix_shadow_yield_row(key))
+        item["sample_count"] += 1
+        item["last_sample_at"] = max(
+            [value for value in (item.get("last_sample_at"), row.get("created_at")) if value],
+            default=None,
+        )
+        if status == "compared":
+            item["compared_count"] += 1
+            compared_count += 1
+        else:
+            item["uncompared_count"] += 1
+        if row.get("passed_threshold"):
+            item["passed_threshold_count"] += 1
+        shadow_cost = float(row.get("shadow_cost_est_usd") or 0.0)
+        item["shadow_cost_usd"] += shadow_cost
+        total_shadow_cost += shadow_cost
+        _increment_count(item["status_counts"], status, fallback="unknown")
+        _increment_count(item["reason_counts"], reason, fallback="unknown")
+        _increment_count(status_counts, status, fallback="unknown")
+        _increment_count(reason_counts, reason, fallback="unknown")
+        experiment = _parse_jsonish(row.get("experiment_json"))
+        managed = experiment.get("managed_feedback") if isinstance(experiment, dict) else {}
+        managed_status = _public_label((managed or {}).get("status"), fallback="not-exported") if isinstance(managed, dict) else "not-exported"
+        _increment_count(item["managed_feedback_status_counts"], managed_status, fallback="not-exported")
+        _increment_count(managed_feedback_status_counts, managed_status, fallback="not-exported")
+        if last_sample_at is None or str(row.get("created_at")) > str(last_sample_at):
+            last_sample_at = row.get("created_at")
+
+    where_decisions = "routing_json is not null and routing_json like '%\"routing_experiment\"%'"
+    decision_params: list[Any] = []
+    if cutoff:
+        where_decisions += " and created_at >= ?"
+        decision_params.append(cutoff)
+    decision_rows: list[Any] = []
+    try:
+        decision_rows.extend(
+            conn.execute(
+                f"""
+                select created_at,
+                       coalesce(provider, 'anthropic') as provider,
+                       coalesce(source_surface, 'anthropic_messages') as source_surface,
+                       coalesce(category, 'unknown') as category,
+                       requested_model,
+                       routed_model,
+                       routing_json
+                from calls
+                where {where_decisions}
+                order by created_at desc
+                limit 50000
+                """,
+                tuple(decision_params),
+            ).fetchall()
+        )
+    except Exception:
+        pass
+    codex_params: list[Any] = []
+    codex_where = "direction = 'client_to_server' and method = 'turn/start' and routing_json is not null and routing_json like '%\"routing_experiment\"%'"
+    if cutoff:
+        codex_where += " and created_at >= ?"
+        codex_params.append(cutoff)
+    try:
+        decision_rows.extend(
+            conn.execute(
+                f"""
+                select created_at,
+                       'openai' as provider,
+                       'codex_turn' as source_surface,
+                       null as category,
+                       null as requested_model,
+                       null as routed_model,
+                       routing_json
+                from codex_app_events
+                where {codex_where}
+                order by created_at desc
+                limit 50000
+                """,
+                tuple(codex_params),
+            ).fetchall()
+        )
+    except Exception:
+        pass
+
+    decision_status_counts: dict[str, int] = {}
+    decision_reason_counts: dict[str, int] = {}
+    selected_decisions = 0
+    skipped_decisions = 0
+    eligible_unsampled_decisions = 0
+    last_decision_at = None
+    for raw_row in decision_rows:
+        row = dict(raw_row)
+        routing = _parse_jsonish(row.get("routing_json"))
+        experiment = routing.get("routing_experiment") if isinstance(routing, dict) else None
+        if not isinstance(experiment, dict):
+            continue
+        status = _public_label(experiment.get("status"), fallback="unknown")
+        reason = _public_label(experiment.get("reason"), fallback="unknown")
+        requested = experiment.get("requested_model") or row.get("requested_model")
+        shadow = experiment.get("shadow_model") or experiment.get("routed_model") or row.get("routed_model")
+        category = experiment.get("category") or row.get("category") or "unknown"
+        key = _post_fix_shadow_yield_candidate_key(
+            provider=experiment.get("provider") or row.get("provider"),
+            source_surface=experiment.get("source_surface") or row.get("source_surface"),
+            category=category,
+            requested_model=requested,
+            shadow_model=shadow,
+        )
+        item = rows_by_key.setdefault(key, _new_post_fix_shadow_yield_row(key))
+        if status == "selected":
+            selected_decisions += 1
+            item["selected_decision_count"] += 1
+        else:
+            skipped_decisions += 1
+            item["skipped_decision_count"] += 1
+            if reason == "sample-rate-not-selected" or reason == "streaming-shadow-not-sampled":
+                eligible_unsampled_decisions += 1
+                item["eligible_unsampled_count"] += 1
+        item["last_decision_at"] = max(
+            [value for value in (item.get("last_decision_at"), row.get("created_at")) if value],
+            default=None,
+        )
+        _increment_count(item["decision_reason_counts"], reason, fallback="unknown")
+        _increment_count(decision_status_counts, status, fallback="unknown")
+        _increment_count(decision_reason_counts, reason, fallback="unknown")
+        if last_decision_at is None or str(row.get("created_at")) > str(last_decision_at):
+            last_decision_at = row.get("created_at")
+
+    rows = [_finalize_post_fix_shadow_yield_row(row) for row in rows_by_key.values()]
+    rows.sort(
+        key=lambda item: (
+            -int(item.get("sample_count") or 0),
+            -int(item.get("selected_decision_count") or 0),
+            str(item.get("provider") or ""),
+            str(item.get("source_surface") or ""),
+            str(item.get("category") or ""),
+            str(item.get("requested_model") or ""),
+            str(item.get("shadow_model") or ""),
+        )
+    )
+    return {
+        "schema": "agentflow.post_fix_shadow_yield.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "since": cutoff,
+        "window_hours": None if cutoff is None or since else float(window_hours or 0),
+        "limit": capped_limit,
+        "summary": {
+            "sample_count": len(sample_rows),
+            "compared_count": compared_count,
+            "uncompared_count": max(0, len(sample_rows) - compared_count),
+            "clean_yield": round(compared_count / len(sample_rows), 4) if sample_rows else 0.0,
+            "decision_count": selected_decisions + skipped_decisions,
+            "selected_decision_count": selected_decisions,
+            "skipped_decision_count": skipped_decisions,
+            "eligible_unsampled_count": eligible_unsampled_decisions,
+            "shadow_cost_usd": round(total_shadow_cost, 6),
+            "last_sample_at": last_sample_at,
+            "last_decision_at": last_decision_at,
+        },
+        "status_counts": _count_rows(status_counts, key_name="status"),
+        "reason_counts": _count_rows(reason_counts),
+        "decision_status_counts": _count_rows(decision_status_counts, key_name="status"),
+        "decision_reason_counts": _count_rows(decision_reason_counts),
+        "managed_feedback_status_counts": _count_rows(managed_feedback_status_counts, key_name="status"),
+        "candidates": rows[:capped_limit],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "content_free": True,
+            "raw_prompts_included": False,
+            "raw_provider_bodies_included": False,
+            "raw_responses_included": False,
+            "tool_payloads_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "filesystem_paths_included": False,
+            "api_keys_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "basis": "local routing experiment metadata after the configured cutoff",
+        },
+    }
 
 
 def _build_claude_shadow_yield_report(
@@ -1608,7 +1952,13 @@ def _build_claude_shadow_yield_report(
     }
 
 
-def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[str, Any]:
+def build_routing_experiment_report(
+    store_obj: Any,
+    *,
+    limit: int = 20,
+    since: str | None = None,
+    window_hours: float | None = 24.0,
+) -> dict[str, Any]:
     capped = max(1, min(int(limit or 1), 1000))
     conn = store_obj.conn
     rows = conn.execute(
@@ -1901,6 +2251,12 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
     pass_rate_total = (summary_row or {}).get("pass_rate")
     eligibility_projection = _build_shadow_eligibility_projection(conn)
     claude_shadow_yield = _build_claude_shadow_yield_report(conn, candidates=candidates)
+    post_fix_shadow_yield = build_post_fix_shadow_yield_report(
+        store_obj,
+        since=since,
+        window_hours=window_hours,
+        limit=limit,
+    )
     return {
         "schema": "agentflow.routing_experiment_report.v1",
         "generated_at": utc_now(),
@@ -1949,6 +2305,7 @@ def build_routing_experiment_report(store_obj: Any, *, limit: int = 20) -> dict[
         "decision_surfaces": decision_surfaces,
         "eligibility_projection": eligibility_projection,
         "claude_shadow_yield": claude_shadow_yield,
+        "post_fix_shadow_yield": post_fix_shadow_yield,
         "candidates": candidates,
         "privacy": {
             "metadata_only": True,

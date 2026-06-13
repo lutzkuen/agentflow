@@ -37,7 +37,7 @@ from agentflow_proxy.recommendations import (
     PHASE_ROUTING_OUTCOME_SOURCE_SURFACE,
     pattern_decision_summaries,
 )
-from agentflow_proxy.routing_experiments import build_routing_experiment_report
+from agentflow_proxy.routing_experiments import build_post_fix_shadow_yield_report, build_routing_experiment_report
 from agentflow_proxy.session_phase_memory import build_session_phase_memory
 from agentflow_proxy.store import utc_now
 
@@ -10471,6 +10471,20 @@ def _optimization_eval_candidate_row(plan_row: dict[str, Any], verdict_row: dict
     }
 
 
+async def stats_post_fix_shadow_yield(
+    store_obj: Any,
+    limit: int = 50,
+    since: str | None = None,
+    window_hours: float = 24.0,
+) -> dict[str, Any]:
+    return build_post_fix_shadow_yield_report(
+        store_obj,
+        limit=limit,
+        since=since,
+        window_hours=window_hours,
+    )
+
+
 async def stats_optimization_eval_queue(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
     from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
@@ -18116,6 +18130,12 @@ def dashboard_html() -> str:
     </tr></thead>
     <tbody id="routing-experiments-tbody"></tbody>
   </table>
+  <table class="activity-table" data-table-id="post-fix-shadow-yield" data-filter-label="Filter post-fix shadow yield">
+    <thead><tr>
+      <th data-sort-type="text">Surface</th><th data-sort-type="text">Model pair</th><th data-sort-type="text">Category</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Compared</th><th data-sort-type="percent">Clean yield</th><th data-sort-type="number">Eligible unsampled</th><th data-sort-type="text">Top sample reasons</th><th data-sort-type="text">Top decision reasons</th><th data-sort-type="text">Managed feedback</th><th data-sort-type="time">Latest</th>
+    </tr></thead>
+    <tbody id="post-fix-shadow-yield-tbody"></tbody>
+  </table>
   <table class="activity-table" data-table-id="routing-experiment-decisions" data-filter-label="Filter routing A/B diagnostics">
     <thead><tr>
       <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="number">Observed</th>
@@ -20429,6 +20449,12 @@ function claudeRoutingFunnelBadges(items,emptyLabel){
   if(!items.length)return`<span class="badge hit">${esc(emptyLabel||'none')}</span>`;
   return items.slice(0,5).map(item=>`<span class="badge miss">${esc(item.value||item)} ${item.count!=null?Number(item.count||0).toLocaleString():''}</span>`).join(' ');
 }
+function keyedBreakdownBadges(items,keyName,emptyLabel){
+  items=items||[];
+  if(!items.length)return`<span class="badge hit">${esc(emptyLabel||'none')}</span>`;
+  keyName=keyName||'reason';
+  return items.slice(0,5).map(item=>`<span class="badge provider">${esc(item[keyName]||item.value||item.status||'unknown')} ${item.count!=null?Number(item.count||0).toLocaleString():''}</span>`).join(' ');
+}
 async function refreshClaudeRoutingPromotionFunnel(){
   try{
     const r=await fetch('/agentflow/stats/claude-routing-promotion-funnel?limit=1000');
@@ -21009,6 +21035,24 @@ async function refreshPhaseRouting(){
       <td class="flags">${budgetBadge} <span class="badge provider">${fmt(experimentPolicy.today_shadow_spend_usd||0,6)} / ${fmt(experimentPolicy.daily_budget_usd||0,6)}</span> <span class="badge miss">${fmt(experimentPolicy.today_budget_remaining_usd||0,6)} left</span></td>
       <td class="ts">${ago(row.last_sample_at)}</td>
     </tr>`).join('')||`<tr><td colspan="11" style="color:#8b949e">No routing A/B samples recorded · ${experimentPolicy.enabled?'enabled':'disabled'} · ${budgetBadge}</td></tr>`;
+    const postFixYield=experimentReport.post_fix_shadow_yield||{};
+    const postFixRows=postFixYield.candidates||[];
+    document.getElementById('post-fix-shadow-yield-tbody').innerHTML=postFixRows.map(row=>{
+      const latest=row.last_sample_at||row.last_decision_at;
+      return `<tr>
+        <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="model">${esc(shortModel(row.requested_model))} → ${esc(shortModel(row.shadow_model))}</td>
+        <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+        <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+        <td class="tokens">${(row.compared_count||0).toLocaleString()}</td>
+        <td class="${(row.clean_yield||0)<0.5?'cost':'tokens'}">${fmtPctValue(row.clean_yield||0)}</td>
+        <td class="tokens">${(row.eligible_unsampled_count||0).toLocaleString()}</td>
+        <td class="flags">${keyedBreakdownBadges(row.reason_counts,'reason','none')}</td>
+        <td class="flags">${keyedBreakdownBadges(row.decision_reason_counts,'reason','none')}</td>
+        <td class="flags">${keyedBreakdownBadges(row.managed_feedback_status_counts,'status','not-exported')}</td>
+        <td class="ts">${latest?ago(latest):'—'}</td>
+      </tr>`;
+    }).join('')||`<tr><td colspan="11" style="color:#8b949e">No post-fix shadow samples in ${postFixYield.since?'the selected window':'local metadata'}</td></tr>`;
     const experimentDecisionRows=experimentReport.decision_reasons||[];
     document.getElementById('routing-experiment-decisions-tbody').innerHTML=experimentDecisionRows.map(row=>`<tr>
       <td><span class="badge provider">${esc(shortProvider(row.provider||'unknown'))}</span> <span class="badge stream">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>

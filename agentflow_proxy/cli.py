@@ -5780,6 +5780,13 @@ def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: 
         help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
     )
     parser.add_argument("--limit", type=int, default=20, help="Maximum candidate rows to include, default: 20.")
+    parser.add_argument("--since", help="Only include post-fix shadow yield rows at or after this ISO timestamp.")
+    parser.add_argument(
+        "--window-hours",
+        type=float,
+        default=24.0,
+        help="Rolling post-fix shadow-yield window when --since is omitted, default: 24. Use 0 for all history.",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
 
@@ -5789,7 +5796,12 @@ def routing_experiment_report_cli(argv: Sequence[str] | None = None, *, stdout: 
 
     store = _open_store_for_db(str(args.db))
     try:
-        result = build_routing_experiment_report(store, limit=args.limit)
+        result = build_routing_experiment_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            window_hours=args.window_hours,
+        )
     finally:
         store.conn.close()
     if args.pretty:

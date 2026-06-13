@@ -442,6 +442,168 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertTrue(payload["privacy"]["metadata_only"])
         self.assertNotIn("private cli cache prompt", json.dumps(payload).lower())
 
+    def test_routing_experiment_report_cli_slices_post_fix_shadow_yield(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_routing_experiment(
+                    id="old-shadow-error",
+                    call_id="old-shadow-call-secret",
+                    created_at="2026-06-12T23:59:00+00:00",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-haiku-4-5-20251001",
+                    primary_model="claude-sonnet-4-6",
+                    shadow_model="claude-haiku-4-5-20251001",
+                    category="tool-result",
+                    routing_reason="fixture old shadow",
+                    input_tokens_est=100,
+                    primary_status_code=200,
+                    shadow_status_code=400,
+                    output_similarity=None,
+                    passed_threshold=0,
+                    shadow_cost_est_usd=0.0,
+                    error="shadow-http-400",
+                    routing_json=stable_json({"request_id": "old-shadow-request-secret"}),
+                    experiment_json=stable_json({
+                        "optimization_feedback": {
+                            "status": "shadow-http-400",
+                            "reason_codes": ["shadow-http-400"],
+                        },
+                        "raw_prompt": "old raw prompt must stay excluded",
+                    }),
+                )
+                for idx, status in enumerate(("compared", "shadow-unsupported-shape"), start=1):
+                    compared = status == "compared"
+                    store.log_routing_experiment(
+                        id=f"recent-shadow-{idx}",
+                        call_id=f"recent-shadow-call-secret-{idx}",
+                        created_at=f"2026-06-13T01:0{idx}:00+00:00",
+                        provider="anthropic",
+                        source_surface="anthropic_messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-haiku-4-5-20251001",
+                        primary_model="claude-sonnet-4-6",
+                        shadow_model="claude-haiku-4-5-20251001",
+                        category="tool-result",
+                        routing_reason="fixture recent shadow",
+                        input_tokens_est=100,
+                        primary_status_code=200,
+                        shadow_status_code=200 if compared else None,
+                        primary_latency_ms=40,
+                        shadow_latency_ms=20 if compared else None,
+                        primary_output_chars=12,
+                        shadow_output_chars=12 if compared else 0,
+                        primary_output_sha256=f"recent-primary-{idx}",
+                        shadow_output_sha256=f"recent-shadow-{idx}",
+                        output_similarity=0.95 if compared else None,
+                        passed_threshold=1 if compared else 0,
+                        primary_cost_est_usd=0.003,
+                        shadow_cost_est_usd=0.001 if compared else 0.0,
+                        budget_limit_usd=1.0,
+                        budget_spent_before_usd=0.0,
+                        budget_remaining_before_usd=1.0,
+                        budget_spent_after_usd=0.001,
+                        error=None if compared else "shadow-unsupported-shape:tool-protocol-context-blocked",
+                        routing_json=stable_json({"request_id": "recent-shadow-request-secret"}),
+                        experiment_json=stable_json({
+                            "optimization_feedback": {
+                                "status": status,
+                                "reason_codes": ["passed"] if compared else [
+                                    "shadow-unsupported-shape",
+                                    "unsupported-shadow-shape-tool-protocol-context-blocked",
+                                ],
+                            },
+                            "managed_feedback": {
+                                "status": "queued",
+                                "source_surface": "routing_experiment_outcome",
+                                "payload_included": False,
+                            },
+                            "provider_body": {"messages": [{"content": "recent raw provider body must stay excluded"}]},
+                            "tool_payload": {"secret": "recent tool payload must stay excluded"},
+                        }),
+                        primary_response_json=stable_json({"content": "recent raw primary response must stay excluded"}),
+                        shadow_response_json=stable_json({"content": "recent raw shadow response must stay excluded"}),
+                    )
+                store.log_call(
+                    id="recent-decision-unsampled",
+                    created_at="2026-06-13T01:03:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=1,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=10,
+                    input_tokens_est=10,
+                    output_tokens_est=10,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    routing_json=stable_json({
+                        "routing_experiment": {
+                            "status": "skipped",
+                            "reason": "sample-rate-not-selected",
+                            "provider": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "category": "tool-result",
+                            "requested_model": "claude-sonnet-4-6",
+                            "shadow_model": "claude-haiku-4-5-20251001",
+                            "request_id": "decision-request-secret",
+                        }
+                    }),
+                    category="tool-result",
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.routing_experiment_report_cli(
+                ["--db", db_path, "--since", "2026-06-13T00:00:00+00:00", "--limit", "10"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        yield_report = payload["post_fix_shadow_yield"]
+        self.assertEqual(yield_report["schema"], "agentflow.post_fix_shadow_yield.v1")
+        self.assertEqual(yield_report["summary"]["sample_count"], 2)
+        self.assertEqual(yield_report["summary"]["compared_count"], 1)
+        self.assertEqual(yield_report["summary"]["eligible_unsampled_count"], 1)
+        self.assertAlmostEqual(yield_report["summary"]["clean_yield"], 0.5, places=6)
+        reasons = {row["reason"] for row in yield_report["reason_counts"]}
+        self.assertIn("passed", reasons)
+        self.assertIn("shadow-unsupported-shape", reasons)
+        self.assertNotIn("shadow-http-400", reasons)
+        row = yield_report["candidates"][0]
+        self.assertEqual(row["provider"], "anthropic")
+        self.assertEqual(row["source_surface"], "anthropic_messages")
+        self.assertEqual(row["category"], "tool-result")
+        self.assertEqual(row["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(row["shadow_model"], "claude-haiku-4-5-20251001")
+        self.assertTrue(yield_report["privacy"]["metadata_only"])
+        rendered = json.dumps(yield_report, sort_keys=True)
+        for forbidden in (
+            "old-shadow-call-secret",
+            "recent-shadow-call-secret",
+            "recent-shadow-request-secret",
+            "decision-request-secret",
+            "old raw prompt must stay excluded",
+            "recent raw provider body must stay excluded",
+            "recent tool payload must stay excluded",
+            "recent raw primary response must stay excluded",
+            "recent raw shadow response must stay excluded",
+            '"request_id"',
+            '"provider_body"',
+            '"tool_payload"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cache_replayability_report_cli_reads_local_metadata_only(self):
         from agentflow_proxy.store import Store, stable_json
 
