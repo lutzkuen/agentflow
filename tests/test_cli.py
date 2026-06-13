@@ -68,6 +68,81 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn("usage:", stdout.getvalue())
 
+    def test_readme_onboarding_happy_path_stays_primary_and_private(self):
+        readme = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertLess(readme.index("## Quick start"), readme.index("## Manual proxy fallback"))
+        self.assertLess(readme.index("agentflow activate openai"), readme.index("agentflow-proxy --provider"))
+        for expected in (
+            "agentflow activate openai",
+            "agentflow activate claude",
+            "agentflow activate codex",
+            "agentflow activate claude-vscode",
+            "agentflow stats",
+            "agentflow doctor",
+            "openai_base_url = \"http://127.0.0.1:4003/v1\"",
+            "ANTHROPIC_BASE_URL=http://127.0.0.1:4000",
+            "agentflow_server",
+            "not a provider proxy",
+            "GitHub Copilot non-goal",
+            "unsupported: GitHub Copilot is not a base-url target",
+        ):
+            self.assertIn(expected, readme)
+        self.assertNotIn("sk-", readme)
+
+    def test_readme_onboarding_commands_smoke_without_credentials(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            codex_config = Path(tmp) / "codex-config.toml"
+            smoke_commands = [
+                ["activate", "openai", "--config-dir", str(config_dir), "--dry-run"],
+                ["activate", "claude", "--config-dir", str(config_dir), "--dry-run"],
+                [
+                    "activate",
+                    "codex",
+                    "--config-dir",
+                    str(config_dir),
+                    "--codex-config",
+                    str(codex_config),
+                    "--dry-run",
+                ],
+                ["activate", "claude-vscode", "--config-dir", str(config_dir), "--dry-run"],
+                ["stats", "--config-dir", str(config_dir)],
+                ["stats", "--config-dir", str(config_dir), "--json"],
+            ]
+
+            for command in smoke_commands:
+                with self.subTest(command=command):
+                    code = cli.agentflow_cli(command, stdout=io.StringIO(), stderr=io.StringIO())
+                    self.assertEqual(code, 0)
+
+            cli.agentflow_cli(["activate", "openai", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            cli.agentflow_cli(["activate", "claude", "--config-dir", str(config_dir)], stdout=io.StringIO())
+            run_stdout = io.StringIO()
+            self.assertEqual(
+                cli.agentflow_cli(["run", "openai", "--config-dir", str(config_dir), "--dry-run"], stdout=run_stdout),
+                0,
+            )
+            self.assertIn("--provider openai", run_stdout.getvalue())
+
+            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+                http_get.return_value = httpx.Response(
+                    200,
+                    json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"},
+                )
+                doctor_stdout = io.StringIO()
+                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", str(config_dir)], stdout=doctor_stdout)
+            self.assertEqual(code, 0)
+            self.assertIn("openai: healthy", doctor_stdout.getvalue())
+
+    def test_activate_copilot_fails_as_unsupported_base_url_target(self):
+        stderr = io.StringIO()
+
+        code = cli.agentflow_cli(["activate", "copilot"], stdout=io.StringIO(), stderr=stderr)
+
+        self.assertEqual(code, 2)
+        self.assertIn("unsupported: GitHub Copilot is not a base-url target", stderr.getvalue())
+
     def test_agentflow_version_command_prints_version(self):
         from agentflow_proxy import __version__
 

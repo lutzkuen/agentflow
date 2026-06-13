@@ -1,139 +1,125 @@
 # AgentFlow
 
-AgentFlow is a **local proxy for token savings and telemtry on LLM traffic**.
+AgentFlow is a **local proxy for token savings and telemetry on LLM traffic**.
 
 Run it on localhost, point OpenAI-compatible or Anthropic-compatible clients at it, and keep using your normal provider credentials. AgentFlow forwards the real provider call, records local usage metadata, and shows cost and traffic behavior in a read-only dashboard.
 It will apply crunching, caching and routing to decrease your token spend while preserving quality.
 
 By default, AgentFlow does **not** store raw prompts or responses.
 
-## How does it work?
-
-AgentFlow sits between tools such as Codex, Claude Code, VS Code extensions, or your own API app and the provider API.
-
-```text
-your app / IDE plugin -> AgentFlow on localhost -> OpenAI or Anthropic
-```
-
-It currently supports:
-
-| Provider mode | Routes |
-| --- | --- |
-| Anthropic / Claude-compatible | `POST /v1/messages` |
-| OpenAI-compatible | `POST /v1/responses`, `POST /v1/chat/completions`, WebSocket `/v1/responses`, plus files/uploads passthrough |
-| Codex app-server | Experimental proxy/telemetry path |
-
-The OpenAI and Anthropic proxies run as separate provider modes. Run two AgentFlow processes if you want both at the same time.
-
-## How does it help me?
-
-Agentflow reduces your LLM spend.
-
-Beyond that AgentFlow gives you local visibility into coding-agent traffic:
-
-- estimated tokens, spend, savings, and recent activity
-- which app, session, provider, and model generated calls
-- routing, prompt-crunching, cache, retry, backoff, and error decisions
-- policy state and whether local policy files need reload
-- metadata-only Codex app-server telemetry
-
-It is meant for answering "where did the tokens and cost go?" without sending prompts or responses to another service.
-
-## Install
+## Quick start
 
 Requires Python 3.10+.
+
+The target packaged install is:
+
+```bash
+pip install agentflow
+```
+
+Until the public package name is migrated, install from this repository:
 
 ```bash
 git clone https://github.com/lutzkuen/agentflow.git
 cd agentflow
-
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-Smoke-test the install:
+Then use the public onboarding command:
 
 ```bash
 agentflow --help
+agentflow activate openai
+agentflow activate claude
+agentflow activate codex
+agentflow activate claude-vscode
+agentflow stats
+agentflow doctor
 ```
 
-The public onboarding command is `agentflow`. The Python distribution is still
-published from this repository as `agentflow-proxy`; reserving or migrating the
-PyPI package name to `agentflow` is a release task. Existing specialist scripts
-such as `agentflow-proxy` remain available for compatibility.
+Activation writes local routing/config files only. It does not store or print API keys.
+Keep provider credentials in your shell, OS secret manager, or the client that already
+uses them.
 
-Run tests:
+Start the configured proxies in separate terminals:
 
 ```bash
-python -m unittest discover -s tests
+agentflow run openai
+agentflow run claude
 ```
 
-## Start AgentFlow
-
-### Claude / Anthropic-compatible proxy
+Use `--dry-run` to inspect the command without starting a server:
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-agentflow-proxy --provider anthropic --host 127.0.0.1 --port 4000
+agentflow run openai --dry-run
+agentflow run claude --dry-run
 ```
 
-This serves:
+Open the read-only dashboard when a proxy or dashboard process is running:
 
 ```text
-http://127.0.0.1:4000/v1/messages
-http://127.0.0.1:4000/agentflow/dashboard
+http://127.0.0.1:4002/agentflow/dashboard
 ```
 
-### OpenAI-compatible proxy
+## What activation changes
+
+| Target | Command | What it changes | Local client URL | Runtime |
+| --- | --- | --- | --- | --- |
+| OpenAI API apps | `agentflow activate openai` | AgentFlow activation profile for OpenAI-compatible traffic | `http://127.0.0.1:4003/v1` | `agentflow run openai` |
+| Claude API apps | `agentflow activate claude` | AgentFlow activation profile for Anthropic-compatible traffic | `http://127.0.0.1:4000` | `agentflow run claude` |
+| Codex VS Code / CLI | `agentflow activate codex` | User-level `~/.codex/config.toml` `openai_base_url`; creates the OpenAI profile if needed | `http://127.0.0.1:4003/v1` | `agentflow run openai` |
+| Claude VS Code / Claude Code | `agentflow activate claude-vscode` | AgentFlow-managed non-secret env file with `ANTHROPIC_BASE_URL`; creates the Claude profile if needed | `http://127.0.0.1:4000` | `agentflow run claude` |
+| Codex app-server telemetry | No `activate` target | Experimental WebSocket relay for OAuth/subscription app-server telemetry | `ws://127.0.0.1:4013` | `agentflow-codex-app-proxy` |
+| GitHub Copilot | Unsupported | No base-url activation target | Not applicable | Not applicable |
+
+The OpenAI and Anthropic proxies run as separate provider modes. Run two AgentFlow
+processes if you want both at the same time.
+
+## Interpret stats and doctor
 
 ```bash
-export OPENAI_API_KEY="sk-..."
-agentflow-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
+agentflow stats
 ```
 
-This serves:
-
-```text
-http://127.0.0.1:4003/v1/responses
-http://127.0.0.1:4003/v1/chat/completions
-http://127.0.0.1:4003/agentflow/dashboard
-```
-
-`--openai-auth-mode proxy` means AgentFlow uses `AGENTFLOW_OPENAI_API_KEY` or `OPENAI_API_KEY` from the proxy environment when forwarding upstream. Use `--openai-auth-mode client` if you want each client request's `Authorization` header to be forwarded.
-
-For a custom OpenAI-compatible provider, keep the client base URL pointed at
-AgentFlow and configure the upstream provider URL separately:
+`agentflow stats` reads the local activation config and reports which targets are
+configured, the local base URL each client should use, and the redacted upstream
+provider URL AgentFlow will forward to. It does not contact provider APIs.
 
 ```bash
-agentflow activate openai \
-  --openai-base-url 'https://resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21' \
-  --openai-auth-mode proxy
+agentflow doctor
+```
 
+`agentflow doctor` checks configured targets without printing secrets. For provider
+targets it checks the loopback health endpoint and detects common stale-config
+states such as a running proxy pointed at a different upstream. For VS Code targets
+it checks the local config files and reports when runtime environment inheritance
+cannot be proven from the current shell.
+
+Use JSON output for scripts:
+
+```bash
+agentflow stats --json
+agentflow doctor --json
+```
+
+## OpenAI API apps
+
+Configure the local OpenAI target:
+
+```bash
+agentflow activate openai
 agentflow run openai
 ```
 
-In that example:
-
-- `http://127.0.0.1:4003/v1` is the local AgentFlow base URL your OpenAI SDK or tool uses.
-- `https://resource.openai.azure.com/openai/deployments/my-deployment?...` is the upstream provider base URL AgentFlow forwards to.
-- `--openai-auth-mode proxy` uses credentials from the AgentFlow process environment. `--openai-auth-mode client` forwards each client's `Authorization` header instead.
-
-AgentFlow preserves upstream path and query components such as Azure `api-version`,
-avoids duplicate `/v1` route segments, and redacts userinfo or sensitive query
-values in CLI and health output.
-
-## Point an existing app at AgentFlow
-
-### Existing OpenAI API app
-
-Change the OpenAI base URL to:
+Change the OpenAI base URL in your app to:
 
 ```text
 http://127.0.0.1:4003/v1
 ```
 
-Keep the same models and API key. Examples:
+Keep the same models and API key handling your app already uses.
 
 ```python
 import os
@@ -161,7 +147,35 @@ curl http://127.0.0.1:4003/v1/responses \
   -d '{"model":"gpt-5.5","input":"Reply with ok"}'
 ```
 
-### Existing Claude / Anthropic API app
+For a custom OpenAI-compatible provider, keep the client base URL pointed at
+AgentFlow and configure the upstream provider URL separately:
+
+```bash
+agentflow activate openai \
+  --openai-base-url 'https://resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21' \
+  --openai-auth-mode proxy
+
+agentflow run openai
+```
+
+In that example:
+
+- `http://127.0.0.1:4003/v1` is the local AgentFlow base URL your OpenAI SDK or tool uses.
+- `https://resource.openai.azure.com/openai/deployments/my-deployment?...` is the upstream provider base URL AgentFlow forwards to.
+- `--openai-auth-mode proxy` uses credentials from the AgentFlow process environment. `--openai-auth-mode client` forwards each client's `Authorization` header instead.
+
+AgentFlow preserves upstream path and query components such as Azure `api-version`,
+avoids duplicate `/v1` route segments, and redacts userinfo or sensitive query
+values in CLI and health output.
+
+## Claude API apps
+
+Configure the local Claude target:
+
+```bash
+agentflow activate claude
+agentflow run claude
+```
 
 Change the Anthropic base URL to:
 
@@ -189,32 +203,27 @@ curl http://127.0.0.1:4000/v1/messages \
   -d '{"model":"claude-sonnet-4.5","max_tokens":32,"messages":[{"role":"user","content":"Reply with ok"}]}'
 ```
 
-## Run VS Code so Codex and Claude use AgentFlow
+## Codex VS Code and CLI
 
-VS Code extensions usually read environment variables from the VS Code process. If you open VS Code from the desktop launcher, it may not know about variables you exported in a terminal.
+`agentflow activate codex` configures Codex through the user-level Codex
+`openai_base_url` setting:
 
-Use this pattern:
+```bash
+agentflow activate codex
+agentflow run openai
+```
 
-1. Start AgentFlow in one terminal and leave it running.
-2. Open a second terminal.
-3. In the second terminal, export the variables the extension needs.
-4. Launch VS Code from that same second terminal with `code .`.
-
-`code .` means "open the current folder in VS Code." Because VS Code was started from that shell, its extensions can inherit that shell's environment.
-
-### Codex VS Code extension
-
-Put the OpenAI proxy base URL in your **user-level** Codex config:
+This writes or updates:
 
 ```toml
 # ~/.codex/config.toml
 openai_base_url = "http://127.0.0.1:4003/v1"
 ```
 
-Then launch VS Code from a shell that has your OpenAI key:
+Start VS Code from a shell or launcher where Codex can access your existing
+OpenAI credentials:
 
 ```bash
-export OPENAI_API_KEY="sk-..."
 code .
 ```
 
@@ -224,20 +233,110 @@ For a one-off CLI check:
 codex exec --config 'openai_base_url="http://127.0.0.1:4003/v1"' "Reply with ok"
 ```
 
-Do not put this provider setting in a project `.codex/config.toml`; Codex treats provider/auth settings as machine-local.
+Do not put this provider setting in a project `.codex/config.toml`; Codex treats
+provider/auth settings as machine-local.
 
-### Claude / Claude Code VS Code integration
+## Claude VS Code and Claude Code
 
-Run the Anthropic proxy, then launch VS Code from a shell with the Claude proxy environment:
+`agentflow activate claude-vscode` writes an AgentFlow-managed non-secret env file
+for the Claude base URL and prints a shell snippet. It does not write
+`ANTHROPIC_API_KEY` or token values.
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
+agentflow activate claude-vscode
+agentflow run claude
+```
+
+Launch VS Code from a shell that has your Claude credentials and the printed
+AgentFlow routing variables:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 export ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_API_KEY"
 code .
 ```
 
-If your extension does not inherit shell environment variables, configure the same variables in that extension's environment/wrapper. Keep secrets in your user environment, not in repository files.
+If your extension does not inherit shell environment variables, configure the
+same variables in that extension's environment/wrapper. Keep secrets in your
+user environment, not in repository files.
+
+## GitHub Copilot non-goal
+
+GitHub Copilot is not currently a normal AgentFlow base-url activation target.
+The AgentFlow base-url path works for clients/tools that let the user set an
+OpenAI-compatible or Anthropic-compatible provider base URL. Copilot is mediated
+through GitHub/Copilot product integrations, accounts, policy, and extension
+behavior. Future Copilot support should be designed as a separate integration,
+not as `agentflow activate copilot` silently editing an assumed provider URL.
+
+```bash
+agentflow activate copilot
+# unsupported: GitHub Copilot is not a base-url target; see README.md
+```
+
+## How does it work?
+
+AgentFlow sits between tools such as Codex, Claude Code, VS Code extensions, or your own API app and the provider API.
+
+```text
+your app / IDE plugin -> AgentFlow on localhost -> OpenAI or Anthropic
+```
+
+It currently supports:
+
+| Provider mode | Routes |
+| --- | --- |
+| Anthropic / Claude-compatible | `POST /v1/messages` |
+| OpenAI-compatible | `POST /v1/responses`, `POST /v1/chat/completions`, WebSocket `/v1/responses`, plus files/uploads passthrough |
+| Codex app-server | Experimental proxy/telemetry path |
+
+AgentFlow gives you local visibility into coding-agent traffic:
+
+- estimated tokens, spend, savings, and recent activity
+- which app, session, provider, and model generated calls
+- routing, prompt-crunching, cache, retry, backoff, and error decisions
+- policy state and whether local policy files need reload
+- metadata-only Codex app-server telemetry
+
+It is meant for answering "where did the tokens and cost go?" without sending prompts or responses to another service.
+
+## Manual proxy fallback
+
+The public onboarding command is `agentflow`. The Python distribution is still
+published from this repository as `agentflow-proxy`; reserving or migrating the
+PyPI package name to `agentflow` is a release task. Existing specialist scripts
+such as `agentflow-proxy` remain available for compatibility.
+
+Run the Anthropic-compatible proxy directly:
+
+```bash
+agentflow-proxy --provider anthropic --host 127.0.0.1 --port 4000
+```
+
+Run the OpenAI-compatible proxy directly:
+
+```bash
+agentflow-proxy --provider openai --openai-auth-mode proxy --host 127.0.0.1 --port 4003
+```
+
+`--openai-auth-mode proxy` means AgentFlow uses `AGENTFLOW_OPENAI_API_KEY` or
+`OPENAI_API_KEY` from the proxy environment when forwarding upstream. Use
+`--openai-auth-mode client` if you want each client request's `Authorization`
+header to be forwarded.
+
+Run tests:
+
+```bash
+python -m unittest discover -s tests
+```
+
+## Managed control plane boundary
+
+`agentflow_server` is the future managed control plane for metadata-only policy
+recommendations. It is not a provider proxy and should not receive or forward
+raw provider request bodies. Local AgentFlow still owns provider forwarding,
+request mutation, cache lookup/storage, local rule files, rollback, and the
+read-only dashboard.
 
 ## Dashboard
 

@@ -31,6 +31,7 @@ OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_OPTIMIZATION_ROLLOUT_ACTIONS_U
 SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_SCAFFOLD_ROLLOUT_ACTIONS_URL"
 MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode")
+UNSUPPORTED_ONBOARDING_TARGETS = ("copilot",)
 RUN_TARGETS = ("openai", "claude")
 DEFAULT_STATS_URL = "http://127.0.0.1:4002/agentflow/stats"
 
@@ -211,6 +212,15 @@ def agentflow_cli(
         action="store_true",
         help="Confirm an explicit Codex config update while still refusing project-local .codex/config.toml.",
     )
+    activate_copilot = activate_subparsers.add_parser(
+        "copilot",
+        help="Unsupported: GitHub Copilot is not a base-url activation target.",
+    )
+    activate_copilot.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
     run_parser = subparsers.add_parser(
         "run",
@@ -289,6 +299,10 @@ def agentflow_cli(
         args.config_dir = os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
 
     if args.command == "activate":
+        if args.target in UNSUPPORTED_ONBOARDING_TARGETS:
+            stderr.write("unsupported: GitHub Copilot is not a base-url target; see README.md\n")
+            return 2
+
         if args.target in {"claude-vscode", "claude-code"}:
             try:
                 result = activation.activate_claude_vscode(
