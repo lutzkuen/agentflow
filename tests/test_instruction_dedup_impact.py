@@ -34,6 +34,10 @@ FORBIDDEN_VALUES = (
     "raw-session-impact-secret",
     "raw-cache-key-impact-secret",
     "raw-tenant-impact-secret",
+    "raw-impact-candidate-secret",
+    "raw-impact-rule-secret",
+    "raw impact category secret",
+    "raw impact reason secret",
     "/workspace/private/impact.py",
 )
 
@@ -270,6 +274,40 @@ class InstructionDedupImpactTests(unittest.TestCase):
         self.assertEqual(managed_egress_violations(payload), [])
         self.assertFalse(payload["metadata"]["privacy"]["raw_instruction_text_included"])
         self.assertFalse(payload["metadata"]["privacy"]["request_ids_included"])
+        self._assert_private(payload)
+
+    def test_impact_and_lifecycle_feedback_sanitize_raw_runtime_metadata(self) -> None:
+        self._log_call(
+            status="applied",
+            reason="instruction-section-dedup-applied",
+            extra_meta={
+                "candidate_id": "raw-impact-candidate-secret",
+                "selected_rule_id": "raw-impact-rule-secret",
+                "category": "raw impact category secret",
+                "workflow_phase": "/workspace/private/impact.py",
+                "reason_codes": ["raw impact reason secret"],
+            },
+        )
+
+        report = build_instruction_dedup_impact_report(
+            self.store,
+            limit=20,
+            min_applied_samples=1,
+            min_holdout_samples=0,
+        )
+        candidate = report["candidates"][0]
+        self.assertTrue(candidate["candidate_id"].startswith("instruction-dedup-candidate:"))
+        self.assertEqual(candidate["rule_id"], "unknown")
+        self.assertEqual(candidate["category"], "unknown")
+        self.assertEqual(candidate["workflow_phase"], "unknown")
+        self.assertEqual(candidate["cohorts"]["applied"]["reason_breakdown"][0]["value"], "unknown")
+
+        payload = build_instruction_dedup_lifecycle_feedback(report)
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(managed_egress_violations(payload), [])
+        self._assert_private(report)
         self._assert_private(payload)
 
     def test_feedback_queue_helper_queues_when_managed_disabled(self) -> None:

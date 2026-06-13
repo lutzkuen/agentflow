@@ -790,6 +790,71 @@ instruction_section_deduplication:
             self.assertEqual(thinking_crunched, thinking_body)
             self.assertEqual(thinking_meta["instruction_section_deduplication"]["reason"], "thinking-content-risk")
 
+    def test_instruction_section_dedup_invalid_canary_policy_fails_closed_without_raw_metadata(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            section = ("Invalid canary instruction section. " + "Keep local instruction text private. " * 8).strip()
+            fingerprint = crunch_module._instruction_hash_text(crunch_module._normalize_instruction_text(section))
+            (config / "crunch_rules.yaml").write_text(
+                f"""
+enabled: true
+instruction_section_deduplication:
+  enabled: true
+  policy_source: local-manual
+  min_section_chars: 80
+  min_repeated_count: 2
+  keep_recent_sections: 1
+  max_replacements: 4
+  replacement_notice: "raw replacement notice secret must not leak"
+  canary:
+    enabled: true
+    fraction: 0.8
+    holdout_fraction: 0.4
+    salt: raw canary salt secret must not leak
+  safety_stop:
+    enabled: false
+  rules:
+    - id: raw-runtime-rule-secret
+      candidate_id: raw-runtime-candidate-secret
+      instruction_section_fingerprints:
+        - {fingerprint}
+      enabled: true
+      max_replacements: 2
+      canary:
+        enabled: true
+        fraction: 0.8
+        holdout_fraction: 0.4
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+            body = self._instruction_body(section)
+
+            crunched, meta = manual.crunch_body(body)
+
+            self.assertEqual(crunched, body)
+            dedup = meta["instruction_section_deduplication"]
+            self.assertEqual(dedup["status"], "skipped")
+            self.assertEqual(dedup["reason"], "invalid-canary-configuration")
+            self.assertIn("invalid-canary-configuration", dedup["reason_codes"])
+            self.assertFalse(dedup["rules"][0]["canary"]["valid"])
+            self.assertIn("invalid-canary-fraction-sum", dedup["rules"][0]["canary"]["validation_errors"])
+            self.assertEqual(dedup["rules"][0]["rule_id"], "instruction-section-dedup-policy")
+            self.assertTrue(dedup["rules"][0]["candidate_id"].startswith("instruction-dedup-candidate:"))
+            self.assertFalse(dedup["rule_path_included"])
+            rendered = json.dumps(dedup, sort_keys=True)
+            for forbidden in (
+                "raw replacement notice secret must not leak",
+                "raw canary salt secret must not leak",
+                "raw-runtime-rule-secret",
+                "raw-runtime-candidate-secret",
+                "Invalid canary instruction section",
+            ):
+                self.assertNotIn(forbidden, rendered)
+
     def test_instruction_section_dedup_coordinator_suppression_prevents_mutation(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

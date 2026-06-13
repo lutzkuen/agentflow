@@ -23,6 +23,7 @@ from agentflow_proxy.pattern_safety import (
     log_pattern_canary_safety_stop,
 )
 from agentflow_proxy.pattern_modules import evaluate_pattern_modules, registered_pattern_modules
+from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.store import stable_json
 from agentflow_proxy.terminal_compaction_dry_run import (
     DEFAULT_HEAD_LINES as TERMINAL_COMPACTION_DEFAULT_HEAD_LINES,
@@ -588,6 +589,7 @@ def _list_of_strings(value: Any) -> list[str]:
 def _apply_fraction_canary_yaml(target_canary: dict[str, Any], raw_canary: Any) -> None:
     if not isinstance(raw_canary, dict):
         return
+    validation_errors = _instruction_canary_validation_errors(raw_canary)
     target_canary["enabled"] = _as_bool(raw_canary.get("enabled"), target_canary["enabled"])
     for source_key, target_key in (
         ("fraction", "fraction"),
@@ -605,6 +607,42 @@ def _apply_fraction_canary_yaml(target_canary: dict[str, Any], raw_canary: Any) 
         target_canary["unit"] = str(raw_canary["unit"])
     if raw_canary.get("canary_unit") is not None:
         target_canary["unit"] = str(raw_canary["canary_unit"])
+    if validation_errors:
+        target_canary["validation_errors"] = validation_errors
+
+
+def _instruction_canary_validation_errors(raw_canary: Any) -> list[str]:
+    if raw_canary is None:
+        return []
+    if not isinstance(raw_canary, dict):
+        return ["invalid-canary-configuration"]
+    errors: list[str] = []
+
+    def parse_unit_interval(key: str) -> float | None:
+        if raw_canary.get(key) is None:
+            return None
+        try:
+            value = float(raw_canary.get(key))
+        except (TypeError, ValueError):
+            errors.append(f"invalid-canary-{key.replace('_', '-')}")
+            return None
+        if value < 0.0 or value > 1.0:
+            errors.append(f"invalid-canary-{key.replace('_', '-')}")
+        return value
+
+    fraction = parse_unit_interval("fraction")
+    if fraction is None:
+        fraction = parse_unit_interval("canary_fraction")
+    if fraction is None:
+        fraction = parse_unit_interval("rollout_fraction")
+    holdout_fraction = parse_unit_interval("holdout_fraction")
+    if fraction is not None and holdout_fraction is not None and 0.0 <= fraction <= 1.0 and 0.0 <= holdout_fraction <= 1.0:
+        if fraction + holdout_fraction > 1.0:
+            errors.append("invalid-canary-fraction-sum")
+    configured_errors = raw_canary.get("validation_errors")
+    if isinstance(configured_errors, list):
+        errors.extend(public_label(item, "invalid-canary-configuration") for item in configured_errors if str(item))
+    return sorted(set(errors))
 
 
 def _apply_instruction_dedup_safety_yaml(target_safety: dict[str, Any], raw_safety: Any) -> None:
@@ -2011,6 +2049,7 @@ def _select_instruction_dedup_rule(policy: dict[str, Any], basis: dict[str, Any]
 def _instruction_dedup_cohort(rule: dict[str, Any], section_fingerprint: str, basis: dict[str, Any]) -> dict[str, Any]:
     raw_canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
     enabled = _as_bool(raw_canary.get("enabled"), True)
+    validation_errors = _instruction_canary_validation_errors(raw_canary)
     try:
         fraction = max(0.0, min(1.0, float(raw_canary.get("fraction", 0.0) or 0.0)))
     except (TypeError, ValueError):
@@ -2034,7 +2073,11 @@ def _instruction_dedup_cohort(rule: dict[str, Any], section_fingerprint: str, ba
     }
     digest = hashlib.sha256(json.dumps(cohort_basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
-    if not enabled:
+    if validation_errors:
+        cohort = "invalid"
+        selected = False
+        is_holdout = False
+    elif not enabled:
         cohort = "disabled"
         selected = False
         is_holdout = False
@@ -2063,6 +2106,8 @@ def _instruction_dedup_cohort(rule: dict[str, Any], section_fingerprint: str, ba
         "cohort_basis": "public-metadata-plus-hidden-instruction-fingerprint",
         "salt_included": False,
         "fingerprint_included": False,
+        "valid": not validation_errors,
+        "validation_errors": validation_errors,
     }
 
 
@@ -2070,16 +2115,17 @@ def _instruction_dedup_coordinator_compatibility(row_meta: dict[str, Any]) -> di
     decision = row_meta.get("optimization_coordinator")
     if not isinstance(decision, dict):
         return {"status": "unknown", "compatible": True, "reason_codes": [], "selected_family": None}
-    selected = str(decision.get("selected_family") or decision.get("selected_action_family") or "none")
-    reasons = [str(item) for item in decision.get("reason_codes") or [] if str(item)]
+    selected_raw = str(decision.get("selected_family") or decision.get("selected_action_family") or "none")
+    selected = public_label(selected_raw, "unknown")
+    reasons = [public_label(item, "sanitized-reason") for item in decision.get("reason_codes") or [] if str(item)]
     suppressed = decision.get("suppressed_families") if isinstance(decision.get("suppressed_families"), list) else []
     for item in suppressed:
         if not isinstance(item, dict):
             continue
         family = str(item.get("family") or "")
         if family in {"pattern_crunch", "prompt_role", "instruction_section_deduplication"} or "prompt_role" in family:
-            reasons.extend(str(reason) for reason in item.get("reason_codes") or [] if str(reason))
-    if selected not in {"none", "pattern_crunch", "prompt_role", "instruction_section_deduplication"}:
+            reasons.extend(public_label(reason, "sanitized-reason") for reason in item.get("reason_codes") or [] if str(reason))
+    if selected_raw not in {"none", "pattern_crunch", "prompt_role", "instruction_section_deduplication"}:
         reasons.append("conflicts-with-coordinator-selection")
         return {"status": "conflict", "compatible": False, "reason_codes": sorted(set(reasons)), "selected_family": selected}
     if "coordinator-holdout" in reasons or "coordinator-canary-not-selected" in reasons:
@@ -2223,8 +2269,8 @@ def _instruction_dedup_meta(policy: dict[str, Any], status: str, reason: str) ->
         "reason": reason,
         "changed": False,
         "applied": False,
-        "policy_source": str(policy.get("policy_source") or CRUNCH_POLICY_SOURCE),
-        "rule_path": str(CRUNCH_RULES_PATH),
+        "policy_source": public_label(policy.get("policy_source") or CRUNCH_POLICY_SOURCE, "unknown"),
+        "rule_path_included": False,
         "configured_rule_count": len(policy.get("rules") or []),
         "selected_rule_id": None,
         "candidate_id": None,
@@ -2274,6 +2320,8 @@ def _instruction_dedup_public_canary(canary: dict[str, Any]) -> dict[str, Any]:
         public["status"] = "skipped"
     elif cohort == "disabled":
         public["status"] = "disabled"
+    elif cohort == "invalid":
+        public["status"] = "invalid"
     public["salt_included"] = False
     public["fingerprint_included"] = False
     return public
@@ -2281,10 +2329,10 @@ def _instruction_dedup_public_canary(canary: dict[str, Any]) -> dict[str, Any]:
 
 def _instruction_dedup_rule_meta(rule: dict[str, Any], canary: dict[str, Any]) -> dict[str, Any]:
     return {
-        "rule_id": str(rule.get("id") or "instruction-section-dedup-policy"),
-        "candidate_id": rule.get("candidate_id") if isinstance(rule.get("candidate_id"), str) else None,
+        "rule_id": public_label(rule.get("id") or "instruction-section-dedup-policy", "instruction-section-dedup-policy"),
+        "candidate_id": public_id(rule.get("candidate_id"), prefix="instruction-dedup-candidate") if rule.get("candidate_id") not in (None, "") else None,
         "enabled": bool(rule.get("enabled", True)),
-        "policy_source": str(rule.get("policy_source") or CRUNCH_POLICY_SOURCE),
+        "policy_source": public_label(rule.get("policy_source") or CRUNCH_POLICY_SOURCE, "unknown"),
         "min_section_chars": int(rule.get("min_section_chars") or INSTRUCTION_DEDUP_MIN_SECTION_CHARS),
         "min_repeated_count": int(rule.get("min_repeated_count") or 2),
         "keep_recent_sections": int(rule.get("keep_recent_sections") or 1),
@@ -2507,6 +2555,10 @@ def _apply_instruction_section_deduplication(
         if not canary.get("holdout_configured"):
             reason_codes.add("missing-holdout-configuration")
             rule_meta["reason_codes"].append("missing-holdout-configuration")
+            continue
+        if not canary.get("valid", True):
+            reason_codes.add("invalid-canary-configuration")
+            rule_meta["reason_codes"].append("invalid-canary-configuration")
             continue
         if canary.get("status") == "holdout":
             count = max(0, repeated_count - keep_recent)

@@ -330,8 +330,12 @@ instruction_section_deduplication:
                     "policy_source": "managed-enforced",
                     "instruction_section_fingerprints": ["not-a-sha"],
                     "raw_instruction_text": "raw prompt fixture must not leak",
+                    "tenant_id": "tenant-fixture-secret",
+                    "request_id": "request-fixture-secret",
+                    "cache_key": "cache-fixture-secret",
+                    "policy_yaml": "instruction_section_deduplication: raw fixture secret",
                     "block_tool_payloads": False,
-                    "action": {"type": "omit_instruction_section", "target": "tool_payload"},
+                    "action": {"type": "omit_instruction_section", "target": "tool_payload", "provider_body": "raw provider body fixture"},
                     "canary": {"canary_fraction": 1.2},
                 }
             ],
@@ -346,6 +350,11 @@ instruction_section_deduplication:
         self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].policy_source", paths)
         self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].instruction_section_fingerprints[0]", paths)
         self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].raw_instruction_text", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].tenant_id", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].request_id", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].cache_key", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].policy_yaml", paths)
+        self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].action.provider_body", paths)
         self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].block_tool_payloads", paths)
         self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].action", paths)
         self.assertIn("$.policies.crunch.instruction_section_deduplication.rules[0].canary.canary_fraction", paths)

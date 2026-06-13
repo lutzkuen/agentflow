@@ -227,6 +227,46 @@ class InstructionDedupReportTests(unittest.TestCase):
         self.assertNotIn("raw-instruction-hash-must-not-leak", rendered)
         self.assertFalse(report["privacy"]["pattern_hashes_included"])
 
+    def test_raw_metadata_labels_are_sanitized_in_opportunity_output(self) -> None:
+        instruction = (
+            "System instruction section with raw metadata labels around it. "
+            "Only aggregate metadata may leave this report even when row labels contain secrets."
+        )
+        for _ in range(2):
+            self._log_call(
+                source_surface="/workspace/private/raw-source-secret.py",
+                endpoint="responses/raw-endpoint-secret",
+                category="raw opportunity category secret",
+                workflow_phase="raw opportunity phase secret",
+                request_json={
+                    "model": "claude-sonnet-4-6",
+                    "system": instruction,
+                    "messages": [{"role": "user", "content": "raw opportunity user secret"}],
+                },
+                routing_extra={
+                    "source_surface": "/workspace/private/raw-routing-source-secret.py",
+                    "workflow_phase": "raw opportunity routing phase secret",
+                },
+            )
+
+        report = build_instruction_dedup_opportunity_report(self.store, limit=20)
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["source_surface"], "unknown")
+        self.assertEqual(candidate["endpoint"], "unknown")
+        self.assertEqual(candidate["category"], "unknown")
+        self.assertEqual(candidate["workflow_phase"], "unknown")
+        rendered = json.dumps(report, sort_keys=True)
+        for forbidden in (
+            "/workspace/private/raw-source-secret.py",
+            "responses/raw-endpoint-secret",
+            "raw opportunity category secret",
+            "raw opportunity phase secret",
+            "raw opportunity routing phase secret",
+            "raw opportunity user secret",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_codex_app_metadata_only_rows_are_included_without_raw_ids(self) -> None:
         for idx in range(2):
             self.store.log_codex_app_event(

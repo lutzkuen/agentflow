@@ -23,6 +23,7 @@ from agentflow_proxy.instruction_dedup_report import (
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.policy_files import policy_file_status
 from agentflow_proxy.pricing import estimate_cost
+from agentflow_proxy.public_metadata import public_id, public_label
 from agentflow_proxy.store import utc_now
 
 
@@ -60,8 +61,45 @@ def _breakdown(counter: dict[str, int], key_name: str = "value") -> list[dict[st
 
 
 def _increment(counter: dict[str, int], key: Any, amount: int = 1) -> None:
-    text = str(key or "unknown")
+    text = public_label(key, "unknown")
     counter[text] = counter.get(text, 0) + amount
+
+
+def _candidate_id(value: Any, fallback: str = "unknown") -> str | None:
+    if value in (None, ""):
+        return None
+    return public_id(value, prefix="instruction-dedup-candidate", fallback=fallback)
+
+
+def _canary_validation_errors(raw_canary: Any) -> list[str]:
+    if raw_canary is None:
+        return []
+    if not isinstance(raw_canary, dict):
+        return ["invalid-canary-configuration"]
+    errors: list[str] = []
+
+    def parse_unit_interval(key: str) -> float | None:
+        if raw_canary.get(key) is None:
+            return None
+        try:
+            value = float(raw_canary.get(key))
+        except (TypeError, ValueError):
+            errors.append(f"invalid-canary-{key.replace('_', '-')}")
+            return None
+        if value < 0.0 or value > 1.0:
+            errors.append(f"invalid-canary-{key.replace('_', '-')}")
+        return value
+
+    fraction = parse_unit_interval("fraction")
+    if fraction is None:
+        fraction = parse_unit_interval("canary_fraction")
+    if fraction is None:
+        fraction = parse_unit_interval("rollout_fraction")
+    holdout_fraction = parse_unit_interval("holdout_fraction")
+    if fraction is not None and holdout_fraction is not None and 0.0 <= fraction <= 1.0 and 0.0 <= holdout_fraction <= 1.0:
+        if fraction + holdout_fraction > 1.0:
+            errors.append("invalid-canary-fraction-sum")
+    return sorted(set(errors))
 
 
 def _body_has_type(value: Any, names: set[str]) -> bool:
@@ -158,6 +196,7 @@ def _select_rule(policy: dict[str, Any], plan_basis: dict[str, Any], section_fin
 def _cohort(rule: dict[str, Any], section_fingerprint: str, plan_basis: dict[str, Any], *, local_salt: str | None) -> dict[str, Any]:
     raw_canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else {}
     enabled = _safe_bool(raw_canary.get("enabled"), True)
+    validation_errors = _canary_validation_errors(raw_canary)
     fraction = max(0.0, min(1.0, _as_float(raw_canary.get("fraction"), 0.0)))
     holdout_raw = raw_canary.get("holdout_fraction")
     holdout_fraction = None if holdout_raw is None else max(0.0, min(1.0, _as_float(holdout_raw)))
@@ -175,7 +214,11 @@ def _cohort(rule: dict[str, Any], section_fingerprint: str, plan_basis: dict[str
     }
     digest = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     score = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
-    if not enabled:
+    if validation_errors:
+        cohort = "invalid"
+        selected = False
+        is_holdout = False
+    elif not enabled:
         cohort = "disabled"
         selected = False
         is_holdout = False
@@ -204,6 +247,8 @@ def _cohort(rule: dict[str, Any], section_fingerprint: str, plan_basis: dict[str
         "cohort_basis": "public-metadata-plus-hidden-instruction-fingerprint",
         "salt_included": False,
         "fingerprint_included": False,
+        "valid": not validation_errors,
+        "validation_errors": validation_errors,
     }
 
 
@@ -216,16 +261,17 @@ def _coordinator_compatibility(row_meta: dict[str, Any]) -> dict[str, Any]:
             "reason_codes": [],
             "selected_family": None,
         }
-    selected = str(decision.get("selected_family") or decision.get("selected_action_family") or "none")
-    reasons = [str(item) for item in decision.get("reason_codes") or [] if str(item)]
+    selected_raw = str(decision.get("selected_family") or decision.get("selected_action_family") or "none")
+    selected = public_label(selected_raw, "unknown")
+    reasons = [public_label(item, "sanitized-reason") for item in decision.get("reason_codes") or [] if str(item)]
     suppressed = decision.get("suppressed_families") if isinstance(decision.get("suppressed_families"), list) else []
     for item in suppressed:
         if not isinstance(item, dict):
             continue
         family = str(item.get("family") or "")
         if family in {"pattern_crunch", "prompt_role", "instruction_section_deduplication"} or "prompt_role" in family:
-            reasons.extend(str(reason) for reason in item.get("reason_codes") or [] if str(reason))
-    if selected not in {"none", "pattern_crunch", "prompt_role", "instruction_section_deduplication"}:
+            reasons.extend(public_label(reason, "sanitized-reason") for reason in item.get("reason_codes") or [] if str(reason))
+    if selected_raw not in {"none", "pattern_crunch", "prompt_role", "instruction_section_deduplication"}:
         reasons.append("conflicts-with-coordinator-selection")
         return {
             "status": "conflict",
@@ -249,11 +295,10 @@ def _coordinator_compatibility(row_meta: dict[str, Any]) -> dict[str, Any]:
 
 
 def _replacement_preview(rule: dict[str, Any], before_chars: int, after_chars: int, saved_chars: int) -> dict[str, Any]:
-    notice = str(rule.get("replacement_notice") or "[repeated instruction section omitted by AgentFlow]")
     return {
         "redacted": True,
         "source_text_included": False,
-        "replacement_text": notice[:160],
+        "replacement_text": "[redacted replacement notice]",
         "before_chars": before_chars,
         "after_chars": after_chars,
         "saved_chars": saved_chars,
@@ -338,6 +383,8 @@ def _plan_for_section(
         blockers.add("missing-holdout-configuration")
     if canary["holdout"]:
         blockers.add("instruction-dedup-holdout")
+    if not canary.get("valid", True):
+        blockers.add("invalid-canary-configuration")
     elif canary["cohort"] == "not_selected":
         blockers.add("instruction-dedup-canary-not-selected")
     elif canary["cohort"] == "disabled":
@@ -359,17 +406,17 @@ def _plan_for_section(
         }),
         "status": status,
         "blockers": sorted(blockers),
-        "selected_rule_id": str(rule.get("id") or "instruction-section-dedup-policy"),
-        "policy_source": str(rule.get("policy_source") or policy.get("policy_source") or "local-default"),
-        "candidate_id": rule.get("candidate_id") if isinstance(rule.get("candidate_id"), str) else None,
-        "source_surface": basis["source_surface"],
-        "provider": provider,
-        "endpoint": basis["endpoint"],
-        "app_family": basis["app_family"],
-        "category": basis["category"],
-        "workflow_phase": basis["workflow_phase"],
-        "requested_model_family": basis["requested_model_family"],
-        "routed_model_tier": basis["routed_model_tier"],
+        "selected_rule_id": public_label(rule.get("id") or "instruction-section-dedup-policy", "instruction-section-dedup-policy"),
+        "policy_source": public_label(rule.get("policy_source") or policy.get("policy_source") or "local-default", "unknown"),
+        "candidate_id": _candidate_id(rule.get("candidate_id")),
+        "source_surface": public_label(basis["source_surface"], "unknown"),
+        "provider": public_label(provider, "unknown"),
+        "endpoint": public_label(basis["endpoint"], "unknown"),
+        "app_family": public_label(basis["app_family"], "unknown"),
+        "category": public_label(basis["category"], "unknown"),
+        "workflow_phase": public_label(basis["workflow_phase"], "unknown"),
+        "requested_model_family": public_label(basis["requested_model_family"], "unknown"),
+        "routed_model_tier": public_label(basis["routed_model_tier"], "unknown"),
         "text_bucket": basis["text_bucket"],
         "instruction_section": {
             "source_field": str(section.get("source_field") or "unknown"),
@@ -430,6 +477,8 @@ def _blocked_bodyless_plan(
     canary_policy = policy.get("canary") if isinstance(policy.get("canary"), dict) else {}
     if canary_policy.get("holdout_fraction") is None:
         blockers.add("missing-holdout-configuration")
+    if _canary_validation_errors(canary_policy):
+        blockers.add("invalid-canary-configuration")
     compatibility = _coordinator_compatibility(routing)
     if not compatibility["compatible"]:
         blockers.add("coordinator-conflict")
@@ -439,13 +488,13 @@ def _blocked_bodyless_plan(
         "status": "blocked",
         "blockers": sorted(blockers),
         "selected_rule_id": None,
-        "policy_source": str(policy.get("policy_source") or "local-default"),
-        "source_surface": source_surface,
-        "provider": provider,
-        "endpoint": endpoint,
-        "app_family": _app_family(provider, row.get("requested_model"), path, source_surface),
-        "category": category,
-        "workflow_phase": _workflow_phase(routing, category),
+        "policy_source": public_label(policy.get("policy_source") or "local-default", "unknown"),
+        "source_surface": public_label(source_surface, "unknown"),
+        "provider": public_label(provider, "unknown"),
+        "endpoint": public_label(endpoint, "unknown"),
+        "app_family": public_label(_app_family(provider, row.get("requested_model"), path, source_surface), "unknown"),
+        "category": public_label(category, "unknown"),
+        "workflow_phase": public_label(_workflow_phase(routing, category), "unknown"),
         "instruction_section": {
             "source_field": None,
             "fingerprint_present": False,
@@ -473,6 +522,8 @@ def _blocked_bodyless_plan(
             "cohort_basis": "unavailable-without-request-body",
             "salt_included": False,
             "fingerprint_included": False,
+            "valid": not _canary_validation_errors(canary_policy),
+            "validation_errors": _canary_validation_errors(canary_policy),
         },
         "coordinator_compatibility": compatibility,
         "replacement_preview": {
@@ -694,7 +745,7 @@ def build_instruction_dedup_dry_run(
             "reload_required": reload_required,
             "file": reload_state,
             "rule_count": len(active_policy.get("rules") or []),
-            "source_surfaces": [str(item) for item in active_policy.get("source_surfaces") or []],
+            "source_surfaces": [public_label(item, "unknown") for item in active_policy.get("source_surfaces") or []],
             "min_section_chars": _as_int(active_policy.get("min_section_chars"), 700),
             "min_repeated_count": _as_int(active_policy.get("min_repeated_count"), 2),
             "max_replacements": _as_int(active_policy.get("max_replacements"), 0),

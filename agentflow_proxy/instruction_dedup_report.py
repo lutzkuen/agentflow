@@ -8,6 +8,7 @@ from typing import Any
 from agentflow_proxy.limiter import model_tier
 from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_model_family, openai_source_surface
 from agentflow_proxy.pricing import estimate_cost
+from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import utc_now
 
 
@@ -56,7 +57,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 
 
 def _increment(counter: dict[str, int], key: Any, amount: int = 1) -> None:
-    text = str(key or "unknown")
+    text = public_label(key, "unknown")
     counter[text] = counter.get(text, 0) + amount
 
 
@@ -579,14 +580,14 @@ def build_instruction_dedup_opportunity_report(
             bodyless_rows += 1
 
         public_basis = {
-            "provider": provider,
-            "source_surface": source_surface,
-            "endpoint": endpoint,
-            "app_family": app_family,
-            "category": category,
-            "workflow_phase": phase,
-            "requested_model_family": model_family,
-            "routed_model_tier": tier,
+            "provider": public_label(provider, "unknown"),
+            "source_surface": public_label(source_surface, "unknown"),
+            "endpoint": public_label(endpoint, "unknown"),
+            "app_family": public_label(app_family, "unknown"),
+            "category": public_label(category, "unknown"),
+            "workflow_phase": public_label(phase, "unknown"),
+            "requested_model_family": public_label(model_family, "unknown"),
+            "routed_model_tier": public_label(tier, "unknown"),
             "stream": stream,
             "text_bucket": _text_bucket(text_chars),
             "fingerprint_source": features["fingerprint_source"],
@@ -652,14 +653,14 @@ def build_instruction_dedup_opportunity_report(
             "source_surface": source_surface,
             "endpoint": "app_server",
             "app_family": "codex",
-            "category": category,
-            "workflow_phase": phase,
-            "requested_model_family": str(routing.get("requested_model_family") or "codex"),
-            "routed_model_tier": str(routing.get("routed_model_tier") or "codex"),
+            "category": public_label(category, "unknown"),
+            "workflow_phase": public_label(phase, "unknown"),
+            "requested_model_family": public_label(routing.get("requested_model_family") or "codex", "unknown"),
+            "routed_model_tier": public_label(routing.get("routed_model_tier") or "codex", "unknown"),
             "stream": False,
             "text_bucket": _text_bucket(text_chars),
-            "direction": direction,
-            "method": method,
+            "direction": public_label(direction, "unknown"),
+            "method": public_label(method, "unknown"),
             "fingerprint_source": features["fingerprint_source"],
             "fingerprint_present": False,
         }

@@ -22,6 +22,11 @@ FORBIDDEN_VALUES = (
     "raw-request-dry-run-secret",
     "local-salt-dry-run-secret",
     "sha256:raw-instruction-hash-must-not-leak",
+    "raw category dry run secret",
+    "raw-policy-rule-secret",
+    "raw-candidate-dry-run-secret",
+    "raw coordinator dry run secret",
+    "private replacement notice dry run secret",
 )
 
 
@@ -309,6 +314,66 @@ class InstructionDedupDryRunTests(unittest.TestCase):
         self.assertIn("instruction-dedup-holdout", plan["blockers"])
         self.assertEqual(plan["coordinator_compatibility"]["status"], "conflict")
         self.assertEqual(plan["canary"]["cohort"], "holdout")
+        self._assert_private(report)
+
+    def test_invalid_canary_and_raw_policy_metadata_fail_closed_without_leaking(self) -> None:
+        instruction = (
+            "Repeated private instruction dry run secret with unsafe policy metadata. "
+            "Invalid rollout math must block instead of silently selecting a cohort."
+        )
+        for _ in range(2):
+            self._log_call(
+                category="raw category dry run secret",
+                workflow_phase="/home/lutz/private/raw-phase-secret.py",
+                request_json={"model": "claude-sonnet-4-6", "system": instruction, "messages": []},
+                routing_extra={
+                    "optimization_coordinator": {
+                        "selected_family": "cache_replay",
+                        "reason_codes": ["raw coordinator dry run secret"],
+                    }
+                },
+            )
+
+        report = build_instruction_dedup_dry_run(
+            self.store,
+            limit=20,
+            examples=20,
+            policy=self._policy(
+                replacement_notice="private replacement notice dry run secret",
+                rules=[
+                    {
+                        "id": "raw-policy-rule-secret",
+                        "candidate_id": "raw-candidate-dry-run-secret",
+                        "enabled": True,
+                        "policy_source": "managed-recommended",
+                        "max_replacements": 2,
+                        "min_section_chars": 80,
+                        "min_repeated_count": 2,
+                        "canary": {
+                            "enabled": True,
+                            "fraction": 0.8,
+                            "holdout_fraction": 0.4,
+                            "salt": "local-salt-dry-run-secret",
+                        },
+                    }
+                ],
+            ),
+            rule_path="/home/lutz/private/crunch_rules.yaml",
+            local_salt="local-salt-dry-run-secret",
+        )
+
+        plan = report["plans"][0]
+        self.assertEqual(plan["status"], "blocked")
+        self.assertIn("invalid-canary-configuration", plan["blockers"])
+        self.assertIn("coordinator-conflict", plan["blockers"])
+        self.assertFalse(plan["canary"]["valid"])
+        self.assertIn("invalid-canary-fraction-sum", plan["canary"]["validation_errors"])
+        self.assertEqual(plan["selected_rule_id"], "instruction-section-dedup-policy")
+        self.assertTrue(str(plan["candidate_id"]).startswith("instruction-dedup-candidate:"))
+        self.assertEqual(plan["category"], "unknown")
+        self.assertEqual(plan["workflow_phase"], "unknown")
+        self.assertIn("sanitized-reason", plan["coordinator_compatibility"]["reason_codes"])
+        self.assertFalse(report["policy"]["file"]["path_included"])
         self._assert_private(report)
 
     def test_default_cli_emits_dry_run_schema_without_raw_text(self) -> None:
