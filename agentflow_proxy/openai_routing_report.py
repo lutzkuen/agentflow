@@ -139,6 +139,8 @@ def _simulate_openai_route(
     text_chars: int,
 ) -> tuple[str | None, str, str]:
     requested_l = requested_model.lower()
+    if requested_l == "gpt-5.4" and text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
+        return "gpt-5.4-mini", "proposed-canary-default-off", "gpt-5.4-large-to-mini-short-non-tool"
     if requested_l == OPENAI_LARGE_DEFAULT.lower() and text_chars < OPENAI_SMALL_TEXT_CHARS_LT and not has_tools:
         return OPENAI_SMALL_DEFAULT, "existing-threshold", "large-to-small-short-non-tool"
     if requested_l == OPENAI_SMALL_DEFAULT.lower() and text_chars < OPENAI_TINY_TEXT_CHARS_LT and not has_tools:

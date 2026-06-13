@@ -4752,6 +4752,88 @@ def openai_routing_report_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     return 0
 
 
+def openai_routing_canary_stage_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Stage default-off OpenAI large-to-mini routing canary drafts from local metadata")
+    parser.add_argument(
+        "routing_report",
+        nargs="?",
+        help="OpenAI routing report JSON path, or '-' for stdin. If omitted, a fresh report is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=1000, help="Recent OpenAI provider calls to inspect when building a fresh report, default: 1000.")
+    parser.add_argument("--draft-id", help="Optional local draft ID. When multiple candidates are staged, a numeric suffix is added.")
+    parser.add_argument(
+        "--workspace",
+        default=os.getenv("AGENTFLOW_POLICY_DRAFT_DIR", str(Path.home() / ".agentflow" / "policy_drafts")),
+        help="Local draft workspace directory, default: ~/.agentflow/policy_drafts.",
+    )
+    parser.add_argument("--canary-fraction", type=float, default=0.05, help="Proposed deterministic canary fraction, default: 0.05.")
+    parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed deterministic holdout fraction, default: 0.10.")
+    parser.add_argument("--min-samples", type=int, default=5, help="Minimum candidate samples before staging, default: 5.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.routing_report:
+        report = _read_json_input(str(args.routing_report), stdin=stdin)
+    else:
+        from agentflow_proxy.openai_routing_report import build_openai_routing_report
+
+        store = _open_store_for_db(str(args.db))
+        try:
+            report = build_openai_routing_report(store, limit=args.limit)
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.openai_routing_canary_stage import stage_openai_routing_canary_drafts
+    from agentflow_proxy.policy_events import log_policy_event
+
+    result = asyncio.run(stage_openai_routing_canary_drafts(
+        report,
+        draft_id=args.draft_id,
+        workspace=args.workspace,
+        canary_fraction=args.canary_fraction,
+        holdout_fraction=args.holdout_fraction,
+        min_samples=args.min_samples,
+    ))
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "openai-routing-canary-stage",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.routing_report,
+            "workspace": args.workspace,
+            "candidate_count": summary.get("candidate_count", 0),
+            "eligible_candidate_count": summary.get("eligible_candidate_count", 0),
+            "staged_count": summary.get("staged_count", 0),
+            "omitted_count": summary.get("omitted_count", 0),
+            "wrote_active_policy_files": False,
+            "reloaded_modules": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0 if result.get("ok") else 1
+
+
 def openai_old_context_summary_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Measure OpenAI old-context summary opportunity and blockers from local metadata")
     parser.add_argument(
@@ -9093,6 +9175,10 @@ def openai_scoreboard_main() -> None:
 
 def openai_routing_report_main() -> None:
     raise SystemExit(openai_routing_report_cli())
+
+
+def openai_routing_canary_stage_main() -> None:
+    raise SystemExit(openai_routing_canary_stage_cli())
 
 
 def openai_old_context_summary_report_main() -> None:
