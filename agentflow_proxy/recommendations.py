@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -502,8 +503,24 @@ def recommendation_failure_mode() -> str:
     return mode if mode in {"fallback-local"} else "fallback-local"
 
 
+def managed_loopback_auth_allowed() -> bool:
+    parsed = urlparse(recommendation_server_url())
+    if parsed.scheme != "http":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def managed_auth_configured() -> bool:
-    return bool(os.getenv(MANAGED_API_KEY_ENV))
+    return bool(os.getenv(MANAGED_API_KEY_ENV)) or managed_loopback_auth_allowed()
+
+
+def managed_auth_source() -> str | None:
+    if os.getenv(MANAGED_API_KEY_ENV):
+        return MANAGED_API_KEY_ENV
+    if managed_loopback_auth_allowed():
+        return "loopback-unauthenticated-dev"
+    return None
 
 
 def _managed_headers() -> dict[str, str]:
@@ -806,6 +823,8 @@ def _base_meta() -> dict[str, Any]:
         "timeout_seconds": recommendation_timeout_seconds(),
         "failure_mode": recommendation_failure_mode(),
         "auth_configured": managed_auth_configured(),
+        "auth_source": managed_auth_source(),
+        "loopback_unauthenticated_allowed": managed_loopback_auth_allowed(),
         "api_key_value_included": False,
         "policy_source": "local-default",
     }
@@ -948,7 +967,8 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
         confidence = routing.get("confidence")
     if not isinstance(confidence, (int, float)):
         confidence = 0.0
-    target_model = routing.get("target_model")
+    route_to = body.get("route_to") or routing.get("route_to")
+    target_model = routing.get("target_model") or route_to
     policy_id = body.get("policy_id") or routing.get("policy_id") or body.get("decision_id") or "managed-policy-decision"
     reason_codes = routing.get("reason_codes") if isinstance(routing.get("reason_codes"), list) else []
     reason = ", ".join(str(item) for item in reason_codes if item) or "managed policy decision"
@@ -957,6 +977,8 @@ def _normalize_policy_decision(body: Any) -> tuple[dict[str, Any] | None, str | 
         "schema": POLICY_DECISION_SCHEMA,
         "policy_decision_schema": POLICY_DECISION_SCHEMA,
         "target_model": target_model if isinstance(target_model, str) else None,
+        "route_to": route_to if isinstance(route_to, str) else None,
+        "route_to_present": isinstance(route_to, str) and bool(route_to),
         "confidence": float(confidence),
         "policy_id": str(policy_id),
         "reason": reason,
@@ -1404,6 +1426,23 @@ def apply_policy_decision_routing_to_body(
         return meta
 
     recommended_mode = str(meta.get("recommended_mode") or "observe").lower()
+    if meta.get("route_to_present") and recommended_mode in {"", "observe", "shadow", "none"}:
+        body["model"] = target_model
+        routing_meta["routed_model"] = target_model
+        routing_meta["final_policy_source"] = "managed-recommended"
+        routing_meta["managed_policy_id"] = meta.get("policy_id")
+        routing_meta["managed_reason"] = meta.get("reason")
+        routing_meta["managed_route_recommended_mode"] = "route_to"
+        meta.update({
+            "applied": True,
+            "changed_model": True,
+            "fallback": None,
+            "apply_reason": "route-to-local-safety-gate-passed",
+            "local_action_taken": "route_to",
+            "local_policy_decision_mode": "route_to",
+        })
+        return meta
+
     if recommended_mode in {"observe", "shadow"}:
         meta.update({
             "applied": False,

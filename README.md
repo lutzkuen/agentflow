@@ -318,6 +318,14 @@ export AGENTFLOW_LOG_BODIES=1
 | `AGENTFLOW_PORT` | `4000` | Proxy port default |
 | `AGENTFLOW_DASHBOARD_HOST` | `0.0.0.0` | Standalone dashboard host |
 | `AGENTFLOW_DASHBOARD_PORT` | `4002` | Standalone dashboard port |
+| `AGENTFLOW_RECOMMENDATION_ENABLED` | `0` | Enable metadata-only managed recommendation calls |
+| `AGENTFLOW_POLICY_DECISION_ENABLED` | `0` | Use managed `/v1/policy-decision` responses for local actions |
+| `AGENTFLOW_MANAGED_API_KEY` | unset | Bearer token for non-loopback managed servers |
+
+For local managed-server development, `AGENTFLOW_RECOMMENDATION_SERVER_URL=http://127.0.0.1:4100`
+is treated as loopback-only and does not require `AGENTFLOW_MANAGED_API_KEY`.
+Remote managed servers still require an API key. Managed calls send derived
+feature metadata only; provider request bodies stay local.
 
 ## Advanced policy and diagnostics
 

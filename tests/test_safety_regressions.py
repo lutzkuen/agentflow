@@ -65,6 +65,9 @@ class ManagedFeedbackAsyncClient:
     recommendation_body = None
     recommendation_status = 200
     recommendation_error = None
+    policy_decision_body = None
+    policy_decision_status = 200
+    policy_decision_error = None
     feedback_error = None
 
     def __init__(self, *args, **kwargs):
@@ -77,6 +80,36 @@ class ManagedFeedbackAsyncClient:
         return False
 
     async def post(self, url, *, headers=None, json=None, **kwargs):
+        if url.endswith("/v1/policy-decision"):
+            if ManagedFeedbackAsyncClient.policy_decision_error is not None:
+                raise ManagedFeedbackAsyncClient.policy_decision_error
+            ManagedFeedbackAsyncClient.calls.append({
+                "kind": "policy-decision",
+                "url": url,
+                "headers": dict(headers or {}),
+                "json": json,
+                "kwargs": kwargs,
+            })
+            body = ManagedFeedbackAsyncClient.policy_decision_body
+            if body is None:
+                body = {
+                    "schema": "agentflow.policy_decision.v1",
+                    "policy_id": "policy-managed-test",
+                    "confidence": 0.91,
+                    "route_to": "claude-haiku-4-5-20251001",
+                    "provider_forwarding": False,
+                    "server_content_processing": False,
+                    "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+                    "routing": {
+                        "status": "recommended",
+                        "confidence": 0.91,
+                        "route_down_probability": 0.91,
+                        "recommended_mode": "shadow",
+                        "model_artifact_version": "routing-predictor-test",
+                        "reason_codes": ["active-routing-predictor-model"],
+                    },
+                }
+            return FakeJsonResponse(body, ManagedFeedbackAsyncClient.policy_decision_status)
         if url.endswith("/v1/recommendation"):
             if ManagedFeedbackAsyncClient.recommendation_error is not None:
                 raise ManagedFeedbackAsyncClient.recommendation_error
@@ -213,6 +246,7 @@ class SafetyRegressionRouteTests(unittest.TestCase):
             "AGENTFLOW_RECOMMENDATION_ENABLED",
             "AGENTFLOW_RECOMMENDATION_SERVER_URL",
             "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS",
+            "AGENTFLOW_POLICY_DECISION_ENABLED",
             "AGENTFLOW_OPENAI_RECOMMENDATION_MODE",
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_FRACTION",
             "AGENTFLOW_OPENAI_RECOMMENDATION_CANARY_SALT",
@@ -231,6 +265,9 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         ManagedFeedbackAsyncClient.recommendation_body = None
         ManagedFeedbackAsyncClient.recommendation_status = 200
         ManagedFeedbackAsyncClient.recommendation_error = None
+        ManagedFeedbackAsyncClient.policy_decision_body = None
+        ManagedFeedbackAsyncClient.policy_decision_status = 200
+        ManagedFeedbackAsyncClient.policy_decision_error = None
         ManagedFeedbackAsyncClient.feedback_error = None
         SequencedAsyncClient.calls = []
         SequencedAsyncClient.responses = []
@@ -388,6 +425,73 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertEqual(managed["status"], "received")
         self.assertTrue(managed["applied"])
         self.assertTrue(managed["changed_model"])
+
+    def test_anthropic_policy_decision_route_to_applies_with_loopback_auth_metadata(self):
+        server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")
+        ManagedFeedbackAsyncClient.policy_decision_body = {
+            "schema": "agentflow.policy_decision.v1",
+            "policy_id": "policy-managed-route-to",
+            "confidence": 0.94,
+            "route_to": "claude-haiku-4-5-20251001",
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "confidence": 0.94,
+                "route_down_probability": 0.91,
+                "recommended_mode": "shadow",
+                "model_artifact_version": "routing-predictor-route-to-test",
+                "reason_codes": ["active-routing-predictor-model"],
+            },
+        }
+        ManagedFeedbackAsyncClient.provider_body = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 8, "output_tokens": 2},
+        }
+        request_body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "status update " * 1000}],
+        }
+
+        with (
+            patch.dict(os.environ, {
+                "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+                "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
+                "AGENTFLOW_RECOMMENDATION_SERVER_URL": "http://127.0.0.1:4100",
+                "AGENTFLOW_RECOMMENDATION_TIMEOUT_SECONDS": "0.25",
+            }, clear=False),
+            patch.object(server.httpx, "AsyncClient", ManagedFeedbackAsyncClient),
+        ):
+            response = TestClient(server.app).post("/v1/messages", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call["kind"] for call in ManagedFeedbackAsyncClient.calls], ["policy-decision", "upstream"])
+        decision_call = ManagedFeedbackAsyncClient.calls[0]
+        self.assertEqual(decision_call["url"], "http://127.0.0.1:4100/v1/policy-decision")
+        self.assertNotIn("authorization", decision_call["headers"])
+        self.assertEqual(decision_call["json"]["schema"], "agentflow.policy_decision_preflight.v1")
+        self.assertTrue({"messages", "content", "raw_request"}.isdisjoint(self._keys_in(decision_call["json"])))
+        upstream = ManagedFeedbackAsyncClient.calls[1]["json"]
+        self.assertEqual(upstream["model"], "claude-haiku-4-5-20251001")
+
+        [row] = server.store.conn.execute("select routing_json from calls").fetchall()
+        managed = json.loads(row["routing_json"])["managed_recommendation"]
+        self.assertTrue(managed["enabled"])
+        self.assertTrue(managed["auth_configured"])
+        self.assertEqual(managed["auth_source"], "loopback-unauthenticated-dev")
+        self.assertTrue(managed["loopback_unauthenticated_allowed"])
+        self.assertEqual(managed["endpoint"], "/v1/policy-decision")
+        self.assertEqual(managed["status"], "received")
+        self.assertTrue(managed["applied"])
+        self.assertTrue(managed["changed_model"])
+        self.assertEqual(managed["apply_reason"], "route-to-local-safety-gate-passed")
+        self.assertEqual(managed["local_action_taken"], "route_to")
 
     def test_anthropic_managed_scaffold_crunch_profile_applies_before_forwarding(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

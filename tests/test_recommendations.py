@@ -546,6 +546,7 @@ class RecommendationTest(unittest.TestCase):
             meta = asyncio.run(recommendations.fetch_policy_decision(unit))
 
         self.assertEqual(FakeAsyncClient.last_url, "http://127.0.0.1:4100/v1/policy-decision")
+        self.assertNotIn("authorization", FakeAsyncClient.last_headers)
         sent = FakeAsyncClient.last_json
         self.assertEqual(sent["schema"], "agentflow.policy_decision_preflight.v1")
         self.assertEqual(sent["replayability_level"], "features_only")
@@ -554,6 +555,10 @@ class RecommendationTest(unittest.TestCase):
         self.assertNotIn("privacy_summary", sent)
         self.assertNotIn("pattern_features", sent)
         self.assertEqual(meta["status"], "received")
+        self.assertTrue(meta["enabled"])
+        self.assertTrue(meta["auth_configured"])
+        self.assertEqual(meta["auth_source"], "loopback-unauthenticated-dev")
+        self.assertTrue(meta["loopback_unauthenticated_allowed"])
         self.assertEqual(meta["policy_decision_schema"], "agentflow.policy_decision.v1")
         self.assertEqual(meta["target_model"], "claude-haiku-4-5-20251001")
         self.assertEqual(meta["recommended_mode"], "shadow")
@@ -600,6 +605,58 @@ class RecommendationTest(unittest.TestCase):
         self.assertEqual(schema_meta["reason"], "invalid-schema")
         self.assertEqual(schema_meta["schema_error"], "schema-mismatch")
         self.assertEqual(schema_meta["fallback"], "local-policy")
+
+    def test_policy_decision_normalizes_route_to_and_applies_after_local_gate(self):
+        os.environ["AGENTFLOW_RECOMMENDATION_ENABLED"] = "1"
+        os.environ["AGENTFLOW_POLICY_DECISION_ENABLED"] = "1"
+        FakeAsyncClient.response = FakeResponse(body={
+            "schema": "agentflow.policy_decision.v1",
+            "policy_id": "feature-policy-decision:anthropic:route-to",
+            "confidence": 0.94,
+            "route_to": "claude-haiku-4-5-20251001",
+            "provider_forwarding": False,
+            "server_content_processing": False,
+            "privacy_summary": {"metadata_only": True, "raw_payload_included": False},
+            "routing": {
+                "status": "recommended",
+                "confidence": 0.94,
+                "route_down_probability": 0.91,
+                "recommended_mode": "shadow",
+                "model_artifact_version": "routing-predictor-v1-route-to",
+                "reason_codes": ["active-routing-predictor-model"],
+            },
+        })
+
+        with patch.object(recommendations.httpx, "AsyncClient", FakeAsyncClient):
+            meta = asyncio.run(recommendations.fetch_policy_decision({
+                "source_surface": "anthropic_messages",
+                "granularity": "provider_request",
+                "app_family": "claude_code",
+                "requested_model": "claude-sonnet-4-6",
+                "input_features": {},
+                "tool_features": {},
+                "replayability_level": "features_only",
+            }))
+
+        body = {"model": "claude-sonnet-4-6"}
+        routing_meta = {"routed_model": "claude-sonnet-4-6", "reason": "local route"}
+        applied = recommendations.apply_recommendation_to_body(
+            provider="anthropic",
+            body=body,
+            routing_meta=routing_meta,
+            recommendation_meta=meta,
+        )
+
+        self.assertEqual(meta["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(meta["route_to"], "claude-haiku-4-5-20251001")
+        self.assertTrue(meta["route_to_present"])
+        self.assertTrue(applied["applied"])
+        self.assertTrue(applied["changed_model"])
+        self.assertEqual(applied["apply_reason"], "route-to-local-safety-gate-passed")
+        self.assertEqual(applied["local_action_taken"], "route_to")
+        self.assertEqual(body["model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(routing_meta["managed_route_recommended_mode"], "route_to")
+        self.assertEqual(routing_meta["final_policy_source"], "managed-recommended")
 
     def test_policy_decision_application_observes_shadow_and_canary_gates_before_mutating(self):
         base_meta = {
