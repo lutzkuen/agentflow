@@ -4403,6 +4403,88 @@ def anthropic_thinking_compaction_opportunity_cli(argv: Sequence[str] | None = N
     return 0
 
 
+def anthropic_thinking_compaction_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run Anthropic thinking-history compaction plans from local request metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider calls to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--examples",
+        type=int,
+        default=50,
+        help="Maximum plans to include in output, default: 50, max: 500",
+    )
+    parser.add_argument(
+        "--min-text-chars",
+        type=int,
+        default=8000,
+        help="Minimum request text size for candidate rows, default: 8000",
+    )
+    parser.add_argument(
+        "--min-block-chars",
+        type=int,
+        default=2000,
+        help="Minimum thinking block size for a compaction target, default: 2000",
+    )
+    parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=0.95,
+        help="Near-duplicate shingle similarity threshold, default: 0.95",
+    )
+    parser.add_argument(
+        "--canary-fraction",
+        type=float,
+        default=1.0,
+        help="Deterministic dry-run canary fraction, default: 1.0",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.0,
+        help="Deterministic dry-run holdout fraction, default: 0.0",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.anthropic_thinking_compaction_dry_run import build_anthropic_thinking_compaction_dry_run
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_anthropic_thinking_compaction_dry_run(
+            store,
+            limit=args.limit,
+            examples=args.examples,
+            min_text_chars=args.min_text_chars,
+            min_block_chars=args.min_block_chars,
+            similarity_threshold=args.similarity_threshold,
+            canary_fraction=args.canary_fraction,
+            holdout_fraction=args.holdout_fraction,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def codex_terminal_transcript_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run Codex terminal-transcript compaction plans from local event windows")
     parser.add_argument(
@@ -8032,6 +8114,10 @@ def codex_terminal_transcript_opportunity_main() -> None:
 
 def anthropic_thinking_compaction_opportunity_main() -> None:
     raise SystemExit(anthropic_thinking_compaction_opportunity_cli())
+
+
+def anthropic_thinking_compaction_dry_run_main() -> None:
+    raise SystemExit(anthropic_thinking_compaction_dry_run_cli())
 
 
 def codex_terminal_transcript_dry_run_main() -> None:
