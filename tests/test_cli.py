@@ -2057,6 +2057,98 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["privacy"]["file_paths_included"])
         self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
 
+    def test_zero_hit_cache_ladder_emits_ranked_issue_ready_action_candidates(self):
+        from agentflow_proxy import stats
+        from agentflow_proxy.store import stable_json
+
+        def row(index, *, stream, reason, category, phase, has_tools=False, path="/v1/messages"):
+            return {
+                "id": f"secret-call-{index}",
+                "created_at": f"2026-06-10T04:0{index}:00+00:00",
+                "stream": 1 if stream else 0,
+                "cache_hit": 0,
+                "status_code": 200,
+                "path": path,
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": None,
+                "routing_json": stable_json({
+                    "category": category,
+                    "workflow_phase": phase,
+                    "has_tools": has_tools,
+                    "managed_pattern_features": {
+                        "pattern_hashes": ["sha256:" + "e" * 64],
+                        "workflow_phase": phase,
+                    },
+                }),
+                "cache_json": stable_json({
+                    "status": "skipped" if reason != "exact-miss" else "miss",
+                    "reason": reason,
+                    "policy_source": "local-default",
+                    "has_tools": has_tools,
+                    "replayability_level": "local-exact-response",
+                    "cache_key": "raw-cache-key-secret",
+                    "pattern_hash": "sha256:" + "f" * 64,
+                    "file_dependency_audit": {
+                        "paths_included": True,
+                        "path": "/home/lutz/private/cache-source.py",
+                    },
+                }),
+                "request_json": stable_json({"messages": [{"content": "raw cache ladder prompt must not leak"}]}),
+                "session_id": "secret-session-id",
+            }
+
+        rows = [
+            row(0, stream=True, reason="streaming", category="tool-result", phase="tool-execution", has_tools=True),
+            row(1, stream=True, reason="streaming", category="tool-result", phase="tool-execution", has_tools=True),
+            row(2, stream=True, reason="streaming", category="tool-result", phase="tool-execution", has_tools=True),
+            row(3, stream=False, reason="tools-disabled", category="tool-result", phase="tool-execution", has_tools=True),
+            row(4, stream=False, reason="tools-disabled", category="tool-result", phase="tool-execution", has_tools=True),
+            row(5, stream=False, reason="exact-miss", category="chat", phase="chat", has_tools=False),
+            row(6, stream=False, reason="unknown", category="chat", phase="chat", path="/home/lutz/private/raw-path"),
+        ]
+
+        payload = stats._cache_zero_hit_blocker_ladder(rows, scan_limit=20)
+
+        self.assertEqual(payload["schema"], "agentflow.cache_zero_hit_blocker_ladder.v1")
+        self.assertTrue(payload["summary"]["zero_hit_window"])
+        self.assertGreaterEqual(payload["summary"]["action_candidate_count"], 3)
+        self.assertEqual(payload["summary"]["top_action_candidate_family"], "stage-replay-policy")
+        self.assertEqual(payload["ladder"][0]["blocker_code"], "skipped-streaming")
+        self.assertEqual(payload["ladder"][0]["category"], "tool-result")
+        self.assertEqual(payload["ladder"][0]["workflow_phase"], "tool-execution")
+        top = payload["action_candidates"][0]
+        self.assertIn("Stage streaming cache replay pattern rule", top["title"])
+        self.assertEqual(top["local_action"]["family"], "stage-replay-policy")
+        self.assertTrue(top["local_action"]["concrete"])
+        self.assertIn("dry-run", top["acceptance_metric"])
+        self.assertIn("backlog", top["labels"])
+        self.assertIn("expected_savings_path_or_bottleneck_removed", top)
+        true_miss = [
+            candidate
+            for candidate in payload["action_candidates"]
+            if candidate["local_action"]["family"] == "accept-non-repeatable-traffic"
+        ][0]
+        self.assertEqual(true_miss["local_action"]["activation_mode"], "research-only")
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw cache ladder prompt must not leak",
+            "secret-call-",
+            "secret-session-id",
+            "raw-cache-key-secret",
+            "sha256:" + "e" * 64,
+            "sha256:" + "f" * 64,
+            "/home/lutz/private",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertFalse(payload["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(payload["privacy"]["file_paths_included"])
+        self.assertFalse(payload["privacy"]["request_ids_included"])
+        self.assertFalse(payload["privacy"]["session_ids_included"])
+        self.assertFalse(payload["privacy"]["cache_keys_included"])
+        self.assertFalse(payload["privacy"]["pattern_hashes_included"])
+        self.assertFalse(payload["privacy"]["candidate_identifiers_included"])
+
     def test_cache_replay_dry_run_cli_reads_policy_without_mutating_cache(self):
         from agentflow_proxy.store import Store, stable_json
 

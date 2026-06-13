@@ -3529,6 +3529,55 @@ _CACHE_BLOCKER_NEXT_ACTIONS = {
     },
 }
 
+_CACHE_ACTION_CANDIDATE_TITLES = {
+    "stage-replay-policy": "Stage streaming cache replay pattern rule for {cohort}",
+    "collect-dependency-evidence": "Collect cache invalidation evidence for {cohort}",
+    "reload-cache-policy": "Enable or reload local cache policy for {cohort}",
+    "promote-or-rebalance-canary": "Review cache replay holdout evidence for {cohort}",
+    "review-safety-stop": "Review cache replay safety stop for {cohort}",
+    "instrument-cache-decision": "Instrument explicit cache decisions for {cohort}",
+    "accept-non-repeatable-traffic": "Confirm non-repeatable cache cohort for {cohort}",
+}
+
+_CACHE_ACTION_CANDIDATE_LOCAL_ACTIONS = {
+    "stage-replay-policy": "draft a local streaming-safe cache replay rule and verify it with a dry-run before activation",
+    "collect-dependency-evidence": "collect file-watch and invalidation evidence before enabling tool-call cache replay",
+    "reload-cache-policy": "run a local cache policy reload or exact-cache smoke check so eligible requests can reach cache lookup",
+    "promote-or-rebalance-canary": "review applied versus holdout cache replay evidence before promoting or rebalancing the canary",
+    "review-safety-stop": "keep replay disabled for the cohort until the safety-stop reason is reviewed and narrowed",
+    "instrument-cache-decision": "add explicit cache status and reason metadata for this surface before planning activation",
+    "accept-non-repeatable-traffic": "treat the cohort as a no-op unless a narrower repeated request-shape bucket appears",
+}
+
+_CACHE_ACTION_CANDIDATE_ACCEPTANCE = {
+    "stage-replay-policy": "A dry-run reports projected streaming replay hits for this cohort while holdout traffic still bypasses unchanged.",
+    "collect-dependency-evidence": "The next metadata window reports stable invalidation evidence or a smaller dependency blocker count for this cohort.",
+    "reload-cache-policy": "A cache policy reload or smoke diagnostic removes the disabled/reload blocker for new rows in this cohort.",
+    "promote-or-rebalance-canary": "Applied and holdout cache replay counts produce a promote, rebalance, or keep-holdout decision for this cohort.",
+    "review-safety-stop": "The safety-stop remains an explicit no-op or is replaced by a narrower safe bypass reduction check.",
+    "instrument-cache-decision": "New rows for this provider/surface include non-unknown cache status and reason metadata.",
+    "accept-non-repeatable-traffic": "The report marks this as research-only/no-op unless repeated-shape evidence appears in a bounded metadata window.",
+}
+
+_CACHE_ACTION_CANDIDATE_SAVINGS_PATH = {
+    "stage-replay-policy": "Recover hits from high-volume streaming requests once replay safety is proven locally.",
+    "collect-dependency-evidence": "Remove the stale-cache risk that blocks tool or file-dependent cache replay.",
+    "reload-cache-policy": "Let already-configured exact-cache or replay rules participate in lookup instead of being skipped.",
+    "promote-or-rebalance-canary": "Convert holdout-only replay evidence into captured cache savings when quality gates pass.",
+    "review-safety-stop": "Prevent unsafe replay while identifying the smallest blocker that can be safely reduced later.",
+    "instrument-cache-decision": "Remove the observability gap that prevents cache activation work from targeting a real blocker.",
+    "accept-non-repeatable-traffic": "Avoid spending activation work on traffic that has no repeatable local cache opportunity.",
+}
+
+_CACHE_ACTION_CANDIDATE_CONCRETE = {
+    "stage-replay-policy",
+    "collect-dependency-evidence",
+    "reload-cache-policy",
+    "promote-or-rebalance-canary",
+    "review-safety-stop",
+    "instrument-cache-decision",
+}
+
 
 def _endpoint_for_cache_ladder(row: dict[str, Any]) -> str:
     endpoint = row.get("endpoint")
@@ -3544,7 +3593,7 @@ def _endpoint_for_cache_ladder(row: dict[str, Any]) -> str:
         return "messages"
     if path_l.startswith("codex-app://"):
         return "turn_start"
-    return public_label(path, "unknown")
+    return "unknown"
 
 
 def _cache_ladder_bool_label(value: Any, *, true_label: str, false_label: str) -> str:
@@ -3563,6 +3612,114 @@ def _cache_ladder_has_tools(cache: dict[str, Any], routing: dict[str, Any]) -> b
         if key in routing:
             return bool(routing.get(key))
     return None
+
+
+def _cache_ladder_category(row: dict[str, Any], cache: dict[str, Any], routing: dict[str, Any]) -> str:
+    return public_label(row.get("category") or cache.get("category") or routing.get("category"), "unknown")
+
+
+def _cache_ladder_phase(cache: dict[str, Any], routing: dict[str, Any]) -> str:
+    feature = routing.get("openai_feature_unit") if isinstance(routing.get("openai_feature_unit"), dict) else {}
+    for key in ("workflow_phase", "phase"):
+        if routing.get(key):
+            return public_label(routing.get(key), "unknown")
+        if cache.get(key):
+            return public_label(cache.get(key), "unknown")
+        if feature.get(key):
+            return public_label(feature.get(key), "unknown")
+    managed_features = routing.get("managed_pattern_features") if isinstance(routing.get("managed_pattern_features"), dict) else {}
+    return public_label(managed_features.get("workflow_phase") or managed_features.get("category"), "unknown")
+
+
+def _cache_action_candidate_cohort(row: dict[str, Any]) -> str:
+    parts = [
+        str(row.get("blocker_code") or "cache-replay"),
+        str(row.get("provider") or "unknown"),
+        str(row.get("source_surface") or "unknown"),
+        str(row.get("endpoint") or "unknown"),
+        str(row.get("category") or "unknown"),
+        str(row.get("workflow_phase") or "unknown"),
+    ]
+    return " / ".join(part for part in parts if part and part != "unknown") or "cache-replay"
+
+
+def _cache_action_candidate_from_ladder_row(row: dict[str, Any], *, rank: int) -> dict[str, Any] | None:
+    action_family = str(row.get("next_action_family") or "instrument-cache-decision")
+    if action_family == "none":
+        return None
+    cohort = _cache_action_candidate_cohort(row)
+    concrete = action_family in _CACHE_ACTION_CANDIDATE_CONCRETE
+    title_template = _CACHE_ACTION_CANDIDATE_TITLES.get(
+        action_family,
+        _CACHE_ACTION_CANDIDATE_TITLES["instrument-cache-decision"],
+    )
+    local_action = _CACHE_ACTION_CANDIDATE_LOCAL_ACTIONS.get(
+        action_family,
+        _CACHE_ACTION_CANDIDATE_LOCAL_ACTIONS["instrument-cache-decision"],
+    )
+    acceptance = _CACHE_ACTION_CANDIDATE_ACCEPTANCE.get(
+        action_family,
+        _CACHE_ACTION_CANDIDATE_ACCEPTANCE["instrument-cache-decision"],
+    )
+    savings_path = _CACHE_ACTION_CANDIDATE_SAVINGS_PATH.get(
+        action_family,
+        _CACHE_ACTION_CANDIDATE_SAVINGS_PATH["instrument-cache-decision"],
+    )
+    evidence = {
+        "count": _as_int(row.get("count")),
+        "blocker_code": row.get("blocker_code"),
+        "provider": row.get("provider"),
+        "source_surface": row.get("source_surface"),
+        "endpoint": row.get("endpoint"),
+        "category": row.get("category"),
+        "workflow_phase": row.get("workflow_phase"),
+        "stream_mode": row.get("stream_mode"),
+        "tool_presence": row.get("tool_presence"),
+        "replayability_level": row.get("replayability_level"),
+        "cache_status": row.get("cache_status"),
+        "cache_reason": row.get("cache_reason"),
+    }
+    return {
+        "rank": rank,
+        "title": title_template.format(cohort=cohort),
+        "labels": ["backlog", "status:ready", "priority:p1", "core-feature", "correctness", "cache", "privacy"],
+        "cohort": cohort,
+        "local_action": {
+            "family": action_family,
+            "label": row.get("next_action_label") or local_action,
+            "implementation_hint": local_action,
+            "concrete": concrete,
+            "activation_mode": "activation-candidate" if concrete else "research-only",
+        },
+        "rationale": (
+            "A zero-hit cache window is dominated by this explicit skip/blocker bucket. "
+            "The next issue should target this local action instead of restating the generic hit-rate warning."
+        ),
+        "implementation_approach": [
+            "Use only the aggregate cache decision bucket dimensions in this candidate.",
+            local_action,
+            "Record the follow-up result in machine-readable local cache metadata.",
+            "Do not inspect prompts, provider bodies, file paths, request IDs, session IDs, cache keys, pattern hashes, or candidate identifiers.",
+        ],
+        "acceptance_metric": acceptance,
+        "expected_savings_path_or_bottleneck_removed": savings_path,
+        "sequencing_notes": (
+            "Sequence before broad cache activation so replay work targets the highest-volume explicit zero-hit blocker first."
+        ),
+        "evidence": evidence,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "pattern_hashes_included": False,
+            "candidate_identifiers_included": False,
+        },
+    }
 
 
 def _cache_ladder_replayability(cache: dict[str, Any], routing: dict[str, Any]) -> str:
@@ -3628,7 +3785,7 @@ def _cache_blocker_code(row: dict[str, Any], decision: dict[str, str], cache: di
 def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: int = _CACHE_BLOCKER_SCAN_LIMIT) -> dict[str, Any]:
     capped_limit = max(1, min(int(scan_limit or _CACHE_BLOCKER_SCAN_LIMIT), 5000))
     scanned = rows[:capped_limit]
-    grouped: dict[tuple[str, str, str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    grouped: dict[tuple[str, str, str, str, str, str, str, str, str, str, str, str], dict[str, Any]] = {}
     cache_hits = 0
     for row in scanned:
         cache = _json_obj(row.get("cache_json"))
@@ -3644,11 +3801,15 @@ def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: in
             or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
         )
         has_tools = _cache_ladder_has_tools(cache, routing)
+        category = _cache_ladder_category(row, cache, routing)
+        workflow_phase = _cache_ladder_phase(cache, routing)
         key = (
             blocker,
             public_label(row.get("provider") or "anthropic", "unknown"),
             public_label(source_surface, "unknown"),
             _endpoint_for_cache_ladder(row),
+            category,
+            workflow_phase,
             _cache_ladder_bool_label(bool(_as_int(row.get("stream"))), true_label="stream", false_label="non-stream"),
             _cache_ladder_bool_label(has_tools, true_label="tools", false_label="no-tools"),
             _cache_ladder_replayability(cache, routing),
@@ -3663,12 +3824,14 @@ def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: in
                 "provider": key[1],
                 "source_surface": key[2],
                 "endpoint": key[3],
-                "stream_mode": key[4],
-                "tool_presence": key[5],
-                "replayability_level": key[6],
-                "cache_policy_source": key[7],
-                "cache_status": key[8],
-                "cache_reason": key[9],
+                "category": key[4],
+                "workflow_phase": key[5],
+                "stream_mode": key[6],
+                "tool_presence": key[7],
+                "replayability_level": key[8],
+                "cache_policy_source": key[9],
+                "cache_status": key[10],
+                "cache_reason": key[11],
                 "next_action_family": next_action["family"],
                 "next_action_label": next_action["label"],
                 "count": 0,
@@ -3679,6 +3842,15 @@ def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: in
     ladder = list(grouped.values())
     ladder.sort(key=lambda row: (-row["count"], row["blocker_code"], row["provider"], row["source_surface"]))
     top = ladder[0] if ladder else None
+    action_candidates = [
+        candidate
+        for candidate in (
+            _cache_action_candidate_from_ladder_row(row, rank=index + 1)
+            for index, row in enumerate(ladder)
+            if row.get("blocker_code") != "cache-hit-observed"
+        )
+        if candidate is not None
+    ][:10] if cache_hits == 0 else []
     return {
         "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
         "generated_at": utc_now(),
@@ -3690,10 +3862,17 @@ def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: in
             "cache_hits": cache_hits,
             "zero_hit_window": cache_hits == 0,
             "blocker_bucket_count": len(ladder),
+            "action_candidate_count": len(action_candidates),
             "top_blocker_code": top.get("blocker_code") if top else None,
             "top_next_action_family": top.get("next_action_family") if top else None,
+            "top_action_candidate_family": (
+                ((action_candidates[0].get("local_action") or {}).get("family"))
+                if action_candidates
+                else None
+            ),
         },
         "ladder": ladder[:50],
+        "action_candidates": action_candidates,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -3704,6 +3883,8 @@ def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: in
             "request_ids_included": False,
             "session_ids_included": False,
             "cache_keys_included": False,
+            "pattern_hashes_included": False,
+            "candidate_identifiers_included": False,
             "file_paths_included": False,
             "absolute_paths_included": False,
             "provider_calls_made": False,
