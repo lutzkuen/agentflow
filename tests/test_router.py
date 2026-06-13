@@ -352,15 +352,43 @@ rules:
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["reason"], "keep requested model for thinking request")
 
-    def test_openai_routing_is_disabled_by_default(self):
+    def test_openai_canary_is_enabled_for_tool_light_gpt_5_4_by_default(self):
+        routed, meta = router_module.route_openai_model({
+            "model": "gpt-5.4",
+            "input": "Inspect the small tool result and decide whether another lookup is needed.",
+            "tools": [{"type": "function", "name": "lookup_file"}],
+        })
+
+        self.assertIn(routed, {"gpt-5.4", "gpt-5.4-mini"})
+        self.assertTrue(meta["enabled"])
+        self.assertEqual(meta["provider"], "openai")
+        self.assertNotEqual(meta["reason"], "openai routing disabled")
+        self.assertEqual(meta["category"], "tool-light")
+        self.assertTrue(meta["has_tools"])
+        canary = meta["openai_canary"]
+        self.assertEqual(canary["policy_id"], "local-openai-routing-canary-v1")
+        self.assertEqual(canary["target_model"], "gpt-5.4-mini")
+        self.assertEqual(canary["canary_fraction"], 0.05)
+        self.assertEqual(canary["holdout_fraction"], 0.05)
+        self.assertEqual(canary["category"], "tool-light")
+        self.assertTrue(canary["has_tools"])
+        self.assertIn(canary["status"], {"applied", "holdout", "not_selected"})
+        self.assertIn(canary["cohort"], {"canary_applied", "canary_holdout", "skipped"})
+        self.assertIn("safety_stop", canary)
+        self.assertTrue(canary["safety_stop"]["enabled"])
+        self.assertEqual(router_module.ROUTING_OPENAI_CANARY["safety_stop"]["max_error_rate"], 0.03)
+
+    def test_openai_canary_ignores_non_target_models_by_default(self):
         routed, meta = router_module.route_openai_model({
             "model": "gpt-5-codex",
             "input": "small task",
         })
 
         self.assertEqual(routed, "gpt-5-codex")
-        self.assertFalse(meta["enabled"])
+        self.assertTrue(meta["enabled"])
         self.assertEqual(meta["provider"], "openai")
+        self.assertEqual(meta["openai_canary"]["status"], "ineligible")
+        self.assertEqual(meta["openai_canary"]["reason"], "requested-model-not-enabled")
 
     def test_openai_routing_stays_inside_openai_models(self):
         try:

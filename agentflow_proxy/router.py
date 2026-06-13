@@ -300,20 +300,20 @@ def _default_phase_canary_policy() -> dict[str, Any]:
 
 def _default_openai_canary_policy() -> dict[str, Any]:
     return {
-        "enabled": False,
+        "enabled": True,
         "policy_id": "local-openai-routing-canary-v1",
-        "model_pattern": "gpt-5",
-        "target_model": OPENAI_SMALL_DEFAULT,
-        "eligible_categories": ["chat", "short-completion"],
-        "excluded_categories": ["tool-result", "tool-heavy", "tool-light", "code-gen", "long-context"],
-        "allow_tools": False,
+        "model_pattern": "gpt-5.4",
+        "target_model": "gpt-5.4-mini",
+        "eligible_categories": ["chat", "short-completion", "tool-light"],
+        "excluded_categories": ["tool-result", "tool-heavy", "code-gen", "long-context"],
+        "allow_tools": True,
         "allow_stream": False,
         "min_text_chars": 0,
         "max_text_chars": 8000,
         "min_input_tokens_est": 0,
         "max_input_tokens_est": 2000,
-        "canary_fraction": 0.0,
-        "holdout_fraction": 0.0,
+        "canary_fraction": 0.05,
+        "holdout_fraction": 0.05,
         "salt": "agentflow-openai-routing-canary-v1",
         "safety_stop": {
             "enabled": True,
@@ -1649,7 +1649,8 @@ def route_openai_model(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             "policy_source": canary_meta.get("policy_source") or ROUTING_RULES_SOURCE,
             "openai_canary": canary_meta,
         })
-        return routed, meta
+        if not (OPENAI_ROUTING_ENABLED and canary_meta.get("status") in {"ineligible", "noop"}):
+            return routed, meta
 
     if not OPENAI_ROUTING_ENABLED:
         return requested, meta

@@ -151,7 +151,7 @@ class DashboardImportTests(unittest.TestCase):
             self.assertFalse(openai_optimization_readiness.json()["privacy"]["request_ids_included"])
             self.assertEqual(openai_canary_readiness.status_code, 200)
             self.assertEqual(openai_canary_readiness.json()["schema"], "agentflow.openai_canary_readiness.v1")
-            self.assertEqual(openai_canary_readiness.json()["state"], "disabled")
+            self.assertEqual(openai_canary_readiness.json()["state"], "collecting_evidence")
             self.assertFalse(openai_canary_readiness.json()["privacy"]["provider_calls_made"])
             self.assertEqual(claude_canary_impact.status_code, 200)
             self.assertEqual(claude_canary_impact.json()["schema"], "agentflow.claude_canary_impact.v1")

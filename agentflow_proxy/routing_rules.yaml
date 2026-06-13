@@ -76,27 +76,27 @@ phase_canary:
 # metadata-only request features. The target model must stay inside the OpenAI
 # provider family.
 openai_canary:
-  enabled: false
+  enabled: true
   policy_id: local-openai-routing-canary-v1
-  model_pattern: gpt-5
-  target_model: gpt-5-mini
+  model_pattern: gpt-5.4
+  target_model: gpt-5.4-mini
   eligible_categories:
     - chat
     - short-completion
+    - tool-light
   excluded_categories:
     - tool-result
     - tool-heavy
-    - tool-light
     - code-gen
     - long-context
-  allow_tools: false
+  allow_tools: true
   allow_stream: false
   min_text_chars: 0
   max_text_chars: 8000
   min_input_tokens_est: 0
   max_input_tokens_est: 2000
-  canary_fraction: 0.0
-  holdout_fraction: 0.0
+  canary_fraction: 0.05
+  holdout_fraction: 0.05
   salt: agentflow-openai-routing-canary-v1
   safety_stop:
     enabled: true
