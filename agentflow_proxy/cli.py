@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Sequence
@@ -229,27 +230,27 @@ def agentflow_cli(
         parents=[config_parent],
         help="Check a configured AgentFlow target without exposing secrets.",
     )
-    doctor_parser.add_argument("target", choices=ONBOARDING_TARGETS)
+    doctor_parser.add_argument("target", nargs="?", choices=ONBOARDING_TARGETS)
     doctor_parser.add_argument("--timeout", type=float, default=5.0, help="Health request timeout in seconds.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     stats_parser = subparsers.add_parser(
         "stats",
         parents=[config_parent],
-        help="Fetch local AgentFlow stats from the read-only dashboard API.",
+        help="Show configured AgentFlow activation targets.",
     )
     stats_parser.add_argument(
         "target",
         nargs="?",
         choices=ONBOARDING_TARGETS,
-        help="Optional onboarding target label for docs/scripts; stats are read from the local API.",
+        help="Optional onboarding target label; defaults to all targets.",
     )
     stats_parser.add_argument(
         "--url",
         default=os.getenv("AGENTFLOW_STATS_URL", DEFAULT_STATS_URL),
-        help=f"Local stats URL, default: {DEFAULT_STATS_URL}.",
+        help=argparse.SUPPRESS,
     )
-    stats_parser.add_argument("--timeout", type=float, default=5.0, help="Stats request timeout in seconds.")
+    stats_parser.add_argument("--timeout", type=float, default=5.0, help=argparse.SUPPRESS)
     stats_parser.add_argument("--json", action="store_true", help="Print full stats JSON.")
 
     version_parser = subparsers.add_parser("version", help="Print the AgentFlow CLI version.")
@@ -341,62 +342,33 @@ def agentflow_cli(
         return 0
 
     if args.command == "doctor":
-        if args.target not in RUN_TARGETS:
-            stderr.write(
-                f"AgentFlow doctor target is not implemented yet: {args.target}. "
-                "Supported runtime targets are: openai, claude.\n"
-            )
-            return 2
         try:
             config = activation.load_activation_config(args.config_dir)
         except activation.ActivationConfigError as exc:
-            result = {
-                "schema": "agentflow.activation_doctor.v1",
-                "target": args.target,
-                "ok": False,
-                "configured": False,
-                "issues": [
-                    {
-                        "code": "activation-config-invalid",
-                        "message": str(exc),
-                        "errors": getattr(exc, "errors", []),
-                    }
-                ],
-            }
+            result = _activation_config_error_result("agentflow.activation_doctor.v1", args.config_dir, args.target, exc)
             if args.json:
                 _write_json(stdout, result)
             else:
                 stderr.write(str(exc) + "\n")
             return 1
-        profile = (config.get("targets") or {}).get(args.target)
-        if not isinstance(profile, dict) or not profile.get("configured"):
-            stderr.write(f"AgentFlow target is not configured: {args.target}. Run `agentflow activate {args.target}` first.\n")
-            return 1
-        result = _doctor_activation_target(profile, timeout=float(args.timeout))
-        result["activation"] = activation.activation_status_from_config(config, config_dir=args.config_dir, target=args.target)
+        result = _activation_doctor_result(config, config_dir=args.config_dir, target=args.target, timeout=float(args.timeout))
         if args.json:
             _write_json(stdout, result)
         else:
-            _write_doctor_summary(stdout, result)
+            _write_activation_doctor_summary(stdout, result)
         return 0 if result["ok"] else 1
 
     if args.command == "stats":
-        result = _fetch_agentflow_stats(url=str(args.url), timeout=float(args.timeout), target=args.target)
         try:
-            result["activation"] = activation.activation_status(args.config_dir, target=args.target)
+            config = activation.load_activation_config(args.config_dir)
         except activation.ActivationConfigError as exc:
-            result.setdefault("issues", []).append(
-                {
-                    "code": "activation-config-invalid",
-                    "message": str(exc),
-                    "errors": getattr(exc, "errors", []),
-                }
-            )
-            result["ok"] = False
+            result = _activation_config_error_result("agentflow.activation_stats.v1", args.config_dir, args.target, exc)
+        else:
+            result = _activation_stats_result(config, config_dir=args.config_dir, target=args.target)
         if args.json:
             _write_json(stdout, result)
         elif result["ok"]:
-            _write_stats_summary(stdout, result)
+            _write_activation_stats_summary(stdout, result)
         else:
             _write_json(stderr, result)
         return 0 if result["ok"] else 1
@@ -417,6 +389,358 @@ def agentflow_cli(
 
     parser.error("unknown command")
     return 2
+
+
+_CODEX_OPENAI_BASE_URL_RE = re.compile(r'^(\s*openai_base_url\s*=\s*)(".*?"|\'.*?\'|[^#\n]*?)(\s+#.*)?(\r?\n)?$')
+
+
+def _activation_config_error_result(
+    schema: str,
+    config_dir: str | Path | None,
+    target: str | None,
+    exc: Exception,
+) -> dict[str, Any]:
+    from agentflow_proxy import activation
+
+    return {
+        "schema": schema,
+        "ok": False,
+        "target": target,
+        "config_path": str(activation.activation_config_path(config_dir)),
+        "targets": {},
+        "issues": [
+            {
+                "code": "activation-config-invalid",
+                "message": str(exc),
+                "errors": getattr(exc, "errors", []),
+            }
+        ],
+    }
+
+
+def _selected_activation_targets(target: str | None) -> list[str]:
+    return [target] if target else list(ONBOARDING_TARGETS)
+
+
+def _profile_for_target(config: dict[str, Any], target: str) -> dict[str, Any]:
+    targets = config.get("targets") if isinstance(config.get("targets"), dict) else {}
+    profile = targets.get(target) if isinstance(targets.get(target), dict) else {}
+    return profile if isinstance(profile, dict) else {}
+
+
+def _target_activation_base(
+    config: dict[str, Any],
+    *,
+    config_dir: str | Path | None,
+    target: str,
+) -> dict[str, Any]:
+    from agentflow_proxy import activation
+
+    profile = _profile_for_target(config, target)
+    configured = bool(profile.get("configured"))
+    upstream = profile.get("upstream_base_url")
+    result: dict[str, Any] = {
+        "target": target,
+        "status": "configured" if configured else "not configured",
+        "configured": configured,
+        "provider": profile.get("provider") if configured else None,
+        "local_base_url": _redact_url(str(profile.get("local_base_url"))) if configured and profile.get("local_base_url") else None,
+        "health_url": str(profile.get("health_url")) if configured and profile.get("health_url") else None,
+        "upstream_base_url": _redact_url(str(upstream)) if configured and upstream else None,
+        "reasons": [],
+    }
+    if configured:
+        for key in ("codex_config_path", "env_file_path", "depends_on"):
+            if profile.get(key):
+                result[key] = str(profile.get(key))
+    else:
+        result["reasons"].append("activation-profile-missing")
+    if target == "codex" and configured and not result.get("upstream_base_url"):
+        openai_profile = _profile_for_target(config, "openai")
+        upstream = openai_profile.get("upstream_base_url")
+        if upstream:
+            result["upstream_base_url"] = _redact_url(str(upstream))
+    if target == "claude-vscode" and configured and not result.get("upstream_base_url"):
+        claude_profile = _profile_for_target(config, "claude")
+        upstream = claude_profile.get("upstream_base_url")
+        if upstream:
+            result["upstream_base_url"] = _redact_url(str(upstream))
+    result["config_path"] = str(activation.activation_config_path(config_dir))
+    return result
+
+
+def _activation_stats_result(
+    config: dict[str, Any],
+    *,
+    config_dir: str | Path | None,
+    target: str | None,
+) -> dict[str, Any]:
+    from agentflow_proxy import activation
+
+    targets = {
+        name: _target_activation_base(config, config_dir=config_dir, target=name)
+        for name in _selected_activation_targets(target)
+    }
+    return {
+        "schema": "agentflow.activation_stats.v1",
+        "ok": True,
+        "target": target,
+        "config_path": str(activation.activation_config_path(config_dir)),
+        "targets": targets,
+    }
+
+
+def _activation_doctor_result(
+    config: dict[str, Any],
+    *,
+    config_dir: str | Path | None,
+    target: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    from agentflow_proxy import activation
+
+    targets: dict[str, dict[str, Any]] = {}
+    for name in _selected_activation_targets(target):
+        base = _target_activation_base(config, config_dir=config_dir, target=name)
+        profile = _profile_for_target(config, name)
+        if name in RUN_TARGETS:
+            checked = _doctor_provider_target(base, profile, timeout=timeout)
+        elif name == "codex":
+            checked = _doctor_codex_target(base, config)
+        elif name == "claude-vscode":
+            checked = _doctor_claude_vscode_target(base)
+        else:
+            checked = base
+            checked["ok"] = False
+            checked["status"] = "unhealthy"
+            checked["reasons"].append("unknown-target")
+        targets[name] = checked
+    return {
+        "schema": "agentflow.activation_doctor.v1",
+        "ok": all(bool(item.get("ok")) for item in targets.values()),
+        "target": target,
+        "config_path": str(activation.activation_config_path(config_dir)),
+        "targets": targets,
+    }
+
+
+def _doctor_provider_target(base: dict[str, Any], profile: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+    result = dict(base)
+    result["ok"] = False
+    if not result.get("configured"):
+        result["status"] = "not configured"
+        return result
+    health_url = str(result.get("health_url") or "")
+    if not _is_loopback_url(health_url):
+        result["status"] = "unhealthy"
+        result["reasons"].append("health-url-not-loopback")
+        return result
+
+    expected_provider = "openai" if profile.get("provider") == "openai" else "anthropic"
+    try:
+        response = httpx.get(health_url, timeout=timeout)
+    except Exception as exc:
+        result["status"] = "configured but not running"
+        result["reasons"].append("health-unreachable")
+        result["health_error"] = type(exc).__name__
+        return result
+
+    result["health_status_code"] = response.status_code
+    if response.status_code < 200 or response.status_code >= 300:
+        result["status"] = "unhealthy"
+        result["reasons"].append("health-non-2xx")
+        return result
+    try:
+        health = response.json()
+    except ValueError:
+        result["status"] = "unhealthy"
+        result["reasons"].append("health-invalid-json")
+        return result
+    if not isinstance(health, dict):
+        result["status"] = "unhealthy"
+        result["reasons"].append("health-invalid-payload")
+        return result
+
+    health_provider = str(health.get("provider") or "")
+    health_upstream = _redact_url(str(health.get("upstream") or "")) if health.get("upstream") else None
+    result["health"] = {
+        "ok": bool(health.get("ok")),
+        "provider": health_provider,
+        "upstream_base_url": health_upstream,
+        "openai_auth_mode": health.get("openai_auth_mode"),
+    }
+    if health_provider != expected_provider:
+        result["status"] = "provider mismatch"
+        result["reasons"].append("provider-mismatch")
+        result["expected_provider"] = expected_provider
+        return result
+    configured_upstream = result.get("upstream_base_url")
+    if configured_upstream and health_upstream and configured_upstream != health_upstream:
+        result["status"] = "stale base url"
+        result["reasons"].append("upstream-mismatch")
+        result["running_upstream_base_url"] = health_upstream
+        return result
+    if not health.get("ok"):
+        result["status"] = "unhealthy"
+        result["reasons"].append("health-ok-false")
+        return result
+
+    result["status"] = "healthy"
+    result["ok"] = True
+    return result
+
+
+def _decode_toml_string(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value[1:-1]
+        return decoded if isinstance(decoded, str) else str(decoded)
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1]
+    return value
+
+
+def _codex_openai_base_url_from_toml(raw: str) -> str | None:
+    for line in raw.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("[") and not stripped.startswith("#"):
+            return None
+        match = _CODEX_OPENAI_BASE_URL_RE.match(line)
+        if match:
+            return _decode_toml_string(match.group(2))
+    return None
+
+
+def _doctor_codex_target(base: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    result["ok"] = False
+    if not result.get("configured"):
+        result["status"] = "not configured"
+        return result
+    expected = str(result.get("local_base_url") or "")
+    path_value = result.get("codex_config_path")
+    if not path_value:
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("codex-config-path-missing")
+        return result
+    path = Path(str(path_value)).expanduser()
+    if not path.exists():
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("codex-config-missing")
+        return result
+    try:
+        configured_base_url = _codex_openai_base_url_from_toml(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        result["status"] = "unhealthy"
+        result["reasons"].append("codex-config-unreadable")
+        result["config_error"] = type(exc).__name__
+        return result
+    result["codex_openai_base_url"] = _redact_url(configured_base_url) if configured_base_url else None
+    if not configured_base_url:
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("codex-openai-base-url-missing")
+        return result
+    if configured_base_url != expected:
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("codex-openai-base-url-mismatch")
+        return result
+    openai_profile = _profile_for_target(config, "openai")
+    if openai_profile and not openai_profile.get("configured"):
+        result["reasons"].append("openai-profile-not-configured")
+    result["status"] = "healthy"
+    result["ok"] = True
+    return result
+
+
+def _env_file_value(path: Path, key: str) -> str | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        if name.strip() == key:
+            return value.strip().strip('"').strip("'")
+    return None
+
+
+def _doctor_claude_vscode_target(base: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    result["ok"] = False
+    if not result.get("configured"):
+        result["status"] = "not configured"
+        return result
+    expected = str(result.get("local_base_url") or "")
+    env_path_value = result.get("env_file_path")
+    env_file_base_url = None
+    if env_path_value:
+        env_path = Path(str(env_path_value)).expanduser()
+        result["env_file_exists"] = env_path.exists()
+        env_file_base_url = _env_file_value(env_path, "ANTHROPIC_BASE_URL") if env_path.exists() else None
+        result["env_file_base_url"] = _redact_url(env_file_base_url) if env_file_base_url else None
+    else:
+        result["env_file_exists"] = False
+    if env_file_base_url != expected:
+        result["status"] = "not routed via agentflow" if not env_file_base_url else "stale base url"
+        result["reasons"].append("claude-vscode-env-file-missing" if not env_file_base_url else "claude-vscode-env-file-mismatch")
+        return result
+
+    current_shell_base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    result["current_shell_base_url"] = _redact_url(current_shell_base_url) if current_shell_base_url else None
+    if current_shell_base_url and current_shell_base_url != expected:
+        result["status"] = "not routed via agentflow"
+        result["reasons"].append("current-shell-anthropic-base-url-mismatch")
+        result["reasons"].append("vscode-runtime-env-uncertain")
+        return result
+    if current_shell_base_url == expected:
+        result["status"] = "healthy"
+        result["reasons"].append("current-shell-routed")
+    else:
+        result["status"] = "configured"
+        result["reasons"].append("current-shell-env-missing")
+    result["reasons"].append("vscode-runtime-env-uncertain")
+    result["ok"] = True
+    return result
+
+
+def _write_activation_stats_summary(stdout: Any, result: dict[str, Any]) -> None:
+    targets = result.get("targets") if isinstance(result.get("targets"), dict) else {}
+    for name in _selected_activation_targets(result.get("target")):
+        target = targets.get(name) if isinstance(targets.get(name), dict) else {}
+        if not target.get("configured"):
+            stdout.write(f"{name}: not configured\n")
+            continue
+        parts = [f"{name}: configured"]
+        if target.get("local_base_url"):
+            parts.append(f"base url: {target['local_base_url']}")
+        if target.get("upstream_base_url"):
+            parts.append(f"upstream: {target['upstream_base_url']}")
+        stdout.write(", ".join(parts) + "\n")
+
+
+def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> None:
+    targets = result.get("targets") if isinstance(result.get("targets"), dict) else {}
+    for name in _selected_activation_targets(result.get("target")):
+        target = targets.get(name) if isinstance(targets.get(name), dict) else {}
+        status = target.get("status") or "unknown"
+        parts = [f"{name}: {status}"]
+        if target.get("local_base_url"):
+            parts.append(f"base url: {target['local_base_url']}")
+        if target.get("health_url"):
+            parts.append(f"health url: {target['health_url']}")
+        if target.get("upstream_base_url"):
+            parts.append(f"upstream: {target['upstream_base_url']}")
+        if target.get("running_upstream_base_url"):
+            parts.append(f"running upstream: {target['running_upstream_base_url']}")
+        if target.get("reasons"):
+            parts.append("reasons: " + ", ".join(str(reason) for reason in target["reasons"]))
+        stdout.write(", ".join(parts) + "\n")
 
 
 def _fetch_agentflow_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0, target: str | None = None) -> dict[str, Any]:

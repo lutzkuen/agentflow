@@ -78,45 +78,40 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stdout.getvalue(), f"agentflow {__version__}\n")
 
-    def test_agentflow_stats_fetches_loopback_stats_summary(self):
+    def test_agentflow_stats_prints_activation_targets_without_http(self):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()
+            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
             with patch("agentflow_proxy.cli.httpx.get") as http_get:
-                http_get.return_value = httpx.Response(
-                    200,
-                    json={"calls": 12, "cache_hit_rate": 0.25, "db": "/tmp/agentflow.sqlite3"},
-                )
                 code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai"], stdout=stdout)
 
         self.assertEqual(code, 0)
-        http_get.assert_called_once_with("http://127.0.0.1:4002/agentflow/stats", timeout=5.0)
+        http_get.assert_not_called()
         output = stdout.getvalue()
-        self.assertIn("AgentFlow stats status=ok", output)
-        self.assertIn("Target: openai", output)
-        self.assertIn("Calls: 12", output)
-        self.assertIn("Configured: false", output)
+        self.assertEqual(output, "openai: configured, base url: http://127.0.0.1:4003/v1, upstream: https://api.openai.com\n")
 
-    def test_agentflow_stats_refuses_non_loopback_url(self):
-        stderr = io.StringIO()
+    def test_agentflow_stats_lists_all_known_targets(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
 
-        code = cli.agentflow_cli(
-            ["stats", "--url", "https://example.com/agentflow/stats"],
-            stdout=io.StringIO(),
-            stderr=stderr,
-        )
+            code = cli.agentflow_cli(["stats", "--config-dir", tmp], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("openai: configured, base url: http://127.0.0.1:4003/v1", output)
+        self.assertIn("claude: not configured", output)
+        self.assertIn("codex: not configured", output)
+        self.assertIn("claude-vscode: not configured", output)
+
+    def test_agentflow_doctor_codex_not_configured(self):
+        stdout = io.StringIO()
+
+        code = cli.agentflow_cli(["doctor", "codex"], stdout=stdout)
 
         self.assertEqual(code, 1)
-        self.assertIn("non-loopback-url", stderr.getvalue())
-
-    def test_unsupported_onboarding_doctor_target_returns_clear_message(self):
-        stderr = io.StringIO()
-
-        code = cli.agentflow_cli(["doctor", "codex"], stdout=io.StringIO(), stderr=stderr)
-
-        self.assertEqual(code, 2)
-        self.assertIn("AgentFlow doctor target is not implemented yet: codex", stderr.getvalue())
-        self.assertIn("Supported runtime targets are: openai, claude", stderr.getvalue())
+        self.assertIn("codex: not configured", stdout.getvalue())
 
     def test_unsupported_subcommand_has_stable_argparse_exit(self):
         stderr = io.StringIO()
@@ -293,16 +288,20 @@ class AgentflowActivationCliTests(unittest.TestCase):
             stdout = io.StringIO()
 
             with patch("agentflow_proxy.cli.httpx.get") as http_get:
-                http_get.return_value = httpx.Response(200, json={"calls": 1})
                 code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai", "--json"], stdout=stdout)
 
         self.assertEqual(code, 0)
+        http_get.assert_not_called()
         result = json.loads(stdout.getvalue())
-        status = result["activation"]["targets"]["openai"]
+        self.assertEqual(result["schema"], "agentflow.activation_stats.v1")
+        status = result["targets"]["openai"]
+        self.assertEqual(status["status"], "configured")
         self.assertTrue(status["configured"])
         self.assertEqual(status["provider"], "openai")
         self.assertEqual(status["local_base_url"], "http://127.0.0.1:4003/v1")
         self.assertEqual(status["upstream_base_url"], "https://api.openai.com")
+        for field in ("status", "configured", "local_base_url", "health_url", "upstream_base_url", "reasons"):
+            self.assertIn(field, status)
 
     def test_activate_openai_invalid_upstream_fails_actionably(self):
         with TemporaryDirectory() as tmp:
@@ -561,10 +560,169 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             output = stdout.getvalue()
             self.assertIn("upstream-mismatch", output)
-            self.assertIn("Configured upstream: https://example-resource.openai.azure.com/openai/deployments/a", output)
+            self.assertIn("upstream: https://example-resource.openai.azure.com/openai/deployments/a", output)
             self.assertIn("api-key=%5Bredacted%5D", output)
             self.assertNotIn("user:pass", output)
             self.assertNotIn("api-key=secret", output)
+
+    def test_agentflow_doctor_json_covers_provider_health_statuses(self):
+        cases = [
+            (
+                "healthy",
+                httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://api.openai.com"}),
+                0,
+                "healthy",
+                [],
+            ),
+            (
+                "connection-refused",
+                httpx.ConnectError("refused"),
+                1,
+                "configured but not running",
+                ["health-unreachable"],
+            ),
+            (
+                "non-2xx",
+                httpx.Response(503, json={"ok": False}),
+                1,
+                "unhealthy",
+                ["health-non-2xx"],
+            ),
+            (
+                "ok-false",
+                httpx.Response(200, json={"ok": False, "provider": "openai", "upstream": "https://api.openai.com"}),
+                1,
+                "unhealthy",
+                ["health-ok-false"],
+            ),
+            (
+                "provider-mismatch",
+                httpx.Response(200, json={"ok": True, "provider": "anthropic", "upstream": "https://api.openai.com"}),
+                1,
+                "provider mismatch",
+                ["provider-mismatch"],
+            ),
+            (
+                "upstream-mismatch",
+                httpx.Response(200, json={"ok": True, "provider": "openai", "upstream": "https://other.example"}),
+                1,
+                "stale base url",
+                ["upstream-mismatch"],
+            ),
+            (
+                "invalid-json",
+                httpx.Response(200, text="not json"),
+                1,
+                "unhealthy",
+                ["health-invalid-json"],
+            ),
+        ]
+        for name, response_or_exc, expected_code, expected_status, expected_reasons in cases:
+            with self.subTest(name=name), TemporaryDirectory() as tmp:
+                cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+                stdout = io.StringIO()
+
+                with patch("agentflow_proxy.cli.httpx.get", side_effect=[response_or_exc]):
+                    code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+
+                self.assertEqual(code, expected_code)
+                result = json.loads(stdout.getvalue())
+                target = result["targets"]["openai"]
+                self.assertEqual(target["status"], expected_status)
+                self.assertEqual(target["configured"], True)
+                self.assertEqual(target["local_base_url"], "http://127.0.0.1:4003/v1")
+                self.assertEqual(target["health_url"], "http://127.0.0.1:4003/health")
+                self.assertEqual(target["upstream_base_url"], "https://api.openai.com")
+                for reason in expected_reasons:
+                    self.assertIn(reason, target["reasons"])
+
+    def test_agentflow_doctor_provider_mismatch_on_openai_port(self):
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+                http_get.return_value = httpx.Response(
+                    200,
+                    json={"ok": True, "provider": "anthropic", "upstream": "https://api.openai.com"},
+                )
+                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        self.assertIn("openai: provider mismatch", stdout.getvalue())
+        self.assertIn("provider-mismatch", stdout.getvalue())
+
+    def test_agentflow_doctor_codex_reports_not_routed_when_config_missing_or_stale(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            codex_config = Path(tmp) / "config.toml"
+            cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+            codex_config.unlink()
+            missing_stdout = io.StringIO()
+
+            missing_code = cli.agentflow_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=missing_stdout)
+
+            codex_config.write_text('openai_base_url = "https://api.openai.com/v1"\n', encoding="utf-8")
+            stale_stdout = io.StringIO()
+            stale_code = cli.agentflow_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=stale_stdout)
+
+        self.assertEqual(missing_code, 1)
+        missing = json.loads(missing_stdout.getvalue())["targets"]["codex"]
+        self.assertEqual(missing["status"], "not routed via agentflow")
+        self.assertIn("codex-config-missing", missing["reasons"])
+        self.assertEqual(stale_code, 1)
+        stale = json.loads(stale_stdout.getvalue())["targets"]["codex"]
+        self.assertEqual(stale["status"], "not routed via agentflow")
+        self.assertEqual(stale["codex_openai_base_url"], "https://api.openai.com/v1")
+        self.assertIn("codex-openai-base-url-mismatch", stale["reasons"])
+
+    def test_agentflow_doctor_codex_reports_healthy_when_toml_points_to_agentflow(self):
+        with TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "agentflow"
+            codex_config = Path(tmp) / "config.toml"
+            cli.agentflow_cli(
+                ["activate", "codex", "--config-dir", str(config_dir), "--codex-config", str(codex_config)],
+                stdout=io.StringIO(),
+            )
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["doctor", "codex", "--config-dir", str(config_dir), "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        target = json.loads(stdout.getvalue())["targets"]["codex"]
+        self.assertEqual(target["status"], "healthy")
+        self.assertEqual(target["codex_openai_base_url"], "http://127.0.0.1:4003/v1")
+
+    def test_agentflow_doctor_claude_vscode_reports_environment_uncertainty(self):
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {}, clear=True):
+                code = cli.agentflow_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
+        self.assertEqual(target["status"], "configured")
+        self.assertEqual(target["env_file_base_url"], "http://127.0.0.1:4000")
+        self.assertIn("current-shell-env-missing", target["reasons"])
+        self.assertIn("vscode-runtime-env-uncertain", target["reasons"])
+
+    def test_agentflow_doctor_claude_vscode_detects_shell_base_url_mismatch(self):
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}, clear=True):
+                code = cli.agentflow_cli(["doctor", "claude-vscode", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        target = json.loads(stdout.getvalue())["targets"]["claude-vscode"]
+        self.assertEqual(target["status"], "not routed via agentflow")
+        self.assertIn("current-shell-anthropic-base-url-mismatch", target["reasons"])
 
     def test_agentflow_run_translates_claude_profile_to_proxy_flags(self):
         upstream = "https://anthropic.example"
