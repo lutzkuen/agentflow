@@ -534,6 +534,116 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("openai-canary-secret-id", rendered)
         self.assertNotIn("local-openai-routing-secret", rendered)
 
+    def test_openai_canary_cohort_lifecycle_metadata_clears_aggregate_only_gate(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "openai_canary_impact": {
+                    "schema": "agentflow.openai_canary_impact.v1",
+                    "status": "matched",
+                    "summary": {
+                        "candidate_count": 1,
+                        "canary_applied_count": 2,
+                        "canary_holdout_count": 1,
+                    },
+                    "candidates": [
+                        {
+                            "candidate_id": "raw-openai-canary-candidate-secret",
+                            "source_surface": "openai_responses",
+                            "original_model": "gpt-5.4",
+                            "candidate_target_model": "gpt-5.4-mini",
+                            "verdict": "widen",
+                            "next_action": "widen_local_openai_canary",
+                            "aggregate_only_feedback": True,
+                            "reason_codes": ["target-savings-met"],
+                            "warning_codes": [],
+                            "sample_count": 3,
+                            "cohort_counts": {
+                                "canary_applied": 2,
+                                "canary_holdout": 1,
+                                "safety_stopped": 0,
+                            },
+                            "applied_vs_holdout_deltas": {
+                                "applied_minus_holdout_error_rate": 0.0,
+                                "applied_minus_holdout_retry_rate": 0.0,
+                                "applied_minus_holdout_fallback_rate": 0.0,
+                            },
+                            "observed_savings_usd": 0.02,
+                            "projected_savings_usd": 0.03,
+                            "stale_evidence": {"stale": False, "age_hours": 1.0},
+                        }
+                    ],
+                    "activation_lifecycle_feedback": {
+                        "queue_rows": 1,
+                        "state_breakdown": [{"value": "healthy_canary", "count": 1}],
+                        "cohort_breakdown": [
+                            {"value": "canary_applied", "count": 2},
+                            {"value": "canary_holdout", "count": 1},
+                        ],
+                        "cohort_lifecycle_metadata": [
+                            {
+                                "policy_ref": "policy:public-cohort-ref",
+                                "policy_id": "raw-policy-secret-should-redact",
+                                "cohort_label": "canary_applied",
+                                "action_family": "routing",
+                                "event_count": 2,
+                                "applied_count": 2,
+                                "holdout_count": 0,
+                                "fallback_count": 0,
+                                "error_rate": 0.0,
+                                "savings_estimate_usd": 0.02,
+                            },
+                            {
+                                "policy_ref": "policy:public-cohort-ref",
+                                "policy_id": "raw-policy-secret-should-redact",
+                                "cohort_label": "canary_holdout",
+                                "action_family": "routing",
+                                "event_count": 1,
+                                "applied_count": 0,
+                                "holdout_count": 1,
+                                "fallback_count": 0,
+                                "error_rate": 0.0,
+                                "savings_estimate_usd": 0.0,
+                            },
+                        ],
+                        "payload_json_included": False,
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "raw_prompts_included": False,
+                            "request_ids_included": False,
+                            "raw_session_ids_included": False,
+                        },
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        routing_issues = [
+            item
+            for item in plan["backlog_changes"]["create_issues"]
+            if "OpenAI routing canary" in item["title"]
+        ]
+        self.assertEqual(len(routing_issues), 1)
+        issue = routing_issues[0]
+        self.assertIn("status:ready", issue["labels"])
+        self.assertIn("Activation mode: activation-candidate", issue["body"])
+        self.assertIn("Cohort lifecycle metadata", issue["body"])
+        self.assertNotIn("aggregate-only-feedback", issue["body"])
+
+        routing_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "routing")
+        signal = routing_candidate["projected_savings_signal"]
+        self.assertEqual(signal["omission_reason"], "none")
+        self.assertEqual(signal["cohort_lifecycle_metadata"][0]["applied_count"], 2)
+        self.assertEqual(signal["cohort_lifecycle_metadata"][1]["holdout_count"], 1)
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-openai-canary-candidate-secret", rendered)
+        self.assertNotIn("raw-policy-secret-should-redact", rendered)
+
     def test_openai_canary_missing_lifecycle_feedback_generates_blocked_update(self):
         plan = build_research_plan(
             issues=[],

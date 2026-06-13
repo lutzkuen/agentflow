@@ -359,6 +359,7 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
                         "status": cohort,
                         "candidate_id": f"candidate-{idx}",
                         "rule_id": f"rule-{idx}",
+                        "savings_estimate_usd": 0.01 * (idx + 1),
                         "reason_codes": [state],
                     }
                 ],
@@ -395,6 +396,14 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
         self.assertEqual(states["holdout_only"], 1)
         self.assertEqual(states["suppressed"], 1)
         self.assertEqual(states["rollback_required"], 1)
+        lifecycle_rows = feedback["cohort_lifecycle_metadata"]
+        self.assertEqual(len(lifecycle_rows), 3)
+        for row in lifecycle_rows:
+            self.assertTrue(row["policy_ref"].startswith("policy:"))
+            self.assertIn(row["cohort_label"], {"holdout", "suppressed", "rollback_required"})
+            for field in ("applied_count", "holdout_count", "fallback_count", "error_rate", "savings_estimate_usd"):
+                self.assertIn(field, row)
+        self.assertAlmostEqual(sum(row["savings_estimate_usd"] for row in lifecycle_rows), 0.06)
         self.assertFalse(feedback["payload_json_included"])
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn(_SECRET_PROMPT, rendered)

@@ -769,6 +769,8 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     canary_row, _ = _top_openai_routing_canary_row(stats_summary)
     if canary_row is not None:
         action = _openai_routing_candidate_action(canary_row, stats_summary)
+        impact = stats_summary.get("openai_canary_impact") if isinstance(stats_summary.get("openai_canary_impact"), dict) else {}
+        feedback = impact.get("activation_lifecycle_feedback") if isinstance(impact.get("activation_lifecycle_feedback"), dict) else {}
         counts = canary_row.get("cohort_counts") if isinstance(canary_row.get("cohort_counts"), dict) else {}
         reason_codes = [str(reason) for reason in canary_row.get("reason_codes") or []]
         blocker = (
@@ -794,6 +796,7 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
                 "safety_stopped_count": _to_int(counts.get("safety_stopped")),
                 "savings_per_1000_calls_usd": action["savings_per_1000_calls_usd"],
                 "omission_reason": action["omission_reason"],
+                "cohort_lifecycle_metadata": _cohort_lifecycle_metadata(feedback, limit=5),
             },
             confidence="high" if action["activation_ready"] else "medium",
             sequencing="Use canary lifecycle feedback before generic pass-through routing issues so activation work cites applied, holdout, and safety evidence.",
@@ -1405,6 +1408,42 @@ def _breakdown_counts(rows: Any) -> dict[str, int]:
     return counts
 
 
+def _cohort_lifecycle_metadata(feedback: dict[str, Any], *, limit: int = 10) -> list[dict[str, Any]]:
+    rows = feedback.get("cohort_lifecycle_metadata") if isinstance(feedback.get("cohort_lifecycle_metadata"), list) else []
+    metadata: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata.append(
+            {
+                "policy_ref": sanitize_value(row.get("policy_ref") or row.get("policy_public_id") or "unknown"),
+                "cohort_label": sanitize_value(row.get("cohort_label") or row.get("cohort") or "unknown"),
+                "action_family": sanitize_value(row.get("action_family") or "unknown"),
+                "event_count": _to_int(row.get("event_count") or row.get("count")),
+                "applied_count": _to_int(row.get("applied_count")),
+                "holdout_count": _to_int(row.get("holdout_count")),
+                "fallback_count": _to_int(row.get("fallback_count")),
+                "error_rate": round(_to_float(row.get("error_rate")), 6),
+                "savings_estimate_usd": round(_to_float(row.get("savings_estimate_usd")), 8),
+            }
+        )
+        if len(metadata) >= limit:
+            break
+    return metadata
+
+
+def _has_policy_cohort_lifecycle_metadata(feedback: dict[str, Any]) -> bool:
+    for row in _cohort_lifecycle_metadata(feedback, limit=50):
+        if row["policy_ref"] == "unknown" or row["cohort_label"] == "unknown":
+            continue
+        if any(
+            _to_int(row.get(key)) > 0
+            for key in ("event_count", "applied_count", "holdout_count", "fallback_count")
+        ):
+            return True
+    return False
+
+
 def _openai_routing_canary_bucket(row: dict[str, Any]) -> str:
     provider = "openai"
     source_surface = str(row.get("source_surface") or "openai_provider_request").strip()
@@ -1438,7 +1477,8 @@ def _openai_lifecycle_omission_reason(feedback: dict[str, Any]) -> str | None:
     if not isinstance(feedback, dict) or _to_int(feedback.get("queue_rows")) <= 0:
         return "missing-lifecycle-feedback"
     privacy = feedback.get("privacy") if isinstance(feedback.get("privacy"), dict) else {}
-    if privacy.get("aggregate_only") is True:
+    has_cohort_lifecycle = _has_policy_cohort_lifecycle_metadata(feedback)
+    if privacy.get("aggregate_only") is True and not has_cohort_lifecycle:
         return "aggregate-only-feedback"
     state_counts = _breakdown_counts(feedback.get("state_breakdown"))
     if state_counts.get("rollback_required", 0) > 0:
@@ -1488,8 +1528,9 @@ def _openai_routing_candidate_action(row: dict[str, Any], stats_summary: dict[st
     stale = row.get("stale_evidence") if isinstance(row.get("stale_evidence"), dict) else {}
     verdict = str(row.get("verdict") or "unknown")
     omission_reason = None
+    has_cohort_lifecycle = _has_policy_cohort_lifecycle_metadata(feedback)
 
-    if row.get("aggregate_only_feedback") is True:
+    if row.get("aggregate_only_feedback") is True and not has_cohort_lifecycle:
         omission_reason = "aggregate-only-feedback"
     elif stale.get("stale"):
         omission_reason = "stale-evidence"
@@ -1639,6 +1680,7 @@ def _proposal_from_openai_routing_canary_feedback(stats_summary: dict[str, Any])
     impact = stats_summary.get("openai_canary_impact") if isinstance(stats_summary.get("openai_canary_impact"), dict) else {}
     feedback = impact.get("activation_lifecycle_feedback") if isinstance(impact.get("activation_lifecycle_feedback"), dict) else {}
     state_counts = _breakdown_counts(feedback.get("state_breakdown"))
+    lifecycle_metadata = _cohort_lifecycle_metadata(feedback, limit=5)
     next_action = str(row.get("next_action") or "inspect_openai_canary_lifecycle_evidence")
     reason_codes = [str(reason) for reason in row.get("reason_codes") or []]
     warning_codes = [str(reason) for reason in row.get("warning_codes") or []]
@@ -1682,6 +1724,8 @@ def _proposal_from_openai_routing_canary_feedback(stats_summary: dict[str, Any])
         f"Holdout samples: {_to_int(counts.get('canary_holdout'))}",
         f"Safety-stopped samples: {_to_int(counts.get('safety_stopped'))}",
     ]
+    if lifecycle_metadata:
+        evidence.append(f"Cohort lifecycle metadata: {json.dumps(lifecycle_metadata, sort_keys=True)}")
     for key in (
         "observed_savings_usd",
         "projected_savings_usd",

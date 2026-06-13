@@ -89,6 +89,14 @@ def _safe_id(value: Any, *, prefix: str, fallback: str = "unknown") -> str:
     return public_id(value, prefix=prefix, fallback=fallback) or fallback
 
 
+def _public_ref(value: Any, *, prefix: str, fallback: str = "unknown") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}:{digest}"
+
+
 def _reason_code(value: Any) -> str | None:
     text = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
     if not text:
@@ -124,6 +132,21 @@ def _money_bucket(value: Any) -> str:
     if amount < 0.10:
         return "0_01_0_10"
     return "gte_0_10"
+
+
+def _savings_estimate(value: dict[str, Any]) -> float:
+    for key in (
+        "savings_estimate_usd",
+        "estimated_savings_usd",
+        "projected_savings_usd",
+        "observed_savings_usd",
+        "net_savings_usd",
+        "expected_net_savings_usd",
+    ):
+        amount = _as_float(value.get(key))
+        if amount > 0:
+            return round(amount, 8)
+    return 0.0
 
 
 def _status_bucket(status: Any) -> str:
@@ -181,6 +204,7 @@ def _event_from_staged_draft(item: dict[str, Any], *, event_phase: str) -> dict[
         "rule_id": _safe_id(item.get("rule_id") or item.get("policy_id") or item.get("target_rule_id"), prefix="rule", fallback="unknown"),
         "action_id": _safe_id(item.get("action_id") or item.get("promotion_action_id") or item.get("draft_id"), prefix="action", fallback="unknown"),
         "policy_source": _safe_label(item.get("policy_source") or "local-manual", "local-manual"),
+        "savings_estimate_usd": _savings_estimate(item),
         "reason_codes": _reason_codes(item.get("reason_codes"), "activation-staged-action"),
     }
 
@@ -199,6 +223,7 @@ def _event_from_action(item: dict[str, Any], *, event_phase: str) -> dict[str, A
         "rule_id": _safe_id(item.get("rule_id") or item.get("target_rule_id") or item.get("policy_id"), prefix="rule", fallback="unknown"),
         "action_id": _safe_id(item.get("action_id") or item.get("promotion_action_id"), prefix="action", fallback="unknown"),
         "policy_source": _safe_label(item.get("policy_source") or "local-manual", "local-manual"),
+        "savings_estimate_usd": _savings_estimate(item),
         "reason_codes": _reason_codes(item.get("reason_codes"), item.get("reason"), f"activation-{event_phase}"),
     }
 
@@ -214,6 +239,7 @@ def _event_from_omission(item: dict[str, Any], *, event_phase: str) -> dict[str,
         "candidate_id": _safe_id(item.get("candidate_id") or item.get("target_candidate_id"), prefix="candidate"),
         "rule_id": _safe_id(item.get("rule_id") or item.get("target_rule_id"), prefix="rule", fallback="unknown"),
         "policy_source": _safe_label(item.get("policy_source") or "local-manual", "local-manual"),
+        "savings_estimate_usd": _savings_estimate(item),
         "reason_codes": _reason_codes(item.get("reason_codes"), item.get("reason"), f"activation-{event_phase}-suppressed"),
     }
 
@@ -312,6 +338,74 @@ def lifecycle_feedback_state_from_events(events: list[dict[str, Any]]) -> str:
     return "missing_feedback"
 
 
+def _empty_lifecycle_group(policy_ref: str, cohort: str, family: str) -> dict[str, Any]:
+    return {
+        "policy_ref": policy_ref,
+        "cohort_label": cohort,
+        "action_family": family,
+        "event_count": 0,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "fallback_count": 0,
+        "error_count": 0,
+        "savings_estimate_usd": 0.0,
+    }
+
+
+def _event_policy_ref(event: dict[str, Any]) -> str:
+    return _public_ref(
+        event.get("policy_ref")
+        or event.get("policy_id")
+        or event.get("rule_id")
+        or event.get("candidate_id"),
+        prefix="policy",
+        fallback="unknown",
+    )
+
+
+def _payload_error_observed(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("status_bucket") or "").strip().lower()
+    return status in {"4xx", "5xx", "blocked", "error", "failed", "retryable-error"}
+
+
+def _add_lifecycle_group_event(
+    groups: dict[tuple[str, str, str], dict[str, Any]],
+    *,
+    event: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    family = _safe_label(event.get("action_family"), "unknown")
+    cohort = _safe_label(event.get("cohort") or event.get("status"), "unknown")
+    policy_ref = _event_policy_ref(event)
+    group = groups.setdefault((policy_ref, cohort, family), _empty_lifecycle_group(policy_ref, cohort, family))
+    group["event_count"] += 1
+    if cohort in {"applied", "canary_applied"}:
+        group["applied_count"] += 1
+    if cohort in {"holdout", "canary_holdout"}:
+        group["holdout_count"] += 1
+    if cohort in {"fallback", "fallback_applied", "rate_limit_fallback"}:
+        group["fallback_count"] += 1
+    if _payload_error_observed(payload):
+        group["error_count"] += 1
+    group["savings_estimate_usd"] += _savings_estimate(event)
+
+
+def _finalize_lifecycle_group(group: dict[str, Any]) -> dict[str, Any]:
+    count = _as_int(group.get("event_count"))
+    errors = _as_int(group.get("error_count"))
+    return {
+        "policy_ref": group["policy_ref"],
+        "cohort_label": group["cohort_label"],
+        "action_family": group["action_family"],
+        "event_count": count,
+        "applied_count": _as_int(group.get("applied_count")),
+        "holdout_count": _as_int(group.get("holdout_count")),
+        "fallback_count": _as_int(group.get("fallback_count")),
+        "error_rate": round(errors / count, 6) if count > 0 else 0.0,
+        "savings_estimate_usd": round(_as_float(group.get("savings_estimate_usd")), 8),
+    }
+
+
 async def queue_activation_staged_lifecycle_feedback(
     store_obj: Any,
     result: dict[str, Any],
@@ -364,6 +458,7 @@ def activation_lifecycle_feedback_summary(store_obj: Any, *, limit: int = 10000)
     cohort_counts: Counter[str] = Counter()
     family_state_counts: Counter[str] = Counter()
     candidate_counts: Counter[str] = Counter()
+    lifecycle_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
         try:
             payload = json.loads(str(row.get("payload_json") or "{}"))
@@ -390,6 +485,19 @@ def activation_lifecycle_feedback_summary(store_obj: Any, *, limit: int = 10000)
             candidate_id = event.get("candidate_id")
             if candidate_id:
                 candidate_counts[str(candidate_id)] += 1
+            _add_lifecycle_group_event(lifecycle_groups, event=event, payload=payload)
+    cohort_lifecycle_metadata = [
+        _finalize_lifecycle_group(group)
+        for group in lifecycle_groups.values()
+    ]
+    cohort_lifecycle_metadata.sort(
+        key=lambda item: (
+            -_as_int(item.get("event_count")),
+            str(item.get("action_family") or ""),
+            str(item.get("policy_ref") or ""),
+            str(item.get("cohort_label") or ""),
+        )
+    )
     return {
         "schema": SUMMARY_SCHEMA,
         "queue_rows": queue_rows,
@@ -399,6 +507,7 @@ def activation_lifecycle_feedback_summary(store_obj: Any, *, limit: int = 10000)
         "cohort_breakdown": [{"value": key, "count": value} for key, value in sorted(cohort_counts.items(), key=lambda item: (-item[1], item[0]))],
         "family_state_breakdown": [{"value": key, "count": value} for key, value in sorted(family_state_counts.items(), key=lambda item: (-item[1], item[0]))],
         "candidate_id_breakdown": [{"value": key, "count": value} for key, value in sorted(candidate_counts.items(), key=lambda item: (-item[1], item[0]))[:50]],
+        "cohort_lifecycle_metadata": cohort_lifecycle_metadata[:50],
         "payload_json_included": False,
         "privacy": _privacy_summary(),
     }
