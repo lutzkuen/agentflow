@@ -253,6 +253,34 @@ def agentflow_cli(
     stats_parser.add_argument("--timeout", type=float, default=5.0, help=argparse.SUPPRESS)
     stats_parser.add_argument("--json", action="store_true", help="Print full stats JSON.")
 
+    savings_parser = subparsers.add_parser(
+        "savings",
+        parents=[config_parent],
+        help="Show savings opportunity report for configured AgentFlow targets.",
+    )
+    savings_subparsers = savings_parser.add_subparsers(dest="savings_command", required=True)
+    savings_report_parser = savings_subparsers.add_parser(
+        "report",
+        help="Ranked savings opportunities from local activation config and metadata.",
+    )
+    savings_report_parser.add_argument(
+        "--db",
+        default=None,
+        help="Local AgentFlow SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    savings_report_parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to scan, default: 1000.",
+    )
+    savings_report_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    savings_report_parser.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+
     version_parser = subparsers.add_parser("version", help="Print the AgentFlow CLI version.")
     version_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
@@ -372,6 +400,40 @@ def agentflow_cli(
         else:
             _write_json(stderr, result)
         return 0 if result["ok"] else 1
+
+    if args.command == "savings":
+        from agentflow_proxy.savings_report import build_savings_report
+
+        try:
+            config = activation.load_activation_config(args.config_dir)
+        except activation.ActivationConfigError as exc:
+            result = _activation_config_error_result("agentflow.savings_report.v1", args.config_dir, None, exc)
+            _write_json(stderr, result)
+            return 1
+
+        db_path = getattr(args, "db", None) or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
+        store = None
+        db_path_obj = Path(db_path)
+        if db_path_obj.exists():
+            try:
+                store = _open_store_for_db(db_path)
+            except Exception:
+                pass
+
+        try:
+            result = build_savings_report(config, store=store, limit=int(getattr(args, "limit", 1000)))
+        finally:
+            if store is not None:
+                try:
+                    store.conn.close()
+                except Exception:
+                    pass
+
+        if args.json:
+            _write_json(stdout, result)
+        else:
+            _write_savings_report_summary(stdout, result)
+        return 0 if result.get("ok") else 1
 
     if args.command == "version":
         result = {
@@ -740,6 +802,25 @@ def _write_activation_doctor_summary(stdout: Any, result: dict[str, Any]) -> Non
             parts.append(f"running upstream: {target['running_upstream_base_url']}")
         if target.get("reasons"):
             parts.append("reasons: " + ", ".join(str(reason) for reason in target["reasons"]))
+        stdout.write(", ".join(parts) + "\n")
+
+
+def _write_savings_report_summary(stdout: Any, result: dict[str, Any]) -> None:
+    opportunities = result.get("opportunities") if isinstance(result.get("opportunities"), list) else []
+    count = len(opportunities)
+    stdout.write(f"AgentFlow savings report: {count} opportunit{'y' if count == 1 else 'ies'}\n")
+    for opp in opportunities:
+        if not isinstance(opp, dict):
+            continue
+        family = str(opp.get("opportunity_family") or "unknown")
+        target = str(opp.get("target") or "unknown")
+        bucket = str(opp.get("projected_savings_bucket") or "unknown")
+        blockers = opp.get("blocker_codes") or []
+        blocker_str = ", ".join(str(b) for b in blockers) if blockers else "none"
+        suggested = opp.get("suggested_command")
+        parts = [f"  {family} ({target}): bucket={bucket}, blockers=[{blocker_str}]"]
+        if suggested:
+            parts.append(f"next: {suggested}")
         stdout.write(", ".join(parts) + "\n")
 
 
