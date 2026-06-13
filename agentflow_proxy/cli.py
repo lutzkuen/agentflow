@@ -4274,6 +4274,67 @@ def terminal_output_compaction_opportunity_cli(argv: Sequence[str] | None = None
     return 0
 
 
+def codex_terminal_transcript_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure Codex terminal-transcript compaction opportunity from local event windows")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent Codex turn/start rows to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--min-input-chars",
+        type=int,
+        default=8000,
+        help="Minimum Codex turn input text size for candidate rows, default: 8000",
+    )
+    parser.add_argument(
+        "--min-terminal-chars",
+        type=int,
+        default=2000,
+        help="Minimum estimated terminal-transcript chars for candidate rows, default: 2000",
+    )
+    parser.add_argument(
+        "--compaction-ratio",
+        type=float,
+        default=0.65,
+        help="Projected removable fraction of terminal transcript chars after preserving diagnostics, default: 0.65",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.codex_terminal_compaction_report import build_codex_terminal_transcript_opportunity_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_codex_terminal_transcript_opportunity_report(
+            store,
+            limit=args.limit,
+            min_input_chars=args.min_input_chars,
+            min_terminal_chars=args.min_terminal_chars,
+            compaction_ratio=args.compaction_ratio,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def terminal_output_compaction_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run terminal-output compaction plans for Anthropic tool-result history")
     parser.add_argument(
@@ -7754,6 +7815,10 @@ def instruction_dedup_impact_main() -> None:
 
 def terminal_output_compaction_opportunity_main() -> None:
     raise SystemExit(terminal_output_compaction_opportunity_cli())
+
+
+def codex_terminal_transcript_opportunity_main() -> None:
+    raise SystemExit(codex_terminal_transcript_opportunity_cli())
 
 
 def terminal_output_compaction_dry_run_main() -> None:
