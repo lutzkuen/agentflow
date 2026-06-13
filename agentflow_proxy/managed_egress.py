@@ -93,6 +93,7 @@ LIFECYCLE_METADATA_COMMAND_SCHEMAS = {
     "agentflow.optimization_coordinator_lifecycle_feedback.v1",
     "agentflow.repeated_scaffold_lifecycle_feedback.v1",
     "agentflow.instruction_dedup_lifecycle_feedback.v1",
+    "agentflow.codex_terminal_transcript_compaction_lifecycle_feedback.v1",
     "agentflow.rollout_action_lifecycle_metadata.v1",
     "agentflow.terminal_output_compaction_lifecycle_feedback.v1",
 }

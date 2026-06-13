@@ -3622,7 +3622,12 @@ def _record_message(
         latency_ms=latency_ms,
         session_id=session_id,
         routing_json=stable_json(optimization_metadata["routing"]) if optimization_metadata else None,
-        crunch_json=stable_json(optimization_metadata["crunch"]) if optimization_metadata else None,
+        crunch_json=stable_json({
+            **(optimization_metadata.get("crunch") if isinstance(optimization_metadata.get("crunch"), dict) else {}),
+            **({
+                TERMINAL_COMPACTION_FAMILY: optimization_metadata[TERMINAL_COMPACTION_FAMILY],
+            } if optimization_metadata and isinstance(optimization_metadata.get(TERMINAL_COMPACTION_FAMILY), dict) else {}),
+        }) if optimization_metadata else None,
         cache_json=stable_json(optimization_metadata["cache"]) if optimization_metadata else None,
         metadata_json=stable_json(metadata) if metadata else None,
     )

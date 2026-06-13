@@ -68,6 +68,7 @@ agentflow-instruction-dedup-dry-run = "agentflow_proxy.cli:instruction_dedup_dry
 agentflow-instruction-dedup-impact = "agentflow_proxy.cli:instruction_dedup_impact_main"
 agentflow-codex-terminal-transcript-opportunity = "agentflow_proxy.cli:codex_terminal_transcript_opportunity_main"
 agentflow-codex-terminal-transcript-dry-run = "agentflow_proxy.cli:codex_terminal_transcript_dry_run_main"
+agentflow-codex-terminal-transcript-impact = "agentflow_proxy.cli:codex_terminal_transcript_impact_main"
 agentflow-terminal-output-compaction-opportunity = "agentflow_proxy.cli:terminal_output_compaction_opportunity_main"
 agentflow-terminal-output-compaction-dry-run = "agentflow_proxy.cli:terminal_output_compaction_dry_run_main"
 agentflow-terminal-output-compaction-impact = "agentflow_proxy.cli:terminal_output_compaction_impact_main"
