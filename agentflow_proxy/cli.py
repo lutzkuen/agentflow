@@ -4335,6 +4335,46 @@ def codex_terminal_transcript_opportunity_cli(argv: Sequence[str] | None = None,
     return 0
 
 
+def codex_terminal_transcript_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run Codex terminal-transcript compaction plans from local event windows")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent Codex turn/start rows to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.codex_terminal_compaction_dry_run import build_codex_terminal_transcript_compaction_dry_run
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_codex_terminal_transcript_compaction_dry_run(
+            store,
+            limit=args.limit,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def terminal_output_compaction_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run terminal-output compaction plans for Anthropic tool-result history")
     parser.add_argument(
@@ -7819,6 +7859,10 @@ def terminal_output_compaction_opportunity_main() -> None:
 
 def codex_terminal_transcript_opportunity_main() -> None:
     raise SystemExit(codex_terminal_transcript_opportunity_cli())
+
+
+def codex_terminal_transcript_dry_run_main() -> None:
+    raise SystemExit(codex_terminal_transcript_dry_run_cli())
 
 
 def terminal_output_compaction_dry_run_main() -> None:
