@@ -46,6 +46,85 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("Implementation Approach", created[0]["body"])
         self.assertIn("status:ready", created[0]["labels"])
 
+    def test_low_backlog_emits_ranked_metadata_only_optimization_candidates(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "cache rollout omitted reason=aggregate-only candidate_id=cache-candidate-secret",
+                        "routing safety blocker=safety-stop request_id=req-candidate-secret",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                stats={
+                    "calls": 2778,
+                    "cache_hits": 0,
+                    "cache_hit_rate": 0.0,
+                    "today_crunch_savings_usd": 1.25,
+                    "routing": [
+                        {
+                            "provider": "anthropic",
+                            "requested_model": "claude-sonnet-4-6",
+                            "routed_model": "claude-sonnet-4-6",
+                            "c": 1248,
+                        },
+                        {
+                            "provider": "openai",
+                            "requested_model": "gpt-5.4",
+                            "routed_model": "gpt-5.4",
+                            "c": 198,
+                        },
+                    ],
+                    "cache_decision_breakdown": [
+                        {
+                            "source_surface": "openai_responses",
+                            "status": "skipped",
+                            "reason": "streaming",
+                            "count": 700,
+                        }
+                    ],
+                },
+                log_sources=[log_path],
+                threshold=3,
+                now=NOW,
+            )
+
+        candidates = plan["evidence"]["optimization_candidates"]
+        self.assertGreaterEqual(len(candidates), 3)
+        self.assertEqual([item["rank"] for item in candidates], list(range(1, len(candidates) + 1)))
+        for candidate in candidates:
+            for field in (
+                "lever",
+                "blocker",
+                "estimated_savings_path",
+                "confidence",
+                "sequencing",
+                "repo",
+                "privacy",
+                "projected_savings_signal",
+            ):
+                self.assertIn(field, candidate)
+            self.assertTrue(candidate["privacy"]["metadata_only"])
+            self.assertTrue(candidate["privacy"]["aggregate_only"])
+            self.assertFalse(candidate["privacy"]["raw_prompts_included"])
+            self.assertFalse(candidate["privacy"]["provider_bodies_included"])
+            self.assertFalse(candidate["privacy"]["request_ids_included"])
+            self.assertFalse(candidate["privacy"]["session_ids_included"])
+            self.assertFalse(candidate["privacy"]["individual_candidate_ids_included"])
+
+        levers = {candidate["lever"] for candidate in candidates}
+        self.assertIn("cache", levers)
+        self.assertIn("routing", levers)
+        self.assertIn("crunch", levers)
+        rendered = json.dumps(plan)
+        self.assertNotIn("cache-candidate-secret", rendered)
+        self.assertNotIn("req-candidate-secret", rendered)
+
     def test_enough_ready_issues_is_noop(self):
         plan = build_research_plan(
             issues=[
@@ -61,6 +140,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(plan["research_trigger"]["should_run"])
         self.assertEqual(plan["backlog_changes"]["create_issues"], [])
         self.assertEqual(plan["backlog_changes"]["comment_issues"], [])
+        self.assertEqual(plan["evidence"]["optimization_candidates"], [])
         self.assertIn("should not run", plan["run_log_summary"])
 
     def test_stale_blocked_issues_get_current_evidence_comment(self):
