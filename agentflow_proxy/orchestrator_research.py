@@ -1029,7 +1029,7 @@ def _optimization_candidates(
     *,
     stats_summary: dict[str, Any],
     diagnostics: list[dict[str, Any]],
-    minimum: int = 3,
+    minimum: int = 6,
 ) -> list[dict[str, Any]]:
     candidates = [
         item
@@ -1062,10 +1062,13 @@ def _issue_body(
     implementation: list[str],
     acceptance: list[str],
     sequencing: str,
+    savings_path: str | None = None,
 ) -> str:
     evidence_lines = "\n".join(f"- {redact_text(item)}" for item in evidence) or "- No local evidence was available."
     implementation_lines = "\n".join(f"- {item}" for item in implementation)
     acceptance_lines = "\n".join(f"- {item}" for item in acceptance)
+    savings_text = savings_path or "This removes a planning or activation bottleneck using metadata-only local evidence."
+    savings_section = "## Expected Savings Path Or Bottleneck Removed\n\n" f"{redact_text(savings_text)}\n\n"
     return (
         "## Rationale\n\n"
         f"{redact_text(rationale)}\n\n"
@@ -1075,6 +1078,7 @@ def _issue_body(
         f"{implementation_lines}\n\n"
         "## Acceptance Criteria\n\n"
         f"{acceptance_lines}\n\n"
+        f"{savings_section}"
         "## Sequencing Notes\n\n"
         f"{redact_text(sequencing)}\n"
     )
@@ -1082,6 +1086,150 @@ def _issue_body(
 
 def _default_issue_labels(priority: str = "priority:p1") -> list[str]:
     return ["backlog", "status:ready", priority, "core-feature", "correctness"]
+
+
+def _issue_title_key(title: Any) -> str:
+    text = redact_text(str(title or "")).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    stop_words = {
+        "a",
+        "an",
+        "and",
+        "for",
+        "from",
+        "into",
+        "of",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+    words = [word for word in text.split() if word not in stop_words]
+    return " ".join(words)
+
+
+def _dedupe_create_issue_proposals(
+    proposals: list[dict[str, Any]],
+    *,
+    existing_issues: Iterable[dict[str, Any]],
+    max_count: int = 10,
+) -> list[dict[str, Any]]:
+    existing_keys = {_issue_title_key(issue.get("title")) for issue in existing_issues}
+    existing_keys.discard("")
+    seen = set(existing_keys)
+    deduped: list[dict[str, Any]] = []
+    for proposal in proposals:
+        key = _issue_title_key(proposal.get("title"))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(proposal)
+        if len(deduped) >= max_count:
+            break
+    return deduped
+
+
+def _candidate_title(candidate: dict[str, Any]) -> str:
+    lever = str(candidate.get("lever") or "optimization")
+    blocker = str(candidate.get("blocker") or "candidate").replace("_", "-")
+    signal = candidate.get("projected_savings_signal") if isinstance(candidate.get("projected_savings_signal"), dict) else {}
+    if lever == "cache":
+        return f"Turn {blocker} cache candidate into local replay evidence"
+    if lever == "routing":
+        requested = str(signal.get("requested_model") or "").strip()
+        target = str(signal.get("candidate_target_model") or "").strip()
+        if requested and target:
+            return f"Stage routing evidence for {requested} to {target}"
+        return f"Collect routing lifecycle evidence for {blocker}"
+    if lever == "crunch":
+        return f"Rank crunch savings follow-up for {blocker}"
+    if lever == "activation-feedback":
+        return f"Resolve {blocker} activation feedback blocker"
+    if lever == "managed-recommendation":
+        return "Rank managed recommendation omission reasons for local policy handoff"
+    if lever == "request-shape-rollups":
+        return "Generate request-shape rollup candidates for repeated context work"
+    return f"Convert {lever} candidate into implementation-ready savings issue"
+
+
+def _candidate_labels(candidate: dict[str, Any]) -> list[str]:
+    labels = _default_issue_labels("priority:p1" if candidate.get("confidence") in {"high", "medium"} else "priority:p2")
+    lever = str(candidate.get("lever") or "")
+    if lever in {"cache", "routing", "crunch"}:
+        labels.append(lever)
+    if lever in {"activation-feedback", "managed-recommendation"}:
+        labels.append("privacy")
+    elif "privacy" not in labels:
+        labels.append("privacy")
+    return list(dict.fromkeys(labels))
+
+
+def _candidate_issue_acceptance(candidate: dict[str, Any]) -> list[str]:
+    lever = str(candidate.get("lever") or "")
+    blocker = str(candidate.get("blocker") or "candidate")
+    common = [
+        "The issue includes a measurable item-specific verification check tied to the ranked candidate evidence.",
+        "Generated and follow-up evidence remains metadata-only and excludes prompts, provider bodies, file paths, request IDs, session IDs, cache keys, and individual candidate IDs.",
+    ]
+    if lever == "cache":
+        first = "The next research plan reports hit recovery, replay readiness, invalidation evidence, or a reduced cache blocker count for this cohort."
+    elif lever == "routing":
+        first = "The next routing report names applied/holdout coverage, savings per 1000 calls, and any error, retry, fallback, stale-evidence, or safety-stop blocker."
+    elif lever == "crunch":
+        first = "The next crunch report ranks observed or projected savings for this blocker, or records the missing measurement that prevents activation."
+    elif lever == "activation-feedback":
+        signal = candidate.get("projected_savings_signal") if isinstance(candidate.get("projected_savings_signal"), dict) else {}
+        first = str(signal.get("acceptance_check") or "The feedback report names the privacy-safe cohort lifecycle field needed to unblock the diagnostic.")
+    elif lever == "managed-recommendation":
+        first = "Managed recommendation health reports the omitted local-action reason and whether a local file-backed representation exists."
+    elif lever == "request-shape-rollups":
+        first = "Request-shape rollups produce at least one repeated-context, replayability, routing, or crunch cohort with bounded aggregate evidence."
+    else:
+        first = f"The {blocker} candidate is either converted into a safe local action or kept blocked with a machine-readable reason."
+    return [first, *common]
+
+
+def _proposal_from_optimization_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    title = _candidate_title(candidate)
+    signal = candidate.get("projected_savings_signal") if isinstance(candidate.get("projected_savings_signal"), dict) else {}
+    evidence = [
+        f"Ranked candidate: {candidate.get('rank')}",
+        f"Lever: {candidate.get('lever')}",
+        f"Provider/surface bucket: {candidate.get('provider_surface_bucket')}",
+        f"Current blocker: {candidate.get('blocker')}",
+        f"Confidence: {candidate.get('confidence')}",
+        f"Safety status: {candidate.get('safety_status')}",
+        f"Projected savings signal: {json.dumps(signal, sort_keys=True)}",
+    ]
+    return {
+        "repo": candidate.get("repo") or "lutzkuen/agentflow",
+        "title": title,
+        "labels": _candidate_labels(candidate),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "Research mode ranked this metadata-only optimization candidate as part of the telemetry-to-activation milestone. "
+                "The follow-up should be narrow enough for unattended implementation and should avoid re-scanning raw dashboard or provider history."
+            ),
+            evidence=evidence,
+            implementation=[
+                "Start from the ranked optimization candidate in the research plan rather than rediscovering raw traffic.",
+                "Use only bounded local metadata reports and file-backed local policy interfaces for routing, crunching, cache, or policy-bundle work.",
+                "Prefer a dry-run, review, canary, or instrumentation step when lifecycle, invalidation, or safety evidence is incomplete.",
+                "Record the outcome in machine-readable metadata so the next research run can rank the candidate as improved, blocked, or superseded.",
+            ],
+            acceptance=_candidate_issue_acceptance(candidate),
+            savings_path=str(
+                candidate.get("estimated_savings_path")
+                or "This removes a planning bottleneck by turning aggregate metadata into a specific local optimization follow-up."
+            ),
+            sequencing=str(candidate.get("sequencing") or "Sequence after higher-ranked ready candidates in the same milestone."),
+        ),
+    }
+
+
+def _proposals_from_optimization_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_proposal_from_optimization_candidate(candidate) for candidate in candidates]
 
 
 def _proposal_from_low_backlog(
@@ -1655,11 +1803,13 @@ def build_research_plan(
         openai_routing_proposal = _proposal_from_openai_routing_canary_feedback(summary)
         if openai_routing_proposal is not None:
             create_issues.append(openai_routing_proposal)
+        create_issues.extend(_proposals_from_optimization_candidates(optimization_candidates))
         repeated_actionable_diagnostics = [item for item in _actionable_diagnostics(diagnostics) if _to_int(item.get("count")) > 1]
         if repeated_actionable_diagnostics:
             create_issues.append(_proposal_from_repeated_diagnostic(repeated_actionable_diagnostics[0]))
         for issue in blocked_stale[:3]:
             comment_issues.append(_blocked_comment(issue, diagnostics, summary))
+        create_issues = _dedupe_create_issue_proposals(create_issues, existing_issues=issue_list, max_count=10)
 
     inspected_sources = ["github_issues"]
     if summary:

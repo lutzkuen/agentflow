@@ -164,6 +164,92 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-candidate-secret", rendered)
         self.assertNotIn("req-candidate-secret", rendered)
 
+    def test_thin_low_backlog_plan_expands_into_implementation_ready_milestone(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "cache replay omitted reason=aggregate-only candidate_id=private-candidate-secret",
+                        "routing gate blocked blocker=aggregate-only request_id=req-private-secret",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[
+                    issue(
+                        90,
+                        "Stage routing evidence for gpt-5.4 to gpt-5.4-mini",
+                        ["backlog", "status:closed", "priority:p1", "core-feature"],
+                        state="CLOSED",
+                    )
+                ],
+                stats={
+                    "calls": 2487,
+                    "cache_hits": 0,
+                    "cache_hit_rate": 0.0,
+                    "today_crunch_savings_usd": 0.0,
+                    "routing": [
+                        {
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "requested_model": "gpt-5.4",
+                            "routed_model": "gpt-5.4",
+                            "category": "chat",
+                            "c": 210,
+                        },
+                        {
+                            "provider": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "endpoint": "messages",
+                            "requested_model": "claude-sonnet-4-6",
+                            "routed_model": "claude-sonnet-4-6",
+                            "category": "tool-result",
+                            "reason": "thinking-context-blocked",
+                            "c": 956,
+                        },
+                    ],
+                },
+                log_sources=[log_path],
+                threshold=3,
+                now=NOW,
+            )
+
+        created = plan["backlog_changes"]["create_issues"]
+        titles = [item["title"] for item in created]
+        self.assertGreaterEqual(len(created), 6)
+        self.assertLessEqual(len(created), 10)
+        self.assertNotIn("Stage routing evidence for gpt-5.4 to gpt-5.4-mini", titles)
+        self.assertEqual(len(titles), len(set(titles)))
+
+        required_labels = {"backlog", "status:ready", "correctness"}
+        core_feature_count = 0
+        for proposal in created:
+            labels = set(proposal["labels"])
+            self.assertTrue(required_labels.issubset(labels))
+            self.assertTrue(any(label.startswith("priority:") for label in labels))
+            if "core-feature" in labels:
+                core_feature_count += 1
+            body = proposal["body"]
+            self.assertIn("## Rationale", body)
+            self.assertIn("## Evidence", body)
+            self.assertIn("## Implementation Approach", body)
+            self.assertIn("## Acceptance Criteria", body)
+            self.assertIn("## Expected Savings Path Or Bottleneck Removed", body)
+            self.assertIn("## Sequencing Notes", body)
+        self.assertGreaterEqual(core_feature_count, len(created) // 2)
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("private-candidate-secret", rendered)
+        self.assertNotIn("req-private-secret", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+        self.assertFalse(plan["privacy"]["provider_bodies_included"])
+        self.assertFalse(plan["privacy"]["request_ids_included"])
+        self.assertFalse(plan["privacy"]["session_ids_included"])
+
     def test_current_pass_through_routing_summary_is_ranked_into_activation_candidates(self):
         plan = build_research_plan(
             issues=[],
