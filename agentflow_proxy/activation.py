@@ -23,6 +23,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_OPENAI_PORT = 4003
 DEFAULT_CLAUDE_PORT = 4000
 CODEX_CONFIG_RELATIVE_PATH = Path(".codex") / "config.toml"
+CLAUDE_VSCODE_ENV_FILENAME = "claude-vscode.env"
 
 
 class ActivationError(ValueError):
@@ -180,6 +181,24 @@ def _openai_profile_from_config(config: dict[str, Any]) -> tuple[dict[str, Any],
     return activation_profile("openai"), True
 
 
+def _claude_profile_from_config(
+    config: dict[str, Any],
+    *,
+    auto_configure: bool = True,
+) -> tuple[dict[str, Any], bool]:
+    targets = config.get("targets") if isinstance(config.get("targets"), dict) else {}
+    existing = targets.get("claude") if isinstance(targets.get("claude"), dict) else None
+    if existing and existing.get("configured"):
+        return existing, False
+    if not auto_configure:
+        raise ActivationError(
+            "AgentFlow target is not configured: claude. Run `agentflow activate claude` first, "
+            "or rerun `agentflow activate claude-vscode` without `--no-auto-claude` to create "
+            "the default Claude target."
+        )
+    return activation_profile("claude"), True
+
+
 def codex_activation_profile(*, openai_profile: dict[str, Any], codex_config_path: Path) -> dict[str, Any]:
     return {
         "id": "codex",
@@ -189,6 +208,28 @@ def codex_activation_profile(*, openai_profile: dict[str, Any], codex_config_pat
         "depends_on": "openai",
         "local_base_url": str(openai_profile.get("local_base_url") or DEFAULT_OPENAI_LOCAL_BASE_URL),
         "codex_config_path": str(codex_config_path),
+        "updated_at": utc_now(),
+    }
+
+
+def claude_vscode_activation_profile(
+    *,
+    claude_profile: dict[str, Any],
+    env_file_path: Path,
+) -> dict[str, Any]:
+    return {
+        "id": "claude-vscode",
+        "configured": True,
+        "provider": "anthropic",
+        "app": "claude-vscode",
+        "depends_on": "claude",
+        "local_base_url": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
+        "upstream_base_url": str(claude_profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL),
+        "env_file_path": str(env_file_path),
+        "safe_env": {
+            "ANTHROPIC_BASE_URL": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
+        },
+        "launch_command": "code .",
         "updated_at": utc_now(),
     }
 
@@ -295,6 +336,68 @@ def _is_project_local_codex_config(path: Path, cwd: Path | None = None) -> bool:
         return path.expanduser().resolve(strict=False) == (base / CODEX_CONFIG_RELATIVE_PATH).resolve(strict=False)
     except OSError:
         return False
+
+
+def claude_vscode_env_path(config_dir: str | Path | None = None) -> Path:
+    base = Path(config_dir) if config_dir is not None else default_config_dir()
+    return base / CLAUDE_VSCODE_ENV_FILENAME
+
+
+def _claude_vscode_env_contents(local_base_url: str) -> str:
+    return (
+        "# AgentFlow-managed non-secret routing values for Claude in VS Code.\n"
+        "# Keep Claude API keys in your shell or OS secret manager, not in this file.\n"
+        f"ANTHROPIC_BASE_URL={local_base_url}\n"
+    )
+
+
+def activate_claude_vscode(
+    *,
+    config_dir: str | Path | None = None,
+    dry_run: bool = False,
+    auto_configure_claude: bool = True,
+) -> dict[str, Any]:
+    config = load_activation_config(config_dir)
+    claude_profile, created_claude = _claude_profile_from_config(config, auto_configure=auto_configure_claude)
+    local_base_url = str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL)
+    upstream_base_url = str(claude_profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL)
+    env_path = claude_vscode_env_path(config_dir)
+    env_contents = _claude_vscode_env_contents(local_base_url)
+    existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    env_changed = existing_env != env_contents
+
+    vscode_profile = claude_vscode_activation_profile(claude_profile=claude_profile, env_file_path=env_path)
+    updated_config = apply_activation_profile(config, claude_profile)
+    updated_config = apply_activation_profile(updated_config, vscode_profile)
+    config_path = activation_config_path(config_dir)
+
+    if not dry_run:
+        if env_changed:
+            env_path.parent.mkdir(parents=True, exist_ok=True)
+            env_path.write_text(env_contents, encoding="utf-8")
+        config_path = write_activation_config(updated_config, config_dir)
+
+    shell_exports = [f"export ANTHROPIC_BASE_URL={shlex.quote(local_base_url)}"]
+    routing_snippet = "\n".join([*shell_exports, "code ."])
+    return {
+        "schema": "agentflow.claude_vscode_activation_result.v1",
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "target": "claude-vscode",
+        "configured": True,
+        "config_path": str(config_path),
+        "env_file_path": str(env_path),
+        "env_file_changed": env_changed,
+        "local_base_url": local_base_url,
+        "upstream_base_url": upstream_base_url,
+        "depends_on": "claude",
+        "claude_target_created": created_claude,
+        "run_command": "agentflow run claude",
+        "safe_env": dict(vscode_profile["safe_env"]),
+        "routing_snippet": routing_snippet,
+        "profile": vscode_profile,
+        "target_count": len(updated_config.get("targets") or {}),
+    }
 
 
 def activate_codex(

@@ -112,6 +112,128 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn("Upstream provider base URL: https://api.anthropic.com", stdout_one.getvalue())
             self.assertIn("Run configured proxy: agentflow run claude", stdout_one.getvalue())
 
+    def test_activate_claude_vscode_writes_env_file_and_default_claude_dependency(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            config_path = Path(tmp) / "activation.json"
+            env_path = Path(tmp) / "claude-vscode.env"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude", "claude-vscode"])
+            self.assertEqual(config["targets"]["claude-vscode"]["depends_on"], "claude")
+            self.assertEqual(config["targets"]["claude-vscode"]["local_base_url"], "http://127.0.0.1:4000")
+            self.assertEqual(config["targets"]["claude-vscode"]["upstream_base_url"], "https://api.anthropic.com")
+            self.assertEqual(config["targets"]["claude-vscode"]["env_file_path"], str(env_path))
+            self.assertEqual(config["targets"]["claude-vscode"]["safe_env"], {"ANTHROPIC_BASE_URL": "http://127.0.0.1:4000"})
+            self.assertEqual(
+                env_path.read_text(encoding="utf-8"),
+                "# AgentFlow-managed non-secret routing values for Claude in VS Code.\n"
+                "# Keep Claude API keys in your shell or OS secret manager, not in this file.\n"
+                "ANTHROPIC_BASE_URL=http://127.0.0.1:4000\n",
+            )
+            output = stdout.getvalue()
+            self.assertIn("Claude VS Code local AgentFlow base URL: http://127.0.0.1:4000", output)
+            self.assertIn("Upstream Anthropic base URL used by AgentFlow: https://api.anthropic.com", output)
+            self.assertIn("Claude target was not configured; created the default Claude activation profile.", output)
+            self.assertIn("export ANTHROPIC_BASE_URL=http://127.0.0.1:4000\ncode .", output)
+            self.assertIn("VS Code extensions usually inherit environment variables only from the VS Code process", output)
+
+    def test_activate_claude_vscode_is_idempotent(self):
+        with TemporaryDirectory() as tmp:
+            first = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=io.StringIO())
+            second_stdout = io.StringIO()
+            second = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=second_stdout)
+
+            self.assertEqual(first, 0)
+            self.assertEqual(second, 0)
+            self.assertIn("Env file changed: false", second_stdout.getvalue())
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude", "claude-vscode"])
+
+    def test_activate_claude_vscode_uses_existing_claude_local_base_url(self):
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(
+                ["activate", "claude", "--config-dir", tmp, "--local-base-url", "http://127.0.0.1:4998"],
+                stdout=io.StringIO(),
+            )
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["targets"]["claude-vscode"]["local_base_url"], "http://127.0.0.1:4998")
+            self.assertEqual((Path(tmp) / "claude-vscode.env").read_text(encoding="utf-8").splitlines()[-1], "ANTHROPIC_BASE_URL=http://127.0.0.1:4998")
+            self.assertIn("Claude VS Code local AgentFlow base URL: http://127.0.0.1:4998", stdout.getvalue())
+            self.assertIn("Upstream Anthropic base URL used by AgentFlow: https://api.anthropic.com", stdout.getvalue())
+
+    def test_activate_claude_vscode_alias_claude_code(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["activate", "claude-code", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertIn("claude-vscode", config["targets"])
+            self.assertIn("Configured AgentFlow target: claude-vscode", stdout.getvalue())
+
+    def test_activate_claude_vscode_dry_run_does_not_write_files(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp, "--dry-run"], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertFalse((Path(tmp) / "activation.json").exists())
+            self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
+            self.assertIn("Dry run: would configure AgentFlow target: claude-vscode", stdout.getvalue())
+            self.assertIn("Env file changed: true", stdout.getvalue())
+
+    def test_activate_claude_vscode_does_not_persist_secret_env_vars(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "ANTHROPIC_API_KEY": "sk-ant-secret",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-ant-token-secret",
+                },
+                clear=False,
+            ):
+                code = cli.agentflow_cli(["activate", "claude-vscode", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            activation_raw = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
+            env_raw = (Path(tmp) / "claude-vscode.env").read_text(encoding="utf-8")
+            persisted = activation_raw + "\n" + env_raw
+            self.assertNotIn("ANTHROPIC_API_KEY", persisted)
+            self.assertNotIn("ANTHROPIC_AUTH_TOKEN", persisted)
+            self.assertNotIn("sk-ant-secret", persisted)
+            self.assertNotIn("sk-ant-token-secret", persisted)
+            output = stdout.getvalue()
+            self.assertNotIn("sk-ant-secret", output)
+            self.assertNotIn("sk-ant-token-secret", output)
+
+    def test_activate_claude_vscode_no_auto_claude_prints_remediation(self):
+        with TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+
+            code = cli.agentflow_cli(
+                ["activate", "claude-vscode", "--config-dir", tmp, "--no-auto-claude"],
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 2)
+            self.assertFalse((Path(tmp) / "activation.json").exists())
+            self.assertFalse((Path(tmp) / "claude-vscode.env").exists())
+            self.assertIn("AgentFlow target is not configured: claude", stderr.getvalue())
+            self.assertIn("agentflow activate claude", stderr.getvalue())
+
     def test_activate_dry_run_does_not_write_config(self):
         with TemporaryDirectory() as tmp:
             stdout = io.StringIO()

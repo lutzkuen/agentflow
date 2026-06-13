@@ -32,6 +32,27 @@ MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 
 
 def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
+    if result["target"] == "claude-vscode":
+        prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
+        stdout.write(f"{prefix} AgentFlow target: claude-vscode\n")
+        stdout.write(f"Claude VS Code local AgentFlow base URL: {result['local_base_url']}\n")
+        stdout.write(f"Upstream Anthropic base URL used by AgentFlow: {result['upstream_base_url']}\n")
+        stdout.write(f"AgentFlow-managed non-secret env file: {result['env_file_path']}\n")
+        stdout.write(f"Env file changed: {str(result['env_file_changed']).lower()}\n")
+        stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
+        if result.get("claude_target_created"):
+            stdout.write("Claude target was not configured; created the default Claude activation profile.\n")
+        stdout.write("Routing snippet for a terminal that already has your Claude API key:\n")
+        stdout.write(result["routing_snippet"] + "\n")
+        stdout.write(f"Run configured proxy: {result['run_command']}\n")
+        stdout.write(f"Config file: {result['config_path']}\n")
+        stdout.write(
+            "VS Code extensions usually inherit environment variables only from the VS Code process; "
+            "restart VS Code from that terminal if it was opened from the desktop.\n"
+        )
+        stdout.write("AgentFlow does not store or print ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or token values.\n")
+        return
+
     if result["target"] == "codex":
         prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
         stdout.write(f"{prefix} AgentFlow target: codex\n")
@@ -132,6 +153,23 @@ def agentflow_cli(
     activate_claude.add_argument("--health-url", default=None, help=argparse.SUPPRESS)
     activate_claude.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
 
+    activate_claude_vscode = activate_subparsers.add_parser(
+        "claude-vscode",
+        aliases=["claude-code"],
+        help="Configure Claude/Claude Code in VS Code to inherit AgentFlow Anthropic routing.",
+    )
+    activate_claude_vscode.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    activate_claude_vscode.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
+    activate_claude_vscode.add_argument(
+        "--no-auto-claude",
+        action="store_true",
+        help="Require an existing `agentflow activate claude` profile instead of creating the default one.",
+    )
+
     activate_codex = activate_subparsers.add_parser("codex", help="Configure Codex VS Code/Codex CLI OpenAI base URL.")
     activate_codex.add_argument(
         "--codex-config",
@@ -168,6 +206,19 @@ def agentflow_cli(
         args.config_dir = os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
 
     if args.command == "activate":
+        if args.target in {"claude-vscode", "claude-code"}:
+            try:
+                result = activation.activate_claude_vscode(
+                    config_dir=args.config_dir,
+                    dry_run=bool(args.dry_run),
+                    auto_configure_claude=not bool(args.no_auto_claude),
+                )
+            except activation.ActivationError as exc:
+                stderr.write(str(exc) + "\n")
+                return 2
+            _write_activation_summary(stdout, result)
+            return 0
+
         if args.target == "codex":
             try:
                 result = activation.activate_codex(
