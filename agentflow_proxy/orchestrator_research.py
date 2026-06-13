@@ -42,7 +42,7 @@ _RAW_FIELD_NAMES = {
     "response_json",
 }
 _ID_FIELD_RE = re.compile(
-    r"(?:(?:^|_)(?:request|session|thread|tenant|trace|candidate|cohort|proposal|rule)_?(?:id|key|fingerprint)$)"
+    r"(?:(?:^|_)(?:request|session|thread|tenant|trace|candidate|cohort|proposal|policy|rule)_?(?:id|key|fingerprint)$)"
     r"|(?:(?:^|_)cache_?(?:id|key|fingerprint)$)"
     r"|(?:^|_)pattern_hash(?:es)?$"
 )
@@ -273,6 +273,22 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             "cohorts": cohort_rows[:5],
             "privacy": cohorts.get("privacy") if isinstance(cohorts.get("privacy"), dict) else {},
         }
+    openai_canary = stats.get("openai_canary_impact") or stats.get("openai_routing_canary_impact")
+    if isinstance(openai_canary, dict):
+        candidate_rows = openai_canary.get("candidates") if isinstance(openai_canary.get("candidates"), list) else []
+        lifecycle_feedback = (
+            openai_canary.get("activation_lifecycle_feedback")
+            if isinstance(openai_canary.get("activation_lifecycle_feedback"), dict)
+            else {}
+        )
+        summary["openai_canary_impact"] = {
+            "schema": openai_canary.get("schema"),
+            "status": openai_canary.get("status"),
+            "summary": openai_canary.get("summary") if isinstance(openai_canary.get("summary"), dict) else {},
+            "candidates": candidate_rows[:5],
+            "activation_lifecycle_feedback": lifecycle_feedback,
+            "privacy": openai_canary.get("privacy") if isinstance(openai_canary.get("privacy"), dict) else {},
+        }
     return summary
 
 
@@ -340,6 +356,41 @@ def _candidate(
 
 
 def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    canary_row, _ = _top_openai_routing_canary_row(stats_summary)
+    if canary_row is not None:
+        action = _openai_routing_candidate_action(canary_row, stats_summary)
+        counts = canary_row.get("cohort_counts") if isinstance(canary_row.get("cohort_counts"), dict) else {}
+        reason_codes = [str(reason) for reason in canary_row.get("reason_codes") or []]
+        blocker = (
+            "openai-routing-canary-ready"
+            if action["activation_ready"]
+            else f"openai-routing-canary-{action['omission_reason']}"
+        )
+        return _candidate(
+            lever="routing",
+            provider_surface_bucket=_openai_routing_canary_bucket(canary_row),
+            blocker=blocker,
+            estimated_savings_path=(
+                "Convert OpenAI routing canary lifecycle evidence into a reviewed local canary widening or policy-bundle action."
+                if action["activation_ready"]
+                else "Resolve the OpenAI routing canary blocker before local routing activation or policy-bundle review."
+            ),
+            projected_savings_signal={
+                "verdict": canary_row.get("verdict"),
+                "next_action": canary_row.get("next_action"),
+                "reason_codes": reason_codes,
+                "applied_count": _to_int(counts.get("canary_applied")),
+                "holdout_count": _to_int(counts.get("canary_holdout")),
+                "safety_stopped_count": _to_int(counts.get("safety_stopped")),
+                "savings_per_1000_calls_usd": action["savings_per_1000_calls_usd"],
+                "omission_reason": action["omission_reason"],
+            },
+            confidence="high" if action["activation_ready"] else "medium",
+            sequencing="Use canary lifecycle feedback before generic pass-through routing issues so activation work cites applied, holdout, and safety evidence.",
+            safety_status="review-required" if action["activation_ready"] else "blocked",
+            score=10_000.0 + action["savings_per_1000_calls_usd"],
+        )
+
     routing_rows = stats_summary.get("routing_top")
     if not isinstance(routing_rows, list) or not routing_rows:
         calls = _to_int(stats_summary.get("calls"))
@@ -688,6 +739,152 @@ _CACHE_ACTION_CONCRETE = {
 }
 
 
+_OPENAI_ROUTING_ACTION_LABELS = {
+    "widen_local_openai_canary": "widen the reviewed local OpenAI routing canary",
+    "keep_current_openai_canary_fraction": "keep the current canary fraction and collect more lifecycle evidence",
+    "rollback_or_disable_openai_canary": "rollback or disable the unsafe local OpenAI routing canary",
+    "collect_openai_canary_holdout_evidence_or_run_eval": "collect OpenAI canary holdout evidence or run a local eval",
+}
+
+_OPENAI_ROUTING_BLOCKED_ACCEPTANCE = {
+    "missing-openai-canary-impact": "The next research run includes bounded OpenAI routing canary impact metadata before activation is reconsidered.",
+    "missing-canary-candidate": "The OpenAI canary impact report includes at least one candidate row with applied and holdout cohort counts.",
+    "missing-lifecycle-feedback": "Activation lifecycle feedback reports a healthy canary state before a widening or policy-bundle issue is generated.",
+    "aggregate-only-feedback": "The blocker update remains review-only until lifecycle feedback includes candidate-level canary state without raw prompts, provider bodies, request IDs, or session IDs.",
+    "stale-evidence": "Fresh canary lifecycle evidence is collected inside the configured evidence window before activation is reconsidered.",
+    "non-positive-savings": "The candidate reports positive observed or projected savings per 1000 calls before activation is reconsidered.",
+    "insufficient-cohort-coverage": "The candidate reports both applied and holdout cohort samples before activation is reconsidered.",
+    "safety-stop-observed": "The safety stop is resolved or the canary is rolled back with a machine-readable reason before widening is reconsidered.",
+    "canary-verdict-hold": "The hold reason is resolved and a later canary impact report returns a widen verdict before activation is reconsidered.",
+    "canary-verdict-rollback": "The canary rollback or disable action is recorded before any new OpenAI routing activation issue is generated.",
+    "canary-verdict-needs_eval": "Additional holdout samples or eval evidence move the verdict out of needs_eval before activation is reconsidered.",
+}
+
+
+def _breakdown_counts(rows: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not isinstance(rows, list):
+        return counts
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get("value") or row.get("state") or "").strip()
+        if value:
+            counts[value] = counts.get(value, 0) + _to_int(row.get("count"), 1)
+    return counts
+
+
+def _openai_routing_canary_bucket(row: dict[str, Any]) -> str:
+    provider = "openai"
+    source_surface = str(row.get("source_surface") or "openai_provider_request").strip()
+    original = str(row.get("original_model") or row.get("requested_model") or "").strip()
+    target = str(row.get("candidate_target_model") or row.get("target_model") or "").strip()
+    model_pair = f"{original}->{target}" if original and target else "routing-canary"
+    return "/".join(part for part in (provider, source_surface, model_pair) if part)
+
+
+def _openai_routing_canary_title_suffix(row: dict[str, Any]) -> str:
+    original = str(row.get("original_model") or row.get("requested_model") or "source model").strip()
+    target = str(row.get("candidate_target_model") or row.get("target_model") or "target model").strip()
+    source_surface = str(row.get("source_surface") or "openai_provider_request").strip()
+    return f"{original} to {target} on {source_surface}"
+
+
+def _openai_savings_per_1000_calls(row: dict[str, Any]) -> float:
+    counts = row.get("cohort_counts") if isinstance(row.get("cohort_counts"), dict) else {}
+    applied_count = _to_int(counts.get("canary_applied"))
+    sample_count = _to_int(row.get("sample_count"))
+    observed = _to_float(row.get("observed_savings_usd"))
+    projected = _to_float(row.get("projected_savings_usd"))
+    if observed > 0 and applied_count > 0:
+        return round((observed / applied_count) * 1000.0, 6)
+    if projected > 0 and sample_count > 0:
+        return round((projected / sample_count) * 1000.0, 6)
+    return 0.0
+
+
+def _openai_lifecycle_omission_reason(feedback: dict[str, Any]) -> str | None:
+    if not isinstance(feedback, dict) or _to_int(feedback.get("queue_rows")) <= 0:
+        return "missing-lifecycle-feedback"
+    privacy = feedback.get("privacy") if isinstance(feedback.get("privacy"), dict) else {}
+    if privacy.get("aggregate_only") is True:
+        return "aggregate-only-feedback"
+    state_counts = _breakdown_counts(feedback.get("state_breakdown"))
+    if state_counts.get("rollback_required", 0) > 0:
+        return "safety-stop-observed"
+    if state_counts.get("suppressed", 0) > 0:
+        return "safety-stop-observed"
+    if state_counts.get("missing_feedback", 0) > 0 and state_counts.get("healthy_canary", 0) <= 0:
+        return "missing-lifecycle-feedback"
+    if state_counts.get("holdout_only", 0) > 0 and state_counts.get("healthy_canary", 0) <= 0:
+        return "insufficient-cohort-coverage"
+    if state_counts.get("healthy_canary", 0) <= 0:
+        return "missing-lifecycle-feedback"
+    return None
+
+
+def _top_openai_routing_canary_row(stats_summary: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    impact = stats_summary.get("openai_canary_impact")
+    if not isinstance(impact, dict):
+        return None, ""
+    candidates = [row for row in impact.get("candidates") or [] if isinstance(row, dict)]
+    if not candidates:
+        return None, "missing-canary-candidate"
+
+    verdict_rank = {"widen": 0, "hold": 1, "needs_eval": 2, "rollback": 3}
+
+    def sort_key(row: dict[str, Any]) -> tuple[int, float, int]:
+        counts = row.get("cohort_counts") if isinstance(row.get("cohort_counts"), dict) else {}
+        sample_count = _to_int(row.get("sample_count")) or sum(_to_int(value) for value in counts.values())
+        return (
+            verdict_rank.get(str(row.get("verdict") or ""), 4),
+            -_openai_savings_per_1000_calls(row),
+            -sample_count,
+        )
+
+    return sorted(candidates, key=sort_key)[0], "openai_canary_impact"
+
+
+def _openai_routing_candidate_action(row: dict[str, Any], stats_summary: dict[str, Any]) -> dict[str, Any]:
+    impact = stats_summary.get("openai_canary_impact") if isinstance(stats_summary.get("openai_canary_impact"), dict) else {}
+    feedback = impact.get("activation_lifecycle_feedback") if isinstance(impact.get("activation_lifecycle_feedback"), dict) else {}
+    counts = row.get("cohort_counts") if isinstance(row.get("cohort_counts"), dict) else {}
+    applied_count = _to_int(counts.get("canary_applied"))
+    holdout_count = _to_int(counts.get("canary_holdout"))
+    safety_count = _to_int(counts.get("safety_stopped"))
+    savings_per_1000 = _openai_savings_per_1000_calls(row)
+    reason_codes = [str(reason) for reason in row.get("reason_codes") or []]
+    stale = row.get("stale_evidence") if isinstance(row.get("stale_evidence"), dict) else {}
+    verdict = str(row.get("verdict") or "unknown")
+    omission_reason = None
+
+    if row.get("aggregate_only_feedback") is True:
+        omission_reason = "aggregate-only-feedback"
+    elif stale.get("stale"):
+        omission_reason = "stale-evidence"
+    elif safety_count > 0 or "safety-stop-observed" in reason_codes:
+        omission_reason = "safety-stop-observed"
+    elif applied_count <= 0 or holdout_count <= 0:
+        omission_reason = "insufficient-cohort-coverage"
+    elif savings_per_1000 <= 0:
+        omission_reason = "non-positive-savings"
+    else:
+        omission_reason = _openai_lifecycle_omission_reason(feedback)
+
+    if omission_reason is None and verdict != "widen":
+        omission_reason = f"canary-verdict-{verdict}"
+    activation_ready = omission_reason is None and verdict == "widen"
+    return {
+        "activation_ready": activation_ready,
+        "omission_reason": omission_reason or "none",
+        "savings_per_1000_calls_usd": savings_per_1000,
+        "action_label": _OPENAI_ROUTING_ACTION_LABELS.get(
+            str(row.get("next_action") or ""),
+            "inspect the OpenAI routing canary lifecycle evidence",
+        ),
+    }
+
+
 def _cache_cohort_name(row: dict[str, Any]) -> str:
     blocker = str(row.get("blocker_code") or row.get("readiness") or "cache-replay").strip() or "cache-replay"
     provider = str(row.get("provider") or "").strip()
@@ -801,6 +998,101 @@ def _proposal_from_cache_replay_blocker(stats_summary: dict[str, Any]) -> dict[s
     }
 
 
+def _proposal_from_openai_routing_canary_feedback(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    row, source = _top_openai_routing_canary_row(stats_summary)
+    if row is None:
+        return None
+    action = _openai_routing_candidate_action(row, stats_summary)
+    counts = row.get("cohort_counts") if isinstance(row.get("cohort_counts"), dict) else {}
+    deltas = row.get("applied_vs_holdout_deltas") if isinstance(row.get("applied_vs_holdout_deltas"), dict) else {}
+    impact = stats_summary.get("openai_canary_impact") if isinstance(stats_summary.get("openai_canary_impact"), dict) else {}
+    feedback = impact.get("activation_lifecycle_feedback") if isinstance(impact.get("activation_lifecycle_feedback"), dict) else {}
+    state_counts = _breakdown_counts(feedback.get("state_breakdown"))
+    next_action = str(row.get("next_action") or "inspect_openai_canary_lifecycle_evidence")
+    reason_codes = [str(reason) for reason in row.get("reason_codes") or []]
+    warning_codes = [str(reason) for reason in row.get("warning_codes") or []]
+    suffix = _openai_routing_canary_title_suffix(row)
+    local_action = action["action_label"]
+    activation_mode = "activation-candidate" if action["activation_ready"] else "blocked"
+    if action["activation_ready"]:
+        title = f"Widen OpenAI routing canary for {suffix}"
+        labels = ["backlog", "status:ready", "priority:p1", "core-feature", "correctness", "routing", "privacy"]
+        acceptance_first = (
+            "A local canary review or policy-bundle dry run widens the OpenAI routing canary while preserving explicit holdout traffic and rollback metadata."
+        )
+        rationale = (
+            "Research mode found OpenAI routing canary lifecycle feedback with applied and holdout coverage, positive savings, and no regression or safety-stop verdict. "
+            "The next local issue can move from observation to reviewed canary widening without relying on raw provider content."
+        )
+    else:
+        omission = action["omission_reason"]
+        title = f"Blocked: Resolve OpenAI routing canary evidence for {suffix}"
+        labels = ["backlog", "status:blocked", "priority:p1", "core-feature", "correctness", "routing", "privacy"]
+        acceptance_first = _OPENAI_ROUTING_BLOCKED_ACCEPTANCE.get(
+            omission,
+            "The explicit OpenAI routing canary blocker is resolved before activation is reconsidered.",
+        )
+        rationale = (
+            "Research mode found OpenAI routing canary metadata, but the lifecycle feedback is not activation-ready. "
+            "The next update should keep the canary blocked and name the exact evidence gate instead of producing a widening issue."
+        )
+    evidence = [
+        f"Source metadata: {source}",
+        f"Ranked routing canary: {suffix}",
+        f"Activation mode: {activation_mode}",
+        f"Local action needed: {local_action}",
+        f"Next action: {next_action}",
+        f"Omission reason: {action['omission_reason']}",
+        f"Savings per 1000 calls estimate: {action['savings_per_1000_calls_usd']}",
+        f"Verdict: {row.get('verdict') or 'unknown'}",
+        f"Reason codes: {', '.join(reason_codes) if reason_codes else 'none'}",
+        f"Lifecycle states: {json.dumps(state_counts, sort_keys=True)}",
+        f"Applied samples: {_to_int(counts.get('canary_applied'))}",
+        f"Holdout samples: {_to_int(counts.get('canary_holdout'))}",
+        f"Safety-stopped samples: {_to_int(counts.get('safety_stopped'))}",
+    ]
+    for key in (
+        "observed_savings_usd",
+        "projected_savings_usd",
+        "latest_observed_at",
+    ):
+        if row.get(key) is not None:
+            evidence.append(f"{key}: {row.get(key)}")
+    for key in (
+        "applied_minus_holdout_error_rate",
+        "applied_minus_holdout_retry_rate",
+        "applied_minus_holdout_fallback_rate",
+        "applied_minus_holdout_latency_avg_ms",
+    ):
+        if deltas.get(key) is not None:
+            evidence.append(f"{key}: {deltas.get(key)}")
+    if warning_codes:
+        evidence.append(f"Warning codes: {', '.join(warning_codes)}")
+
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": labels,
+        "body": _issue_body(
+            title=title,
+            rationale=rationale,
+            evidence=evidence,
+            implementation=[
+                "Use the bounded OpenAI canary impact report and activation lifecycle feedback; do not inspect prompts, provider bodies, request IDs, session IDs, candidate identifiers, or individual comparison records.",
+                f"Focus on the ranked canary and {local_action}.",
+                "If evidence is stale, aggregate-only, missing holdout coverage, regressed, or safety-stopped, keep the work blocked and collect the named evidence instead of widening.",
+                "Record the outcome in machine-readable routing canary, policy bundle, or lifecycle feedback metadata so the next research run can verify the gate.",
+            ],
+            acceptance=[
+                acceptance_first,
+                "The follow-up reports the item-specific verification check: applied/holdout coverage, error/retry/fallback deltas, lifecycle state, and savings per 1000 calls or the explicit omission reason.",
+                "Generated and follow-up evidence remains metadata-only and excludes prompts, provider bodies, file paths, request IDs, session IDs, candidate identifiers, and individual comparison records.",
+            ],
+            sequencing="Sequence before generic OpenAI pass-through routing work so local activation follows canary lifecycle evidence rather than raw traffic volume alone.",
+        ),
+    }
+
+
 def _blocked_comment(issue: dict[str, Any], diagnostics: list[dict[str, Any]], stats_summary: dict[str, Any]) -> dict[str, Any]:
     evidence = [
         f"Blocked issue has been stale for {issue.get('age_days', 'unknown')} days.",
@@ -870,6 +1162,9 @@ def build_research_plan(
         cache_replay_proposal = _proposal_from_cache_replay_blocker(summary)
         if cache_replay_proposal is not None:
             create_issues.append(cache_replay_proposal)
+        openai_routing_proposal = _proposal_from_openai_routing_canary_feedback(summary)
+        if openai_routing_proposal is not None:
+            create_issues.append(openai_routing_proposal)
         if diagnostics and diagnostics[0].get("count", 0) > 1:
             create_issues.append(_proposal_from_repeated_diagnostic(diagnostics[0]))
         for issue in blocked_stale[:3]:

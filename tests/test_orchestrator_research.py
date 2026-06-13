@@ -228,6 +228,141 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-session-secret", rendered)
         self.assertNotIn("secretid", rendered)
 
+    def test_openai_canary_lifecycle_feedback_generates_routing_activation_issue(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "openai_canary_impact": {
+                    "schema": "agentflow.openai_canary_impact.v1",
+                    "status": "matched",
+                    "summary": {
+                        "candidate_count": 1,
+                        "canary_applied_count": 2,
+                        "canary_holdout_count": 1,
+                    },
+                    "candidates": [
+                        {
+                            "candidate_id": "openai-canary-secret-id",
+                            "policy_id": "local-openai-routing-secret",
+                            "source_surface": "openai_responses",
+                            "original_model": "gpt-5.4",
+                            "candidate_target_model": "gpt-5.4-mini",
+                            "verdict": "widen",
+                            "next_action": "widen_local_openai_canary",
+                            "reason_codes": ["target-savings-met"],
+                            "warning_codes": [],
+                            "sample_count": 3,
+                            "cohort_counts": {
+                                "canary_applied": 2,
+                                "canary_holdout": 1,
+                                "safety_stopped": 0,
+                            },
+                            "applied_vs_holdout_deltas": {
+                                "applied_minus_holdout_error_rate": 0.0,
+                                "applied_minus_holdout_retry_rate": 0.0,
+                                "applied_minus_holdout_fallback_rate": 0.0,
+                                "applied_minus_holdout_latency_avg_ms": -120,
+                            },
+                            "observed_savings_usd": 0.02,
+                            "projected_savings_usd": 0.03,
+                            "stale_evidence": {"stale": False, "age_hours": 2.0},
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        }
+                    ],
+                    "activation_lifecycle_feedback": {
+                        "queue_rows": 1,
+                        "state_breakdown": [{"value": "healthy_canary", "count": 1}],
+                        "cohort_breakdown": [
+                            {"value": "canary_applied", "count": 2},
+                            {"value": "canary_holdout", "count": 1},
+                        ],
+                        "payload_json_included": False,
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": False,
+                            "raw_prompts_included": False,
+                            "request_ids_included": False,
+                            "raw_session_ids_included": False,
+                        },
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        created = plan["backlog_changes"]["create_issues"]
+        routing_issues = [item for item in created if "OpenAI routing canary" in item["title"]]
+        self.assertEqual(len(routing_issues), 1)
+        issue = routing_issues[0]
+        self.assertIn("status:ready", issue["labels"])
+        self.assertIn("routing", issue["labels"])
+        self.assertIn("Widen OpenAI routing canary", issue["title"])
+        self.assertIn("Activation mode: activation-candidate", issue["body"])
+        self.assertIn("Next action: widen_local_openai_canary", issue["body"])
+        self.assertIn("Savings per 1000 calls estimate: 10.0", issue["body"])
+        self.assertIn("healthy_canary", issue["body"])
+        self.assertIn("applied/holdout coverage", issue["body"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("openai-canary-secret-id", rendered)
+        self.assertNotIn("local-openai-routing-secret", rendered)
+
+    def test_openai_canary_missing_lifecycle_feedback_generates_blocked_update(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "openai_canary_impact": {
+                    "schema": "agentflow.openai_canary_impact.v1",
+                    "status": "matched",
+                    "summary": {"candidate_count": 1},
+                    "candidates": [
+                        {
+                            "candidate_id": "blocked-openai-canary-secret",
+                            "source_surface": "openai_responses",
+                            "original_model": "gpt-5.4",
+                            "candidate_target_model": "gpt-5.4-mini",
+                            "verdict": "widen",
+                            "next_action": "widen_local_openai_canary",
+                            "reason_codes": ["target-savings-met"],
+                            "sample_count": 3,
+                            "cohort_counts": {
+                                "canary_applied": 2,
+                                "canary_holdout": 1,
+                                "safety_stopped": 0,
+                            },
+                            "observed_savings_usd": 0.02,
+                            "projected_savings_usd": 0.03,
+                            "stale_evidence": {"stale": False, "age_hours": 2.0},
+                        }
+                    ],
+                    "activation_lifecycle_feedback": {
+                        "queue_rows": 0,
+                        "state_breakdown": [],
+                        "payload_json_included": False,
+                        "privacy": {"metadata_only": True, "aggregate_only": False},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        created = plan["backlog_changes"]["create_issues"]
+        blocked = [item for item in created if item["title"].startswith("Blocked: Resolve OpenAI routing canary evidence")]
+        self.assertEqual(len(blocked), 1)
+        issue = blocked[0]
+        self.assertIn("status:blocked", issue["labels"])
+        self.assertNotIn("status:ready", issue["labels"])
+        self.assertIn("Activation mode: blocked", issue["body"])
+        self.assertIn("Omission reason: missing-lifecycle-feedback", issue["body"])
+        self.assertIn("Activation lifecycle feedback reports a healthy canary state", issue["body"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("blocked-openai-canary-secret", rendered)
+
     def test_enough_ready_issues_is_noop(self):
         plan = build_research_plan(
             issues=[
