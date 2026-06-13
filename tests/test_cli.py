@@ -13,6 +13,7 @@ import yaml
 
 from agentflow_proxy import activation
 from agentflow_proxy import cli
+from agentflow_proxy.cli_commands import policy_bundle as policy_bundle_cli
 
 
 class ManagedFeedbackFlushClient:
@@ -1069,6 +1070,13 @@ class PolicyReloadCliTests(unittest.TestCase):
                 "http://127.0.0.1:4001/agentflow/admin/reload-policies",
             )
 
+    def test_cli_module_re_exports_policy_bundle_commands(self):
+        self.assertIs(cli.policy_reload_cli, policy_bundle_cli.policy_reload_cli)
+        self.assertIs(cli.policy_export_cli, policy_bundle_cli.policy_export_cli)
+        self.assertIs(cli.policy_validate_cli, policy_bundle_cli.policy_validate_cli)
+        self.assertIs(cli.policy_diff_cli, policy_bundle_cli.policy_diff_cli)
+        self.assertIs(cli.policy_review_cli, policy_bundle_cli.policy_review_cli)
+
     def test_loopback_url_validation(self):
         self.assertTrue(cli._is_loopback_url("http://127.0.0.1:4000/agentflow/admin/reload-policies"))
         self.assertTrue(cli._is_loopback_url("http://localhost:4000/agentflow/admin/reload-policies"))
@@ -1085,7 +1093,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with patch("agentflow_proxy.cli.httpx.post") as post:
+        with patch("agentflow_proxy.cli_commands.policy_bundle.httpx.post") as post:
             post.return_value = httpx.Response(200, json=payload)
             code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4001/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
@@ -1098,7 +1106,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with patch("agentflow_proxy.cli.httpx.post") as post:
+        with patch("agentflow_proxy.cli_commands.policy_bundle.httpx.post") as post:
             code = cli.policy_reload_cli(["--url", "http://192.168.1.20:4000/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
         self.assertEqual(code, 2)
@@ -1150,7 +1158,7 @@ class PolicyReloadCliTests(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        with patch("agentflow_proxy.cli.httpx.post") as post:
+        with patch("agentflow_proxy.cli_commands.policy_bundle.httpx.post") as post:
             post.return_value = httpx.Response(403, json={"ok": False, "error": {"type": "forbidden"}})
             code = cli.policy_reload_cli(["--url", "http://127.0.0.1:4000/agentflow/admin/reload-policies"], stdout=stdout, stderr=stderr)
 
@@ -3833,6 +3841,18 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
         self.assertIn("invalid JSON", payload["errors"][0]["message"])
+
+    def test_policy_validate_cli_rejects_missing_file_with_structured_errors(self):
+        stdout = io.StringIO()
+
+        code = cli.policy_validate_cli(["/tmp/agentflow-no-such-policy-bundle.json"], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["schema"], "agentflow.policy_bundle_validation.v1")
+        self.assertEqual(payload["errors"][0]["path"], "/tmp/agentflow-no-such-policy-bundle.json")
+        self.assertIn("No such file", payload["errors"][0]["message"])
 
     def test_policy_validate_cli_rejects_malformed_bundle(self):
         stdout = io.StringIO()
