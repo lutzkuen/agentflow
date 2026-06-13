@@ -40,6 +40,7 @@ PAYLOAD_PRIVACY = {
 SUPPORTED_SURFACES = {"openai", "openai_responses", "openai_chat", "openai_chat_completions"}
 SUPPORTED_ENDPOINTS = {"responses", "chat", "chat_completions"}
 DEFAULT_EXCLUDED_CATEGORIES = ["tool-result", "tool-heavy", "tool-light", "code-gen", "long-context"]
+PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
 RAW_KEYS = {
     "api_key",
     "authorization",
@@ -200,6 +201,8 @@ def _candidate_omission_reason(candidate: dict[str, Any], *, min_samples: int) -
         return "unsupported-endpoint"
     if _as_int(candidate.get("matched_count")) < min_samples:
         return "insufficient-samples"
+    if _as_int(candidate.get("current_routed_count")) > 0:
+        return "already-routed"
     if _as_int(candidate.get("blocked_count")) > 0:
         if "tools-disabled" in blockers or bool(candidate.get("has_tools")):
             return "tool-safety-blocker"
@@ -215,8 +218,10 @@ def _candidate_omission_reason(candidate: dict[str, Any], *, min_samples: int) -
             return "high-retry-rate"
         if "stream-only-evidence" in blockers:
             return "stream-only-evidence"
+        if "category-safety-blocker" in blockers:
+            return "category-safety-blocker"
         return sorted(blockers)[0] if blockers else "blocked-candidate"
-    if bool(candidate.get("has_tools")):
+    if bool(candidate.get("has_tools")) and not bool(candidate.get("allow_tools")):
         return "tool-safety-blocker"
     if bool(candidate.get("stream")):
         return "streaming-not-enabled"
@@ -289,6 +294,7 @@ def _candidate_payload(
     evidence_category = _string(candidate.get("category") or "chat")
     category = evidence_category if evidence_category in {"tool-result", "tool-heavy", "tool-light", "long-context", "short-completion", "code-gen", "chat"} else "chat"
     excluded = [item for item in DEFAULT_EXCLUDED_CATEGORIES if item != category]
+    allow_tools = bool(candidate.get("allow_tools"))
     policy_id = f"local-openai-routing-canary-{_safe_id(candidate_id)}"
     rollback = _rollback_metadata()
     reason_codes = sorted({
@@ -296,6 +302,16 @@ def _candidate_payload(
         _string(candidate.get("simulated_reason") or "openai-routing-opportunity"),
         f"endpoint:{_string(candidate.get('endpoint') or 'unknown')}",
     })
+    bounded_canary_fraction = _bounded_fraction(canary_fraction, 0.05)
+    bounded_holdout_fraction = _bounded_fraction(holdout_fraction, 0.10)
+    projected_holdout_count = min(matched, int(math.ceil(matched * bounded_holdout_fraction)))
+    projected_canary_count = min(
+        max(0, matched - projected_holdout_count),
+        int(math.ceil(matched * max(0.0, min(1.0, bounded_holdout_fraction + bounded_canary_fraction) - bounded_holdout_fraction))),
+    )
+    savings_per_1000 = _as_float(candidate.get("estimated_savings_per_1000_calls_usd"))
+    if savings_per_1000 <= 0:
+        savings_per_1000 = (_as_float(candidate.get("projected_savings_usd")) / matched) * 1000.0
     canary = {
         "enabled": False,
         "review_only": True,
@@ -306,14 +322,14 @@ def _candidate_payload(
         "target_model": _string(candidate.get("target_model")),
         "eligible_categories": [category],
         "excluded_categories": excluded,
-        "allow_tools": False,
+        "allow_tools": allow_tools,
         "allow_stream": False,
         "min_text_chars": text_min,
         "max_text_chars": text_max,
         "min_input_tokens_est": token_min,
         "max_input_tokens_est": token_max,
-        "canary_fraction": _bounded_fraction(canary_fraction, 0.05),
-        "holdout_fraction": _bounded_fraction(holdout_fraction, 0.10),
+        "canary_fraction": bounded_canary_fraction,
+        "holdout_fraction": bounded_holdout_fraction,
         "salt": _stable_id("openai-routing-canary-salt", candidate_id, candidate.get("requested_model"), candidate.get("target_model")),
         "safety_stop": {
             "enabled": True,
@@ -326,9 +342,19 @@ def _candidate_payload(
             "max_latency_regression_ratio": 1.50,
             "limit": 1000,
         },
+        "fallback": {
+            "enabled": True,
+            "fallback_model": _string(candidate.get("requested_model")),
+            "reason_codes": [
+                "rate_limited",
+                "upstream_error",
+                "local-canary-safety-stop",
+                "operator-rollback",
+            ],
+        },
         "promotion": {
             "schema": "agentflow.openai_routing_canary_stage_metadata.v1",
-            "source": "openai_routing_report",
+            "source": "pass_through_routing_report" if report.get("schema") == PASS_THROUGH_SCHEMA else "openai_routing_report",
             "source_report_schema": report.get("schema"),
             "source_report_generated_at": report.get("generated_at"),
             "candidate_id": candidate_id,
@@ -340,14 +366,87 @@ def _candidate_payload(
             "category": evidence_category,
             "applied_canary_category": category,
             "matched_count": _as_int(candidate.get("matched_count")),
+            "source_actionability": candidate.get("actionability"),
             "projected_savings_usd": round(_as_float(candidate.get("projected_savings_usd")), 6),
+            "estimated_savings_per_1000_calls_usd": round(savings_per_1000, 6),
             "estimated_baseline_cost_usd": round(_as_float(candidate.get("estimated_baseline_cost_usd")), 6),
+            "projected_cohort_counts": {
+                "matched": matched,
+                "canary_applied": projected_canary_count,
+                "canary_holdout": projected_holdout_count,
+                "bypassed_or_disabled": max(0, matched - projected_canary_count - projected_holdout_count),
+            },
             "reason_codes": reason_codes,
             "rollback_metadata": rollback,
             "privacy": PAYLOAD_PRIVACY,
         },
     }
     return candidate_id, {"openai_canary": canary}
+
+
+def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    provider = _string(bucket.get("provider")).lower()
+    requested = _string(bucket.get("requested_model"))
+    target = _string(bucket.get("candidate_target_model") or bucket.get("target_model"))
+    category = _string(bucket.get("category") or "unknown")
+    sample_count = _as_int(bucket.get("sample_count") or bucket.get("count"))
+    savings_per_1000 = _as_float(bucket.get("estimated_savings_per_1000_calls_usd"))
+    actionability = _string(bucket.get("actionability"))
+    blockers: list[str] = []
+    if actionability and actionability != "actionable":
+        blockers.append(actionability)
+    if provider != "openai":
+        blockers.append("unsupported-source-surface")
+    if category in {"tool-result", "tool-heavy", "code-gen", "long-context"}:
+        blockers.append("category-safety-blocker")
+    has_tools = category.startswith("tool-")
+    allow_tools = category == "tool-light"
+    return {
+        "candidate_id": _stable_id(
+            "openai-pass-through-route",
+            bucket.get("rank"),
+            bucket.get("source_surface"),
+            bucket.get("endpoint"),
+            requested,
+            bucket.get("routed_model"),
+            target,
+            category,
+        ),
+        "source_surface": bucket.get("source_surface") or "openai_provider_request",
+        "endpoint": bucket.get("endpoint") or "responses",
+        "requested_model": requested,
+        "target_model": target,
+        "category": category,
+        "matched_count": sample_count,
+        "blocked_count": sample_count if blockers else 0,
+        "current_routed_count": 0,
+        "projected_savings_usd": round((savings_per_1000 * sample_count) / 1000.0, 6),
+        "estimated_savings_per_1000_calls_usd": savings_per_1000,
+        "estimated_baseline_cost_usd": 0.0,
+        "text_bucket": bucket.get("text_bucket") or "unknown",
+        "token_bucket": bucket.get("token_bucket") or "unknown",
+        "input_tokens": _as_int(bucket.get("input_tokens")),
+        "has_tools": has_tools,
+        "allow_tools": allow_tools,
+        "stream": False,
+        "simulated_policy": bucket.get("required_local_executor") or "openai-routing-canary",
+        "simulated_reason": bucket.get("candidate_reason") or "pass-through-routing-activation-candidate",
+        "actionability": actionability,
+        "blockers": sorted(set(blockers)),
+    }
+
+
+def _candidate_list_from_report(report: dict[str, Any]) -> list[Any] | None:
+    candidates = report.get("candidates")
+    if isinstance(candidates, list):
+        return candidates
+    if report.get("schema") == PASS_THROUGH_SCHEMA and isinstance(report.get("buckets"), list):
+        return [
+            _candidate_from_pass_through_bucket(bucket)
+            for bucket in report.get("buckets") or []
+            if isinstance(bucket, dict) and _string(bucket.get("provider")).lower() == "openai"
+        ]
+    return None
 
 
 def _error_result(error_type: str, message: str, *, errors: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -380,6 +479,7 @@ async def stage_openai_routing_canary_drafts(
     canary_fraction: float = 0.05,
     holdout_fraction: float = 0.10,
     min_samples: int = 5,
+    top_candidates: int | None = 1,
 ) -> dict[str, Any]:
     if not isinstance(routing_report, dict):
         return _error_result("invalid_report", "OpenAI routing report must be a JSON object")
@@ -390,13 +490,14 @@ async def stage_openai_routing_canary_drafts(
             "OpenAI routing report contains raw prompt, response, provider body, identifier, file path, cache key, or secret fields",
             errors=raw_errors,
         )
-    candidates = routing_report.get("candidates")
+    candidates = _candidate_list_from_report(routing_report)
     if not isinstance(candidates, list):
-        return _error_result("invalid_report", "OpenAI routing report must include a candidates list")
+        return _error_result("invalid_report", "OpenAI routing report must include a candidates list or pass-through buckets list")
 
     staged: list[dict[str, Any]] = []
     omitted: list[dict[str, Any]] = []
     eligible_count = 0
+    stage_limit = None if top_candidates is None else max(0, int(top_candidates))
     for index, candidate in enumerate(candidates):
         if not isinstance(candidate, dict):
             omitted.append({
@@ -413,6 +514,9 @@ async def stage_openai_routing_canary_drafts(
             omitted.append(_omission(candidate, reason, path=f"$.candidates[{index}]"))
             continue
         eligible_count += 1
+        if stage_limit is not None and len(staged) >= stage_limit:
+            omitted.append(_omission(candidate, "lower-ranked-candidate-not-staged", path=f"$.candidates[{index}]"))
+            continue
         candidate_id, payload = _candidate_payload(
             routing_report,
             candidate,
@@ -458,6 +562,8 @@ async def stage_openai_routing_canary_drafts(
             "holdout_fraction": canary["holdout_fraction"],
             "reason_codes": canary["promotion"]["reason_codes"],
             "projected_savings_usd": canary["promotion"]["projected_savings_usd"],
+            "estimated_savings_per_1000_calls_usd": canary["promotion"]["estimated_savings_per_1000_calls_usd"],
+            "projected_cohort_counts": canary["promotion"]["projected_cohort_counts"],
             "rollback_metadata": canary["promotion"]["rollback_metadata"],
             "draft": draft_result.get("draft"),
             "error": draft_result.get("error"),
@@ -481,6 +587,10 @@ async def stage_openai_routing_canary_drafts(
             "staged_count": len(staged),
             "omitted_count": len(omitted),
             "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in staged), 6),
+            "estimated_savings_per_1000_calls_usd": round(
+                max((_as_float(item.get("estimated_savings_per_1000_calls_usd")) for item in staged), default=0.0),
+                6,
+            ),
             "omission_reason_counts": [{"value": key, "count": omission_counts[key]} for key in sorted(omission_counts)],
         },
         "staged_drafts": staged,

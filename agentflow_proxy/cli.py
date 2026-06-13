@@ -4793,6 +4793,7 @@ def openai_routing_canary_stage_cli(
     parser.add_argument("--canary-fraction", type=float, default=0.05, help="Proposed deterministic canary fraction, default: 0.05.")
     parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed deterministic holdout fraction, default: 0.10.")
     parser.add_argument("--min-samples", type=int, default=5, help="Minimum candidate samples before staging, default: 5.")
+    parser.add_argument("--top-candidates", type=int, default=1, help="Maximum ranked eligible candidates to stage, default: 1.")
     parser.add_argument("--queue-feedback", action="store_true", help="Queue sanitized activation lifecycle feedback in the local metadata queue.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
@@ -4804,10 +4805,37 @@ def openai_routing_canary_stage_cli(
         report = _read_json_input(str(args.routing_report), stdin=stdin)
     else:
         from agentflow_proxy.openai_routing_report import build_openai_routing_report
+        from agentflow_proxy.orchestrator_research import _pass_through_routing_report
 
         store = _open_store_for_db(str(args.db))
         try:
-            report = build_openai_routing_report(store, limit=args.limit)
+            rows = [
+                dict(row)
+                for row in store.conn.execute(
+                    """
+                    select coalesce(provider, 'anthropic') as provider,
+                           coalesce(source_surface, 'unknown') as source_surface,
+                           coalesce(endpoint, 'unknown') as endpoint,
+                           requested_model,
+                           routed_model,
+                           coalesce(category, 'unknown') as category,
+                           count(*) as c
+                    from (
+                        select provider, source_surface, endpoint, requested_model, routed_model, category, created_at
+                        from calls
+                        order by created_at desc
+                        limit ?
+                    )
+                    group by coalesce(provider, 'anthropic'), coalesce(source_surface, 'unknown'),
+                             coalesce(endpoint, 'unknown'), requested_model, routed_model,
+                             coalesce(category, 'unknown')
+                    order by c desc
+                    limit 50
+                    """,
+                    (max(1, min(int(args.limit or 1000), 10_000)),),
+                ).fetchall()
+            ]
+            report = _pass_through_routing_report(rows, limit=20) or build_openai_routing_report(store, limit=args.limit)
         finally:
             store.conn.close()
 
@@ -4821,6 +4849,7 @@ def openai_routing_canary_stage_cli(
         canary_fraction=args.canary_fraction,
         holdout_fraction=args.holdout_fraction,
         min_samples=args.min_samples,
+        top_candidates=args.top_candidates,
     ))
     if args.queue_feedback:
         from agentflow_proxy.activation_lifecycle_feedback import queue_activation_staged_lifecycle_feedback

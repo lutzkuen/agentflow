@@ -141,6 +141,24 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertFalse(result["privacy"]["secrets_included"])
         self.assertFalse(result["privacy"]["provider_calls_made"])
 
+    def test_report_preserves_gpt54_large_to_gpt54_mini_pass_through_candidate(self) -> None:
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="chat",
+                text_chars=1200,
+            )
+
+        result = build_openai_routing_report(self.store, limit=20)
+
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["requested_model"], "gpt-5.4")
+        self.assertEqual(candidate["target_model"], "gpt-5.4-mini")
+        self.assertEqual(candidate["current_routed_count"], 0)
+        self.assertEqual(candidate["blocked_count"], 0)
+        self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         for _ in range(5):
             self._log_openai_call(category="chat", text_chars=1200)

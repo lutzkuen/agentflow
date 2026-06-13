@@ -260,6 +260,10 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
 
     bucket["projected_savings_usd"] = round(_as_float(bucket.get("projected_savings_usd")), 6)
     bucket["estimated_baseline_cost_usd"] = round(_as_float(bucket.get("estimated_baseline_cost_usd")), 6)
+    bucket["estimated_savings_per_1000_calls_usd"] = round(
+        (_as_float(bucket.get("projected_savings_usd")) / matched) * 1000.0,
+        6,
+    ) if matched else 0.0
     bucket["blocked_count"] = blocked
     bucket["error_rate"] = round(error_rate, 4) if matched else 0.0
     bucket["retry_rate"] = round(retry_rate, 4) if matched else 0.0

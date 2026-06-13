@@ -123,6 +123,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
                 workspace=str(workspace),
                 canary_fraction=0.07,
                 holdout_fraction=0.13,
+                top_candidates=10,
             ))
 
         self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
@@ -137,6 +138,8 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
             self.assertEqual(staged["target_model"], "gpt-5.4-mini")
             self.assertEqual(staged["canary_fraction"], 0.07)
             self.assertEqual(staged["holdout_fraction"], 0.13)
+            self.assertGreater(staged["estimated_savings_per_1000_calls_usd"], 0)
+            self.assertEqual(staged["projected_cohort_counts"]["matched"], 6)
             self.assertIn("eligible-openai-large-to-mini", staged["reason_codes"])
             self.assertEqual(staged["rollback_metadata"]["rollback_action_type"], "disable_openai_canary")
             bundle = json.loads(Path(staged["bundle_path"]).read_text(encoding="utf-8"))
@@ -145,6 +148,8 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
             self.assertTrue(canary["review_only"])
             self.assertEqual(canary["target_model"], "gpt-5.4-mini")
             self.assertEqual(canary["policy_source"], "local-manual")
+            self.assertEqual(canary["fallback"]["fallback_model"], "gpt-5.4")
+            self.assertGreater(canary["promotion"]["estimated_savings_per_1000_calls_usd"], 0)
             self.assertEqual(canary["promotion"]["endpoint"], staged["endpoint"])
 
             draft_yaml = yaml.safe_load((Path(staged["workspace"]) / "sections" / "routing_rules.yaml").read_text(encoding="utf-8"))
@@ -152,6 +157,46 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
             self.assertEqual(draft_yaml["openai_canary"]["target_model"], "gpt-5.4-mini")
 
         rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw prompt must not appear", rendered)
+        self.assertNotIn("secret-openai-session-id", rendered)
+
+    def test_cli_stages_only_top_ranked_gpt54_pass_through_candidate_by_default(self) -> None:
+        for _ in range(8):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                category="chat",
+                text_chars=1200,
+                cost_baseline_usd=0.006,
+            )
+        for _ in range(6):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                path="/v1/chat/completions",
+                source_surface="openai_chat",
+                endpoint="chat_completions",
+                category="summary",
+                text_chars=900,
+                cost_baseline_usd=0.003,
+            )
+
+        stdout = io.StringIO()
+        code = cli.openai_routing_canary_stage_cli(
+            ["--db", self.db_path, "--workspace", str(Path(self.tmpdir.name) / "drafts")],
+            stdout=stdout,
+        )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(code, 0, stdout.getvalue())
+        self.assertEqual(payload["summary"]["eligible_candidate_count"], 2)
+        self.assertEqual(payload["summary"]["staged_count"], 1)
+        self.assertEqual(payload["summary"]["omission_reason_counts"], [{"value": "lower-ranked-candidate-not-staged", "count": 1}])
+        staged = payload["staged_drafts"][0]
+        self.assertEqual(staged["requested_model"], "gpt-5.4")
+        self.assertEqual(staged["target_model"], "gpt-5.4-mini")
+        self.assertEqual(staged["endpoint"], "responses")
+        self.assertGreater(staged["estimated_savings_per_1000_calls_usd"], 0)
+        self.assertEqual(staged["projected_cohort_counts"]["matched"], 8)
+        rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("raw prompt must not appear", rendered)
         self.assertNotIn("secret-openai-session-id", rendered)
 
@@ -177,6 +222,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
             {**base, "candidate_id": "missing-baseline", "projected_savings_usd": 0.0},
             {**base, "candidate_id": "unsupported-target", "target_model": "unsupported-target-model"},
             {**base, "candidate_id": "tool-blocker", "has_tools": True},
+            {**base, "candidate_id": "already-routed", "current_routed_count": 1},
         ]
         report = {
             "schema": "agentflow.openai_routing_opportunity.v1",
@@ -201,6 +247,7 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
                 "missing-baseline-cost",
                 "unsupported-target-model",
                 "tool-safety-blocker",
+                "already-routed",
             },
         )
         self.assertFalse((Path(self.tmpdir.name) / "drafts").exists())
