@@ -8264,6 +8264,9 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("cache_warmup", hint_codes)
         self.assertIn("large_tool_result_context", hint_codes)
         self.assertFalse(result["grouping"]["raw_prompt_logging"])
+        self.assertEqual(result["grouping"]["display_name"], "By source")
+        self.assertEqual(result["grouping"]["primary_fields"], ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family"])
+        self.assertEqual(result["grouping"]["fallback_fields"], ["session_id"])
         json.dumps(result)
 
     def test_dashboard_exposes_unified_recent_calls_table(self):
@@ -8319,20 +8322,26 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn("safe keys", html)
         self.assertIn("action-like skip on", html)
 
-    def test_dashboard_exposes_usage_by_app_engineer_table(self):
+    def test_dashboard_exposes_usage_by_source_table(self):
         html = stats_views.dashboard_html()
 
-        self.assertIn(">Usage by app / engineer</button>", html)
-        self.assertIn("<h2>Usage by app / engineer</h2>", html)
+        self.assertIn(">By source</button>", html)
+        self.assertIn("<h2>Usage by source</h2>", html)
         self.assertIn("id=\"usage-tbody\"", html)
         self.assertIn("fetch('/agentflow/stats/usage')", html)
-        self.assertIn('<th data-sort-type="text">Bucket</th>', html)
+        self.assertIn('<th data-sort-type="text">Source</th>', html)
+        self.assertIn('<th data-sort-type="text">Grouped by</th>', html)
+        self.assertIn('<th data-sort-type="text">Surfaces</th>', html)
+        self.assertIn("AGENTFLOW_ENGINEER + AGENTFLOW_APP", html)
+        self.assertIn("app_family + session_id", html)
         self.assertIn('<th data-sort-type="number">Turns</th>', html)
         self.assertIn('<th data-sort-type="number">Provider calls</th>', html)
         self.assertIn('<th data-sort-type="number">Codex turns</th>', html)
         self.assertIn("Remaining saving potential", html)
         self.assertIn("Codex estimated", html)
         self.assertNotIn("Codex cost unknown", html)
+        self.assertNotIn("Usage by app / engineer", html)
+        self.assertNotIn("No app or engineer usage today", html)
 
     def test_dashboard_exposes_executive_summary_cards(self):
         html = stats_views.dashboard_html()

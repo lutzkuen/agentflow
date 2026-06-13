@@ -15401,7 +15401,15 @@ async def stats_usage_by_owner(store_obj: Any) -> dict[str, Any]:
         "schema": "agentflow.usage_by_owner.v1",
         "scope": "today",
         "grouping": {
+            "display_name": "By source",
             "priority": ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family", "session_id"],
+            "primary_fields": ["AGENTFLOW_ENGINEER", "AGENTFLOW_APP", "app_family"],
+            "fallback_fields": ["session_id"],
+            "description": (
+                "Usage is grouped by configured engineer/app source labels when present, "
+                "then inferred app family, with stored session_id only as the fallback "
+                "separator for unlabeled local traffic."
+            ),
             "cost_unknown_for": [],
             "raw_prompt_logging": False,
             "codex_cost_basis": CODEX_APP_COST_BASIS,
@@ -17359,7 +17367,7 @@ def dashboard_html() -> str:
 <div class="tabs">
   <button class="tab-btn" data-tab-name="safety" onclick="showTab('safety')">Safety</button>
   <button class="tab-btn active" data-tab-name="activity" onclick="showTab('activity')">Recent calls</button>
-  <button class="tab-btn" data-tab-name="usage" onclick="showTab('usage')">Usage by app / engineer</button>
+  <button class="tab-btn" data-tab-name="usage" onclick="showTab('usage')">By source</button>
   <button class="tab-btn" data-tab-name="codex" onclick="showTab('codex')">Codex quota</button>
   <button class="tab-btn" data-tab-name="weekly" onclick="showTab('weekly')">7-day stats</button>
   <button class="tab-btn" data-tab-name="categories" onclick="showTab('categories')">By category</button>
@@ -17490,11 +17498,11 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-usage">
 <div class="section">
-  <h2>Usage by app / engineer</h2>
+  <h2>Usage by source</h2>
   <div class="table-wrap">
   <table class="activity-table" data-table-id="usage" data-filter-label="Filter usage buckets">
     <thead><tr>
-      <th data-sort-type="text">Bucket</th><th data-sort-type="number">Turns</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="number">Tokens</th><th data-sort-type="money">Spend</th><th data-sort-type="money">Captured savings</th><th data-sort-type="percent">Optimized</th><th data-sort-type="number">Errors</th><th data-sort-type="text">Remaining saving potential</th><th data-sort-type="text">Cost basis</th>
+      <th data-sort-type="text">Source</th><th data-sort-type="text">Grouped by</th><th data-sort-type="text">Surfaces</th><th data-sort-type="number">Turns</th><th data-sort-type="number">Provider calls</th><th data-sort-type="number">Codex turns</th><th data-sort-type="number">Tokens</th><th data-sort-type="money">Spend</th><th data-sort-type="money">Captured savings</th><th data-sort-type="percent">Optimized</th><th data-sort-type="number">Errors</th><th data-sort-type="text">Remaining saving potential</th><th data-sort-type="text">Cost basis</th>
     </tr></thead>
     <tbody id="usage-tbody"></tbody>
   </table>
@@ -18914,8 +18922,16 @@ async function refreshUsage(){
         : '<span class="badge hit">0</span>';
       const codexCost=row.codex_cost_estimated?'<span class="badge miss">Codex estimated</span>':'';
       const totalTokens=(row.provider_total_tokens||0)+(row.codex_total_tokens_est||0);
+      const sourceFields={
+        engineer_app:'AGENTFLOW_ENGINEER + AGENTFLOW_APP',
+        app_session:'app_family + session_id',
+        app_unknown_session:'app_family'
+      }[row.bucket_kind]||row.bucket_kind||'unknown';
+      const surfaces=(row.source_surfaces||[]).map(surface=>`${shortSurface(surface.source_surface||'unknown')} ${surface.units||0}`).join(' · ')||'unknown';
       return `<tr>
         <td><span class="badge provider">${esc(row.bucket_label)}</span></td>
+        <td class="flags"><span class="badge stream">${esc(sourceFields)}</span></td>
+        <td class="flags">${esc(surfaces)}</td>
         <td>${(row.turns||0).toLocaleString()}</td>
         <td>${(row.provider_calls||0).toLocaleString()}</td>
         <td>${(row.codex_turns||0).toLocaleString()}</td>
@@ -18927,7 +18943,7 @@ async function refreshUsage(){
         <td class="flags">${usageHints(row)}</td>
         <td class="flags"><span class="badge provider">${esc(row.cost_basis)}</span> ${codexCost}</td>
       </tr>`;
-    }).join('')||'<tr><td colspan="11" style="color:#8b949e">No app or engineer usage today</td></tr>';
+    }).join('')||'<tr><td colspan="13" style="color:#8b949e">No source usage today</td></tr>';
     applyAllDataTables();
   }catch(e){}
 }
