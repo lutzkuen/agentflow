@@ -12,6 +12,43 @@ from agentflow_proxy.policy_events import recent_policy_events
 from agentflow_proxy.store import Store, stable_json
 
 
+def _thinking_body(
+    *thinking_texts: str,
+    top_level_thinking: bool = False,
+    include_tool_use: bool = False,
+    malformed: bool = False,
+) -> dict:
+    content = []
+    for text in thinking_texts:
+        content.append({"type": "thinking", "thinking": text})
+    if malformed:
+        content.append({"type": "thinking", "thinking": {"secret": "raw-malformed-secret"}})
+    content.append({"type": "text", "text": "bounded assistant fallback"})
+    if include_tool_use:
+        content.append({
+            "type": "tool_use",
+            "id": "raw-tool-use-id-must-not-leak",
+            "name": "Read",
+            "input": {"file_path": "/workspace/private/secret.py"},
+        })
+    body = {
+        "model": "claude-sonnet-4-6",
+        "messages": [{"role": "assistant", "content": content}],
+    }
+    if include_tool_use:
+        body["messages"].append({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "raw-tool-use-id-must-not-leak",
+                "content": "raw tool payload secret must not leak",
+            }],
+        })
+    if top_level_thinking:
+        body["thinking"] = {"type": "enabled", "budget_tokens": 2048}
+    return body
+
+
 class CrunchRulesTest(unittest.TestCase):
     ENV_KEYS = (
         "AGENTFLOW_CRUNCH",
@@ -75,6 +112,136 @@ class CrunchRulesTest(unittest.TestCase):
             self.assertTrue(meta["enabled"])
             self.assertEqual(meta["policy_source"], "local-default")
             self.assertTrue(meta["rule_path"].endswith("agentflow_proxy/crunch_rules.yaml"))
+
+    def test_anthropic_thinking_metadata_records_duplicate_local_hashes_privately(self):
+        manual = importlib.reload(crunch_module)
+        secret = "raw duplicate thinking secret /workspace/private/plan.py "
+        thinking = (secret + "alpha beta gamma delta epsilon ") * 120
+        body = _thinking_body(thinking, thinking)
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["schema"], "agentflow.anthropic_thinking_history_metadata.v1")
+        self.assertEqual(thinking_meta["status"], "ready")
+        self.assertEqual(thinking_meta["reason"], "ready-for-thinking-compaction-planning")
+        self.assertEqual(thinking_meta["thinking_block_count"], 2)
+        self.assertEqual(thinking_meta["exact_duplicate_thinking_block_count"], 1)
+        self.assertEqual(thinking_meta["near_duplicate_thinking_block_count"], 0)
+        self.assertEqual(thinking_meta["unique_local_thinking_block_fingerprint_count"], 1)
+        self.assertTrue(thinking_meta["local_thinking_block_fingerprints_included"])
+        self.assertEqual(thinking_meta["policy_source"], "local-default")
+        self.assertTrue(thinking_meta["rule_path"].endswith("agentflow_proxy/crunch_rules.yaml"))
+        self.assertFalse(thinking_meta["raw_thinking_text_included"])
+        rendered = json.dumps(thinking_meta, sort_keys=True)
+        self.assertNotIn("raw duplicate thinking secret", rendered)
+        self.assertNotIn("/workspace/private", rendered)
+        self.assertNotIn("alpha beta gamma", rendered)
+
+    def test_anthropic_thinking_metadata_records_non_duplicate_blocks(self):
+        manual = importlib.reload(crunch_module)
+        body = _thinking_body(
+            ("first private reasoning " + "alpha beta gamma delta ") * 120,
+            ("second private reasoning " + "red blue green yellow ") * 120,
+        )
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["status"], "ready")
+        self.assertEqual(thinking_meta["thinking_block_count"], 2)
+        self.assertEqual(thinking_meta["exact_duplicate_thinking_block_count"], 0)
+        self.assertEqual(thinking_meta["near_duplicate_thinking_block_count"], 0)
+        self.assertEqual(thinking_meta["unique_local_thinking_block_fingerprint_count"], 2)
+        buckets = {item["bucket"]: item["count"] for item in thinking_meta["block_size_bucket_breakdown"]}
+        self.assertGreater(sum(buckets.values()), 0)
+
+    def test_anthropic_thinking_metadata_blocks_active_top_level_thinking(self):
+        manual = importlib.reload(crunch_module)
+        body = _thinking_body(
+            ("active thinking secret " + "alpha beta gamma delta ") * 120,
+            top_level_thinking=True,
+        )
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["status"], "blocked")
+        self.assertTrue(thinking_meta["top_level_thinking_active"])
+        self.assertIn("active-top-level-thinking-request", thinking_meta["blockers"])
+
+    def test_anthropic_thinking_metadata_blocks_adjacent_tool_use_dependency_privately(self):
+        manual = importlib.reload(crunch_module)
+        body = _thinking_body(
+            ("tool dependent thinking secret " + "alpha beta gamma delta ") * 120,
+            include_tool_use=True,
+        )
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["status"], "blocked")
+        self.assertEqual(thinking_meta["adjacent_tool_use_dependency_count"], 1)
+        self.assertIn("adjacent-tool-use-dependency", thinking_meta["blockers"])
+        rendered = json.dumps(thinking_meta, sort_keys=True)
+        self.assertNotIn("raw-tool-use-id-must-not-leak", rendered)
+        self.assertNotIn("raw tool payload secret", rendered)
+        self.assertNotIn("/workspace/private", rendered)
+
+    def test_anthropic_thinking_metadata_blocks_malformed_content_shape(self):
+        manual = importlib.reload(crunch_module)
+        body = _thinking_body(malformed=True)
+
+        _crunched, meta = manual.crunch_body(
+            body,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+        )
+
+        thinking_meta = meta["anthropic_thinking_history"]
+        self.assertEqual(thinking_meta["status"], "blocked")
+        self.assertGreaterEqual(thinking_meta["unsupported_content_block_shape_count"], 1)
+        self.assertIn("unsupported-content-block-shape", thinking_meta["blockers"])
+        self.assertNotIn("raw-malformed-secret", json.dumps(thinking_meta, sort_keys=True))
+
+    def test_anthropic_thinking_metadata_mode_blocks_without_raw_body(self):
+        manual = importlib.reload(crunch_module)
+
+        thinking_meta = manual.build_anthropic_thinking_history_metadata(
+            None,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            category="tool-result",
+        )
+
+        self.assertEqual(thinking_meta["status"], "blocked")
+        self.assertEqual(thinking_meta["privacy_mode"], "metadata-only")
+        self.assertFalse(thinking_meta["body_available"])
+        self.assertIn("raw-body-unavailable", thinking_meta["blockers"])
+        self.assertFalse(thinking_meta["local_thinking_block_fingerprints_included"])
+        self.assertFalse(thinking_meta["raw_messages_included"])
 
     def test_config_crunch_rules_can_disable_crunch_without_env_flags(self):
         with TemporaryDirectory() as tmp:

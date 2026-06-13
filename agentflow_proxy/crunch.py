@@ -1646,6 +1646,294 @@ def _token_bucket(tokens: int) -> str:
     return "gte_64k_tokens"
 
 
+_ANTHROPIC_THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+
+
+def _thinking_size_bucket(chars: int) -> str:
+    if chars <= 0:
+        return "0_chars"
+    if chars < 2_000:
+        return "lt_2k_chars"
+    if chars < 8_000:
+        return "2k_8k_chars"
+    if chars < 32_000:
+        return "8k_32k_chars"
+    if chars < 128_000:
+        return "32k_128k_chars"
+    return "gte_128k_chars"
+
+
+def _thinking_count_bucket(count: int) -> str:
+    if count <= 0:
+        return "0"
+    if count == 1:
+        return "1"
+    if count <= 5:
+        return "2_5"
+    if count <= 20:
+        return "6_20"
+    return "gt_20"
+
+
+def _assistant_age_bucket(age: int) -> str:
+    if age <= 0:
+        return "latest_assistant"
+    if age == 1:
+        return "previous_assistant"
+    if age <= 5:
+        return "assistant_age_2_5"
+    return "assistant_age_gt_5"
+
+
+def _thinking_top_level_active(body: dict[str, Any] | None) -> bool:
+    if not isinstance(body, dict):
+        return False
+    thinking = body.get("thinking")
+    if not thinking:
+        return False
+    if isinstance(thinking, dict) and str(thinking.get("type") or "").strip().lower() == "disabled":
+        return False
+    return True
+
+
+def _thinking_public_breakdown(counter: dict[str, int], *, label: str) -> list[dict[str, Any]]:
+    return [
+        {label: key, "count": value}
+        for key, value in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _thinking_block_text(block: dict[str, Any]) -> str:
+    for key in ("thinking", "text", "data"):
+        value = block.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _thinking_assistant_text_available(content: list[Any]) -> bool:
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+            return True
+        if isinstance(block, str) and block.strip():
+            return True
+    return False
+
+
+def _thinking_tool_use_ids(content: list[Any]) -> set[str]:
+    ids: set[str] = set()
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        tool_id = str(block.get("id") or "")
+        if tool_id:
+            ids.add(tool_id)
+    return ids
+
+
+def _thinking_tool_result_ids(content: list[Any]) -> set[str]:
+    ids: set[str] = set()
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        tool_id = str(block.get("tool_use_id") or "")
+        if tool_id:
+            ids.add(tool_id)
+    return ids
+
+
+def build_anthropic_thinking_history_metadata(
+    body: dict[str, Any] | None,
+    *,
+    provider: str | None = None,
+    source_surface: str | None = None,
+    endpoint: str | None = None,
+    category: str | None = None,
+    policy_source: str | None = None,
+    rule_path: str | None = None,
+) -> dict[str, Any]:
+    """Build bounded local diagnostics for Anthropic thinking-history compaction planning."""
+    meta: dict[str, Any] = {
+        "schema": "agentflow.anthropic_thinking_history_metadata.v1",
+        "status": "blocked",
+        "reason": "not-evaluated",
+        "provider": provider,
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "category": category,
+        "policy_source": str(policy_source or CRUNCH_POLICY_SOURCE),
+        "rule_path": str(rule_path or CRUNCH_RULES_PATH),
+        "policy": {
+            "enabled": THINKING_DEDUP_ENABLED,
+            "min_chars": THINKING_DEDUP_MIN_CHARS,
+            "similarity_threshold": THINKING_DEDUP_SIMILARITY_THRESHOLD,
+            "skip_latest_assistant": THINKING_DEDUP_SKIP_LATEST_ASSISTANT,
+        },
+        "privacy_mode": "metadata-only",
+        "body_available": isinstance(body, dict),
+        "raw_thinking_text_included": False,
+        "raw_prompt_text_included": False,
+        "raw_messages_included": False,
+        "raw_tool_payloads_included": False,
+        "file_paths_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "local_thinking_block_fingerprints_included": False,
+        "top_level_thinking_active": False,
+        "thinking_block_count": 0,
+        "redacted_thinking_block_count": 0,
+        "thinking_history_chars": 0,
+        "thinking_history_size_bucket": "0_chars",
+        "thinking_block_count_bucket": "0",
+        "local_thinking_block_fingerprints": [],
+        "unique_local_thinking_block_fingerprint_count": 0,
+        "exact_duplicate_thinking_block_count": 0,
+        "near_duplicate_thinking_block_count": 0,
+        "assistant_message_count": 0,
+        "assistant_message_with_thinking_count": 0,
+        "missing_assistant_text_fallback_count": 0,
+        "thinking_tool_use_message_count": 0,
+        "adjacent_tool_use_dependency_count": 0,
+        "unsupported_content_block_shape_count": 0,
+        "block_size_bucket_breakdown": [],
+        "assistant_age_bucket_breakdown": [],
+        "blockers": [],
+    }
+
+    blockers: set[str] = set()
+    provider_l = str(provider or "").lower()
+    source_l = str(source_surface or "").lower()
+    endpoint_l = str(endpoint or "").lower()
+    if provider_l and provider_l != "anthropic":
+        blockers.add("non-anthropic-provider")
+    if source_l and source_l != "anthropic_messages":
+        blockers.add("non-anthropic-source-surface")
+    if endpoint_l and endpoint_l != "messages":
+        blockers.add("non-anthropic-messages-endpoint")
+    if not isinstance(body, dict):
+        blockers.add("raw-body-unavailable")
+        meta["reason"] = "raw-body-unavailable"
+        meta["blockers"] = sorted(blockers)
+        return meta
+
+    meta["privacy_mode"] = "local-body-derived-metadata"
+    top_level_active = _thinking_top_level_active(body)
+    meta["top_level_thinking_active"] = top_level_active
+    if top_level_active:
+        blockers.add("active-top-level-thinking-request")
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        blockers.add("unsupported-content-block-shape")
+        meta["unsupported_content_block_shape_count"] = 1
+        meta["reason"] = "unsupported-content-block-shape"
+        meta["blockers"] = sorted(blockers)
+        return meta
+
+    assistant_indexes = [idx for idx, msg in enumerate(messages) if isinstance(msg, dict) and msg.get("role") == "assistant"]
+    assistant_age_by_index = {
+        msg_idx: len(assistant_indexes) - 1 - assistant_order
+        for assistant_order, msg_idx in enumerate(assistant_indexes)
+    }
+    meta["assistant_message_count"] = len(assistant_indexes)
+
+    size_buckets: dict[str, int] = {}
+    age_buckets: dict[str, int] = {}
+    seen_hashes: dict[str, int] = {}
+    seen_shingles: list[frozenset] = []
+    local_hashes: list[str] = []
+    previous_thinking_tool_use_ids: set[str] = set()
+
+    for msg_idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            previous_thinking_tool_use_ids = set()
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "user" and previous_thinking_tool_use_ids:
+            if isinstance(content, list):
+                if previous_thinking_tool_use_ids & _thinking_tool_result_ids(content):
+                    meta["adjacent_tool_use_dependency_count"] += 1
+                    blockers.add("adjacent-tool-use-dependency")
+            else:
+                blockers.add("unsupported-content-block-shape")
+                meta["unsupported_content_block_shape_count"] += 1
+            previous_thinking_tool_use_ids = set()
+            continue
+        previous_thinking_tool_use_ids = set()
+        if role != "assistant":
+            continue
+        if not isinstance(content, list):
+            blockers.add("unsupported-content-block-shape")
+            meta["unsupported_content_block_shape_count"] += 1
+            continue
+
+        thinking_blocks = [
+            block
+            for block in content
+            if isinstance(block, dict) and block.get("type") in _ANTHROPIC_THINKING_BLOCK_TYPES
+        ]
+        if not thinking_blocks:
+            continue
+        meta["assistant_message_with_thinking_count"] += 1
+        if not _thinking_assistant_text_available(content):
+            meta["missing_assistant_text_fallback_count"] += 1
+            blockers.add("missing-assistant-text-fallback")
+        tool_use_ids = _thinking_tool_use_ids(content)
+        if tool_use_ids:
+            meta["thinking_tool_use_message_count"] += 1
+            previous_thinking_tool_use_ids = tool_use_ids
+
+        age_bucket = _assistant_age_bucket(assistant_age_by_index.get(msg_idx, 0))
+        for block in thinking_blocks:
+            block_type = str(block.get("type") or "")
+            if block_type == "redacted_thinking":
+                meta["redacted_thinking_block_count"] += 1
+                blockers.add("redacted-thinking-block")
+            text = _thinking_block_text(block)
+            if block_type == "thinking" and not text:
+                blockers.add("unsupported-content-block-shape")
+                meta["unsupported_content_block_shape_count"] += 1
+            chars = len(text)
+            meta["thinking_block_count"] += 1
+            meta["thinking_history_chars"] += chars
+            _bump_counter(size_buckets, _thinking_size_bucket(chars))
+            _bump_counter(age_buckets, age_bucket)
+            if not text:
+                continue
+            block_hash = "sha256:" + sha256_text(normalize_text(text))
+            local_hashes.append(block_hash)
+            seen_hashes[block_hash] = seen_hashes.get(block_hash, 0) + 1
+            if seen_hashes[block_hash] > 1:
+                meta["exact_duplicate_thinking_block_count"] += 1
+                continue
+            if chars >= THINKING_DEDUP_MIN_CHARS:
+                shingles = _shingles(text)
+                if any(_jaccard(shingles, older) >= THINKING_DEDUP_SIMILARITY_THRESHOLD for older in seen_shingles):
+                    meta["near_duplicate_thinking_block_count"] += 1
+                seen_shingles.append(shingles)
+
+    meta["thinking_history_size_bucket"] = _thinking_size_bucket(int(meta["thinking_history_chars"]))
+    meta["thinking_block_count_bucket"] = _thinking_count_bucket(int(meta["thinking_block_count"]))
+    meta["local_thinking_block_fingerprints"] = sorted(set(local_hashes))[:16]
+    meta["unique_local_thinking_block_fingerprint_count"] = len(set(local_hashes))
+    meta["local_thinking_block_fingerprints_included"] = bool(meta["local_thinking_block_fingerprints"])
+    meta["block_size_bucket_breakdown"] = _thinking_public_breakdown(size_buckets, label="bucket")
+    meta["assistant_age_bucket_breakdown"] = _thinking_public_breakdown(age_buckets, label="bucket")
+
+    if int(meta["thinking_block_count"]) <= 0:
+        blockers.add("no-thinking-history-blocks")
+    if blockers:
+        meta["status"] = "blocked"
+        meta["reason"] = sorted(blockers)[0]
+    else:
+        meta["status"] = "ready"
+        meta["reason"] = "ready-for-thinking-compaction-planning"
+        blockers.add("ready-for-thinking-compaction-planning")
+    meta["blockers"] = sorted(blockers)
+    return meta
+
+
 def _pattern_canary_features(
     *,
     body: dict[str, Any],
@@ -4958,17 +5246,36 @@ def crunch_body(
     threshold_chars = int((managed_profile or {}).get("threshold_chars") or CRUNCH_THRESHOLD_CHARS)
 
     if not CRUNCH_ENABLED:
+        category = _crunch_request_category(body) if isinstance(body, dict) else None
         return body, {
             "enabled": False,
             "changed": False,
             "policy_source": policy_source,
             "rule_path": CRUNCH_RULES_PATH,
             "managed_profile": managed_profile,
+            "anthropic_thinking_history": build_anthropic_thinking_history_metadata(
+                body if isinstance(body, dict) else None,
+                provider=provider,
+                source_surface=source_surface,
+                endpoint=endpoint,
+                category=category,
+                policy_source=policy_source,
+                rule_path=CRUNCH_RULES_PATH,
+            ),
         }
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
     category = _crunch_request_category(new_body)
+    thinking_history_meta = build_anthropic_thinking_history_metadata(
+        body if isinstance(body, dict) else None,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        category=category,
+        policy_source=policy_source,
+        rule_path=CRUNCH_RULES_PATH,
+    )
     new_body, terminal_output_compaction_meta = _apply_terminal_output_compaction_canary(
         new_body,
         store_obj=store_obj,
@@ -5097,6 +5404,7 @@ def crunch_body(
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
         "pattern_rules": pattern_rules_meta,
         "repeated_provider_scaffolding": provider_scaffolding_meta,
+        "anthropic_thinking_history": thinking_history_meta,
         "policy_source": policy_source,
         "rule_path": CRUNCH_RULES_PATH,
         "threshold_chars": threshold_chars,
