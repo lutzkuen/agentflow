@@ -14,6 +14,7 @@ import yaml
 from agentflow_proxy import activation
 from agentflow_proxy import cli
 from agentflow_proxy.cli_commands import policy_bundle as policy_bundle_cli
+from agentflow_proxy.cli_commands import policy_workbench as policy_workbench_cli
 
 
 class ManagedFeedbackFlushClient:
@@ -1076,6 +1077,13 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertIs(cli.policy_validate_cli, policy_bundle_cli.policy_validate_cli)
         self.assertIs(cli.policy_diff_cli, policy_bundle_cli.policy_diff_cli)
         self.assertIs(cli.policy_review_cli, policy_bundle_cli.policy_review_cli)
+
+    def test_cli_module_re_exports_policy_workbench_commands(self):
+        self.assertIs(cli.policy_fetch_review_cli, policy_workbench_cli.policy_fetch_review_cli)
+        self.assertIs(cli.policy_apply_cli, policy_workbench_cli.policy_apply_cli)
+        self.assertIs(cli.policy_draft_stage_cli, policy_workbench_cli.policy_draft_stage_cli)
+        self.assertIs(cli.policy_draft_validate_cli, policy_workbench_cli.policy_draft_validate_cli)
+        self.assertIs(cli.policy_draft_apply_cli, policy_workbench_cli.policy_draft_apply_cli)
 
     def test_loopback_url_validation(self):
         self.assertTrue(cli._is_loopback_url("http://127.0.0.1:4000/agentflow/admin/reload-policies"))
