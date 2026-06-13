@@ -368,7 +368,7 @@ async def openai_uploads_passthrough(request: Request, rest: str) -> Response:
     return await openai_passthrough(request, f"/v1/uploads/{rest}")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="AgentFlow provider-specific local proxy")
     parser.add_argument("--provider", choices=("anthropic", "openai"), default=PROVIDER)
     parser.add_argument("--anthropic-upstream", default=ANTHROPIC_UPSTREAM)
@@ -377,7 +377,7 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--reload", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     os.environ["AGENTFLOW_PROVIDER"] = args.provider
     os.environ["AGENTFLOW_ANTHROPIC_UPSTREAM"] = args.anthropic_upstream
     os.environ["AGENTFLOW_OPENAI_UPSTREAM"] = args.openai_upstream

@@ -31,6 +31,154 @@ SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_SCAFFOLD_ROLLOUT_ACTIONS_URL"
 MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
 
 
+def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
+    prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
+    stdout.write(f"{prefix} AgentFlow target: {result['target']}\n")
+    stdout.write(f"Local base URL for clients: {result['local_base_url']}\n")
+    stdout.write(f"Health URL: {result['health_url']}\n")
+    stdout.write(f"Upstream provider base URL: {result['upstream_base_url']}\n")
+    stdout.write(f"Run configured proxy: {result['run_command']}\n")
+    stdout.write(f"Equivalent proxy command: {result['proxy_command']}\n")
+    stdout.write(f"Config file: {result['config_path']}\n")
+    stdout.write("API keys are not stored or printed by activation.\n")
+
+
+def agentflow_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    from agentflow_proxy import activation
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    config_parent = argparse.ArgumentParser(add_help=False)
+    config_parent.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+
+    parser = argparse.ArgumentParser(description="AgentFlow local proxy onboarding and runtime commands")
+    parser.add_argument(
+        "--config-dir",
+        default=None,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    activate_parser = subparsers.add_parser(
+        "activate",
+        parents=[config_parent],
+        help="Configure a local client/API target to use AgentFlow.",
+    )
+    activate_subparsers = activate_parser.add_subparsers(dest="target", required=True)
+    activate_openai = activate_subparsers.add_parser("openai", help="Configure OpenAI-compatible API traffic.")
+    activate_openai.add_argument(
+        "--openai-base-url",
+        default=None,
+        help="Upstream OpenAI-compatible provider base URL. The local client URL stays on AgentFlow.",
+    )
+    activate_openai.add_argument(
+        "--openai-auth-mode",
+        choices=("client", "proxy"),
+        default=activation.DEFAULT_OPENAI_AUTH_MODE,
+        help="Forward client Authorization headers or use proxy environment credentials. Default: client.",
+    )
+    activate_openai.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    activate_openai.add_argument("--local-base-url", default=None, help=argparse.SUPPRESS)
+    activate_openai.add_argument("--health-url", default=None, help=argparse.SUPPRESS)
+    activate_openai.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
+
+    activate_claude = activate_subparsers.add_parser("claude", help="Configure Claude/Anthropic-compatible API traffic.")
+    activate_claude.add_argument(
+        "--anthropic-base-url",
+        default=None,
+        help="Upstream Anthropic-compatible provider base URL.",
+    )
+    activate_claude.add_argument(
+        "--claude-base-url",
+        default=None,
+        help="Alias for --anthropic-base-url.",
+    )
+    activate_claude.add_argument(
+        "--config-dir",
+        default=argparse.SUPPRESS,
+        help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
+    )
+    activate_claude.add_argument("--local-base-url", default=None, help=argparse.SUPPRESS)
+    activate_claude.add_argument("--health-url", default=None, help=argparse.SUPPRESS)
+    activate_claude.add_argument("--dry-run", action="store_true", help="Show intended changes without writing config.")
+
+    run_parser = subparsers.add_parser(
+        "run",
+        parents=[config_parent],
+        help="Run a configured AgentFlow proxy target.",
+    )
+    run_parser.add_argument("target", choices=("openai", "claude"))
+    run_parser.add_argument(
+        "--dry-run",
+        "--print-command",
+        action="store_true",
+        help="Print the proxy command that would run without starting the server.",
+    )
+
+    args = parser.parse_args(argv)
+    if not hasattr(args, "config_dir") or args.config_dir is None:
+        args.config_dir = os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
+
+    if args.command == "activate":
+        if args.target == "claude" and args.anthropic_base_url and args.claude_base_url:
+            stderr.write("--anthropic-base-url and --claude-base-url are aliases; pass only one.\n")
+            return 2
+        config = activation.load_activation_config(args.config_dir)
+        profile = activation.activation_profile(
+            args.target,
+            openai_base_url=getattr(args, "openai_base_url", None),
+            anthropic_base_url=getattr(args, "anthropic_base_url", None) or getattr(args, "claude_base_url", None),
+            local_base_url=getattr(args, "local_base_url", None),
+            health_url=getattr(args, "health_url", None),
+            openai_auth_mode=getattr(args, "openai_auth_mode", activation.DEFAULT_OPENAI_AUTH_MODE),
+        )
+        updated = activation.apply_activation_profile(config, profile)
+        config_path = activation.activation_config_path(args.config_dir)
+        if not args.dry_run:
+            config_path = activation.write_activation_config(updated, args.config_dir)
+        result = activation.activation_result(
+            config=updated,
+            profile=profile,
+            config_path=config_path,
+            dry_run=bool(args.dry_run),
+        )
+        _write_activation_summary(stdout, result)
+        return 0
+
+    if args.command == "run":
+        config = activation.load_activation_config(args.config_dir)
+        try:
+            proxy_args = activation.proxy_args_for_target(config, args.target)
+        except KeyError:
+            stderr.write(f"AgentFlow target is not configured: {args.target}. Run `agentflow activate {args.target}` first.\n")
+            return 1
+        profile = config["targets"][args.target]
+        if args.dry_run:
+            stdout.write(activation.shell_command_for_profile(profile) + "\n")
+            return 0
+        from agentflow_proxy import server
+
+        server.main(proxy_args)
+        return 0
+
+    parser.error("unknown command")
+    return 2
+
+
 def _default_policy_reload_url() -> str:
     port = os.getenv("AGENTFLOW_ADMIN_PORT") or os.getenv("AGENTFLOW_PORT", "4000")
     return f"http://127.0.0.1:{port}{POLICY_RELOAD_PATH}"
@@ -8025,6 +8173,10 @@ def proxy_main() -> None:
     from agentflow_proxy.server import main
 
     main()
+
+
+def agentflow_main() -> None:
+    raise SystemExit(agentflow_cli())
 
 
 def policy_reload_main() -> None:

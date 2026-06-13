@@ -37,6 +37,180 @@ class ManagedFeedbackFlushClient:
         return httpx.Response(self.status_code, text=self.text)
 
 
+class AgentflowActivationCliTests(unittest.TestCase):
+    def test_activate_openai_writes_default_profile_idempotently(self):
+        with TemporaryDirectory() as tmp:
+            stdout_one = io.StringIO()
+            stdout_two = io.StringIO()
+
+            code_one = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout_one)
+            code_two = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout_two)
+
+            self.assertEqual(code_one, 0)
+            self.assertEqual(code_two, 0)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["openai"])
+            profile = config["targets"]["openai"]
+            self.assertTrue(profile["configured"])
+            self.assertEqual(profile["local_base_url"], "http://127.0.0.1:4003/v1")
+            self.assertEqual(profile["health_url"], "http://127.0.0.1:4003/health")
+            self.assertEqual(profile["upstream_base_url"], "https://api.openai.com")
+            self.assertEqual(profile["openai_auth_mode"], "client")
+            self.assertIn("--provider", profile["command_profile"]["argv"])
+            self.assertIn("openai", profile["command_profile"]["argv"])
+            self.assertIn("Local base URL for clients: http://127.0.0.1:4003/v1", stdout_one.getvalue())
+            self.assertIn("Upstream provider base URL: https://api.openai.com", stdout_one.getvalue())
+            self.assertIn("Run configured proxy: agentflow run openai", stdout_one.getvalue())
+
+    def test_activate_openai_custom_upstream_preserves_local_base_url(self):
+        upstream = "https://example-resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21"
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(
+                [
+                    "activate",
+                    "openai",
+                    "--config-dir",
+                    tmp,
+                    "--openai-base-url",
+                    upstream,
+                    "--openai-auth-mode",
+                    "proxy",
+                ],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            profile = config["targets"]["openai"]
+            self.assertEqual(profile["local_base_url"], "http://127.0.0.1:4003/v1")
+            self.assertEqual(profile["upstream_base_url"], upstream)
+            self.assertEqual(profile["openai_auth_mode"], "proxy")
+            self.assertIn(upstream, stdout.getvalue())
+            self.assertIn("Local base URL for clients: http://127.0.0.1:4003/v1", stdout.getvalue())
+
+    def test_activate_claude_writes_default_profile_idempotently(self):
+        with TemporaryDirectory() as tmp:
+            stdout_one = io.StringIO()
+            stdout_two = io.StringIO()
+
+            code_one = cli.agentflow_cli(["activate", "claude", "--config-dir", tmp], stdout=stdout_one)
+            code_two = cli.agentflow_cli(["activate", "claude", "--config-dir", tmp], stdout=stdout_two)
+
+            self.assertEqual(code_one, 0)
+            self.assertEqual(code_two, 0)
+            config = json.loads((Path(tmp) / "activation.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(config["targets"].keys()), ["claude"])
+            profile = config["targets"]["claude"]
+            self.assertTrue(profile["configured"])
+            self.assertEqual(profile["provider"], "anthropic")
+            self.assertEqual(profile["local_base_url"], "http://127.0.0.1:4000")
+            self.assertEqual(profile["health_url"], "http://127.0.0.1:4000/health")
+            self.assertEqual(profile["upstream_base_url"], "https://api.anthropic.com")
+            self.assertIn("Local base URL for clients: http://127.0.0.1:4000", stdout_one.getvalue())
+            self.assertIn("Upstream provider base URL: https://api.anthropic.com", stdout_one.getvalue())
+            self.assertIn("Run configured proxy: agentflow run claude", stdout_one.getvalue())
+
+    def test_activate_dry_run_does_not_write_config(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp, "--dry-run"], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertFalse((Path(tmp) / "activation.json").exists())
+            self.assertIn("Dry run: would configure AgentFlow target: openai", stdout.getvalue())
+
+    def test_top_level_config_dir_is_preserved(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["--config-dir", tmp, "activate", "openai"], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            self.assertTrue((Path(tmp) / "activation.json").exists())
+            self.assertIn(f"Config file: {Path(tmp) / 'activation.json'}", stdout.getvalue())
+
+    def test_activation_does_not_write_or_print_api_keys(self):
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "sk-openai-secret",
+                    "ANTHROPIC_API_KEY": "sk-ant-secret",
+                    "AGENTFLOW_OPENAI_API_KEY": "sk-proxy-secret",
+                },
+                clear=False,
+            ):
+                code = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 0)
+            raw_config = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
+            output = stdout.getvalue()
+            for secret in ("sk-openai-secret", "sk-ant-secret", "sk-proxy-secret"):
+                self.assertNotIn(secret, raw_config)
+                self.assertNotIn(secret, output)
+
+    def test_agentflow_run_translates_openai_profile_to_proxy_flags(self):
+        upstream = "https://azure.example/openai"
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(
+                [
+                    "activate",
+                    "openai",
+                    "--config-dir",
+                    tmp,
+                    "--openai-base-url",
+                    upstream,
+                    "--openai-auth-mode",
+                    "proxy",
+                ],
+                stdout=io.StringIO(),
+            )
+
+            with patch("agentflow_proxy.server.main") as server_main:
+                code = cli.agentflow_cli(["run", "openai", "--config-dir", tmp], stdout=io.StringIO())
+
+            self.assertEqual(code, 0)
+            server_main.assert_called_once_with([
+                "--provider",
+                "openai",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4003",
+                "--openai-upstream",
+                upstream,
+                "--openai-auth-mode",
+                "proxy",
+            ])
+
+    def test_agentflow_run_translates_claude_profile_to_proxy_flags(self):
+        upstream = "https://anthropic.example"
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(
+                ["activate", "claude", "--config-dir", tmp, "--claude-base-url", upstream],
+                stdout=io.StringIO(),
+            )
+
+            with patch("agentflow_proxy.server.main") as server_main:
+                code = cli.agentflow_cli(["run", "claude", "--config-dir", tmp], stdout=io.StringIO())
+
+            self.assertEqual(code, 0)
+            server_main.assert_called_once_with([
+                "--provider",
+                "anthropic",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "4000",
+                "--anthropic-upstream",
+                upstream,
+            ])
+
+
 class PolicyReloadCliTests(unittest.TestCase):
     def setUp(self):
         ManagedFeedbackFlushClient.calls = []
