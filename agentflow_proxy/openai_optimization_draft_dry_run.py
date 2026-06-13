@@ -44,6 +44,12 @@ RAW_FIELD_NAMES = {
     "tool_payload",
     "transcript",
 }
+SAFE_RAW_FLAG_KEYS = {
+    "raw_commands_included",
+    "raw_paths_included",
+    "raw_request_ids_included",
+    "raw_terminal_text_included",
+}
 FAMILY_ALIASES = {
     "routing": "routing",
     "old_context_summary": "old_context_summary",
@@ -146,6 +152,12 @@ def _scan_raw_fields(value: Any, errors: list[dict[str, str]], path: str = "$") 
         for key, child in value.items():
             lowered = str(key).strip().lower()
             child_path = f"{path}.{key}"
+            if lowered in SAFE_RAW_FLAG_KEYS:
+                if bool(child):
+                    errors.append({"path": child_path, "message": "OpenAI optimization draft dry-runs require local-only metadata and no raw payload flags"})
+                    continue
+                _scan_raw_fields(child, errors, child_path)
+                continue
             if lowered in RAW_FIELD_NAMES or lowered.startswith("raw_"):
                 errors.append({"path": child_path, "message": "raw or local-identifier fields are not accepted in OpenAI optimization draft dry-runs"})
                 continue

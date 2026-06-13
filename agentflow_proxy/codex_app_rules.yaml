@@ -24,3 +24,73 @@ exact_cache:
 crunch:
   profiles:
     - codex-repeated-scaffolding
+terminal_transcript_compaction:
+  # Opt-in policy shape only. The Codex app proxy does not compact turn/start
+  # frames from this section yet; dry-run and canary tools use it to choose
+  # metadata-only cohorts while preserving diagnostics and tool protocol state.
+  enabled: false
+  review_only: true
+  policy_source: local-default
+  rule_id: local-codex-terminal-transcript-compaction
+  candidate_id: null
+  action_id: null
+  conditions:
+    source_surface: codex_turn
+    app_family: codex
+    granularity: agent_turn
+    workflow_phase: tool_execution
+    text_bucket:
+      - 32k_128k_chars
+      - gte_128k_chars
+    terminal_fraction_bucket:
+      - 50_75pct
+      - gte_75pct
+    terminal_event_count_bucket:
+      - 6_20
+      - 21_100
+      - 101_1000
+      - 1000_plus
+    terminal_signal_source:
+      - input-terminal-features
+      - event-window-terminal-events
+      - input-terminal-features+event-window
+    cache_status:
+      - miss
+      - skipped
+      - eligible
+    already_crunched_repeated_scaffold: false
+    safety_preserve_diagnostics: true
+    min_input_chars: 8000
+    min_terminal_chars: 2000
+    min_projected_saved_chars: 500
+  action:
+    type: compact_terminal_transcript
+    keep_recent_turns: 2
+    min_block_chars: 2000
+    head_lines: 12
+    tail_lines: 16
+    max_evidence_lines: 80
+    min_saved_chars: 500
+    preserve_diagnostics: true
+    preserve_tool_protocol: true
+    preserve_recent_turns: true
+    preserve_error_lines: true
+  canary:
+    enabled: true
+    canary_fraction: 0.0
+    holdout_fraction: 1.0
+    canary_salt: ""
+    canary_unit: source_hash
+  safety_stop:
+    enabled: true
+    min_outcome_samples: 5
+    window: 500
+    max_error_rate: 0.1
+    max_retry_rate: 0.25
+    max_negative_savings_rate: 0.25
+    max_error_rate_delta: 0.05
+  provenance:
+    schema: agentflow.codex_terminal_transcript_compaction_policy.v1
+    issuer: local-agentflow
+    status: local-default
+  rules: []

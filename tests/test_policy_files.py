@@ -860,6 +860,171 @@ crunch:
         finally:
             asyncio.run(reload_policy_modules())
 
+    def test_codex_app_default_terminal_transcript_compaction_is_disabled_and_valid(self):
+        bundle = asyncio.run(build_policy_bundle())
+
+        validation = validate_policy_bundle(bundle)
+        codex_policy = bundle["policies"]["codex_app"]
+        terminal = codex_policy["terminal_transcript_compaction"]
+
+        self.assertTrue(validation["ok"])
+        self.assertFalse(terminal["enabled"])
+        self.assertTrue(terminal["review_only"])
+        self.assertFalse(terminal["runtime_mutation_enabled"])
+        self.assertEqual(terminal["application"]["status"], "review-only-not-applied")
+        self.assertEqual(terminal["rule_count"], 0)
+        self.assertEqual(terminal["conditions"]["source_surface"], "codex_turn")
+        self.assertEqual(terminal["conditions"]["workflow_phase"], "tool_execution")
+        self.assertEqual(terminal["canary"]["fraction"], 0.0)
+        self.assertEqual(terminal["canary"]["holdout_fraction"], 1.0)
+        self.assertFalse(terminal["canary"]["salt_configured"])
+        self.assertNotIn("salt", terminal["canary"])
+
+    def test_codex_app_terminal_transcript_policy_file_exports_sanitized_public_metadata(self):
+        raw_candidate_id = "/workspace/private/raw-codex-terminal-candidate-must-not-leak"
+        raw_action_id = "raw-action-id-must-not-leak"
+        raw_salt = "secret-terminal-canary-salt-must-not-leak"
+        raw_rule_path = "/workspace/private/raw-path-must-not-leak"
+        try:
+            with TemporaryDirectory() as tmp:
+                rules_path = Path(tmp) / "codex_app_rules.yaml"
+                rules_path.write_text(
+                    f"""
+enabled: true
+summary_model_hint:
+  enabled: false
+exact_cache:
+  enabled: false
+terminal_transcript_compaction:
+  enabled: true
+  review_only: true
+  policy_source: local-manual
+  rule_id: codex-terminal-review-1
+  candidate_id: "{raw_candidate_id}"
+  action_id: "{raw_action_id}"
+  conditions:
+    source_surface: codex_turn
+    app_family: codex
+    granularity: agent_turn
+    workflow_phase: tool_execution
+    text_bucket:
+      - 32k_128k_chars
+    terminal_fraction_bucket:
+      - gte_75pct
+    terminal_event_count_bucket:
+      - 21_100
+    terminal_signal_source: input-terminal-features+event-window
+    cache_status: skipped
+    already_crunched_repeated_scaffold: false
+    safety_preserve_diagnostics: true
+    min_input_chars: 8000
+    min_terminal_chars: 2000
+    min_projected_saved_chars: 750
+  action:
+    type: compact_terminal_transcript
+    keep_recent_turns: 3
+    min_block_chars: 2500
+    head_lines: 10
+    tail_lines: 18
+    max_evidence_lines: 90
+    min_saved_chars: 750
+    preserve_diagnostics: true
+    preserve_tool_protocol: true
+    preserve_recent_turns: true
+    preserve_error_lines: true
+  canary:
+    enabled: true
+    canary_fraction: 0.15
+    holdout_fraction: 0.85
+    canary_salt: "{raw_salt}"
+    canary_unit: source_hash
+  safety_stop:
+    enabled: true
+    min_outcome_samples: 9
+    window: 700
+    max_error_rate: 0.04
+    max_retry_rate: 0.12
+    max_negative_savings_rate: 0.18
+    max_error_rate_delta: 0.02
+  provenance:
+    schema: agentflow.codex_terminal_transcript_compaction_policy.v1
+    issuer: local-agentflow
+    server_id: "{raw_rule_path}"
+    decision_hash: "{raw_rule_path}"
+    verified: true
+  rules:
+    - id: codex-terminal-review-rule-1
+      enabled: true
+      candidate_id: codex-terminal-candidate-safe
+      action_id: codex-terminal-action-safe
+      conditions:
+        source_surface: codex_turn
+        workflow_phase: tool_execution
+        terminal_fraction_bucket: gte_75pct
+      action:
+        type: compact_terminal_transcript
+        min_saved_chars: 900
+      canary:
+        enabled: true
+        fraction: 0.0
+        holdout_fraction: 1.0
+        salt: "{raw_salt}"
+        unit: source_hash
+""",
+                    encoding="utf-8",
+                )
+                with patch.dict(os.environ, {"AGENTFLOW_CODEX_APP_RULES": str(rules_path), "HOME": tmp}, clear=False):
+                    importlib.reload(codex_app_policy_module)
+                    importlib.reload(stats)
+                    bundle = asyncio.run(build_policy_bundle())
+                    effective = codex_app_policy_module.codex_terminal_transcript_compaction_effective_policy()
+
+                validation = validate_policy_bundle(bundle)
+                codex_policy = bundle["policies"]["codex_app"]
+                terminal = codex_policy["terminal_transcript_compaction"]
+                surface_terminal = bundle["policies"]["source_surfaces"]["codex_turn"]["terminal_transcript_compaction"]
+
+                self.assertTrue(validation["ok"])
+                self.assertTrue(terminal["enabled"])
+                self.assertTrue(terminal["review_only"])
+                self.assertFalse(terminal["runtime_mutation_enabled"])
+                self.assertEqual(terminal["policy_source"], "local-manual")
+                self.assertEqual(terminal["rule_id"], "codex-terminal-review-1")
+                self.assertTrue(str(terminal["candidate_id"]).startswith("codex-terminal-transcript-candidate:"))
+                self.assertTrue(str(terminal["action_id"]).startswith("codex-terminal-transcript-action:"))
+                self.assertEqual(terminal["conditions"]["workflow_phase"], "tool_execution")
+                self.assertEqual(terminal["conditions"]["min_projected_saved_chars"], 750)
+                self.assertEqual(terminal["action"]["keep_recent_turns"], 3)
+                self.assertEqual(terminal["action"]["min_saved_chars"], 750)
+                self.assertEqual(terminal["canary"]["fraction"], 0.15)
+                self.assertEqual(terminal["canary"]["holdout_fraction"], 0.85)
+                self.assertTrue(terminal["canary"]["salt_configured"])
+                self.assertNotIn("salt", terminal["canary"])
+                self.assertEqual(terminal["safety_stop"]["min_outcome_samples"], 9)
+                self.assertEqual(terminal["rule_count"], 1)
+                self.assertEqual(terminal["rules"][0]["candidate_id"], "codex-terminal-candidate-safe")
+                self.assertEqual(surface_terminal["candidate_id"], terminal["candidate_id"])
+                self.assertEqual(effective["candidate_id"], terminal["candidate_id"])
+
+                rendered = json.dumps(terminal, sort_keys=True)
+                self.assertNotIn(raw_candidate_id, rendered)
+                self.assertNotIn(raw_action_id, rendered)
+                self.assertNotIn(raw_salt, rendered)
+                self.assertNotIn(raw_rule_path, rendered)
+                self.assertNotIn(str(rules_path), rendered)
+                self.assertNotIn("/workspace/private", rendered)
+
+                with TemporaryDirectory() as apply_tmp:
+                    result = apply_policy_bundle(bundle, config_dir=apply_tmp, dry_run=True, sections=["codex_app"])
+
+                self.assertTrue(result["ok"])
+                codex_file = result["files"][0]
+                self.assertIn("terminal_transcript_compaction", codex_file["diff"])
+                self.assertIn("review_only: true", codex_file["diff"])
+                self.assertNotIn(raw_salt, codex_file["diff"])
+        finally:
+            asyncio.run(reload_policy_modules())
+
     def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
         bundle = asyncio.run(build_policy_bundle())
 

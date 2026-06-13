@@ -425,7 +425,15 @@ _SUMMARY_SAFE_RAW_FLAG_KEYS = {
     "raw_prompts_included",
     "raw_request_bodies_included",
     "raw_responses_included",
+    "raw_commands_included",
+    "raw_paths_included",
+    "raw_request_ids_included",
+    "raw_terminal_text_included",
     "raw_tool_payloads_included",
+    "policy_file_contents_included",
+    "secret_salt_included",
+    "terminal_transcript_compaction",
+    "terminal_transcript_compaction_enabled",
 }
 _SUMMARY_RAW_EXACT_KEYS = {
     "body",
@@ -1445,6 +1453,37 @@ _CODEX_APP_ACTION_FAMILY_KEYS = {
     "cache_eligible": "cache",
     "cache_eligibility_reason": "cache",
 }
+_CODEX_TERMINAL_TRANSCRIPT_CONDITION_KEYS = {
+    "source_surface",
+    "app_family",
+    "granularity",
+    "workflow_phase",
+    "text_bucket",
+    "input_size_bucket",
+    "terminal_fraction_bucket",
+    "terminal_output_char_fraction_bucket",
+    "terminal_event_count_bucket",
+    "terminal_signal_source",
+    "cache_status",
+    "already_crunched_repeated_scaffold",
+    "safety_preserve_diagnostics",
+    "min_input_chars",
+    "min_terminal_chars",
+    "min_projected_saved_chars",
+}
+_CODEX_TERMINAL_TRANSCRIPT_ACTION_KEYS = {
+    "type",
+    "keep_recent_turns",
+    "min_block_chars",
+    "head_lines",
+    "tail_lines",
+    "max_evidence_lines",
+    "min_saved_chars",
+    "preserve_diagnostics",
+    "preserve_tool_protocol",
+    "preserve_recent_turns",
+    "preserve_error_lines",
+}
 
 
 def _codex_app_action_families(rule: dict[str, Any], action: dict[str, Any]) -> set[str]:
@@ -1505,6 +1544,13 @@ def _validate_codex_app_policy(policy: dict[str, Any], errors: list[dict[str, st
         else:
             for index, profile in enumerate(profiles):
                 _validate_non_empty_string(errors, f"{base}.crunch.profiles[{index}]", profile)
+    terminal_compaction = _validate_object_field(policy, base, "terminal_transcript_compaction", errors)
+    if terminal_compaction:
+        _validate_codex_terminal_transcript_compaction_policy(
+            terminal_compaction,
+            errors,
+            f"{base}.terminal_transcript_compaction",
+        )
 
     rules = policy.get("rules", [])
     if not isinstance(rules, list):
@@ -3852,6 +3898,95 @@ def _codex_app_cache_enabled(action: dict[str, Any]) -> bool | None:
     return None
 
 
+def _validate_codex_terminal_transcript_compaction_policy(
+    policy: dict[str, Any],
+    errors: list[dict[str, str]],
+    base: str,
+) -> None:
+    _reject_raw_payload_fields(policy, errors, base)
+    if "enabled" in policy:
+        _validate_boolish(errors, f"{base}.enabled", policy["enabled"])
+    if "review_only" in policy:
+        _validate_boolish(errors, f"{base}.review_only", policy["review_only"])
+    for key in ("policy_source", "rule_id", "candidate_id", "action_id"):
+        if key in policy and policy[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"{base}.{key}", policy[key])
+
+    conditions = policy.get("conditions", {})
+    if conditions is not None:
+        if not isinstance(conditions, dict):
+            _add_error(errors, f"{base}.conditions", "expected object")
+        else:
+            for key in sorted(set(conditions) - _CODEX_TERMINAL_TRANSCRIPT_CONDITION_KEYS):
+                _add_error(errors, f"{base}.conditions.{key}", "unknown Codex terminal-transcript condition")
+            for key, value in conditions.items():
+                if key not in _CODEX_TERMINAL_TRANSCRIPT_CONDITION_KEYS:
+                    continue
+                if isinstance(value, list):
+                    for index, item in enumerate(value):
+                        if not isinstance(item, (str, int, float, bool)) or item == "":
+                            _add_error(errors, f"{base}.conditions.{key}[{index}]", "expected scalar condition value")
+                elif not isinstance(value, (str, int, float, bool)) or value == "":
+                    _add_error(errors, f"{base}.conditions.{key}", "expected scalar or list condition value")
+
+    action = policy.get("action", {})
+    if action is not None:
+        if not isinstance(action, dict):
+            _add_error(errors, f"{base}.action", "expected object")
+        else:
+            for key in sorted(set(action) - _CODEX_TERMINAL_TRANSCRIPT_ACTION_KEYS):
+                _add_error(errors, f"{base}.action.{key}", "unknown Codex terminal-transcript action")
+            for key in ("type",):
+                if key in action:
+                    _validate_non_empty_string(errors, f"{base}.action.{key}", action[key])
+            for key in ("keep_recent_turns", "min_block_chars", "head_lines", "tail_lines", "max_evidence_lines", "min_saved_chars"):
+                if key in action:
+                    _validate_intish(errors, f"{base}.action.{key}", action[key], min_value=0)
+            for key in ("preserve_diagnostics", "preserve_tool_protocol", "preserve_recent_turns", "preserve_error_lines"):
+                if key in action:
+                    _validate_boolish(errors, f"{base}.action.{key}", action[key])
+
+    canary = _validate_object_field(policy, base, "canary", errors)
+    if "enabled" in canary:
+        _validate_boolish(errors, f"{base}.canary.enabled", canary["enabled"])
+    for key in ("fraction", "canary_fraction", "holdout_fraction"):
+        if key in canary:
+            _validate_floatish(errors, f"{base}.canary.{key}", canary[key], min_value=0.0, max_value=1.0)
+    for key in ("unit", "salt"):
+        if key in canary and canary[key] not in (None, ""):
+            _validate_non_empty_string(errors, f"{base}.canary.{key}", canary[key])
+
+    safety_stop = _validate_object_field(policy, base, "safety_stop", errors)
+    for key in ("min_outcome_samples", "window"):
+        if key in safety_stop:
+            _validate_intish(errors, f"{base}.safety_stop.{key}", safety_stop[key], min_value=0)
+    for key in ("max_error_rate", "max_retry_rate", "max_negative_savings_rate", "max_error_rate_delta"):
+        if key in safety_stop:
+            _validate_floatish(errors, f"{base}.safety_stop.{key}", safety_stop[key], min_value=0.0)
+    if "enabled" in safety_stop:
+        _validate_boolish(errors, f"{base}.safety_stop.enabled", safety_stop["enabled"])
+
+    provenance = policy.get("provenance")
+    if provenance is not None and not isinstance(provenance, dict):
+        _add_error(errors, f"{base}.provenance", "expected object")
+
+    rules = policy.get("rules", [])
+    if rules is not None:
+        if not isinstance(rules, list):
+            _add_error(errors, f"{base}.rules", "expected list")
+        else:
+            for index, rule in enumerate(rules):
+                if not isinstance(rule, dict):
+                    _add_error(errors, f"{base}.rules[{index}]", "expected rule object")
+                    continue
+                nested = {key: value for key, value in rule.items() if key != "rules"}
+                _validate_codex_terminal_transcript_compaction_policy(
+                    nested,
+                    errors,
+                    f"{base}.rules[{index}]",
+                )
+
+
 def _codex_app_managed_rule_to_local(rule: dict[str, Any], *, policy: dict[str, Any], index: int) -> dict[str, Any] | None:
     conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
     action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
@@ -4039,6 +4174,28 @@ def _policy_apply_yaml(section: str, policy: dict[str, Any]) -> dict[str, Any]:
                 for key in ("profiles",)
                 if key in policy["crunch"]
             }
+        terminal = policy.get("terminal_transcript_compaction")
+        if isinstance(terminal, dict):
+            terminal_payload = {
+                key: terminal[key]
+                for key in (
+                    "enabled",
+                    "review_only",
+                    "policy_source",
+                    "rule_id",
+                    "candidate_id",
+                    "action_id",
+                    "conditions",
+                    "action",
+                    "canary",
+                    "safety_stop",
+                    "provenance",
+                    "rules",
+                )
+                if key in terminal
+            }
+            if terminal_payload:
+                payload["terminal_transcript_compaction"] = terminal_payload
         if local_rules:
             payload["rules"] = local_rules
         return payload
