@@ -455,6 +455,18 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             "ladder": ladder_rows[:5],
             "privacy": ladder.get("privacy") if isinstance(ladder.get("privacy"), dict) else {},
         }
+    hit_recovery = stats.get("streaming_cache_hit_recovery") or stats.get("cache_replay_hit_recovery")
+    if isinstance(hit_recovery, dict):
+        recovery_rows = hit_recovery.get("cohorts") if isinstance(hit_recovery.get("cohorts"), list) else []
+        summary["streaming_cache_hit_recovery"] = {
+            "schema": hit_recovery.get("schema"),
+            "summary": hit_recovery.get("summary") if isinstance(hit_recovery.get("summary"), dict) else {},
+            "verdict_breakdown": hit_recovery.get("verdict_breakdown")
+            if isinstance(hit_recovery.get("verdict_breakdown"), list)
+            else [],
+            "cohorts": recovery_rows[:5],
+            "privacy": hit_recovery.get("privacy") if isinstance(hit_recovery.get("privacy"), dict) else {},
+        }
     cohorts = (
         stats.get("cache_replay_cohort_ranking")
         or stats.get("cache_replay_cohorts")

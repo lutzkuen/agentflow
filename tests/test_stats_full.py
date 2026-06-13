@@ -6282,6 +6282,166 @@ class StatsFullTest(unittest.TestCase):
             self.assertIn("cache-replay-activation-health-tbody", dashboard.text)
             self.assertNotIn("private activation prompt", dashboard.text)
 
+    def test_streaming_cache_hit_recovery_reports_store_missing_without_raw_data(self):
+        rule = {
+            "rule_id": "streaming-cache-rule-store-missing",
+            "candidate_id": "candidate-store-missing",
+            "policy_id": "policy-store-missing",
+            "policy_source": "managed-recommended",
+            "scope": "session",
+            "canary": {
+                "enabled": True,
+                "selected": True,
+                "cohort": "canary_applied",
+                "fraction": 0.5,
+                "pattern_hashes": ["sha256:" + "a" * 64],
+            },
+        }
+
+        for index in range(2):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=10,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=0.01,
+                cost_baseline_usd=0.02,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"category": "summary", "workflow_phase": "summary", "has_tools": False}),
+                cache_json=stable_json({
+                    "status": "miss",
+                    "reason": "exact-miss",
+                    "policy_source": "managed-recommended",
+                    "pattern_rule": rule,
+                    "cache_replay_canary": {
+                        "schema": "agentflow.cache_replay_canary_decision.v1",
+                        "rule_id": rule["rule_id"],
+                        "candidate_id": rule["candidate_id"],
+                        "policy_source": "managed-recommended",
+                        "scope": "session",
+                        "canary": rule["canary"],
+                        "canary_cohort": "canary_applied",
+                        "status": "applied",
+                        "reason": "no-dependency-required",
+                    },
+                }),
+                error=None,
+                request_json=stable_json({
+                    "messages": [{"content": "private recovery prompt /tmp/recovery-secret.py cache-key-secret"}],
+                    "request_id": "req-recovery-secret",
+                }),
+                response_json=stable_json({"content": [{"text": "private recovery response"}]}),
+                session_id=f"raw-recovery-session-secret-{index}",
+                category="summary",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(stats_views.stats_streaming_cache_hit_recovery(server.store, limit=10, scan_limit=10))
+
+        self.assertEqual(result["schema"], "agentflow.streaming_cache_hit_recovery.v1")
+        self.assertTrue(result["read_only"])
+        self.assertEqual(result["summary"]["recovery_verdict"], "store-missing")
+        self.assertEqual(result["summary"]["eligible_calls"], 2)
+        self.assertEqual(result["summary"]["replay_attempts"], 2)
+        self.assertEqual(result["summary"]["successful_hits"], 0)
+        self.assertEqual(result["cohorts"][0]["recovery_verdict"], "store-missing")
+        rendered = json.dumps(result, sort_keys=True)
+        for forbidden in (
+            "private recovery prompt",
+            "private recovery response",
+            "/tmp/recovery-secret.py",
+            "cache-key-secret",
+            "req-recovery-secret",
+            "raw-recovery-session-secret",
+            "sha256:" + "a" * 64,
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(result["privacy"]["aggregate_only"])
+        self.assertFalse(result["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(result["privacy"]["cache_keys_included"])
+        self.assertFalse(result["privacy"]["request_ids_included"])
+        self.assertFalse(result["privacy"]["session_ids_included"])
+        self.assertFalse(result["privacy"]["file_paths_included"])
+
+    def test_streaming_cache_hit_recovery_reports_recovered_hits(self):
+        rule = {
+            "rule_id": "streaming-cache-rule-healthy",
+            "candidate_id": "candidate-healthy",
+            "policy_source": "managed-recommended",
+            "scope": "session",
+            "canary": {"enabled": True, "selected": True, "cohort": "canary_applied", "fraction": 1.0},
+        }
+
+        def log_cache_row(status: str, *, cache_hit: int, cost: float, baseline: float) -> None:
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=utc_now(),
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=cache_hit,
+                status_code=200,
+                latency_ms=5,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=cost,
+                cost_baseline_usd=baseline,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"category": "summary", "workflow_phase": "summary", "has_tools": False}),
+                cache_json=stable_json({
+                    "status": status,
+                    "reason": "exact-match" if status == "hit" else "exact-miss",
+                    "hit_type": "exact" if status == "hit" else None,
+                    "policy_source": "managed-recommended",
+                    "pattern_rule": rule,
+                    "cache_replay_canary": {
+                        "schema": "agentflow.cache_replay_canary_decision.v1",
+                        "rule_id": rule["rule_id"],
+                        "candidate_id": rule["candidate_id"],
+                        "policy_source": "managed-recommended",
+                        "scope": "session",
+                        "canary": rule["canary"],
+                        "canary_cohort": "canary_applied",
+                        "status": "applied",
+                        "reason": "no-dependency-required",
+                    },
+                }),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="raw-healthy-session-secret",
+                category="summary",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        log_cache_row("miss", cache_hit=0, cost=0.01, baseline=0.02)
+        log_cache_row("hit", cache_hit=1, cost=0.001, baseline=0.02)
+
+        result = asyncio.run(stats_views.stats_streaming_cache_hit_recovery(server.store, limit=10, scan_limit=10))
+
+        self.assertEqual(result["summary"]["recovery_verdict"], "hits-recovered")
+        self.assertEqual(result["summary"]["successful_hits"], 1)
+        self.assertEqual(result["summary"]["replay_attempts"], 2)
+        self.assertEqual(result["cohorts"][0]["hit_recovery_rate"], 0.5)
+
     def test_cache_replayability_report_surfaces_file_dependency_audit_reasons_without_paths(self):
         def log_tool_candidate(name, audit):
             server.store.log_call(

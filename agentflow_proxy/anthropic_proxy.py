@@ -1617,6 +1617,7 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                             usage=stream_usage,
                             output_text="".join(output_text_parts),
                         )
+                        stored_stream_cache_entries = 0
                         for store_key, store_body in stream_cache_key_variants:
                             context.store.set_cache(
                                 store_key,
@@ -1625,6 +1626,15 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 stream_payload,
                                 file_deps=file_deps,
                             )
+                            stored_stream_cache_entries += 1
+                        cache_meta["stream_cache_store"] = {
+                            "status": "stored" if stored_stream_cache_entries else "not-stored",
+                            "entry_count": stored_stream_cache_entries,
+                            "file_dependency_count": len(file_deps),
+                            "cache_keys_included": False,
+                            "response_body_included": False,
+                            "sse_frames_included": False,
+                        }
                     thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
                     experiment_meta = routing_meta.get("routing_experiment")
                     if (

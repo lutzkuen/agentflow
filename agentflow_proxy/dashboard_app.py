@@ -235,6 +235,14 @@ def create_dashboard_router(
             scan_limit=scan_limit,
         )
 
+    @router.get("/agentflow/stats/streaming-cache-hit-recovery")
+    async def stats_streaming_cache_hit_recovery(limit: int = 1000, scan_limit: int = 1000) -> dict[str, Any]:
+        return await stats_views.stats_streaming_cache_hit_recovery(
+            _store(store_obj),
+            limit=limit,
+            scan_limit=scan_limit,
+        )
+
     @router.get("/agentflow/stats/cache-effectiveness")
     async def stats_cache_effectiveness(limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
         return await stats_views.stats_cache_effectiveness(_store(store_obj), limit=limit, scan_limit=scan_limit)

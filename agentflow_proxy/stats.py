@@ -5093,6 +5093,318 @@ async def stats_cache_replay_activation_health(
     }
 
 
+def _streaming_cache_rule_public_id(rule: dict[str, Any], cache: dict[str, Any], *, key: str, prefix: str) -> str | None:
+    raw = rule.get(key) if isinstance(rule, dict) else None
+    if raw is None and isinstance(cache, dict):
+        raw = cache.get(key)
+    return public_id(raw, prefix=prefix) if raw is not None else None
+
+
+def _streaming_cache_cohort_label(rule: dict[str, Any], cache: dict[str, Any], replay_canary: dict[str, Any]) -> str:
+    canary = rule.get("canary") if isinstance(rule.get("canary"), dict) else None
+    if not isinstance(canary, dict):
+        canary = cache.get("canary") if isinstance(cache.get("canary"), dict) else None
+    if not isinstance(canary, dict):
+        canary = replay_canary.get("canary") if isinstance(replay_canary.get("canary"), dict) else {}
+    return public_label(
+        replay_canary.get("canary_cohort")
+        or cache.get("canary_cohort")
+        or canary.get("cohort")
+        or "unassigned",
+        "unassigned",
+    )
+
+
+def _streaming_cache_stage(
+    *,
+    row: dict[str, Any],
+    cache: dict[str, Any],
+    decision: dict[str, Any],
+    rule: dict[str, Any],
+    replay_canary: dict[str, Any],
+) -> tuple[str, str]:
+    outcome = _cache_confidence_outcome(cache, decision, rule)
+    reason = public_label(
+        replay_canary.get("reason")
+        or rule.get("reason")
+        or decision.get("reason")
+        or cache.get("reason")
+        or "unknown",
+        "unknown",
+    )
+    status = public_label(replay_canary.get("status") or decision.get("status") or cache.get("status"), "unknown")
+    if outcome == "hit" or _as_int(row.get("cache_hit")):
+        return "hit", reason
+    if outcome == "safety_stop" or status == "safety_stopped" or reason == _CACHE_REPLAY_SAFETY_STOP_REASON:
+        return "safety_stop", _CACHE_REPLAY_SAFETY_STOP_REASON
+    if outcome == "holdout" or status == "holdout" or reason == "canary_holdout":
+        return "holdout", "canary_holdout"
+    if outcome == "miss" or status == "applied":
+        return "replay_attempt", reason
+    if outcome == "skip" and status == "invalidated":
+        return "invalidation", reason
+    if _cache_ladder_dependency_blocked(cache, reason, public_label(decision.get("outcome_bucket"), "unknown")):
+        return "invalidation", reason
+    if status in {"bypassed", "blocked"}:
+        return "replay_blocked", reason
+    if rule.get("rule_id") or rule.get("candidate_id"):
+        return "not_eligible", reason
+    return "unknown", reason
+
+
+def _streaming_cache_recovery_verdict(bucket: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons = set(str(item) for item in bucket.get("_reason_codes", set()) if item)
+    if _as_int(bucket.get("eligible_calls")) <= 0:
+        reasons.add("no eligible streaming calls matched this active rule")
+        return "no-eligible-traffic", sorted(reasons)
+    if _as_int(bucket.get("successful_hits")) > 0:
+        reasons.add("streaming cache hits recovered")
+        return "hits-recovered", sorted(reasons)
+    if _as_int(bucket.get("safety_stops")) > 0:
+        reasons.add(_CACHE_REPLAY_SAFETY_STOP_REASON)
+        return "safety-stopped", sorted(reasons)
+    if _as_int(bucket.get("invalidations")) > 0:
+        reasons.add("dependency invalidation blocked replay")
+        return "invalidated", sorted(reasons)
+    if _as_int(bucket.get("holdouts")) > 0 and _as_int(bucket.get("replay_attempts")) <= 0:
+        reasons.add("canary holdout has no applied replay traffic")
+        return "holdout-only", sorted(reasons)
+    if _as_int(bucket.get("replay_attempts")) <= 0:
+        reasons.add("eligible calls did not reach replay lookup")
+        return "replay-blocked", sorted(reasons)
+    reasons.add("replay lookup attempted but no cache hit recovered")
+    return "store-missing", sorted(reasons)
+
+
+def _streaming_cache_stored_response_count(cache: dict[str, Any]) -> int:
+    for key in ("stream_cache_store", "cache_store", "store"):
+        store_meta = cache.get(key) if isinstance(cache.get(key), dict) else None
+        if not isinstance(store_meta, dict):
+            continue
+        if str(store_meta.get("status") or "").lower() in {"stored", "ok", "success"}:
+            return max(1, _as_int(store_meta.get("entry_count")) or _as_int(store_meta.get("stored_count")) or 1)
+    for key in ("stored_response", "response_stored", "stream_cache_stored"):
+        if cache.get(key) is True:
+            return 1
+    return 0
+
+
+async def stats_streaming_cache_hit_recovery(
+    store_obj: Any,
+    *,
+    limit: int = 1000,
+    scan_limit: int = 1000,
+) -> dict[str, Any]:
+    capped_scan = max(1, min(_as_int(scan_limit) or 1000, 10000))
+    output_limit = max(1, min(_as_int(limit) or 50, 1000))
+    rows = _cache_replay_confidence_rows_from_store(store_obj, limit=capped_scan)
+    grouped: dict[tuple[str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    verdict_counts: dict[str, int] = {}
+    bypass_counts: dict[str, int] = {}
+
+    for row in rows:
+        cache = _json_obj(row.get("cache_json"))
+        if not cache:
+            continue
+        stream = bool(_as_int(row.get("stream")) or cache.get("stream"))
+        if not stream:
+            continue
+        routing = _json_obj(row.get("routing_json"))
+        decision = _cache_decision_for_breakdown(row)
+        replay_canary = cache.get("cache_replay_canary") if isinstance(cache.get("cache_replay_canary"), dict) else {}
+        rules = _cache_pattern_rules_from_meta(cache)
+        if not rules and replay_canary:
+            rules = [{
+                "rule_id": replay_canary.get("rule_id"),
+                "candidate_id": replay_canary.get("candidate_id"),
+                "policy_source": replay_canary.get("policy_source"),
+                "scope": replay_canary.get("scope"),
+                "canary": replay_canary.get("canary"),
+            }]
+        if not rules:
+            continue
+
+        source_surface = canonical_source_surface(
+            decision.get("source_surface")
+            or cache.get("source_surface")
+            or row.get("source_surface")
+            or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
+        )
+        category = public_label(row.get("category") or routing.get("category") or cache.get("category"), "unknown")
+        workflow_phase = public_label(
+            routing.get("workflow_phase")
+            or cache.get("workflow_phase")
+            or cache.get("phase")
+            or "unknown",
+            "unknown",
+        )
+        provider = public_label(row.get("provider") or "anthropic", "unknown")
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            stage, reason = _streaming_cache_stage(
+                row=row,
+                cache=cache,
+                decision=decision,
+                rule=rule,
+                replay_canary=replay_canary,
+            )
+            policy_source = public_label(rule.get("policy_source") or cache.get("policy_source") or "unknown", "unknown")
+            rule_id = _streaming_cache_rule_public_id(rule, cache, key="rule_id", prefix="rule-id") or "unruled-cache-decision"
+            candidate_id = _streaming_cache_rule_public_id(rule, cache, key="candidate_id", prefix="candidate-id")
+            policy_id = _streaming_cache_rule_public_id(rule, cache, key="policy_id", prefix="policy-id") or candidate_id or rule_id
+            cohort = _streaming_cache_cohort_label(rule, cache, replay_canary)
+            key = (
+                provider,
+                source_surface,
+                category,
+                workflow_phase,
+                policy_source,
+                policy_id,
+                rule_id,
+                cohort,
+            )
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "provider": provider,
+                    "source_surface": source_surface,
+                    "category": category,
+                    "workflow_phase": workflow_phase,
+                    "policy_source": policy_source,
+                    "policy_id": policy_id,
+                    "rule_id": rule_id,
+                    "candidate_id": candidate_id,
+                    "cohort_label": cohort,
+                    "sample_count": 0,
+                    "eligible_calls": 0,
+                    "stored_responses": 0,
+                    "replay_attempts": 0,
+                    "successful_hits": 0,
+                    "holdouts": 0,
+                    "invalidations": 0,
+                    "safety_stops": 0,
+                    "replay_blocked": 0,
+                    "bypass_reasons": {},
+                    "first_seen_at": row.get("created_at"),
+                    "last_seen_at": row.get("created_at"),
+                    "_reason_codes": set(),
+                },
+            )
+            bucket["sample_count"] += 1
+            if stage != "not_eligible":
+                bucket["eligible_calls"] += 1
+            if stage == "hit":
+                bucket["successful_hits"] += 1
+                bucket["replay_attempts"] += 1
+                bucket["stored_responses"] += 1
+            elif stage == "replay_attempt":
+                bucket["replay_attempts"] += 1
+                bucket["stored_responses"] += _streaming_cache_stored_response_count(cache)
+            elif stage == "holdout":
+                bucket["holdouts"] += 1
+            elif stage == "invalidation":
+                bucket["invalidations"] += 1
+            elif stage == "safety_stop":
+                bucket["safety_stops"] += 1
+            elif stage == "replay_blocked":
+                bucket["replay_blocked"] += 1
+            if stage in {"not_eligible", "replay_blocked", "invalidation", "safety_stop", "holdout"}:
+                bucket["bypass_reasons"][reason] = bucket["bypass_reasons"].get(reason, 0) + 1
+                bypass_counts[reason] = bypass_counts.get(reason, 0) + 1
+            bucket["_reason_codes"].add(reason)
+            if str(row.get("created_at") or "") < str(bucket.get("first_seen_at") or row.get("created_at") or ""):
+                bucket["first_seen_at"] = row.get("created_at")
+            if str(row.get("created_at") or "") > str(bucket.get("last_seen_at") or ""):
+                bucket["last_seen_at"] = row.get("created_at")
+
+    cohorts: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        verdict, reason_codes = _streaming_cache_recovery_verdict(bucket)
+        bucket["recovery_verdict"] = verdict
+        bucket["reason_codes"] = reason_codes
+        bucket["hit_recovery_rate"] = (
+            round(_as_int(bucket.get("successful_hits")) / max(_as_int(bucket.get("replay_attempts")), 1), 4)
+            if _as_int(bucket.get("replay_attempts"))
+            else 0.0
+        )
+        bucket["bypass_reasons"] = _breakdown_from_counts({
+            str(reason): _as_int(count)
+            for reason, count in (bucket.get("bypass_reasons") or {}).items()
+        })
+        bucket["cache_keys_included"] = False
+        bucket["pattern_hashes_included"] = False
+        for key in list(bucket.keys()):
+            if key.startswith("_"):
+                bucket.pop(key, None)
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        cohorts.append(bucket)
+
+    verdict_rank = {
+        "safety-stopped": 0,
+        "hits-recovered": 1,
+        "invalidated": 2,
+        "store-missing": 3,
+        "replay-blocked": 4,
+        "holdout-only": 5,
+        "no-eligible-traffic": 6,
+    }
+    cohorts.sort(
+        key=lambda row: (
+            verdict_rank.get(str(row.get("recovery_verdict")), 99),
+            -_as_int(row.get("sample_count")),
+            str(row.get("provider") or ""),
+            str(row.get("source_surface") or ""),
+        )
+    )
+    top = cohorts[0] if cohorts else None
+    return {
+        "schema": "agentflow.streaming_cache_hit_recovery.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "status": "observed" if cohorts else "needs evidence",
+        "summary": {
+            "rows_considered": len(rows),
+            "streaming_rule_cohort_count": len(cohorts),
+            "recovery_verdict": top.get("recovery_verdict") if top else "no-eligible-traffic",
+            "eligible_calls": sum(_as_int(row.get("eligible_calls")) for row in cohorts),
+            "stored_responses": sum(_as_int(row.get("stored_responses")) for row in cohorts),
+            "replay_attempts": sum(_as_int(row.get("replay_attempts")) for row in cohorts),
+            "successful_hits": sum(_as_int(row.get("successful_hits")) for row in cohorts),
+            "holdouts": sum(_as_int(row.get("holdouts")) for row in cohorts),
+            "invalidations": sum(_as_int(row.get("invalidations")) for row in cohorts),
+            "safety_stops": sum(_as_int(row.get("safety_stops")) for row in cohorts),
+            "replay_blocked": sum(_as_int(row.get("replay_blocked")) for row in cohorts),
+        },
+        "verdict_breakdown": _breakdown_from_counts(verdict_counts),
+        "bypass_reason_breakdown": _breakdown_from_counts(bypass_counts),
+        "cohorts": cohorts[:output_limit],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "provider_bodies_included": False,
+            "file_paths_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "raw_session_ids_included": False,
+            "cache_keys_included": False,
+            "pattern_hashes_included": False,
+            "policy_file_contents_included": False,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "dashboard_read_only": True,
+            "basis": "bounded local cache replay metadata for streaming rule cohorts only",
+        },
+    }
+
+
 async def stats_cache_effectiveness(store_obj: Any, *, limit: int = 10, scan_limit: int = 5000) -> dict[str, Any]:
     return build_cache_smoke_diagnostic(store_obj, limit=limit, scan_limit=scan_limit)
 
@@ -16508,6 +16820,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
     cache_replay_readiness = await stats_cache_replay_readiness(store_obj, limit=50)
     cache_replay_activation_health = await stats_cache_replay_activation_health(store_obj, limit=50, scan_limit=1000)
+    streaming_cache_hit_recovery = await stats_streaming_cache_hit_recovery(store_obj, limit=50, scan_limit=1000)
     cache_effectiveness = await stats_cache_effectiveness(store_obj, limit=5, scan_limit=5000)
     pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows)
     today_pattern_decision_breakdown = _pattern_decision_breakdown(provider_accounting_rows, today_only=True)
@@ -16680,6 +16993,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_replay_confidence": cache_replay_confidence,
         "cache_replay_readiness": cache_replay_readiness,
         "cache_replay_activation_health": cache_replay_activation_health,
+        "streaming_cache_hit_recovery": streaming_cache_hit_recovery,
         "old_context_summary_opportunity": old_context_summary_opportunity,
         "provider_prompt_cache_accounting": prompt_cache_accounting,
         "sqlite_maintenance": sqlite_maintenance,

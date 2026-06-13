@@ -88,6 +88,39 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                             "count": 700,
                         }
                     ],
+                    "streaming_cache_hit_recovery": {
+                        "schema": "agentflow.streaming_cache_hit_recovery.v1",
+                        "summary": {
+                            "recovery_verdict": "store-missing",
+                            "eligible_calls": 8,
+                            "replay_attempts": 8,
+                            "successful_hits": 0,
+                        },
+                        "verdict_breakdown": [{"value": "store-missing", "count": 1}],
+                        "cohorts": [
+                            {
+                                "provider": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "category": "summary",
+                                "workflow_phase": "summary",
+                                "policy_id": "policy-id:public",
+                                "rule_id": "rule-id:public",
+                                "candidate_id": "candidate-id:cache-candidate-secret",
+                                "recovery_verdict": "store-missing",
+                                "cache_key": "cache-key-secret",
+                                "session_id": "session-secret",
+                                "file_path": "/tmp/secret.py",
+                            }
+                        ],
+                        "privacy": {
+                            "metadata_only": True,
+                            "aggregate_only": True,
+                            "cache_keys_included": False,
+                            "request_ids_included": False,
+                            "session_ids_included": False,
+                            "file_paths_included": False,
+                        },
+                    },
                 },
                 log_sources=[log_path],
                 threshold=3,
@@ -95,6 +128,12 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             )
 
         candidates = plan["evidence"]["optimization_candidates"]
+        recovery = plan["evidence"]["stats_summary"]["streaming_cache_hit_recovery"]
+        self.assertEqual(recovery["summary"]["recovery_verdict"], "store-missing")
+        rendered_plan = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("cache-key-secret", rendered_plan)
+        self.assertNotIn("session-secret", rendered_plan)
+        self.assertNotIn("/tmp/secret.py", rendered_plan)
         self.assertGreaterEqual(len(candidates), 3)
         self.assertEqual([item["rank"] for item in candidates], list(range(1, len(candidates) + 1)))
         for candidate in candidates:
