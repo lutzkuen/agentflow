@@ -83,6 +83,15 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
     stdout.write("API keys are not stored or printed by activation.\n")
 
 
+def _write_activation_config_error(stderr: Any, exc: Exception, *, command: str) -> None:
+    stderr.write(str(exc) + "\n")
+    if command == "activate":
+        stderr.write(
+            "Activation did not overwrite this file automatically. Move it aside, fix the JSON, "
+            "or pass --config-dir to write an isolated AgentFlow config.\n"
+        )
+
+
 def agentflow_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -226,6 +235,7 @@ def agentflow_cli(
 
     stats_parser = subparsers.add_parser(
         "stats",
+        parents=[config_parent],
         help="Fetch local AgentFlow stats from the read-only dashboard API.",
     )
     stats_parser.add_argument(
@@ -258,7 +268,7 @@ def agentflow_cli(
                     auto_configure_claude=not bool(args.no_auto_claude),
                 )
             except activation.ActivationError as exc:
-                stderr.write(str(exc) + "\n")
+                _write_activation_config_error(stderr, exc, command="activate")
                 return 2
             _write_activation_summary(stdout, result)
             return 0
@@ -272,7 +282,7 @@ def agentflow_cli(
                     force=bool(args.force),
                 )
             except activation.ActivationError as exc:
-                stderr.write(str(exc) + "\n")
+                _write_activation_config_error(stderr, exc, command="activate")
                 return 2
             _write_activation_summary(stdout, result)
             return 0
@@ -280,7 +290,11 @@ def agentflow_cli(
         if args.target == "claude" and args.anthropic_base_url and args.claude_base_url:
             stderr.write("--anthropic-base-url and --claude-base-url are aliases; pass only one.\n")
             return 2
-        config = activation.load_activation_config(args.config_dir)
+        try:
+            config = activation.load_activation_config(args.config_dir)
+        except activation.ActivationConfigError as exc:
+            _write_activation_config_error(stderr, exc, command="activate")
+            return 2
         try:
             profile = activation.activation_profile(
                 args.target,
@@ -293,7 +307,7 @@ def agentflow_cli(
         except ValueError as exc:
             stderr.write(str(exc) + "\n")
             return 2
-        updated = activation.apply_activation_profile(config, profile)
+        updated = activation.apply_activation_profile(config, profile, config_dir=args.config_dir)
         config_path = activation.activation_config_path(args.config_dir)
         if not args.dry_run:
             config_path = activation.write_activation_config(updated, args.config_dir)
@@ -307,7 +321,11 @@ def agentflow_cli(
         return 0
 
     if args.command == "run":
-        config = activation.load_activation_config(args.config_dir)
+        try:
+            config = activation.load_activation_config(args.config_dir)
+        except activation.ActivationConfigError as exc:
+            _write_activation_config_error(stderr, exc, command="run")
+            return 2
         try:
             proxy_args = activation.proxy_args_for_target(config, args.target)
         except KeyError:
@@ -329,12 +347,33 @@ def agentflow_cli(
                 "Supported runtime targets are: openai, claude.\n"
             )
             return 2
-        config = activation.load_activation_config(args.config_dir)
+        try:
+            config = activation.load_activation_config(args.config_dir)
+        except activation.ActivationConfigError as exc:
+            result = {
+                "schema": "agentflow.activation_doctor.v1",
+                "target": args.target,
+                "ok": False,
+                "configured": False,
+                "issues": [
+                    {
+                        "code": "activation-config-invalid",
+                        "message": str(exc),
+                        "errors": getattr(exc, "errors", []),
+                    }
+                ],
+            }
+            if args.json:
+                _write_json(stdout, result)
+            else:
+                stderr.write(str(exc) + "\n")
+            return 1
         profile = (config.get("targets") or {}).get(args.target)
         if not isinstance(profile, dict) or not profile.get("configured"):
             stderr.write(f"AgentFlow target is not configured: {args.target}. Run `agentflow activate {args.target}` first.\n")
             return 1
         result = _doctor_activation_target(profile, timeout=float(args.timeout))
+        result["activation"] = activation.activation_status_from_config(config, config_dir=args.config_dir, target=args.target)
         if args.json:
             _write_json(stdout, result)
         else:
@@ -343,6 +382,17 @@ def agentflow_cli(
 
     if args.command == "stats":
         result = _fetch_agentflow_stats(url=str(args.url), timeout=float(args.timeout), target=args.target)
+        try:
+            result["activation"] = activation.activation_status(args.config_dir, target=args.target)
+        except activation.ActivationConfigError as exc:
+            result.setdefault("issues", []).append(
+                {
+                    "code": "activation-config-invalid",
+                    "message": str(exc),
+                    "errors": getattr(exc, "errors", []),
+                }
+            )
+            result["ok"] = False
         if args.json:
             _write_json(stdout, result)
         elif result["ok"]:
@@ -424,6 +474,13 @@ def _write_stats_summary(stdout: Any, result: dict[str, Any]) -> None:
     ):
         if key in stats:
             stdout.write(f"{label}: {stats.get(key)}\n")
+    activation_status = result.get("activation") if isinstance(result.get("activation"), dict) else {}
+    targets = activation_status.get("targets") if isinstance(activation_status.get("targets"), dict) else {}
+    if result.get("target") and result.get("target") in targets:
+        target_status = targets[result["target"]]
+        stdout.write(f"Configured: {str(bool(target_status.get('configured'))).lower()}\n")
+        if target_status.get("local_base_url"):
+            stdout.write(f"Local base URL: {target_status.get('local_base_url')}\n")
 
 
 def _doctor_activation_target(profile: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import httpx
 import yaml
 
+from agentflow_proxy import activation
 from agentflow_proxy import cli
 
 
@@ -78,14 +79,15 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), f"agentflow {__version__}\n")
 
     def test_agentflow_stats_fetches_loopback_stats_summary(self):
-        stdout = io.StringIO()
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
 
-        with patch("agentflow_proxy.cli.httpx.get") as http_get:
-            http_get.return_value = httpx.Response(
-                200,
-                json={"calls": 12, "cache_hit_rate": 0.25, "db": "/tmp/agentflow.sqlite3"},
-            )
-            code = cli.agentflow_cli(["stats", "openai"], stdout=stdout)
+            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+                http_get.return_value = httpx.Response(
+                    200,
+                    json={"calls": 12, "cache_hit_rate": 0.25, "db": "/tmp/agentflow.sqlite3"},
+                )
+                code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai"], stdout=stdout)
 
         self.assertEqual(code, 0)
         http_get.assert_called_once_with("http://127.0.0.1:4002/agentflow/stats", timeout=5.0)
@@ -93,6 +95,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIn("AgentFlow stats status=ok", output)
         self.assertIn("Target: openai", output)
         self.assertIn("Calls: 12", output)
+        self.assertIn("Configured: false", output)
 
     def test_agentflow_stats_refuses_non_loopback_url(self):
         stderr = io.StringIO()
@@ -162,6 +165,8 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertEqual(profile["health_url"], "http://127.0.0.1:4003/health")
             self.assertEqual(profile["upstream_base_url"], "https://api.openai.com")
             self.assertEqual(profile["openai_auth_mode"], "client")
+            self.assertIn("last_activation_at", profile)
+            self.assertEqual(profile["config_file_paths"], [str(Path(tmp) / "activation.json")])
             self.assertIn("--provider", profile["command_profile"]["argv"])
             self.assertIn("openai", profile["command_profile"]["argv"])
             self.assertIn("Local base URL for clients: http://127.0.0.1:4003/v1", stdout_one.getvalue())
@@ -215,12 +220,89 @@ class AgentflowActivationCliTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             raw_config = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
-            self.assertIn(upstream, raw_config)
+            self.assertNotIn("user:pass", raw_config)
+            self.assertNotIn("api-key=secret", raw_config)
+            self.assertIn("api-key=%5Bredacted%5D", raw_config)
             output = stdout.getvalue()
             self.assertNotIn("user:pass", output)
             self.assertNotIn("api-key=secret", output)
             self.assertIn("https://example-resource.openai.azure.com/openai/deployments/my-deployment", output)
             self.assertIn("api-key=%5Bredacted%5D", output)
+
+    def test_missing_activation_config_returns_default_status(self):
+        with TemporaryDirectory() as tmp:
+            status = activation.activation_status(tmp)
+
+        self.assertEqual(status["schema"], "agentflow.activation_status.v1")
+        self.assertTrue(status["ok"])
+        self.assertFalse(status["targets"]["openai"]["configured"])
+        self.assertFalse(status["targets"]["claude"]["configured"])
+        self.assertFalse(status["targets"]["codex"]["configured"])
+        self.assertFalse(status["targets"]["claude-vscode"]["configured"])
+
+    def test_activation_config_round_trips_with_atomic_write(self):
+        with TemporaryDirectory() as tmp:
+            profile = activation.activation_profile("openai")
+            config = activation.apply_activation_profile(activation.empty_config(), profile, config_dir=tmp)
+            path = activation.write_activation_config(config, tmp)
+            loaded = activation.load_activation_config(tmp)
+
+            self.assertEqual(loaded, json.loads(path.read_text(encoding="utf-8")))
+            self.assertEqual(loaded["targets"]["openai"]["config_file_paths"], [str(Path(tmp) / "activation.json")])
+            self.assertFalse(list(Path(tmp).glob(".activation.json.*.tmp")))
+
+    def test_doctor_reports_invalid_activation_config_schema(self):
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "activation.json").write_text('{"schema":"bad","targets":{}}\n', encoding="utf-8")
+            stderr = io.StringIO()
+
+            code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
+
+        self.assertEqual(code, 1)
+        self.assertIn("Invalid AgentFlow activation config", stderr.getvalue())
+        self.assertIn("$.schema", stderr.getvalue())
+
+    def test_doctor_json_reports_invalid_activation_config_schema(self):
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / "activation.json").write_text('{"schema":"bad","targets":{}}\n', encoding="utf-8")
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp, "--json"], stdout=stdout)
+
+        self.assertEqual(code, 1)
+        result = json.loads(stdout.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["issues"][0]["code"], "activation-config-invalid")
+        self.assertEqual(result["issues"][0]["errors"][0]["path"], "$.schema")
+
+    def test_activate_refuses_to_overwrite_invalid_activation_config(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activation.json"
+            path.write_text('{"schema":"bad","targets":{}}\n', encoding="utf-8")
+            stderr = io.StringIO()
+
+            code = cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO(), stderr=stderr)
+
+            self.assertEqual(code, 2)
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"schema":"bad","targets":{}}\n')
+            self.assertIn("Activation did not overwrite this file automatically", stderr.getvalue())
+
+    def test_stats_json_includes_activation_status_snapshot(self):
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(["activate", "openai", "--config-dir", tmp], stdout=io.StringIO())
+            stdout = io.StringIO()
+
+            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+                http_get.return_value = httpx.Response(200, json={"calls": 1})
+                code = cli.agentflow_cli(["stats", "--config-dir", tmp, "openai", "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        status = result["activation"]["targets"]["openai"]
+        self.assertTrue(status["configured"])
+        self.assertEqual(status["provider"], "openai")
+        self.assertEqual(status["local_base_url"], "http://127.0.0.1:4003/v1")
+        self.assertEqual(status["upstream_base_url"], "https://api.openai.com")
 
     def test_activate_openai_invalid_upstream_fails_actionably(self):
         with TemporaryDirectory() as tmp:

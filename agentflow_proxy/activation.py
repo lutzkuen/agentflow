@@ -7,7 +7,9 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import tempfile
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from agentflow_proxy.upstream_url import normalize_openai_upstream_base_url, redact_url
 
@@ -26,10 +28,19 @@ DEFAULT_OPENAI_PORT = 4003
 DEFAULT_CLAUDE_PORT = 4000
 CODEX_CONFIG_RELATIVE_PATH = Path(".codex") / "config.toml"
 CLAUDE_VSCODE_ENV_FILENAME = "claude-vscode.env"
+ACTIVATION_TARGETS = ("openai", "claude", "codex", "claude-vscode")
 
 
 class ActivationError(ValueError):
     pass
+
+
+class ActivationConfigError(ActivationError):
+    def __init__(self, message: str, *, path: Path | None = None, errors: list[dict[str, str]] | None = None):
+        self.path = path
+        self.errors = errors or [{"path": "$", "message": message}]
+        location = f" at {path}" if path is not None else ""
+        super().__init__(f"Invalid AgentFlow activation config{location}: {message}")
 
 
 def utc_now() -> str:
@@ -56,27 +67,189 @@ def empty_config() -> dict[str, Any]:
     }
 
 
+def _sanitize_url_for_config(raw_url: str | None) -> str | None:
+    if not raw_url:
+        return raw_url
+    parsed = urlparse(str(raw_url))
+    netloc = parsed.hostname or ""
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    query_items = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key.lower() in {"api-key", "api_key", "apikey", "access_token", "authorization", "client_secret", "code", "key", "sig", "signature", "token"}:
+            query_items.append((key, "[redacted]"))
+        else:
+            query_items.append((key, value))
+    return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, urlencode(query_items, doseq=True), ""))
+
+
+def _validate_url_field(errors: list[dict[str, str]], payload: dict[str, Any], key: str, path: str) -> None:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        errors.append({"path": f"{path}.{key}", "message": "must be a non-empty string"})
+        return
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        errors.append({"path": f"{path}.{key}", "message": "must be an http(s) URL with a host"})
+        return
+    if parsed.username or parsed.password:
+        errors.append({"path": f"{path}.{key}", "message": "must not include URL userinfo credentials"})
+        return
+    sensitive_keys = {"api-key", "api_key", "apikey", "access_token", "authorization", "client_secret", "code", "key", "sig", "signature", "token"}
+    for query_key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
+        if query_key.lower() in sensitive_keys and query_value not in {"[redacted]", "%5Bredacted%5D"}:
+            errors.append({"path": f"{path}.{key}", "message": f"must not include secret query parameter {query_key!r}"})
+            return
+
+
+def validate_activation_config(config: dict[str, Any]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    if not isinstance(config, dict):
+        return [{"path": "$", "message": "must be a JSON object"}]
+    if config.get("schema") != SCHEMA:
+        errors.append({"path": "$.schema", "message": f"must be {SCHEMA!r}"})
+    targets = config.get("targets")
+    if not isinstance(targets, dict):
+        errors.append({"path": "$.targets", "message": "must be an object"})
+        return errors
+    for target_name, profile in targets.items():
+        target_path = f"$.targets.{target_name}"
+        if not isinstance(profile, dict):
+            errors.append({"path": target_path, "message": "must be an object"})
+            continue
+        if profile.get("id") not in {None, target_name}:
+            errors.append({"path": f"{target_path}.id", "message": "must match the target key"})
+        if not isinstance(profile.get("configured"), bool):
+            errors.append({"path": f"{target_path}.configured", "message": "must be a boolean"})
+            continue
+        if not profile.get("configured"):
+            continue
+        if target_name not in ACTIVATION_TARGETS:
+            errors.append({"path": target_path, "message": "unknown activation target"})
+        provider = profile.get("provider")
+        if provider not in {"openai", "anthropic"}:
+            errors.append({"path": f"{target_path}.provider", "message": "must be 'openai' or 'anthropic'"})
+        _validate_url_field(errors, profile, "local_base_url", target_path)
+        if target_name in {"openai", "claude"}:
+            _validate_url_field(errors, profile, "health_url", target_path)
+        if target_name in {"openai", "claude", "claude-vscode"} and "upstream_base_url" in profile:
+            _validate_url_field(errors, profile, "upstream_base_url", target_path)
+        if target_name == "openai" and profile.get("openai_auth_mode") not in {"client", "proxy"}:
+            errors.append({"path": f"{target_path}.openai_auth_mode", "message": "must be 'client' or 'proxy'"})
+        if target_name == "codex" and not isinstance(profile.get("codex_config_path"), str):
+            errors.append({"path": f"{target_path}.codex_config_path", "message": "must be a string"})
+        if target_name == "claude-vscode" and not isinstance(profile.get("env_file_path"), str):
+            errors.append({"path": f"{target_path}.env_file_path", "message": "must be a string"})
+    return errors
+
+
+def _raise_config_error(path: Path, errors: list[dict[str, str]]) -> None:
+    first = errors[0] if errors else {"path": "$", "message": "invalid config"}
+    raise ActivationConfigError(f"{first['path']} {first['message']}", path=path, errors=errors)
+
+
 def load_activation_config(config_dir: str | Path | None = None) -> dict[str, Any]:
     path = activation_config_path(config_dir)
     if not path.exists():
         return empty_config()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
-        return empty_config()
+    except ValueError as exc:
+        raise ActivationConfigError(f"invalid JSON: {exc}", path=path) from exc
     if not isinstance(payload, dict):
-        return empty_config()
-    if not isinstance(payload.get("targets"), dict):
-        payload["targets"] = {}
-    payload.setdefault("schema", SCHEMA)
+        raise ActivationConfigError("root must be a JSON object", path=path)
+    errors = validate_activation_config(payload)
+    if errors:
+        _raise_config_error(path, errors)
     return payload
 
 
 def write_activation_config(config: dict[str, Any], config_dir: str | Path | None = None) -> Path:
     path = activation_config_path(config_dir)
+    errors = validate_activation_config(config)
+    if errors:
+        _raise_config_error(path, errors)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    serialized = json.dumps(config, indent=2, sort_keys=True) + "\n"
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_name = handle.name
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        temp_name = None
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink()
+            except FileNotFoundError:
+                pass
     return path
+
+
+def _config_file_paths_for_profile(profile: dict[str, Any], config_dir: str | Path | None = None) -> list[str]:
+    paths = [str(activation_config_path(config_dir))]
+    for key in ("codex_config_path", "env_file_path"):
+        value = profile.get(key)
+        if isinstance(value, str) and value:
+            paths.append(value)
+    return paths
+
+
+def activation_status_from_config(
+    config: dict[str, Any],
+    *,
+    config_dir: str | Path | None = None,
+    target: str | None = None,
+) -> dict[str, Any]:
+    requested_targets = [target] if target else list(ACTIVATION_TARGETS)
+    profiles = config.get("targets") if isinstance(config.get("targets"), dict) else {}
+    targets: dict[str, Any] = {}
+    for name in requested_targets:
+        raw_profile = profiles.get(name) if isinstance(profiles.get(name), dict) else {}
+        configured = bool(raw_profile.get("configured"))
+        status: dict[str, Any] = {
+            "target": name,
+            "configured": configured,
+            "config_path": str(activation_config_path(config_dir)),
+        }
+        if configured:
+            status.update(
+                {
+                    "provider": raw_profile.get("provider"),
+                    "local_base_url": raw_profile.get("local_base_url"),
+                    "health_url": raw_profile.get("health_url"),
+                    "upstream_base_url": redact_url(raw_profile.get("upstream_base_url")),
+                    "auth_mode": raw_profile.get("openai_auth_mode"),
+                    "depends_on": raw_profile.get("depends_on"),
+                    "config_file_paths": list(raw_profile.get("config_file_paths") or _config_file_paths_for_profile(raw_profile, config_dir)),
+                    "last_activation_at": raw_profile.get("last_activation_at") or raw_profile.get("updated_at"),
+                }
+            )
+            for key in ("codex_config_path", "env_file_path"):
+                if raw_profile.get(key):
+                    status[key] = raw_profile.get(key)
+        targets[name] = status
+    return {
+        "schema": "agentflow.activation_status.v1",
+        "ok": True,
+        "config_path": str(activation_config_path(config_dir)),
+        "targets": targets,
+    }
+
+
+def activation_status(config_dir: str | Path | None = None, *, target: str | None = None) -> dict[str, Any]:
+    config = load_activation_config(config_dir)
+    return activation_status_from_config(config, config_dir=config_dir, target=target)
 
 
 def _target_port(target: str) -> int:
@@ -150,7 +323,9 @@ def activation_profile(
         auth_mode = openai_auth_mode.lower()
         if auth_mode not in {"client", "proxy"}:
             raise ValueError("openai auth mode must be 'client' or 'proxy'")
-        upstream_base_url = normalize_openai_upstream_base_url(openai_base_url or DEFAULT_OPENAI_UPSTREAM_BASE_URL)
+        upstream_base_url = _sanitize_url_for_config(
+            normalize_openai_upstream_base_url(openai_base_url or DEFAULT_OPENAI_UPSTREAM_BASE_URL)
+        )
         profile = {
             "id": "openai",
             "configured": True,
@@ -161,7 +336,6 @@ def activation_profile(
             "openai_auth_mode": auth_mode,
             "host": _target_host(target),
             "port": _target_port(target),
-            "updated_at": utc_now(),
         }
     elif target == "claude":
         profile = {
@@ -170,13 +344,15 @@ def activation_profile(
             "provider": "anthropic",
             "local_base_url": local_base_url or DEFAULT_CLAUDE_LOCAL_BASE_URL,
             "health_url": health_url or DEFAULT_CLAUDE_HEALTH_URL,
-            "upstream_base_url": anthropic_base_url or DEFAULT_CLAUDE_UPSTREAM_BASE_URL,
+            "upstream_base_url": _sanitize_url_for_config(anthropic_base_url or DEFAULT_CLAUDE_UPSTREAM_BASE_URL),
             "host": _target_host(target),
             "port": _target_port(target),
-            "updated_at": utc_now(),
         }
     else:
         raise ValueError("target must be 'openai' or 'claude'")
+    activated_at = utc_now()
+    profile["last_activation_at"] = activated_at
+    profile["updated_at"] = activated_at
     profile["command_profile"] = {
         "entrypoint": "agentflow-proxy",
         "argv": _profile_command_args(profile),
@@ -211,7 +387,7 @@ def _claude_profile_from_config(
 
 
 def codex_activation_profile(*, openai_profile: dict[str, Any], codex_config_path: Path) -> dict[str, Any]:
-    return {
+    profile = {
         "id": "codex",
         "configured": True,
         "provider": "openai",
@@ -219,8 +395,10 @@ def codex_activation_profile(*, openai_profile: dict[str, Any], codex_config_pat
         "depends_on": "openai",
         "local_base_url": str(openai_profile.get("local_base_url") or DEFAULT_OPENAI_LOCAL_BASE_URL),
         "codex_config_path": str(codex_config_path),
-        "updated_at": utc_now(),
+        "last_activation_at": utc_now(),
     }
+    profile["updated_at"] = profile["last_activation_at"]
+    return profile
 
 
 def claude_vscode_activation_profile(
@@ -228,7 +406,7 @@ def claude_vscode_activation_profile(
     claude_profile: dict[str, Any],
     env_file_path: Path,
 ) -> dict[str, Any]:
-    return {
+    profile = {
         "id": "claude-vscode",
         "configured": True,
         "provider": "anthropic",
@@ -241,20 +419,29 @@ def claude_vscode_activation_profile(
             "ANTHROPIC_BASE_URL": str(claude_profile.get("local_base_url") or DEFAULT_CLAUDE_LOCAL_BASE_URL),
         },
         "launch_command": "code .",
-        "updated_at": utc_now(),
+        "last_activation_at": utc_now(),
     }
+    profile["updated_at"] = profile["last_activation_at"]
+    return profile
 
 
 def apply_activation_profile(
     config: dict[str, Any],
     profile: dict[str, Any],
+    *,
+    config_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     updated = dict(config)
     targets = dict(updated.get("targets") or {})
+    profile = dict(profile)
+    activated_at = str(profile.get("last_activation_at") or profile.get("updated_at") or utc_now())
+    profile["last_activation_at"] = activated_at
+    profile["updated_at"] = activated_at
+    profile["config_file_paths"] = _config_file_paths_for_profile(profile, config_dir)
     targets[str(profile["id"])] = profile
     updated["schema"] = SCHEMA
     updated["targets"] = targets
-    updated["updated_at"] = profile["updated_at"]
+    updated["updated_at"] = activated_at
     return updated
 
 
@@ -379,8 +566,8 @@ def activate_claude_vscode(
     env_changed = existing_env != env_contents
 
     vscode_profile = claude_vscode_activation_profile(claude_profile=claude_profile, env_file_path=env_path)
-    updated_config = apply_activation_profile(config, claude_profile)
-    updated_config = apply_activation_profile(updated_config, vscode_profile)
+    updated_config = apply_activation_profile(config, claude_profile, config_dir=config_dir)
+    updated_config = apply_activation_profile(updated_config, vscode_profile, config_dir=config_dir)
     config_path = activation_config_path(config_dir)
 
     if not dry_run:
@@ -435,8 +622,8 @@ def activate_codex(
     backup_path: Path | None = None
 
     codex_profile = codex_activation_profile(openai_profile=openai_profile, codex_config_path=path)
-    updated_config = apply_activation_profile(config, openai_profile)
-    updated_config = apply_activation_profile(updated_config, codex_profile)
+    updated_config = apply_activation_profile(config, openai_profile, config_dir=config_dir)
+    updated_config = apply_activation_profile(updated_config, codex_profile, config_dir=config_dir)
     config_path = activation_config_path(config_dir)
 
     if not dry_run:
