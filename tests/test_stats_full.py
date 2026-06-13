@@ -4037,6 +4037,149 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(breakdown[("hit", "exact-match", "exact")], 1)
         json.dumps(result["cache_decision_breakdown"])
 
+    def test_cache_zero_hit_blocker_ladder_ranks_provider_surface_blockers_without_raw_data(self):
+        secret_prompt = "raw cache blocker prompt must not leak"
+        secret_session = "cache-blocker-session-secret"
+        secret_cache_key = "cache-key-secret"
+        secret_path = "/tmp/cache-blocker-secret.py"
+
+        def log_cache_row(index, *, provider, path, source_surface, endpoint, stream, has_tools, cache_json, routing_json=None):
+            routing = {
+                "category": "chat",
+                "has_tools": has_tools,
+                "openai_feature_unit": {
+                    "source_surface": source_surface,
+                    "endpoint": endpoint,
+                    "replayability_level": cache_json.get("replayability_level", "features_only"),
+                },
+            }
+            if routing_json:
+                routing.update(routing_json)
+            server.store.log_call(
+                id=f"cache-blocker-ladder-{index}",
+                created_at=utc_now(),
+                path=path,
+                requested_model="gpt-5.4-mini" if provider == "openai" else "claude-sonnet-4-6",
+                routed_model="gpt-5.4-mini" if provider == "openai" else "claude-sonnet-4-6",
+                stream=1 if stream else 0,
+                cache_hit=1 if cache_json.get("status") == "hit" else 0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=10,
+                output_tokens_est=1,
+                actual_input_tokens=10,
+                actual_output_tokens=1,
+                cost_est_usd=0.0,
+                cost_baseline_usd=0.0,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json(routing),
+                cache_json=stable_json({
+                    **cache_json,
+                    "cache_key": secret_cache_key,
+                    "file_path": secret_path,
+                }),
+                error=None,
+                request_json=stable_json({"input": secret_prompt}),
+                response_json=stable_json({"output": "raw cache blocker response must not leak"}),
+                session_id=secret_session,
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider=provider,
+                source_surface=source_surface,
+                endpoint=endpoint,
+                requested_model_family="gpt-5" if provider == "openai" else "claude",
+                routed_model_family="gpt-5" if provider == "openai" else "claude",
+            )
+
+        fixtures = [
+            ("openai", "/v1/responses", "openai_responses", "responses", True, False, {"status": "skipped", "reason": "streaming", "policy_source": "local-default", "replayability_level": "features_only"}),
+            ("openai", "/v1/responses", "openai_responses", "responses", True, False, {"status": "skipped", "reason": "streaming", "policy_source": "local-default", "replayability_level": "features_only"}),
+            ("anthropic", "/v1/messages", "anthropic_messages", "messages", False, True, {"status": "skipped", "reason": "tools-disabled", "policy_source": "local-default", "replayability_level": "local-exact-response"}),
+            ("openai", "/v1/chat/completions", "openai_chat", "chat", False, False, {"status": "skipped", "reason": "cache-disabled", "policy_source": "local-default"}),
+            ("openai", "/v1/responses", "openai_responses", "responses", False, False, {"status": "miss", "reason": "exact-miss", "policy_source": "local-default"}),
+            ("openai", "/v1/responses", "openai_responses", "responses", False, False, {"status": "holdout", "reason": "canary_holdout", "policy_source": "local-manual"}),
+            ("openai", "/v1/responses", "openai_responses", "responses", False, True, {"status": "miss", "reason": "dependency-changed", "policy_source": "local-manual", "file_dependency_audit": {"invalidation_reason": "dependency-changed", "safe_invalidation_evidence": False}}),
+            ("openai", "/v1/responses", "openai_responses", "responses", False, False, {"status": "skipped", "reason": "exact-miss", "policy_source": "local-manual", "policy_reload_required": True}),
+        ]
+        for index, fixture in enumerate(fixtures):
+            log_cache_row(index, provider=fixture[0], path=fixture[1], source_surface=fixture[2], endpoint=fixture[3], stream=fixture[4], has_tools=fixture[5], cache_json=fixture[6])
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        ladder_payload = result["cache_zero_hit_blocker_ladder"]
+        ladder = ladder_payload["ladder"]
+        by_code = {row["blocker_code"]: row for row in ladder}
+
+        self.assertEqual(ladder_payload["schema"], "agentflow.cache_zero_hit_blocker_ladder.v1")
+        self.assertTrue(ladder_payload["summary"]["zero_hit_window"])
+        self.assertEqual(ladder[0]["blocker_code"], "skipped-streaming")
+        self.assertEqual(ladder[0]["provider"], "openai")
+        self.assertEqual(ladder[0]["source_surface"], "openai_responses")
+        self.assertEqual(ladder[0]["endpoint"], "responses")
+        self.assertEqual(ladder[0]["stream_mode"], "stream")
+        self.assertEqual(ladder[0]["tool_presence"], "no-tools")
+        self.assertEqual(ladder[0]["replayability_level"], "features_only")
+        self.assertEqual(ladder[0]["next_action_family"], "stage-replay-policy")
+        self.assertIn("skipped-tools", by_code)
+        self.assertIn("disabled", by_code)
+        self.assertIn("true-miss", by_code)
+        self.assertIn("holdout-only", by_code)
+        self.assertIn("dependency-invalidation-blocked", by_code)
+        self.assertIn("staged-policy-not-loaded", by_code)
+        self.assertTrue(ladder_payload["privacy"]["metadata_only"])
+        self.assertFalse(ladder_payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(ladder_payload["privacy"]["request_ids_included"])
+        self.assertFalse(ladder_payload["privacy"]["session_ids_included"])
+        self.assertFalse(ladder_payload["privacy"]["cache_keys_included"])
+        rendered = json.dumps(ladder_payload, sort_keys=True)
+        self.assertNotIn(secret_prompt, rendered)
+        self.assertNotIn(secret_session, rendered)
+        self.assertNotIn(secret_cache_key, rendered)
+        self.assertNotIn(secret_path, rendered)
+
+    def test_cache_zero_hit_blocker_ladder_reports_bounded_recent_window(self):
+        for index in range(1005):
+            server.store.log_call(
+                id=f"cache-blocker-bounded-{index}",
+                created_at=f"2026-06-10T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=10,
+                output_tokens_est=1,
+                actual_input_tokens=10,
+                actual_output_tokens=1,
+                cost_est_usd=0.0,
+                cost_baseline_usd=0.0,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({"has_tools": False, "category": "chat"}),
+                cache_json=stable_json({"status": "skipped", "reason": "streaming", "policy_source": "local-default"}),
+                error=None,
+                request_json=None,
+                response_json=None,
+                session_id="bounded-cache-session",
+                category="chat",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+            )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        summary = result["cache_zero_hit_blocker_ladder"]["summary"]
+
+        self.assertTrue(summary["bounded_recent_window"])
+        self.assertEqual(summary["scan_limit"], 1000)
+        self.assertEqual(summary["scanned_rows"], 1000)
+        self.assertEqual(summary["available_rows"], 1000)
+
     def test_cache_effectiveness_endpoint_reports_local_cache_without_raw_leakage(self):
         secret_cache_key = "secret-cache-key-should-not-render"
         secret_prompt = "raw local cache prompt must not leak"

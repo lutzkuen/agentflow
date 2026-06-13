@@ -139,7 +139,13 @@ def _routing_opportunity(target: str, provider: str, report: dict[str, Any]) -> 
     }
 
 
-def _cache_replay_opportunity(target: str, provider: str, report: dict[str, Any]) -> dict[str, Any] | None:
+def _cache_replay_opportunity(
+    target: str,
+    provider: str,
+    report: dict[str, Any],
+    *,
+    blocker_ladder: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     call_count = _as_int(summary.get("openai_call_count"))
     if call_count == 0:
@@ -152,11 +158,23 @@ def _cache_replay_opportunity(target: str, provider: str, report: dict[str, Any]
 
     if cache_hits == 0 and "no-cache-hits" not in blockers:
         blockers = ["no-cache-hits"] + blockers
+    if isinstance(blocker_ladder, dict):
+        ladder = blocker_ladder.get("ladder") if isinstance(blocker_ladder.get("ladder"), list) else []
+        ladder_codes = [
+            str(row.get("blocker_code"))
+            for row in ladder
+            if isinstance(row, dict)
+            and row.get("blocker_code")
+            and row.get("blocker_code") != "cache-hit-observed"
+        ]
+        for code in ladder_codes[:5]:
+            if code not in blockers:
+                blockers.append(code)
     if not blockers:
         blockers = ["cache-replay-ready"]
 
     suggested = "agentflow-openai-cache-replay-report" if target == "openai" else None
-    return {
+    opportunity = {
         "target": target,
         "provider": provider,
         "source_surface": top_surface,
@@ -167,6 +185,48 @@ def _cache_replay_opportunity(target: str, provider: str, report: dict[str, Any]
         "evidence_window": {"calls": call_count, "cache_hits": cache_hits},
         "suggested_command": suggested,
     }
+    if isinstance(blocker_ladder, dict):
+        ladder_summary = blocker_ladder.get("summary") if isinstance(blocker_ladder.get("summary"), dict) else {}
+        ladder_rows = blocker_ladder.get("ladder") if isinstance(blocker_ladder.get("ladder"), list) else []
+        opportunity["cache_blocker_ladder_summary"] = {
+            "scan_limit": _as_int(ladder_summary.get("scan_limit")),
+            "scanned_rows": _as_int(ladder_summary.get("scanned_rows")),
+            "bounded_recent_window": bool(ladder_summary.get("bounded_recent_window")),
+            "zero_hit_window": bool(ladder_summary.get("zero_hit_window")),
+            "top_blocker_code": ladder_summary.get("top_blocker_code"),
+            "top_next_action_family": ladder_summary.get("top_next_action_family"),
+        }
+        opportunity["cache_blocker_ladder"] = [row for row in ladder_rows[:10] if isinstance(row, dict)]
+        opportunity["evidence_window"]["cache_blocker_scan_rows"] = _as_int(ladder_summary.get("scanned_rows"))
+    return opportunity
+
+
+def _cache_blocker_ladder_for_store(store: Any, *, provider: str, limit: int) -> dict[str, Any] | None:
+    try:
+        from agentflow_proxy.stats import _cache_zero_hit_blocker_ladder
+    except Exception:
+        return None
+    capped = max(1, min(int(limit or 1000), 5000))
+    conn = store.conn
+    try:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                select created_at, stream, cache_hit, status_code, cache_json, routing_json,
+                       path, coalesce(provider, 'anthropic') as provider,
+                       source_surface, endpoint
+                from calls
+                where coalesce(provider, 'anthropic') = ?
+                order by created_at desc
+                limit ?
+                """,
+                (provider, capped),
+            ).fetchall()
+        ]
+    except Exception:
+        return None
+    return _cache_zero_hit_blocker_ladder(rows, scan_limit=capped)
 
 
 def build_savings_report(
@@ -210,7 +270,8 @@ def build_savings_report(
             try:
                 from agentflow_proxy.openai_cache_replay_report import build_openai_cache_replay_report
                 cache_report = build_openai_cache_replay_report(store, limit=limit)
-                opp = _cache_replay_opportunity("openai", "openai", cache_report)
+                blocker_ladder = _cache_blocker_ladder_for_store(store, provider="openai", limit=limit)
+                opp = _cache_replay_opportunity("openai", "openai", cache_report, blocker_ladder=blocker_ladder)
                 if opp is not None:
                     opportunities.append(opp)
             except Exception:

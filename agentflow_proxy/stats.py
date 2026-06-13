@@ -3483,6 +3483,234 @@ def _cache_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = 
     return breakdown
 
 
+_CACHE_BLOCKER_SCAN_LIMIT = 1000
+
+_CACHE_BLOCKER_NEXT_ACTIONS = {
+    "skipped-streaming": {
+        "family": "stage-replay-policy",
+        "label": "stage streaming-safe cache replay policy or accept streaming traffic as non-cacheable",
+    },
+    "skipped-tools": {
+        "family": "collect-dependency-evidence",
+        "label": "collect dependency evidence before enabling tool-call cache replay",
+    },
+    "disabled": {
+        "family": "reload-cache-policy",
+        "label": "enable or reload local cache policy",
+    },
+    "staged-policy-not-loaded": {
+        "family": "reload-cache-policy",
+        "label": "reload staged cache policy before expecting hits",
+    },
+    "dependency-invalidation-blocked": {
+        "family": "collect-dependency-evidence",
+        "label": "collect stable dependency evidence or accept invalidated cache replay",
+    },
+    "holdout-only": {
+        "family": "promote-or-rebalance-canary",
+        "label": "review holdout evidence before promoting cache replay",
+    },
+    "true-miss": {
+        "family": "accept-non-repeatable-traffic",
+        "label": "accept non-repeatable traffic or look for repeated request-shape cohorts",
+    },
+    "cache-hit-observed": {
+        "family": "none",
+        "label": "cache hits are already present",
+    },
+    "safety-stopped": {
+        "family": "review-safety-stop",
+        "label": "review safety stop or unsafe cache envelope metadata",
+    },
+    "unknown-cache-decision": {
+        "family": "instrument-cache-decision",
+        "label": "record explicit cache decision metadata on this surface",
+    },
+}
+
+
+def _endpoint_for_cache_ladder(row: dict[str, Any]) -> str:
+    endpoint = row.get("endpoint")
+    if endpoint:
+        return public_label(endpoint, "unknown")
+    path = str(row.get("path") or "")
+    path_l = path.lower()
+    if "chat/completions" in path_l:
+        return "chat"
+    if "responses" in path_l:
+        return "responses"
+    if "messages" in path_l:
+        return "messages"
+    if path_l.startswith("codex-app://"):
+        return "turn_start"
+    return public_label(path, "unknown")
+
+
+def _cache_ladder_bool_label(value: Any, *, true_label: str, false_label: str) -> str:
+    if value is True:
+        return true_label
+    if value is False:
+        return false_label
+    return "unknown"
+
+
+def _cache_ladder_has_tools(cache: dict[str, Any], routing: dict[str, Any]) -> bool | None:
+    for key in ("has_tools", "has_tool_blocks", "tool_use_present"):
+        if key in cache:
+            return bool(cache.get(key))
+    for key in ("has_tools", "has_tool_blocks", "tool_use_present"):
+        if key in routing:
+            return bool(routing.get(key))
+    return None
+
+
+def _cache_ladder_replayability(cache: dict[str, Any], routing: dict[str, Any]) -> str:
+    feature = routing.get("openai_feature_unit") if isinstance(routing.get("openai_feature_unit"), dict) else {}
+    raw = cache.get("replayability_level") or feature.get("replayability_level")
+    return public_label(raw, "unknown")
+
+
+def _cache_ladder_policy_reload_required(cache: dict[str, Any]) -> bool:
+    if cache.get("policy_reload_required") is True or cache.get("reload_required") is True:
+        return True
+    policy_state = cache.get("policy_state") if isinstance(cache.get("policy_state"), dict) else {}
+    if policy_state.get("reload_required") is True:
+        return True
+    pattern_rules = cache.get("pattern_rules") if isinstance(cache.get("pattern_rules"), dict) else {}
+    if pattern_rules.get("reload_required") is True or pattern_rules.get("policy_reload_required") is True:
+        return True
+    return False
+
+
+def _cache_ladder_dependency_blocked(cache: dict[str, Any], reason: str, outcome_bucket: str) -> bool:
+    if outcome_bucket in {"invalidated", "stale-risk"}:
+        return True
+    if reason.startswith("dependency-") or reason.startswith("file-dependency-"):
+        return True
+    if reason in {"stale-risk-blockers", "file-watch-disabled"}:
+        return True
+    audit = cache.get("file_dependency_audit") if isinstance(cache.get("file_dependency_audit"), dict) else {}
+    if audit.get("invalidation_reason"):
+        return True
+    if audit and audit.get("safe_invalidation_evidence") is False:
+        return True
+    replay_canary = cache.get("cache_replay_canary") if isinstance(cache.get("cache_replay_canary"), dict) else {}
+    decision = replay_canary.get("decision") if isinstance(replay_canary.get("decision"), dict) else {}
+    return str(decision.get("status") or "") in {"invalidated", "bypassed"} and "dependency" in str(decision.get("reason") or "")
+
+
+def _cache_blocker_code(row: dict[str, Any], decision: dict[str, str], cache: dict[str, Any]) -> str:
+    status = public_label(decision.get("status"), "unknown")
+    reason = public_label(decision.get("reason"), "unknown")
+    outcome_bucket = public_label(decision.get("outcome_bucket"), "unknown")
+    if status == "hit":
+        return "cache-hit-observed"
+    if _cache_ladder_policy_reload_required(cache) or "reload" in reason:
+        return "staged-policy-not-loaded"
+    if status == "holdout" or outcome_bucket == "holdout" or reason in {"canary_holdout", "codex-app-cache-canary-holdout"}:
+        return "holdout-only"
+    if _cache_ladder_dependency_blocked(cache, reason, outcome_bucket):
+        return "dependency-invalidation-blocked"
+    if _as_int(row.get("stream")) or reason in {"streaming", "legacy-streaming", "streaming-cache-disabled", "streaming-tools-disabled"}:
+        return "skipped-streaming"
+    if reason in {"tools-disabled", "tool-cache-disabled"}:
+        return "skipped-tools"
+    if status == "disabled" or outcome_bucket == "disabled" or reason in {"cache-disabled", "codex-app-cache-disabled"}:
+        return "disabled"
+    if status == "miss" or outcome_bucket == "miss" or reason in {"exact-miss", "exact-pattern-miss", "semantic-miss", "exact-and-semantic-miss"}:
+        return "true-miss"
+    if status in {"unsafe-skip", "safety-stopped"} or outcome_bucket == "unsafe-skip":
+        return "safety-stopped"
+    return "unknown-cache-decision"
+
+
+def _cache_zero_hit_blocker_ladder(rows: list[dict[str, Any]], *, scan_limit: int = _CACHE_BLOCKER_SCAN_LIMIT) -> dict[str, Any]:
+    capped_limit = max(1, min(int(scan_limit or _CACHE_BLOCKER_SCAN_LIMIT), 5000))
+    scanned = rows[:capped_limit]
+    grouped: dict[tuple[str, str, str, str, str, str, str, str, str, str], dict[str, Any]] = {}
+    cache_hits = 0
+    for row in scanned:
+        cache = _json_obj(row.get("cache_json"))
+        routing = _json_obj(row.get("routing_json"))
+        decision = _cache_decision_for_breakdown(row)
+        if decision.get("status") == "hit" or _as_int(row.get("cache_hit")):
+            cache_hits += 1
+        blocker = _cache_blocker_code(row, decision, cache)
+        next_action = _CACHE_BLOCKER_NEXT_ACTIONS.get(blocker, _CACHE_BLOCKER_NEXT_ACTIONS["unknown-cache-decision"])
+        source_surface = canonical_source_surface(
+            cache.get("surface")
+            or row.get("source_surface")
+            or _source_surface(str(row.get("provider") or "anthropic"), str(row.get("path") or ""))
+        )
+        has_tools = _cache_ladder_has_tools(cache, routing)
+        key = (
+            blocker,
+            public_label(row.get("provider") or "anthropic", "unknown"),
+            public_label(source_surface, "unknown"),
+            _endpoint_for_cache_ladder(row),
+            _cache_ladder_bool_label(bool(_as_int(row.get("stream"))), true_label="stream", false_label="non-stream"),
+            _cache_ladder_bool_label(has_tools, true_label="tools", false_label="no-tools"),
+            _cache_ladder_replayability(cache, routing),
+            public_label(decision.get("policy_source"), "unknown"),
+            public_label(decision.get("status"), "unknown"),
+            public_label(decision.get("reason"), "unknown"),
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                "blocker_code": key[0],
+                "provider": key[1],
+                "source_surface": key[2],
+                "endpoint": key[3],
+                "stream_mode": key[4],
+                "tool_presence": key[5],
+                "replayability_level": key[6],
+                "cache_policy_source": key[7],
+                "cache_status": key[8],
+                "cache_reason": key[9],
+                "next_action_family": next_action["family"],
+                "next_action_label": next_action["label"],
+                "count": 0,
+            },
+        )
+        bucket["count"] += 1
+
+    ladder = list(grouped.values())
+    ladder.sort(key=lambda row: (-row["count"], row["blocker_code"], row["provider"], row["source_surface"]))
+    top = ladder[0] if ladder else None
+    return {
+        "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+        "generated_at": utc_now(),
+        "summary": {
+            "scan_limit": capped_limit,
+            "scanned_rows": len(scanned),
+            "available_rows": len(rows),
+            "bounded_recent_window": True,
+            "cache_hits": cache_hits,
+            "zero_hit_window": cache_hits == 0,
+            "blocker_bucket_count": len(ladder),
+            "top_blocker_code": top.get("blocker_code") if top else None,
+            "top_next_action_family": top.get("next_action_family") if top else None,
+        },
+        "ladder": ladder[:50],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_responses_included": False,
+            "provider_bodies_included": False,
+            "raw_request_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+            "absolute_paths_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        },
+    }
+
+
 def _pattern_decision_breakdown(rows: list[dict[str, Any]], *, today_only: bool = False) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str, str, str, str, str, str, str, str], dict[str, Any]] = {}
     for row in rows:
@@ -16018,9 +16246,9 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     """)
 
     cache_rows = q("""
-        select created_at, stream, cache_hit, status_code, cache_json,
+        select created_at, stream, cache_hit, status_code, cache_json, routing_json,
                path, coalesce(provider, 'anthropic') as provider,
-               null as source_surface,
+               source_surface, endpoint,
                (created_at >= ?) as is_today
         from calls
         union all
@@ -16028,9 +16256,11 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
                case when json_extract(cache_json, '$.status') = 'hit' then 1 else 0 end as cache_hit,
                null as status_code,
                cache_json,
+               routing_json,
                'codex-app://turn/start' as path,
                'codex-app' as provider,
                ? as source_surface,
+               'turn_start' as endpoint,
                (created_at >= ?) as is_today
         from codex_app_events
         where direction = 'client_to_server'
@@ -16038,6 +16268,34 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     """, (today_start, CODEX_APP_SOURCE_SURFACE, today_start))
     cache_decision_breakdown = _cache_decision_breakdown(cache_rows)
     today_cache_decision_breakdown = _cache_decision_breakdown(cache_rows, today_only=True)
+    cache_ladder_rows = q("""
+        select created_at, stream, cache_hit, status_code, cache_json, routing_json,
+               path, coalesce(provider, 'anthropic') as provider,
+               source_surface, endpoint
+        from calls
+        order by created_at desc
+        limit ?
+    """, (_CACHE_BLOCKER_SCAN_LIMIT,)) + q("""
+        select created_at, 0 as stream,
+               case when json_extract(cache_json, '$.status') = 'hit' then 1 else 0 end as cache_hit,
+               null as status_code,
+               cache_json,
+               routing_json,
+               'codex-app://turn/start' as path,
+               'codex-app' as provider,
+               ? as source_surface,
+               'turn_start' as endpoint
+        from codex_app_events
+        where direction = 'client_to_server'
+          and method = 'turn/start'
+        order by created_at desc
+        limit ?
+    """, (CODEX_APP_SOURCE_SURFACE, _CACHE_BLOCKER_SCAN_LIMIT))
+    cache_ladder_rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    cache_zero_hit_blocker_ladder = _cache_zero_hit_blocker_ladder(
+        cache_ladder_rows,
+        scan_limit=_CACHE_BLOCKER_SCAN_LIMIT,
+    )
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
     cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
     cache_replay_readiness = await stats_cache_replay_readiness(store_obj, limit=50)
@@ -16208,6 +16466,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "category_breakdown": category_breakdown,
         "cache_decision_breakdown": cache_decision_breakdown,
         "today_cache_decision_breakdown": today_cache_decision_breakdown,
+        "cache_zero_hit_blocker_ladder": cache_zero_hit_blocker_ladder,
         "cache_effectiveness": cache_effectiveness,
         "cache_replayability": cache_replayability,
         "cache_replay_confidence": cache_replay_confidence,
@@ -17680,6 +17939,15 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Rule</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Cohort</th><th data-sort-type="number">Hits</th><th data-sort-type="number">Misses</th><th data-sort-type="number">Holdouts</th><th data-sort-type="number">Skips</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Invalidations</th><th data-sort-type="money">Savings</th><th data-sort-type="percent">Replay errors</th><th data-sort-type="percent">Holdout errors</th><th data-sort-type="text">Health</th>
     </tr></thead>
     <tbody id="cache-replay-confidence-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Cache zero-hit blocker ladder</h2>
+  <table data-table-id="cache-zero-hit-blocker-ladder" data-filter-label="Filter cache zero-hit blockers">
+    <thead><tr>
+      <th data-sort-type="text">Blocker</th><th data-sort-type="text">Provider</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Endpoint</th><th data-sort-type="text">Shape</th><th data-sort-type="text">Replayability</th><th data-sort-type="text">Policy</th><th data-sort-type="number">Calls</th><th data-sort-type="text">Next action</th>
+    </tr></thead>
+    <tbody id="cache-zero-hit-blocker-ladder-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -19511,6 +19779,24 @@ async function refreshCache(){
         <td class="flags">${health}</td>
       </tr>`;
     }).join('')||'<tr><td colspan="13" style="color:#8b949e">No cache replay confidence metadata recorded yet</td></tr>';
+    const ladderPayload=d.cache_zero_hit_blocker_ladder||{};
+    const ladderRows=ladderPayload.ladder||[];
+    document.getElementById('cache-zero-hit-blocker-ladder-tbody').innerHTML=ladderRows.map(row=>{
+      const blocker=row.blocker_code||'unknown-cache-decision';
+      const cls=blocker==='cache-hit-observed'?'hit':blocker==='safety-stopped'||blocker==='dependency-invalidation-blocked'?'err':blocker==='true-miss'?'miss':'routed';
+      const shape=[row.stream_mode||'unknown',row.tool_presence||'unknown'].join(' · ');
+      return `<tr>
+        <td><span class="badge ${cls}">${esc(blocker)}</span><div class="sub">${esc(row.cache_status||'unknown')} / ${esc(row.cache_reason||'unknown')}</div></td>
+        <td><span class="badge provider">${esc(row.provider||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td class="model">${esc(row.endpoint||'unknown')}</td>
+        <td><span class="badge miss">${esc(shape)}</span></td>
+        <td><span class="badge provider">${esc(row.replayability_level||'unknown')}</span></td>
+        <td><span class="badge provider">${esc(row.cache_policy_source||'unknown')}</span></td>
+        <td class="tokens">${(row.count||0).toLocaleString()}</td>
+        <td class="flags"><span class="badge ${row.next_action_family==='none'?'hit':'routed'}">${esc(row.next_action_family||'unknown')}</span><div class="sub">${esc(row.next_action_label||'')}</div></td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="9" style="color:#8b949e">No recent cache blocker metadata recorded yet</td></tr>';
     const replay=d.cache_replayability||{};
     const burnRows=replay.blocker_burn_down||[];
     document.getElementById('cache-blocker-burn-down-tbody').innerHTML=burnRows.map(row=>{

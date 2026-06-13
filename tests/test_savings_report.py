@@ -99,9 +99,15 @@ class _StoreFixture(unittest.TestCase):
         stream: int = 0,
         status_code: int = 200,
         cache_hit: int = 0,
+        cache_json_override: dict | None = None,
     ) -> None:
         routed_model = routed_model or requested_model
         tokens = max(1, text_chars // 4)
+        cache_json = cache_json_override or {
+            "status": "hit" if cache_hit else ("skipped" if has_tools else "miss"),
+            "reason": "exact-hit" if cache_hit else ("tools-disabled" if has_tools else "exact-miss"),
+            "policy_source": "local-default",
+        }
         self.store.log_call(
             id=str(uuid.uuid4()),
             created_at=utc_now(),
@@ -132,13 +138,7 @@ class _StoreFixture(unittest.TestCase):
                     "policy_source": "local-default",
                 }
             ),
-            cache_json=stable_json(
-                {
-                    "status": "hit" if cache_hit else ("skipped" if has_tools else "miss"),
-                    "reason": "exact-hit" if cache_hit else ("tools-disabled" if has_tools else "exact-miss"),
-                    "policy_source": "local-default",
-                }
-            ),
+            cache_json=stable_json(cache_json),
             error=None,
             request_json=json.dumps({"messages": [{"role": "user", "content": _SECRET_PROMPT}]}),
             response_json=None,
@@ -236,6 +236,41 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
         self.assertIsNotNone(cache_opp.get("evidence_window"))
         self.assertEqual(cache_opp["evidence_window"]["cache_hits"], 0)
         self.assertIsNotNone(cache_opp.get("suggested_command"))
+
+    def test_cache_replay_opportunity_includes_zero_hit_blocker_ladder(self) -> None:
+        for _ in range(4):
+            self._log_openai_call(
+                stream=1,
+                cache_json_override={
+                    "status": "skipped",
+                    "reason": "streaming",
+                    "policy_source": "local-default",
+                    "replayability_level": "features_only",
+                },
+            )
+        for _ in range(2):
+            self._log_openai_call(
+                has_tools=True,
+                cache_json_override={
+                    "status": "skipped",
+                    "reason": "tools-disabled",
+                    "policy_source": "local-default",
+                    "replayability_level": "local-exact-response",
+                },
+            )
+
+        result = build_savings_report(_openai_activation_config(), store=self.store, limit=50)
+
+        cache_opp = [o for o in result["opportunities"] if o["opportunity_family"] == OPPORTUNITY_FAMILY_CACHE_REPLAY][0]
+        self.assertIn("skipped-streaming", cache_opp["blocker_codes"])
+        self.assertIn("skipped-tools", cache_opp["blocker_codes"])
+        self.assertEqual(cache_opp["cache_blocker_ladder_summary"]["top_blocker_code"], "skipped-streaming")
+        self.assertTrue(cache_opp["cache_blocker_ladder_summary"]["bounded_recent_window"])
+        self.assertEqual(cache_opp["cache_blocker_ladder"][0]["provider"], "openai")
+        self.assertEqual(cache_opp["cache_blocker_ladder"][0]["source_surface"], "openai_chat")
+        rendered = json.dumps(cache_opp, sort_keys=True)
+        self.assertNotIn(_SECRET_PROMPT, rendered)
+        self.assertNotIn(_SECRET_SESSION, rendered)
 
     def test_routing_opportunity_names_model_routing_candidates(self) -> None:
         for _ in range(6):
