@@ -263,6 +263,10 @@ def create_dashboard_router(
     async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
         return await stats_views.stats_policy_events(limit=limit)
 
+    @router.get("/agentflow/stats/sqlite-maintenance")
+    async def stats_sqlite_maintenance() -> dict[str, Any]:
+        return await stats_views.stats_sqlite_maintenance(_store(store_obj))
+
     @router.get("/agentflow/stats/managed-recommendations")
     async def stats_managed_recommendations(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_managed_recommendations(_store(store_obj), limit=limit)

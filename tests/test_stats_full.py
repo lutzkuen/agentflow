@@ -8323,6 +8323,32 @@ class StatsFullTest(unittest.TestCase):
         self.assertIn('<th data-sort-type="text">Provider</th>', html)
         self.assertIn('<th data-sort-type="text">Tier</th>', html)
 
+    def test_dashboard_exposes_sqlite_maintenance_summary_only(self):
+        result = asyncio.run(stats_views.stats_sqlite_maintenance(server.store))
+        html = stats_views.dashboard_html()
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream=None,
+            limiter_status=lambda: [],
+            limiter_config={},
+        )
+        client = TestClient(app)
+        endpoint = client.get("/agentflow/stats/sqlite-maintenance")
+
+        self.assertEqual(result["schema"], "agentflow.sqlite_maintenance_dashboard.v1")
+        self.assertEqual(result["summary"]["retention_days"], 7)
+        self.assertTrue(result["privacy"]["metadata_only"])
+        self.assertEqual(endpoint.status_code, 200)
+        self.assertEqual(endpoint.json()["summary"]["retention_days"], 7)
+        self.assertIn("SQLite maintenance", html)
+        self.assertIn("sqlite-maintenance-tbody", html)
+        self.assertIn("fetch('/agentflow/stats/sqlite-maintenance')", html)
+        rendered = json.dumps(endpoint.json(), sort_keys=True)
+        self.assertNotIn("request_json", rendered)
+        self.assertNotIn("response_json", rendered)
+        self.assertNotIn("payload_json", rendered)
+
     def test_dashboard_tables_are_sortable_and_filterable(self):
         html = stats_views.dashboard_html()
 

@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agentflow_proxy.store import PostgresConnection, SQLiteStore, Store, stable_json, utc_now
@@ -13,9 +14,13 @@ class StoreBackendTest(unittest.TestCase):
         self.saved_database_url = os.environ.get("AGENTFLOW_DATABASE_URL")
         self.saved_busy_timeout = os.environ.get("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS")
         self.saved_wal = os.environ.get("AGENTFLOW_SQLITE_WAL")
+        self.saved_retention_days = os.environ.get("AGENTFLOW_SQLITE_RETENTION_DAYS")
+        self.saved_retention_enabled = os.environ.get("AGENTFLOW_SQLITE_RETENTION_ENABLED")
         os.environ.pop("AGENTFLOW_DATABASE_URL", None)
         os.environ.pop("AGENTFLOW_SQLITE_BUSY_TIMEOUT_MS", None)
         os.environ.pop("AGENTFLOW_SQLITE_WAL", None)
+        os.environ.pop("AGENTFLOW_SQLITE_RETENTION_DAYS", None)
+        os.environ.pop("AGENTFLOW_SQLITE_RETENTION_ENABLED", None)
 
     def tearDown(self):
         if self.saved_database_url is None:
@@ -30,6 +35,14 @@ class StoreBackendTest(unittest.TestCase):
             os.environ.pop("AGENTFLOW_SQLITE_WAL", None)
         else:
             os.environ["AGENTFLOW_SQLITE_WAL"] = self.saved_wal
+        if self.saved_retention_days is None:
+            os.environ.pop("AGENTFLOW_SQLITE_RETENTION_DAYS", None)
+        else:
+            os.environ["AGENTFLOW_SQLITE_RETENTION_DAYS"] = self.saved_retention_days
+        if self.saved_retention_enabled is None:
+            os.environ.pop("AGENTFLOW_SQLITE_RETENTION_ENABLED", None)
+        else:
+            os.environ["AGENTFLOW_SQLITE_RETENTION_ENABLED"] = self.saved_retention_enabled
 
     def test_store_uses_sqlite_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -105,6 +118,132 @@ class StoreBackendTest(unittest.TestCase):
                 self.assertIn("idx_codex_app_events_created_at", indexes)
                 self.assertIn("idx_codex_app_events_start_recent", indexes)
                 self.assertIn("idx_codex_app_events_response_lookup", indexes)
+                self.assertIn("idx_agentflow_sqlite_maintenance_runs_recent", indexes)
+            finally:
+                store.conn.close()
+
+    def test_sqlite_retention_defaults_to_seven_days_and_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                status = store.sqlite_retention_status()
+                self.assertTrue(status["enabled"])
+                self.assertEqual(status["retention_days"], 7)
+                self.assertEqual(status["configured_by"], "local-default")
+
+                os.environ["AGENTFLOW_SQLITE_RETENTION_DAYS"] = "0"
+                disabled = store.sqlite_retention_status()
+                self.assertFalse(disabled["enabled"])
+                self.assertIsNone(disabled["retention_days"])
+            finally:
+                store.conn.close()
+
+    def test_sqlite_maintenance_purges_old_rows_and_keeps_recent_rows(self):
+        now = datetime(2026, 6, 13, 8, 0, tzinfo=timezone.utc)
+        old = (now - timedelta(days=9)).isoformat()
+        recent = (now - timedelta(days=2)).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for call_id, created_at in (("old-call", old), ("recent-call", recent)):
+                    store.log_call(
+                        id=call_id,
+                        created_at=created_at,
+                        path="/v1/messages",
+                        requested_model="claude-sonnet-4-6",
+                        routed_model="claude-sonnet-4-6",
+                        stream=0,
+                        cache_hit=0,
+                        status_code=200,
+                        latency_ms=1,
+                        input_tokens_est=1,
+                        output_tokens_est=1,
+                        cost_est_usd=0.001,
+                        cost_baseline_usd=0.001,
+                        crunch_json=stable_json({"changed": False}),
+                        routing_json=stable_json({"reason": "test"}),
+                        cache_json=stable_json({"status": "miss"}),
+                    )
+                    store.log_codex_app_event(
+                        id=f"{call_id}-codex",
+                        created_at=created_at,
+                        direction="server_to_client",
+                        method="turn/completed",
+                    )
+                    store.conn.execute(
+                        """
+                        insert into routing_experiments(id, call_id, created_at, requested_model, routed_model, primary_model, shadow_model)
+                        values (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (f"{call_id}-experiment", call_id, created_at, "gpt-5", "gpt-5-mini", "gpt-5-mini", "gpt-5"),
+                    )
+                    store.log_provider_tool_adoption_window(
+                        id=f"{call_id}-adoption",
+                        created_at=created_at,
+                        updated_at=created_at,
+                        provider="openai",
+                        status="fulfilled",
+                    )
+                    store.log_optimization_eval_result(
+                        id=f"{call_id}-eval",
+                        run_id="run",
+                        created_at=created_at,
+                        candidate_id="candidate",
+                        status_class="pass",
+                        result_json=stable_json({"ok": True}),
+                    )
+
+                store.set_cache("old-cache", "model", 10, {"old": True}, file_deps=[{"path": "/tmp/old", "exists": False}])
+                store.conn.execute("update cache set created_at = ? where cache_key = ?", (old, "old-cache"))
+                store.set_cache("recent-cache", "model", 10, {"recent": True}, file_deps=[{"path": "/tmp/recent", "exists": False}])
+                store.conn.execute("update cache set created_at = ? where cache_key = ?", (recent, "recent-cache"))
+                store.set_semantic_cache("old-semantic", "model", [1.0], {"old": True}, 10)
+                store.conn.execute("update semantic_cache set created_at = ? where cache_key = ?", (old, "old-semantic"))
+                store.set_semantic_cache("recent-semantic", "model", [1.0], {"recent": True}, 10)
+                store.conn.execute("update semantic_cache set created_at = ? where cache_key = ?", (recent, "recent-semantic"))
+
+                result = store.run_sqlite_maintenance(retention_days=7, now=now.isoformat())
+
+                self.assertEqual(result["status"], "ok")
+                self.assertGreaterEqual(result["total_deleted_rows"], 8)
+                self.assertEqual(store.conn.execute("select count(*) as c from calls where id = 'old-call'").fetchone()["c"], 0)
+                self.assertEqual(store.conn.execute("select count(*) as c from calls where id = 'recent-call'").fetchone()["c"], 1)
+                self.assertEqual(store.conn.execute("select count(*) as c from cache where cache_key = 'old-cache'").fetchone()["c"], 0)
+                self.assertEqual(store.conn.execute("select count(*) as c from cache_file_deps where cache_key = 'old-cache'").fetchone()["c"], 0)
+                self.assertEqual(store.conn.execute("select count(*) as c from cache where cache_key = 'recent-cache'").fetchone()["c"], 1)
+                self.assertEqual(store.conn.execute("select count(*) as c from codex_app_events where id = 'old-call-codex'").fetchone()["c"], 0)
+                self.assertEqual(store.conn.execute("select count(*) as c from codex_app_events where id = 'recent-call-codex'").fetchone()["c"], 1)
+                self.assertTrue(store.latest_sqlite_maintenance_run()["optimize_ran"])
+            finally:
+                store.conn.close()
+
+    def test_sqlite_maintenance_preserves_unsent_feedback_rows(self):
+        now = datetime(2026, 6, 13, 8, 0, tzinfo=timezone.utc)
+        old = (now - timedelta(days=10)).isoformat()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                for status in ("queued", "retryable-error", "sending", "sent", "error", "dropped-after-limit"):
+                    store.enqueue_managed_outcome_feedback(
+                        id=f"feedback-{status}",
+                        created_at=old,
+                        updated_at=old,
+                        source_surface="test",
+                        endpoint="/v1/policy-events",
+                        optimization_unit_id=1,
+                        payload_json=stable_json({"schema": "test"}),
+                        status=status,
+                        next_attempt_at=old,
+                    )
+
+                result = store.run_sqlite_maintenance(retention_days=7, now=now.isoformat())
+
+                remaining = {
+                    row["id"]
+                    for row in store.conn.execute("select id from managed_outcome_feedback_queue").fetchall()
+                }
+                self.assertEqual(result["deleted_rows"]["managed_outcome_feedback_queue"], 3)
+                self.assertEqual(remaining, {"feedback-queued", "feedback-retryable-error", "feedback-sending"})
             finally:
                 store.conn.close()
 

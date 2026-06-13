@@ -97,6 +97,7 @@ agentflow-cache-smoke-diagnostic = "agentflow_proxy.cli:cache_smoke_diagnostic_m
 agentflow-cache-replay-dry-run = "agentflow_proxy.cli:cache_replay_dry_run_main"
 agentflow-managed-feedback-status = "agentflow_proxy.cli:managed_feedback_status_main"
 agentflow-managed-feedback-flush = "agentflow_proxy.cli:managed_feedback_flush_main"
+agentflow-sqlite-maintenance = "agentflow_proxy.cli:sqlite_maintenance_main"
 agentflow-managed-pattern-rollups = "agentflow_proxy.cli:managed_pattern_rollups_main"
 agentflow-optimization-eval-plan = "agentflow_proxy.cli:optimization_eval_plan_main"
 agentflow-optimization-shadow-eval = "agentflow_proxy.cli:optimization_shadow_eval_main"

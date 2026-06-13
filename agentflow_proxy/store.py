@@ -5,9 +5,15 @@ import os
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
+
+
+DEFAULT_SQLITE_RETENTION_DAYS = 7
+RETENTION_DISABLED_VALUES = {"", "0", "false", "no", "off", "disabled", "none"}
+PENDING_MANAGED_FEEDBACK_STATUSES = {"queued", "retryable-error", "sending"}
 
 
 def utc_now() -> str:
@@ -118,6 +124,37 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _parse_utc_iso(raw: Any) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        text = str(raw)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def sqlite_retention_days_from_env() -> int | None:
+    if not _env_bool("AGENTFLOW_SQLITE_RETENTION_ENABLED", True):
+        return None
+    raw = os.getenv("AGENTFLOW_SQLITE_RETENTION_DAYS")
+    if raw is None:
+        return DEFAULT_SQLITE_RETENTION_DAYS
+    cleaned = raw.strip().lower()
+    if cleaned in RETENTION_DISABLED_VALUES:
+        return None
+    try:
+        days = int(cleaned)
+    except ValueError:
+        return DEFAULT_SQLITE_RETENTION_DAYS
+    return days if days > 0 else None
 
 
 def _configure_sqlite_connection(conn: sqlite3.Connection, path: str) -> None:
@@ -468,6 +505,23 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists agentflow_sqlite_maintenance_runs (
+              id text primary key,
+              created_at text not null,
+              action text not null,
+              retention_days integer,
+              cutoff_at text,
+              disabled integer not null default 0,
+              dry_run integer not null default 0,
+              deleted_rows_json text not null,
+              total_deleted_rows integer not null default 0,
+              analyze_ran integer not null default 0,
+              optimize_ran integer not null default 0,
+              vacuum_ran integer not null default 0,
+              maintenance_json text
+            )
+            """)
+            cur.execute("""
             create index if not exists idx_codex_app_events_start_recent
             on codex_app_events(direction, method, created_at)
             """)
@@ -498,6 +552,10 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_optimization_eval_results_recent
             on optimization_eval_results(created_at, status_class)
+            """)
+            cur.execute("""
+            create index if not exists idx_agentflow_sqlite_maintenance_runs_recent
+            on agentflow_sqlite_maintenance_runs(created_at)
             """)
             self.conn.commit()
 
@@ -614,6 +672,200 @@ class SQLiteStore:
                 values,
             )
             self.conn.commit()
+
+    def sqlite_retention_status(self) -> dict[str, Any]:
+        days = sqlite_retention_days_from_env()
+        last_run = self.latest_sqlite_maintenance_run()
+        return {
+            "schema": "agentflow.sqlite_retention_status.v1",
+            "backend": self.backend,
+            "enabled": bool(days is not None and self.backend == "sqlite"),
+            "retention_days": days,
+            "default_retention_days": DEFAULT_SQLITE_RETENTION_DAYS,
+            "configured_by": (
+                "env:AGENTFLOW_SQLITE_RETENTION_ENABLED"
+                if os.getenv("AGENTFLOW_SQLITE_RETENTION_ENABLED") is not None
+                else "env:AGENTFLOW_SQLITE_RETENTION_DAYS"
+                if os.getenv("AGENTFLOW_SQLITE_RETENTION_DAYS") is not None
+                else "local-default"
+            ),
+            "last_run": last_run,
+            "request_path_maintenance": "startup-background-or-explicit-command",
+        }
+
+    def latest_sqlite_maintenance_run(self) -> dict[str, Any] | None:
+        if self.backend != "sqlite":
+            return None
+        try:
+            row = self.conn.execute(
+                """
+                select id, created_at, action, retention_days, cutoff_at, disabled,
+                       dry_run, deleted_rows_json, total_deleted_rows, analyze_ran,
+                       optimize_ran, vacuum_ran, maintenance_json
+                from agentflow_sqlite_maintenance_runs
+                order by created_at desc
+                limit 1
+                """
+            ).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        result = dict(row)
+        result["disabled"] = bool(result.get("disabled"))
+        result["dry_run"] = bool(result.get("dry_run"))
+        result["analyze_ran"] = bool(result.get("analyze_ran"))
+        result["optimize_ran"] = bool(result.get("optimize_ran"))
+        result["vacuum_ran"] = bool(result.get("vacuum_ran"))
+        try:
+            result["deleted_rows"] = json.loads(result.pop("deleted_rows_json") or "{}")
+        except Exception:
+            result["deleted_rows"] = {}
+        try:
+            result["maintenance"] = json.loads(result.pop("maintenance_json") or "{}")
+        except Exception:
+            result["maintenance"] = {}
+        return result
+
+    def sqlite_maintenance_due(self, *, min_interval_seconds: int = 21600, now: str | None = None) -> bool:
+        days = sqlite_retention_days_from_env()
+        if self.backend != "sqlite" or days is None:
+            return False
+        last = self.latest_sqlite_maintenance_run()
+        if not last or not last.get("created_at"):
+            return True
+        last_dt = _parse_utc_iso(last.get("created_at"))
+        now_dt = _parse_utc_iso(now) or datetime.now(timezone.utc)
+        if last_dt is None:
+            return True
+        return (now_dt - last_dt).total_seconds() >= max(0, int(min_interval_seconds or 0))
+
+    def _count_where(self, table: str, where_sql: str, params: tuple[Any, ...]) -> int:
+        row = self.conn.execute(f"select count(*) as count from {table} where {where_sql}", params).fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def _delete_where(self, table: str, where_sql: str, params: tuple[Any, ...]) -> None:
+        self.conn.execute(f"delete from {table} where {where_sql}", params)
+
+    def run_sqlite_maintenance(
+        self,
+        *,
+        retention_days: int | None = None,
+        dry_run: bool = False,
+        now: str | None = None,
+        analyze: bool = True,
+        optimize: bool = True,
+        vacuum: bool = False,
+        record: bool = True,
+    ) -> dict[str, Any]:
+        if self.backend != "sqlite":
+            return {
+                "schema": "agentflow.sqlite_maintenance_run.v1",
+                "backend": self.backend,
+                "status": "unsupported",
+                "enabled": False,
+                "reason": "sqlite-maintenance-only",
+                "deleted_rows": {},
+                "total_deleted_rows": 0,
+            }
+
+        configured_days = sqlite_retention_days_from_env()
+        days = retention_days if retention_days is not None else configured_days
+        now_dt = _parse_utc_iso(now) or datetime.now(timezone.utc)
+        now_iso = now_dt.isoformat()
+        disabled = days is None or int(days) <= 0
+        cutoff_at = None if disabled else (now_dt - timedelta(days=int(days))).isoformat()
+        deleted_rows: dict[str, int] = {}
+        analyze_ran = False
+        optimize_ran = False
+        vacuum_ran = False
+
+        with self._lock:
+            if not disabled and cutoff_at is not None:
+                purges: list[tuple[str, str, tuple[Any, ...]]] = [
+                    ("cache_file_deps", "cache_key in (select cache_key from cache where created_at < ?)", (cutoff_at,)),
+                    ("cache", "created_at < ?", (cutoff_at,)),
+                    ("semantic_cache", "created_at < ?", (cutoff_at,)),
+                    ("calls", "created_at < ?", (cutoff_at,)),
+                    ("routing_experiments", "created_at < ?", (cutoff_at,)),
+                    ("codex_app_events", "created_at < ?", (cutoff_at,)),
+                    ("provider_tool_adoption_windows", "created_at < ?", (cutoff_at,)),
+                    (
+                        "managed_outcome_feedback_queue",
+                        "created_at < ? and status not in ('queued', 'retryable-error', 'sending')",
+                        (cutoff_at,),
+                    ),
+                    ("optimization_eval_results", "created_at < ?", (cutoff_at,)),
+                ]
+                for table, where_sql, params in purges:
+                    count = self._count_where(table, where_sql, params)
+                    deleted_rows[table] = count
+                    if count and not dry_run:
+                        self._delete_where(table, where_sql, params)
+                if not dry_run:
+                    if analyze and sum(deleted_rows.values()) > 0:
+                        self.conn.execute("analyze")
+                        analyze_ran = True
+                    if optimize:
+                        self.conn.execute("pragma optimize")
+                        optimize_ran = True
+                    if vacuum:
+                        self.conn.execute("vacuum")
+                        vacuum_ran = True
+                    self.conn.commit()
+
+            total_deleted = int(sum(deleted_rows.values()))
+            maintenance_meta = {
+                "pending_feedback_statuses_preserved": sorted(PENDING_MANAGED_FEEDBACK_STATUSES),
+                "raw_payloads_included": False,
+                "vacuum_guidance": "VACUUM is not run by default; pass --vacuum after a large purge during a maintenance window.",
+                "provider_request_path_delayed": False,
+            }
+            result = {
+                "schema": "agentflow.sqlite_maintenance_run.v1",
+                "backend": self.backend,
+                "id": uuid4().hex,
+                "created_at": now_iso,
+                "action": "sqlite-retention-maintenance",
+                "status": "disabled" if disabled else "dry-run" if dry_run else "ok",
+                "enabled": not disabled,
+                "retention_days": None if disabled else int(days),
+                "cutoff_at": cutoff_at,
+                "dry_run": bool(dry_run),
+                "deleted_rows": deleted_rows,
+                "total_deleted_rows": total_deleted,
+                "analyze_ran": analyze_ran,
+                "optimize_ran": optimize_ran,
+                "vacuum_ran": vacuum_ran,
+                "maintenance": maintenance_meta,
+            }
+            if record:
+                self.conn.execute(
+                    """
+                    insert into agentflow_sqlite_maintenance_runs(
+                      id, created_at, action, retention_days, cutoff_at, disabled,
+                      dry_run, deleted_rows_json, total_deleted_rows, analyze_ran,
+                      optimize_ran, vacuum_ran, maintenance_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        result["id"],
+                        result["created_at"],
+                        result["action"],
+                        result["retention_days"],
+                        result["cutoff_at"],
+                        1 if disabled else 0,
+                        1 if dry_run else 0,
+                        stable_json(deleted_rows),
+                        total_deleted,
+                        1 if analyze_ran else 0,
+                        1 if optimize_ran else 0,
+                        1 if vacuum_ran else 0,
+                        stable_json(maintenance_meta),
+                    ),
+                )
+                self.conn.commit()
+        return result
 
     def update_call_routing_json(self, call_id: str, routing_json: str) -> None:
         with self._lock:

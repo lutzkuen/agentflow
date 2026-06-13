@@ -3547,6 +3547,43 @@ def managed_feedback_flush_cli(argv: Sequence[str] | None = None, *, stdout: Any
     return _managed_feedback_flush_cli(argv, stdout=stdout)
 
 
+def sqlite_maintenance_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Run local SQLite retention maintenance for AgentFlow metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow SQLite DB path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3.",
+    )
+    parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help="Retention window in days. Defaults to AGENTFLOW_SQLITE_RETENTION_DAYS or 7.",
+    )
+    parser.add_argument("--disable-retention", action="store_true", help="Record disabled maintenance without deleting rows.")
+    parser.add_argument("--dry-run", action="store_true", help="Report rows that would be purged without deleting them.")
+    parser.add_argument("--no-analyze", action="store_true", help="Skip ANALYZE after a purge.")
+    parser.add_argument("--no-optimize", action="store_true", help="Skip PRAGMA optimize after maintenance.")
+    parser.add_argument("--vacuum", action="store_true", help="Run VACUUM after the purge. Use only during an explicit maintenance window.")
+    args = parser.parse_args(argv)
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = store.run_sqlite_maintenance(
+            retention_days=None if args.retention_days is None and not args.disable_retention else (0 if args.disable_retention else args.retention_days),
+            dry_run=bool(args.dry_run),
+            analyze=not bool(args.no_analyze),
+            optimize=not bool(args.no_optimize),
+            vacuum=bool(args.vacuum),
+        )
+    finally:
+        try:
+            store.conn.close()
+        except Exception:
+            pass
+    _write_json(stdout or sys.stdout, result)
+    return 0
+
+
 def _phase_routing_lifecycle_payload(command: str, result: dict[str, Any]) -> dict[str, Any] | None:
     if command != "dry-run" or not isinstance(result, dict) or result.get("schema") != "agentflow.phase_routing_dry_run.v1":
         return None
@@ -8312,6 +8349,10 @@ def managed_feedback_status_main() -> None:
 
 def managed_feedback_flush_main() -> None:
     raise SystemExit(managed_feedback_flush_cli())
+
+
+def sqlite_maintenance_main() -> None:
+    raise SystemExit(sqlite_maintenance_cli())
 
 
 def orchestrator_research_main() -> None:

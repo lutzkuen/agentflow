@@ -947,6 +947,41 @@ async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
     return recent_policy_events(limit=limit)
 
 
+async def stats_sqlite_maintenance(store_obj: Any) -> dict[str, Any]:
+    if hasattr(store_obj, "sqlite_retention_status"):
+        status = store_obj.sqlite_retention_status()
+    else:
+        status = {
+            "schema": "agentflow.sqlite_retention_status.v1",
+            "backend": getattr(store_obj, "backend", "unknown"),
+            "enabled": False,
+            "retention_days": None,
+            "default_retention_days": 7,
+            "last_run": None,
+            "request_path_maintenance": "not-available",
+        }
+    return {
+        "schema": "agentflow.sqlite_maintenance_dashboard.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "summary": {
+            "enabled": bool(status.get("enabled")),
+            "retention_days": status.get("retention_days"),
+            "default_retention_days": status.get("default_retention_days"),
+            "last_purge_at": (status.get("last_run") or {}).get("created_at") if isinstance(status.get("last_run"), dict) else None,
+            "last_deleted_rows": _as_int((status.get("last_run") or {}).get("total_deleted_rows")) if isinstance(status.get("last_run"), dict) else 0,
+            "provider_request_path_delayed": False,
+        },
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "queue_payloads_included": False,
+        },
+    }
+
+
 MANAGED_OPENAI_ACTIVATION_ACTIONS = {
     "fetch-review",
     "draft-stage",
@@ -15401,6 +15436,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     conn = store_obj.conn
     today_start = _utc_today_start_iso()
     old_context_summary_opportunity = await stats_old_context_summary(store_obj)
+    sqlite_maintenance = await stats_sqlite_maintenance(store_obj)
 
     def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -15849,6 +15885,10 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
     observed_baseline_with_codex = observed_baseline + codex_cost_est
     today_hard_floor = today_calculated_spend
     hard_floor = calculated_spend
+    today_provider_spend_rounded = round(today_cost, 6)
+    provider_spend_rounded = round(total_cost, 6)
+    today_codex_spend_rounded = round(today_codex_cost_est, 6)
+    codex_spend_rounded = round(codex_cost_est, 6)
     executive_summary = {
         "schema": "agentflow.executive_summary.v1",
         "accounting_today": accounting_today,
@@ -15884,12 +15924,12 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "spend": {
-            "today_calculated_spend_usd": round(today_calculated_spend, 6),
-            "calculated_spend_usd": round(calculated_spend, 6),
-            "today_provider_spend_usd": round(today_cost, 6),
-            "total_provider_spend_usd": round(total_cost, 6),
-            "today_codex_app_estimated_spend_usd": round(today_codex_cost_est, 6),
-            "codex_app_estimated_spend_usd": round(codex_cost_est, 6),
+            "today_calculated_spend_usd": round(today_provider_spend_rounded + today_codex_spend_rounded, 6),
+            "calculated_spend_usd": round(provider_spend_rounded + codex_spend_rounded, 6),
+            "today_provider_spend_usd": today_provider_spend_rounded,
+            "total_provider_spend_usd": provider_spend_rounded,
+            "today_codex_app_estimated_spend_usd": today_codex_spend_rounded,
+            "codex_app_estimated_spend_usd": codex_spend_rounded,
             "today_baseline_provider_cost_usd": round(today_observed_baseline, 6),
             "baseline_provider_cost_usd": round(observed_baseline, 6),
             "today_baseline_calculated_cost_usd": round(today_observed_baseline_with_codex, 6),
@@ -16164,6 +16204,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_replay_activation_health": cache_replay_activation_health,
         "old_context_summary_opportunity": old_context_summary_opportunity,
         "provider_prompt_cache_accounting": prompt_cache_accounting,
+        "sqlite_maintenance": sqlite_maintenance,
         "pattern_decision_breakdown": pattern_decision_breakdown,
         "today_pattern_decision_breakdown": today_pattern_decision_breakdown,
         "error_breakdown": error_breakdown,
@@ -17368,6 +17409,15 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Severity</th><th data-sort-type="text">Code</th><th data-sort-type="text">Warning</th>
     </tr></thead>
     <tbody id="safety-warnings-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>SQLite maintenance</h2>
+  <table data-table-id="sqlite-maintenance" data-filter-label="Filter SQLite maintenance">
+    <thead><tr>
+      <th data-sort-type="text">Retention</th><th data-sort-type="number">Days</th><th data-sort-type="time">Last purge</th><th data-sort-type="number">Deleted rows</th><th data-sort-type="text">Tables</th><th data-sort-type="text">Request path</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="sqlite-maintenance-tbody"></tbody>
   </table>
 </div>
 <div class="section">
@@ -20048,6 +20098,26 @@ async function refreshSafety(){
       <td class="model">${esc(row.code)}</td>
       <td class="flags">${esc(row.message)}</td>
     </tr>`).join('')||'<tr><td colspan="3" style="color:#8b949e">No safety or privacy warnings</td></tr>';
+    const mr=await fetch('/agentflow/stats/sqlite-maintenance');
+    const maintenance=await mr.json();
+    const retention=maintenance.status||{};
+    const last=retention.last_run||{};
+    const deleted=last.deleted_rows||{};
+    const deletedRows=Object.entries(deleted)
+      .filter(([,count])=>Number(count||0)>0)
+      .sort((a,b)=>Number(b[1]||0)-Number(a[1]||0))
+      .slice(0,5)
+      .map(([table,count])=>`<span class="badge provider">${esc(table)} ${(count||0).toLocaleString()}</span>`)
+      .join(' ');
+    document.getElementById('sqlite-maintenance-tbody').innerHTML=`<tr>
+      <td>${retention.enabled?'<span class="badge hit">enabled</span>':'<span class="badge routed">disabled</span>'}<div class="sub">${esc(retention.configured_by||'local-default')}</div></td>
+      <td class="tokens">${retention.retention_days??'—'}</td>
+      <td class="ts">${last.created_at?ago(last.created_at):'never'}</td>
+      <td class="tokens">${(last.total_deleted_rows||0).toLocaleString()}</td>
+      <td class="flags">${deletedRows||'<span class="badge miss">none</span>'}</td>
+      <td><span class="badge hit">background / command</span></td>
+      <td class="flags">${(maintenance.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge routed">unknown</span>'} <span class="badge hit">payloads omitted</span></td>
+    </tr>`;
     const dueRows=feedbackQueue.due_samples||[];
     document.getElementById('safety-managed-feedback-tbody').innerHTML=dueRows.map(row=>`<tr>
       <td class="latency">${fmtSec(row.due_age_seconds)}</td>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -227,6 +228,28 @@ app.include_router(create_admin_router(after_reload=_refresh_policy_module_bindi
 @app.on_event("startup")
 async def _log_startup_session_spending_summary() -> None:
     _log_recent_session_spending_summary("startup")
+    if os.getenv("AGENTFLOW_SQLITE_MAINTENANCE_ON_STARTUP", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    try:
+        min_interval = int(os.getenv("AGENTFLOW_SQLITE_MAINTENANCE_MIN_INTERVAL_SECONDS", "21600"))
+    except ValueError:
+        min_interval = 21600
+    if not hasattr(store, "sqlite_maintenance_due") or not store.sqlite_maintenance_due(min_interval_seconds=min_interval):
+        return
+
+    async def run_background_maintenance() -> None:
+        try:
+            result = await asyncio.to_thread(store.run_sqlite_maintenance)
+            print(
+                "agentflow_sqlite_maintenance "
+                f"status={result.get('status')} retention_days={result.get('retention_days')} "
+                f"deleted_rows={result.get('total_deleted_rows')}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"agentflow_sqlite_maintenance_error: {exc}", file=sys.stderr)
+
+    asyncio.create_task(run_background_maintenance())
 
 
 @app.on_event("shutdown")

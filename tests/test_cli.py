@@ -9190,6 +9190,62 @@ class ManagedFeedbackCliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["flush"]["retryable_error"], 1)
 
+    def test_sqlite_maintenance_cli_reports_dry_run(self):
+        from agentflow_proxy.store import Store, stable_json
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                store.log_call(
+                    id="old-cli-call",
+                    created_at="2026-06-01T00:00:00+00:00",
+                    path="/v1/messages",
+                    requested_model="claude-sonnet-4-6",
+                    routed_model="claude-sonnet-4-6",
+                    stream=0,
+                    cache_hit=0,
+                    status_code=200,
+                    latency_ms=1,
+                    input_tokens_est=1,
+                    output_tokens_est=1,
+                    cost_est_usd=0.001,
+                    cost_baseline_usd=0.001,
+                    crunch_json=stable_json({"changed": False}),
+                    routing_json=stable_json({"reason": "test"}),
+                    cache_json=stable_json({"status": "miss"}),
+                )
+            finally:
+                store.conn.close()
+
+            stdout = io.StringIO()
+            code = cli.sqlite_maintenance_cli(
+                [
+                    "--db",
+                    db_path,
+                    "--retention-days",
+                    "7",
+                    "--dry-run",
+                    "--no-analyze",
+                    "--no-optimize",
+                ],
+                stdout=stdout,
+            )
+
+            payload = json.loads(stdout.getvalue())
+            store = Store(db_path)
+            try:
+                retained = store.conn.execute("select count(*) as count from calls").fetchone()["count"]
+            finally:
+                store.conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema"], "agentflow.sqlite_maintenance_run.v1")
+        self.assertEqual(payload["status"], "dry-run")
+        self.assertEqual(payload["retention_days"], 7)
+        self.assertEqual(payload["deleted_rows"]["calls"], 1)
+        self.assertEqual(retained, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
