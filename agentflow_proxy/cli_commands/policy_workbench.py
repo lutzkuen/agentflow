@@ -11,6 +11,8 @@ from typing import Any, Sequence
 
 import httpx
 
+from agentflow_proxy.cli_common import redact_secret as _redact_secret
+from agentflow_proxy.cli_common import write_json as _write_json
 from agentflow_proxy.cli_commands.policy_bundle import (
     _default_policy_reload_url,
     _is_loopback_url,
@@ -18,8 +20,6 @@ from agentflow_proxy.cli_commands.policy_bundle import (
     _read_policy_json_arg,
     _validation_result_error,
 )
-from agentflow_proxy.optimization.cli_support import redact_secret as _redact_secret
-from agentflow_proxy.optimization.cli_support import write_json as _write_json
 from agentflow_proxy.upstream_url import redact_url as _redact_url
 
 
@@ -1119,5 +1119,4 @@ def _write_policy_draft_apply_result(stream: Any, payload: dict[str, Any], *, pr
         stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stream, payload)
-
 

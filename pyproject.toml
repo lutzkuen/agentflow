@@ -113,7 +113,7 @@ agentflow-orchestrator-research = "agentflow_proxy.cli:orchestrator_research_mai
 agentflow-dashboard = "agentflow_proxy.dashboard:main"
 
 [tool.setuptools]
-packages = ["agentflow_proxy", "agentflow_proxy.optimization"]
+packages = ["agentflow_proxy", "agentflow_proxy.cli_commands", "agentflow_proxy.optimization"]
 
 [tool.setuptools.package-data]
 agentflow_proxy = ["*.yaml"]

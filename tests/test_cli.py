@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import io
 import json
 import os
@@ -218,6 +219,24 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertEqual(scripts["agentflow-proxy"], "agentflow_proxy.cli:proxy_main")
         self.assertEqual(scripts["agentflow-claude-proxy"], "agentflow_proxy.cli:proxy_main")
         self.assertEqual(scripts["agentflow-dashboard"], "agentflow_proxy.dashboard:main")
+        self.assertGreater(len(scripts), 80)
+
+        for name, target in scripts.items():
+            with self.subTest(script=name, target=target):
+                module_name, attr_name = target.split(":", 1)
+                module = importlib.import_module(module_name)
+                self.assertTrue(callable(getattr(module, attr_name)))
+
+        cli_exceptions = {
+            "agentflow-codex-app-proxy": "agentflow_proxy.codex_app_proxy:main",
+            "agentflow-codex-app-client": "agentflow_proxy.codex_app_client:main",
+            "agentflow-dashboard": "agentflow_proxy.dashboard:main",
+        }
+        for name, target in scripts.items():
+            if name in cli_exceptions:
+                self.assertEqual(target, cli_exceptions[name])
+            else:
+                self.assertTrue(target.startswith("agentflow_proxy.cli:"), f"{name} moved away from cli.py")
 
     def test_activate_openai_writes_default_profile_idempotently(self):
         with TemporaryDirectory() as tmp:

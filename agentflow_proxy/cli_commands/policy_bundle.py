@@ -4,17 +4,17 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 import hashlib
-import ipaddress
 import json
 import os
 from pathlib import Path
 import sys
 from typing import Any, Sequence
-from urllib.parse import urlparse
 
 import httpx
 
-from agentflow_proxy.optimization.cli_support import (
+from agentflow_proxy.cli_common import (
+    default_loopback_url,
+    is_loopback_url,
     open_store_for_db as _open_store_for_db,
     write_json as _write_json,
 )
@@ -23,22 +23,14 @@ from agentflow_proxy.upstream_url import redact_url as _redact_url
 
 POLICY_RELOAD_PATH = "/agentflow/admin/reload-policies"
 
+
 def _default_policy_reload_url() -> str:
-    port = os.getenv("AGENTFLOW_ADMIN_PORT") or os.getenv("AGENTFLOW_PORT", "4000")
-    return f"http://127.0.0.1:{port}{POLICY_RELOAD_PATH}"
+    return default_loopback_url(POLICY_RELOAD_PATH)
+
 
 def _is_loopback_url(url: str) -> bool:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        return False
-    if not parsed.hostname:
-        return False
-    if parsed.hostname == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(parsed.hostname).is_loopback
-    except ValueError:
-        return False
+    return is_loopback_url(url)
+
 
 def policy_reload_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Reload local AgentFlow policy files through the loopback admin API")
@@ -843,4 +835,3 @@ def _attach_old_context_summary_lifecycle_feedback(result: dict[str, Any], *, co
     result["managed_lifecycle_feedback"] = public_meta
     if command in {"dry-run", "impact"} and public_meta.get("status") in {"sent", "retryable-error", "dropped-after-limit", "error"}:
         result["managed_server_calls_made"] = True
-

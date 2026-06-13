@@ -14,7 +14,10 @@ from typing import Any, Sequence
 
 import httpx
 
-from agentflow_proxy.optimization.cli_support import (
+from agentflow_proxy.cli_common import (
+    default_config_dir,
+    default_stats_url,
+    is_loopback_url as _is_loopback_url,
     open_store_for_db as _open_store_for_db,
     redact_secret as _redact_secret,
     write_json as _write_json,
@@ -25,7 +28,6 @@ from agentflow_proxy.cli_commands.policy_bundle import (
     POLICY_RELOAD_PATH,
     _attach_old_context_summary_lifecycle_feedback,
     _default_policy_reload_url,
-    _is_loopback_url,
     _old_context_summary_lifecycle_payload,
     _read_policy_json_arg,
     _validation_result_error,
@@ -280,7 +282,7 @@ def agentflow_cli(
     )
     stats_parser.add_argument(
         "--url",
-        default=os.getenv("AGENTFLOW_STATS_URL", DEFAULT_STATS_URL),
+        default=default_stats_url(),
         help=argparse.SUPPRESS,
     )
     stats_parser.add_argument("--timeout", type=float, default=5.0, help=argparse.SUPPRESS)
@@ -319,7 +321,7 @@ def agentflow_cli(
 
     args = parser.parse_args(argv)
     if not hasattr(args, "config_dir") or args.config_dir is None:
-        args.config_dir = os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
+        args.config_dir = default_config_dir()
 
     if args.command == "activate":
         if args.target in UNSUPPORTED_ONBOARDING_TARGETS:
