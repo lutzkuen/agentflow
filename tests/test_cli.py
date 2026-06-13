@@ -90,6 +90,46 @@ class AgentflowActivationCliTests(unittest.TestCase):
             self.assertIn(upstream, stdout.getvalue())
             self.assertIn("Local base URL for clients: http://127.0.0.1:4003/v1", stdout.getvalue())
 
+    def test_activate_openai_redacts_sensitive_custom_upstream_in_output(self):
+        upstream = "https://user:pass@example-resource.openai.azure.com/openai/deployments/my-deployment?api-key=secret&api-version=2024-10-21"
+        with TemporaryDirectory() as tmp:
+            stdout = io.StringIO()
+
+            code = cli.agentflow_cli(
+                [
+                    "activate",
+                    "openai",
+                    "--config-dir",
+                    tmp,
+                    "--openai-base-url",
+                    upstream,
+                ],
+                stdout=stdout,
+            )
+
+            self.assertEqual(code, 0)
+            raw_config = (Path(tmp) / "activation.json").read_text(encoding="utf-8")
+            self.assertIn(upstream, raw_config)
+            output = stdout.getvalue()
+            self.assertNotIn("user:pass", output)
+            self.assertNotIn("api-key=secret", output)
+            self.assertIn("https://example-resource.openai.azure.com/openai/deployments/my-deployment", output)
+            self.assertIn("api-key=%5Bredacted%5D", output)
+
+    def test_activate_openai_invalid_upstream_fails_actionably(self):
+        with TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+
+            code = cli.agentflow_cli(
+                ["activate", "openai", "--config-dir", tmp, "--openai-base-url", "api.openai.com"],
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+            self.assertEqual(code, 2)
+            self.assertFalse((Path(tmp) / "activation.json").exists())
+            self.assertIn("must start with http:// or https://", stderr.getvalue())
+
     def test_activate_claude_writes_default_profile_idempotently(self):
         with TemporaryDirectory() as tmp:
             stdout_one = io.StringIO()
@@ -308,6 +348,35 @@ class AgentflowActivationCliTests(unittest.TestCase):
                 "--openai-auth-mode",
                 "proxy",
             ])
+
+    def test_agentflow_doctor_reports_redacted_upstream_mismatch(self):
+        upstream = "https://user:pass@example-resource.openai.azure.com/openai/deployments/a?api-key=secret&api-version=2024-10-21"
+        with TemporaryDirectory() as tmp:
+            cli.agentflow_cli(
+                ["activate", "openai", "--config-dir", tmp, "--openai-base-url", upstream],
+                stdout=io.StringIO(),
+            )
+            stdout = io.StringIO()
+
+            with patch("agentflow_proxy.cli.httpx.get") as http_get:
+                http_get.return_value = httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "provider": "openai",
+                        "upstream": "https://api.openai.com",
+                        "openai_auth_mode": "client",
+                    },
+                )
+                code = cli.agentflow_cli(["doctor", "openai", "--config-dir", tmp], stdout=stdout)
+
+            self.assertEqual(code, 1)
+            output = stdout.getvalue()
+            self.assertIn("upstream-mismatch", output)
+            self.assertIn("Configured upstream: https://example-resource.openai.azure.com/openai/deployments/a", output)
+            self.assertIn("api-key=%5Bredacted%5D", output)
+            self.assertNotIn("user:pass", output)
+            self.assertNotIn("api-key=secret", output)
 
     def test_agentflow_run_translates_claude_profile_to_proxy_flags(self):
         upstream = "https://anthropic.example"

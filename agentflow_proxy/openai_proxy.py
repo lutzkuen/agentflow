@@ -84,6 +84,7 @@ from agentflow_proxy.routing_experiments import (
 )
 from agentflow_proxy.router import extract_text, has_tools
 from agentflow_proxy.store import stable_json, utc_now
+from agentflow_proxy.upstream_url import join_openai_upstream_url, openai_websocket_url
 
 
 SESSION_COST_ALERT_USD = float(os.getenv("AGENTFLOW_SESSION_COST_ALERT_USD", "5.0"))
@@ -175,12 +176,7 @@ def build_websocket_headers(context: ProviderContext, websocket: WebSocket) -> d
 
 
 def websocket_url(context: ProviderContext, path: str) -> str:
-    base = context.openai_upstream.rstrip("/")
-    if base.startswith("https://"):
-        base = "wss://" + base[len("https://"):]
-    elif base.startswith("http://"):
-        base = "ws://" + base[len("http://"):]
-    return base + path
+    return openai_websocket_url(context.openai_upstream, path)
 
 
 async def read_json_body(request: Request) -> Optional[dict[str, Any]]:
@@ -283,7 +279,7 @@ async def _fetch_openai_old_context_summary(
                 await context.limiter.await_backoff(model)
                 await context.limiter.throttle_forward()
                 r = await client.post(
-                    context.openai_upstream.rstrip("/") + "/v1/responses",
+                    join_openai_upstream_url(context.openai_upstream, "/v1/responses"),
                     headers=headers,
                     json=summary_request,
                 )
@@ -374,7 +370,7 @@ async def _run_openai_routing_experiment(
             async with httpx.AsyncClient(timeout=context.http_timeout) as client:
                 await context.limiter.await_backoff(shadow_model)
                 await context.limiter.throttle_forward()
-                r = await client.post(context.openai_upstream.rstrip("/") + path, headers=headers, json=shadow_body)
+                r = await client.post(join_openai_upstream_url(context.openai_upstream, path), headers=headers, json=shadow_body)
         shadow_latency_ms = int((time.time() - shadow_started) * 1000)
         shadow_status_code = r.status_code
         try:
@@ -535,7 +531,7 @@ async def openai_passthrough(context: ProviderContext, request: Request, path: s
     async with httpx.AsyncClient(timeout=context.http_timeout) as client:
         r = await client.request(
             request.method,
-            context.openai_upstream.rstrip("/") + path,
+            join_openai_upstream_url(context.openai_upstream, path),
             headers=headers,
             content=content if content else None,
             params=dict(request.query_params),
@@ -792,7 +788,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                                 await context.limiter.await_backoff(crunched["model"])
                                 await context.limiter.throttle_forward()
                                 try:
-                                    async with client.stream("POST", context.openai_upstream.rstrip("/") + path, headers=headers, json=crunched) as r:
+                                    async with client.stream("POST", join_openai_upstream_url(context.openai_upstream, path), headers=headers, json=crunched) as r:
                                         status_code = r.status_code
                                         if status_code in (429, 529) and stream_retry_count < 3:
                                             stream_retry_count += 1
@@ -1332,7 +1328,7 @@ async def openai_optimized(context: ProviderContext, request: Request, path: str
                     await context.limiter.await_backoff(crunched["model"])
                     await context.limiter.throttle_forward()
                     try:
-                        r = await client.post(context.openai_upstream.rstrip("/") + path, headers=headers, json=crunched)
+                        r = await client.post(join_openai_upstream_url(context.openai_upstream, path), headers=headers, json=crunched)
                     except httpx.NetworkError as exc:
                         if net_retries < 2:
                             net_retries += 1

@@ -18,9 +18,9 @@ import httpx
 from agentflow_proxy.optimization.cli_support import (
     open_store_for_db as _open_store_for_db,
     redact_secret as _redact_secret,
-    redact_url as _redact_url,
     write_json as _write_json,
 )
+from agentflow_proxy.upstream_url import redact_url as _redact_url
 
 
 POLICY_RELOAD_PATH = "/agentflow/admin/reload-policies"
@@ -36,7 +36,7 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
         prefix = "Dry run: would configure" if result["dry_run"] else "Configured"
         stdout.write(f"{prefix} AgentFlow target: claude-vscode\n")
         stdout.write(f"Claude VS Code local AgentFlow base URL: {result['local_base_url']}\n")
-        stdout.write(f"Upstream Anthropic base URL used by AgentFlow: {result['upstream_base_url']}\n")
+        stdout.write(f"Upstream Anthropic base URL used by AgentFlow: {_redact_url(result['upstream_base_url'])}\n")
         stdout.write(f"AgentFlow-managed non-secret env file: {result['env_file_path']}\n")
         stdout.write(f"Env file changed: {str(result['env_file_changed']).lower()}\n")
         stdout.write(f"Depends on AgentFlow target: {result['depends_on']}\n")
@@ -73,7 +73,7 @@ def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
     stdout.write(f"{prefix} AgentFlow target: {result['target']}\n")
     stdout.write(f"Local base URL for clients: {result['local_base_url']}\n")
     stdout.write(f"Health URL: {result['health_url']}\n")
-    stdout.write(f"Upstream provider base URL: {result['upstream_base_url']}\n")
+    stdout.write(f"Upstream provider base URL: {_redact_url(result['upstream_base_url'])}\n")
     stdout.write(f"Run configured proxy: {result['run_command']}\n")
     stdout.write(f"Equivalent proxy command: {result['proxy_command']}\n")
     stdout.write(f"Config file: {result['config_path']}\n")
@@ -201,6 +201,15 @@ def agentflow_cli(
         help="Print the proxy command that would run without starting the server.",
     )
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        parents=[config_parent],
+        help="Check a configured AgentFlow target without exposing secrets.",
+    )
+    doctor_parser.add_argument("target", choices=("openai", "claude"))
+    doctor_parser.add_argument("--timeout", type=float, default=5.0, help="Health request timeout in seconds.")
+    doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     args = parser.parse_args(argv)
     if not hasattr(args, "config_dir") or args.config_dir is None:
         args.config_dir = os.getenv("AGENTFLOW_CONFIG_DIR", str(Path.home() / ".agentflow"))
@@ -237,14 +246,18 @@ def agentflow_cli(
             stderr.write("--anthropic-base-url and --claude-base-url are aliases; pass only one.\n")
             return 2
         config = activation.load_activation_config(args.config_dir)
-        profile = activation.activation_profile(
-            args.target,
-            openai_base_url=getattr(args, "openai_base_url", None),
-            anthropic_base_url=getattr(args, "anthropic_base_url", None) or getattr(args, "claude_base_url", None),
-            local_base_url=getattr(args, "local_base_url", None),
-            health_url=getattr(args, "health_url", None),
-            openai_auth_mode=getattr(args, "openai_auth_mode", activation.DEFAULT_OPENAI_AUTH_MODE),
-        )
+        try:
+            profile = activation.activation_profile(
+                args.target,
+                openai_base_url=getattr(args, "openai_base_url", None),
+                anthropic_base_url=getattr(args, "anthropic_base_url", None) or getattr(args, "claude_base_url", None),
+                local_base_url=getattr(args, "local_base_url", None),
+                health_url=getattr(args, "health_url", None),
+                openai_auth_mode=getattr(args, "openai_auth_mode", activation.DEFAULT_OPENAI_AUTH_MODE),
+            )
+        except ValueError as exc:
+            stderr.write(str(exc) + "\n")
+            return 2
         updated = activation.apply_activation_profile(config, profile)
         config_path = activation.activation_config_path(args.config_dir)
         if not args.dry_run:
@@ -267,15 +280,103 @@ def agentflow_cli(
             return 1
         profile = config["targets"][args.target]
         if args.dry_run:
-            stdout.write(activation.shell_command_for_profile(profile) + "\n")
+            stdout.write(activation.shell_command_for_profile(profile, redact=True) + "\n")
             return 0
         from agentflow_proxy import server
 
         server.main(proxy_args)
         return 0
 
+    if args.command == "doctor":
+        config = activation.load_activation_config(args.config_dir)
+        profile = (config.get("targets") or {}).get(args.target)
+        if not isinstance(profile, dict) or not profile.get("configured"):
+            stderr.write(f"AgentFlow target is not configured: {args.target}. Run `agentflow activate {args.target}` first.\n")
+            return 1
+        result = _doctor_activation_target(profile, timeout=float(args.timeout))
+        if args.json:
+            _write_json(stdout, result)
+        else:
+            _write_doctor_summary(stdout, result)
+        return 0 if result["ok"] else 1
+
     parser.error("unknown command")
     return 2
+
+
+def _doctor_activation_target(profile: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
+    expected_provider = "openai" if profile.get("provider") == "openai" else "anthropic"
+    configured_upstream = _redact_url(str(profile.get("upstream_base_url") or ""))
+    health_url = str(profile.get("health_url") or "")
+    result: dict[str, Any] = {
+        "schema": "agentflow.activation_doctor.v1",
+        "target": profile.get("id"),
+        "ok": False,
+        "configured": True,
+        "provider": expected_provider,
+        "local_base_url": profile.get("local_base_url"),
+        "health_url": health_url,
+        "configured_upstream": configured_upstream,
+        "issues": [],
+    }
+    try:
+        response = httpx.get(health_url, timeout=timeout)
+    except Exception as exc:
+        result["issues"].append({
+            "code": "health-unreachable",
+            "message": f"Could not reach AgentFlow health URL: {type(exc).__name__}",
+        })
+        return result
+    result["health_status_code"] = response.status_code
+    if response.status_code >= 400:
+        result["issues"].append({
+            "code": "health-error",
+            "message": f"AgentFlow health returned HTTP {response.status_code}.",
+        })
+        return result
+    try:
+        health = response.json()
+    except ValueError:
+        result["issues"].append({"code": "health-invalid-json", "message": "AgentFlow health did not return JSON."})
+        return result
+    health_provider = str(health.get("provider") or "")
+    health_upstream = _redact_url(str(health.get("upstream") or ""))
+    result["health"] = {
+        "ok": bool(health.get("ok")),
+        "provider": health_provider,
+        "upstream": health_upstream,
+        "openai_auth_mode": health.get("openai_auth_mode"),
+    }
+    if health_provider != expected_provider:
+        result["issues"].append({
+            "code": "provider-mismatch",
+            "message": f"Running proxy provider is {health_provider or '<missing>'}, expected {expected_provider}.",
+        })
+    if configured_upstream and health_upstream and configured_upstream != health_upstream:
+        result["issues"].append({
+            "code": "upstream-mismatch",
+            "message": "Running proxy upstream does not match the activation profile.",
+            "configured_upstream": configured_upstream,
+            "running_upstream": health_upstream,
+        })
+    if not health.get("ok"):
+        result["issues"].append({"code": "health-not-ok", "message": "AgentFlow health reports ok=false."})
+    result["ok"] = not result["issues"]
+    return result
+
+
+def _write_doctor_summary(stdout: Any, result: dict[str, Any]) -> None:
+    status = "ok" if result["ok"] else "issue"
+    stdout.write(f"AgentFlow doctor target={result['target']} status={status}\n")
+    stdout.write(f"Local base URL for clients: {result.get('local_base_url')}\n")
+    stdout.write(f"Health URL: {result.get('health_url')}\n")
+    stdout.write(f"Configured upstream: {result.get('configured_upstream')}\n")
+    health = result.get("health") if isinstance(result.get("health"), dict) else {}
+    if health:
+        stdout.write(f"Running provider: {health.get('provider')}\n")
+        stdout.write(f"Running upstream: {health.get('upstream')}\n")
+    for issue in result.get("issues") or []:
+        stdout.write(f"- {issue.get('code')}: {issue.get('message')}\n")
 
 
 def _default_policy_reload_url() -> str:

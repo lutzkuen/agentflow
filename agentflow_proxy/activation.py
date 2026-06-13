@@ -9,6 +9,8 @@ import shlex
 import shutil
 from typing import Any
 
+from agentflow_proxy.upstream_url import normalize_openai_upstream_base_url, redact_url
+
 
 SCHEMA = "agentflow.activation_config.v1"
 DEFAULT_CONFIG_FILENAME = "activation.json"
@@ -85,7 +87,7 @@ def _target_host(_: str) -> str:
     return DEFAULT_HOST
 
 
-def _profile_command_args(profile: dict[str, Any]) -> list[str]:
+def _profile_command_args(profile: dict[str, Any], *, redact: bool = False) -> list[str]:
     target = str(profile.get("id") or "")
     provider = str(profile.get("provider") or "")
     if target == "openai" and provider == "openai":
@@ -97,7 +99,11 @@ def _profile_command_args(profile: dict[str, Any]) -> list[str]:
             "--port",
             str(profile.get("port") or DEFAULT_OPENAI_PORT),
             "--openai-upstream",
-            str(profile.get("upstream_base_url") or DEFAULT_OPENAI_UPSTREAM_BASE_URL),
+            str(
+                redact_url(profile.get("upstream_base_url") or DEFAULT_OPENAI_UPSTREAM_BASE_URL)
+                if redact
+                else profile.get("upstream_base_url") or DEFAULT_OPENAI_UPSTREAM_BASE_URL
+            ),
             "--openai-auth-mode",
             str(profile.get("openai_auth_mode") or DEFAULT_OPENAI_AUTH_MODE),
         ]
@@ -110,7 +116,11 @@ def _profile_command_args(profile: dict[str, Any]) -> list[str]:
             "--port",
             str(profile.get("port") or DEFAULT_CLAUDE_PORT),
             "--anthropic-upstream",
-            str(profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL),
+            str(
+                redact_url(profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL)
+                if redact
+                else profile.get("upstream_base_url") or DEFAULT_CLAUDE_UPSTREAM_BASE_URL
+            ),
         ]
     raise ValueError(f"unknown activation target: {target or provider or '<missing>'}")
 
@@ -122,8 +132,8 @@ def proxy_args_for_target(config: dict[str, Any], target: str) -> list[str]:
     return _profile_command_args(profile)
 
 
-def shell_command_for_profile(profile: dict[str, Any]) -> str:
-    return " ".join(["agentflow-proxy", *[shlex.quote(arg) for arg in _profile_command_args(profile)]])
+def shell_command_for_profile(profile: dict[str, Any], *, redact: bool = False) -> str:
+    return " ".join(["agentflow-proxy", *[shlex.quote(arg) for arg in _profile_command_args(profile, redact=redact)]])
 
 
 def activation_profile(
@@ -140,13 +150,14 @@ def activation_profile(
         auth_mode = openai_auth_mode.lower()
         if auth_mode not in {"client", "proxy"}:
             raise ValueError("openai auth mode must be 'client' or 'proxy'")
+        upstream_base_url = normalize_openai_upstream_base_url(openai_base_url or DEFAULT_OPENAI_UPSTREAM_BASE_URL)
         profile = {
             "id": "openai",
             "configured": True,
             "provider": "openai",
             "local_base_url": local_base_url or DEFAULT_OPENAI_LOCAL_BASE_URL,
             "health_url": health_url or DEFAULT_OPENAI_HEALTH_URL,
-            "upstream_base_url": openai_base_url or DEFAULT_OPENAI_UPSTREAM_BASE_URL,
+            "upstream_base_url": upstream_base_url,
             "openai_auth_mode": auth_mode,
             "host": _target_host(target),
             "port": _target_port(target),
@@ -264,8 +275,9 @@ def activation_result(
         "local_base_url": profile["local_base_url"],
         "health_url": profile["health_url"],
         "upstream_base_url": profile["upstream_base_url"],
+        "upstream_base_url_redacted": redact_url(str(profile["upstream_base_url"])),
         "run_command": f"agentflow run {profile['id']}",
-        "proxy_command": shell_command_for_profile(profile),
+        "proxy_command": shell_command_for_profile(profile, redact=True),
         "profile": profile,
         "target_count": len(config.get("targets") or {}),
     }

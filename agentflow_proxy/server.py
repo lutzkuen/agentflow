@@ -12,11 +12,13 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, WebSocket
 
+from agentflow_proxy.upstream_url import normalize_openai_upstream_base_url, redact_url
+
 load_dotenv()
 
 PROVIDER = os.getenv("AGENTFLOW_PROVIDER", "anthropic").lower()
 ANTHROPIC_UPSTREAM = os.getenv("AGENTFLOW_ANTHROPIC_UPSTREAM", "https://api.anthropic.com")
-OPENAI_UPSTREAM = os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com")
+OPENAI_UPSTREAM = normalize_openai_upstream_base_url(os.getenv("AGENTFLOW_OPENAI_UPSTREAM", "https://api.openai.com"))
 DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
 DEFAULT_DB = os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3"))
 DEFAULT_PORT = int(os.getenv("AGENTFLOW_PORT", "4000"))
@@ -272,7 +274,7 @@ def configure_provider(
         raise ValueError("openai auth mode must be 'client' or 'proxy'")
     PROVIDER = provider
     ANTHROPIC_UPSTREAM = anthropic_upstream
-    OPENAI_UPSTREAM = openai_upstream
+    OPENAI_UPSTREAM = normalize_openai_upstream_base_url(openai_upstream)
     OPENAI_AUTH_MODE = openai_auth_mode
     DEFAULT_UPSTREAM = ANTHROPIC_UPSTREAM if PROVIDER == "anthropic" else OPENAI_UPSTREAM
     app.title = f"AgentFlow {PROVIDER.title()} Proxy"
@@ -295,7 +297,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "provider": PROVIDER,
         "db": DEFAULT_DB,
-        "upstream": DEFAULT_UPSTREAM,
+        "upstream": redact_url(DEFAULT_UPSTREAM),
         "openai_auth_mode": OPENAI_AUTH_MODE if PROVIDER == "openai" else None,
         "time": utc_now(),
     }

@@ -97,6 +97,27 @@ http://127.0.0.1:4003/agentflow/dashboard
 
 `--openai-auth-mode proxy` means AgentFlow uses `AGENTFLOW_OPENAI_API_KEY` or `OPENAI_API_KEY` from the proxy environment when forwarding upstream. Use `--openai-auth-mode client` if you want each client request's `Authorization` header to be forwarded.
 
+For a custom OpenAI-compatible provider, keep the client base URL pointed at
+AgentFlow and configure the upstream provider URL separately:
+
+```bash
+agentflow activate openai \
+  --openai-base-url 'https://resource.openai.azure.com/openai/deployments/my-deployment?api-version=2024-10-21' \
+  --openai-auth-mode proxy
+
+agentflow run openai
+```
+
+In that example:
+
+- `http://127.0.0.1:4003/v1` is the local AgentFlow base URL your OpenAI SDK or tool uses.
+- `https://resource.openai.azure.com/openai/deployments/my-deployment?...` is the upstream provider base URL AgentFlow forwards to.
+- `--openai-auth-mode proxy` uses credentials from the AgentFlow process environment. `--openai-auth-mode client` forwards each client's `Authorization` header instead.
+
+AgentFlow preserves upstream path and query components such as Azure `api-version`,
+avoids duplicate `/v1` route segments, and redacts userinfo or sensitive query
+values in CLI and health output.
+
 ## Point an existing app at AgentFlow
 
 ### Existing OpenAI API app
