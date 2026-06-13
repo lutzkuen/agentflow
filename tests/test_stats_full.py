@@ -743,6 +743,12 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual(summary["received_count"], 1)
         self.assertEqual(summary["applied_count"], 1)
         self.assertEqual(summary["changed_model_count"], 1)
+        self.assertAlmostEqual(summary["observed_savings_usd"], 0.002, places=6)
+        self.assertAlmostEqual(summary["applied_observed_savings_usd"], 0.002, places=6)
+        self.assertAlmostEqual(summary["changed_model_observed_savings_usd"], 0.002, places=6)
+        self.assertEqual(summary["positive_savings_count"], 1)
+        self.assertEqual(summary["observed_savings_basis"], "calls.cost_baseline_usd-minus-cost_est_usd")
+        self.assertEqual(summary["observed_savings_attribution"], "managed-recommendation-model-change")
         self.assertEqual(summary["server_error_count"], 1)
         self.assertEqual(summary["invalid_count"], 0)
         self.assertEqual(summary["feedback_sent_count"], 1)
@@ -756,6 +762,9 @@ class StatsFullTest(unittest.TestCase):
         self.assertEqual({row["value"]: row["count"] for row in result["policy_ids"]}, {"candidate-route-chat": 1})
         self.assertEqual(result["recent"][0]["recommendation_status"], "missing")
         self.assertEqual(result["recent"][0]["recommendation_reason"], "historical-null")
+        applied_recent = next(row for row in result["recent"] if row["applied"])
+        self.assertAlmostEqual(applied_recent["observed_savings_usd"], 0.002, places=6)
+        self.assertTrue(applied_recent["observed_savings_attributed_to_managed"])
         json.dumps(result)
 
     def test_managed_recommendation_dashboard_endpoint_and_panel_render_without_server(self):

@@ -67,6 +67,7 @@ from agentflow_proxy.routing_experiments import (
 )
 from agentflow_proxy.session_memory_hints import build_session_memory_optimization_hints
 from agentflow_proxy.recommendations import (
+    attach_observed_savings_to_routing_meta,
     apply_recommendation_to_body,
     build_old_context_summary_outcome_event,
     build_old_context_summary_outcome_feedback,
@@ -1663,6 +1664,12 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
                                 experiment_meta["reason"] = "streaming-shadow-http-400"
                             elif experiment_meta.get("status") == "shadow-unsupported-shape":
                                 experiment_meta["reason"] = "streaming-shadow-unsupported-shape"
+                    attach_observed_savings_to_routing_meta(
+                        routing_meta,
+                        cost_est_usd=cost,
+                        cost_baseline_usd=cost_baseline,
+                        status_code=status_code,
+                    )
                     context.store.log_call(
                         id=call_id, created_at=utc_now(), path=path,
                         requested_model=requested_model, routed_model=crunched.get("model"), stream=1,
@@ -2106,6 +2113,12 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             )
         error = None if status_code < 400 else upstream_error_text(response_body, status_code)
         thinking_tokens = thinking_chars // TOKEN_CHARS if thinking_chars else None
+        attach_observed_savings_to_routing_meta(
+            routing_meta,
+            cost_est_usd=cost,
+            cost_baseline_usd=cost_baseline,
+            status_code=status_code,
+        )
         context.store.log_call(
             id=call_id, created_at=utc_now(), path=path,
             requested_model=requested_model, routed_model=crunched.get("model"), stream=0,

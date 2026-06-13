@@ -492,6 +492,11 @@ class SafetyRegressionRouteTests(unittest.TestCase):
         self.assertTrue(managed["changed_model"])
         self.assertEqual(managed["apply_reason"], "route-to-local-safety-gate-passed")
         self.assertEqual(managed["local_action_taken"], "route_to")
+        self.assertGreater(managed["observed_savings_usd"], 0.0)
+        self.assertEqual(managed["observed_savings_basis"], "calls.cost_baseline_usd-minus-cost_est_usd")
+        self.assertTrue(managed["observed_savings_cost_known"])
+        self.assertTrue(managed["observed_savings_attributed_to_managed"])
+        self.assertEqual(managed["observed_savings_attribution"], "managed-recommendation-model-change")
 
     def test_anthropic_managed_scaffold_crunch_profile_applies_before_forwarding(self):
         server.configure_provider("anthropic", anthropic_upstream="https://anthropic.test")

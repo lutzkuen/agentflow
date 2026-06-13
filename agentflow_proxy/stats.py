@@ -7947,7 +7947,7 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             """
             select id, created_at, path, coalesce(provider, 'anthropic') as provider,
                    requested_model, routed_model, status_code, latency_ms,
-                   routing_json
+                   cost_est_usd, cost_baseline_usd, routing_json
             from calls
             order by created_at desc
             limit ?
@@ -7980,6 +7980,10 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
     feedback_skipped_count = 0
     feedback_failed_count = 0
     feedback_sanitized_count = 0
+    observed_savings_usd = 0.0
+    applied_observed_savings_usd = 0.0
+    changed_model_observed_savings_usd = 0.0
+    positive_savings_count = 0
     last_recommendation_error_class = None
     last_feedback_error_class = None
 
@@ -8004,6 +8008,7 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
                     "policy_id": None,
                     "target_model": None,
                     "fallback": None,
+                    "observed_savings_usd": 0.0,
                     "latency_ms": None,
                     "feedback_status": "missing",
                     "feedback_reason": "historical-null",
@@ -8023,10 +8028,23 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
             enabled_count += 1
         if status == "received":
             received_count += 1
-        if bool(managed.get("applied")):
+        managed_applied = bool(managed.get("applied"))
+        if managed_applied:
             applied_count += 1
         if bool(managed.get("changed_model")):
             changed_model_count += 1
+        row_savings = max(_as_float(row.get("cost_baseline_usd")) - _as_float(row.get("cost_est_usd")), 0.0)
+        if _as_int(row.get("status_code")) >= 400:
+            row_savings = 0.0
+        managed_changed_model = bool(managed.get("changed_model"))
+        attributed_to_managed = bool(managed_applied and managed_changed_model)
+        if attributed_to_managed and row_savings > 0:
+            positive_savings_count += 1
+        if attributed_to_managed:
+            applied_observed_savings_usd += row_savings
+            observed_savings_usd += row_savings
+        if managed_changed_model:
+            changed_model_observed_savings_usd += row_savings
         if status == "error" or reason == "server-error":
             server_error_count += 1
             if last_recommendation_error_class is None:
@@ -8088,6 +8106,8 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
                 "policy_id": managed.get("policy_id"),
                 "target_model": managed.get("target_model"),
                 "fallback": fallback,
+                "observed_savings_usd": round(row_savings, 8) if attributed_to_managed else 0.0,
+                "observed_savings_attributed_to_managed": attributed_to_managed,
                 "latency_ms": _as_int(latency_ms) if latency_ms is not None else None,
                 "feedback_status": feedback_status,
                 "feedback_reason": feedback_reason,
@@ -8128,6 +8148,12 @@ async def stats_managed_recommendations(store_obj: Any, limit: int = 500) -> dic
         "feedback_skipped_count": feedback_skipped_count,
         "feedback_failed_count": feedback_failed_count,
         "feedback_sanitized_count": feedback_sanitized_count,
+        "observed_savings_usd": round(observed_savings_usd, 8),
+        "applied_observed_savings_usd": round(applied_observed_savings_usd, 8),
+        "changed_model_observed_savings_usd": round(changed_model_observed_savings_usd, 8),
+        "positive_savings_count": positive_savings_count,
+        "observed_savings_basis": "calls.cost_baseline_usd-minus-cost_est_usd",
+        "observed_savings_attribution": "managed-recommendation-model-change",
         "avg_feedback_latency_ms": _avg_or_none(feedback_latency_values),
         "last_recommendation_error_class": last_recommendation_error_class,
         "last_feedback_error_class": last_feedback_error_class,

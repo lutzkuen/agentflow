@@ -1553,6 +1553,51 @@ def apply_recommendation_to_body(
     return meta
 
 
+def attach_observed_savings_to_routing_meta(
+    routing_meta: dict[str, Any],
+    *,
+    cost_est_usd: float | None,
+    cost_baseline_usd: float | None,
+    status_code: int | None = None,
+) -> None:
+    """Annotate routing metadata with the observed call-level cost delta."""
+
+    if cost_est_usd is None or cost_baseline_usd is None:
+        observed_savings = 0.0
+        cost_known = False
+    else:
+        observed_savings = max(float(cost_baseline_usd) - float(cost_est_usd), 0.0)
+        cost_known = True
+
+    success = status_code is None or int(status_code) < 400
+    if not success:
+        observed_savings = 0.0
+
+    observed_savings = round(observed_savings, 8)
+    routing_meta["observed_savings_usd"] = observed_savings
+    routing_meta["observed_savings_basis"] = "calls.cost_baseline_usd-minus-cost_est_usd"
+    routing_meta["observed_savings_cost_known"] = cost_known
+
+    managed = routing_meta.get("managed_recommendation")
+    if not isinstance(managed, dict):
+        return
+
+    attributed_to_managed = bool(managed.get("applied") and managed.get("changed_model"))
+    managed["observed_savings_usd"] = observed_savings if attributed_to_managed else 0.0
+    managed["observed_savings_basis"] = "calls.cost_baseline_usd-minus-cost_est_usd"
+    managed["observed_savings_cost_known"] = cost_known
+    managed["observed_savings_status_code"] = status_code
+    managed["observed_savings_attributed_to_managed"] = attributed_to_managed
+    managed["observed_savings_attribution"] = (
+        "managed-recommendation-model-change"
+        if attributed_to_managed
+        else "not-attributed-without-managed-model-change"
+    )
+    if cost_known:
+        managed["cost_est_usd"] = round(float(cost_est_usd), 8)
+        managed["cost_baseline_usd"] = round(float(cost_baseline_usd), 8)
+
+
 def _compact_error(error: str | None, status_code: int | None) -> dict[str, Any]:
     if not error:
         return {}
