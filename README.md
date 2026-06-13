@@ -55,8 +55,13 @@ pip install -e .
 Smoke-test the install:
 
 ```bash
-agentflow-proxy --help
+agentflow --help
 ```
+
+The public onboarding command is `agentflow`. The Python distribution is still
+published from this repository as `agentflow-proxy`; reserving or migrating the
+PyPI package name to `agentflow` is a release task. Existing specialist scripts
+such as `agentflow-proxy` remain available for compatibility.
 
 Run tests:
 

@@ -29,6 +29,9 @@ PATTERN_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_PATTERN_ROLLOUT_ACTIONS_URL"
 OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_OPTIMIZATION_ROLLOUT_ACTIONS_URL"
 SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_SCAFFOLD_ROLLOUT_ACTIONS_URL"
 MANAGED_POLICY_API_KEY_ENV = "AGENTFLOW_MANAGED_API_KEY"
+ONBOARDING_TARGETS = ("openai", "claude", "codex", "claude-vscode")
+RUN_TARGETS = ("openai", "claude")
+DEFAULT_STATS_URL = "http://127.0.0.1:4002/agentflow/stats"
 
 
 def _write_activation_summary(stdout: Any, result: dict[str, Any]) -> None:
@@ -87,6 +90,7 @@ def agentflow_cli(
     stderr: Any = None,
 ) -> int:
     from agentflow_proxy import activation
+    from agentflow_proxy import __version__
 
     stdout = stdout if stdout is not None else sys.stdout
     stderr = stderr if stderr is not None else sys.stderr
@@ -98,7 +102,17 @@ def agentflow_cli(
         help="Local AgentFlow config directory, default: AGENTFLOW_CONFIG_DIR or ~/.agentflow.",
     )
 
-    parser = argparse.ArgumentParser(description="AgentFlow local proxy onboarding and runtime commands")
+    parser = argparse.ArgumentParser(
+        description="AgentFlow local proxy onboarding and runtime commands",
+        epilog=(
+            "Onboarding targets: "
+            + ", ".join(ONBOARDING_TARGETS)
+            + ". Runtime proxy targets: "
+            + ", ".join(RUN_TARGETS)
+            + ". Defaults bind provider proxies to 127.0.0.1."
+        ),
+    )
+    parser.add_argument("--version", action="version", version=f"agentflow {__version__}")
     parser.add_argument(
         "--config-dir",
         default=None,
@@ -193,7 +207,7 @@ def agentflow_cli(
         parents=[config_parent],
         help="Run a configured AgentFlow proxy target.",
     )
-    run_parser.add_argument("target", choices=("openai", "claude"))
+    run_parser.add_argument("target", choices=RUN_TARGETS)
     run_parser.add_argument(
         "--dry-run",
         "--print-command",
@@ -206,9 +220,30 @@ def agentflow_cli(
         parents=[config_parent],
         help="Check a configured AgentFlow target without exposing secrets.",
     )
-    doctor_parser.add_argument("target", choices=("openai", "claude"))
+    doctor_parser.add_argument("target", choices=ONBOARDING_TARGETS)
     doctor_parser.add_argument("--timeout", type=float, default=5.0, help="Health request timeout in seconds.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    stats_parser = subparsers.add_parser(
+        "stats",
+        help="Fetch local AgentFlow stats from the read-only dashboard API.",
+    )
+    stats_parser.add_argument(
+        "target",
+        nargs="?",
+        choices=ONBOARDING_TARGETS,
+        help="Optional onboarding target label for docs/scripts; stats are read from the local API.",
+    )
+    stats_parser.add_argument(
+        "--url",
+        default=os.getenv("AGENTFLOW_STATS_URL", DEFAULT_STATS_URL),
+        help=f"Local stats URL, default: {DEFAULT_STATS_URL}.",
+    )
+    stats_parser.add_argument("--timeout", type=float, default=5.0, help="Stats request timeout in seconds.")
+    stats_parser.add_argument("--json", action="store_true", help="Print full stats JSON.")
+
+    version_parser = subparsers.add_parser("version", help="Print the AgentFlow CLI version.")
+    version_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     args = parser.parse_args(argv)
     if not hasattr(args, "config_dir") or args.config_dir is None:
@@ -288,6 +323,12 @@ def agentflow_cli(
         return 0
 
     if args.command == "doctor":
+        if args.target not in RUN_TARGETS:
+            stderr.write(
+                f"AgentFlow doctor target is not implemented yet: {args.target}. "
+                "Supported runtime targets are: openai, claude.\n"
+            )
+            return 2
         config = activation.load_activation_config(args.config_dir)
         profile = (config.get("targets") or {}).get(args.target)
         if not isinstance(profile, dict) or not profile.get("configured"):
@@ -300,8 +341,89 @@ def agentflow_cli(
             _write_doctor_summary(stdout, result)
         return 0 if result["ok"] else 1
 
+    if args.command == "stats":
+        result = _fetch_agentflow_stats(url=str(args.url), timeout=float(args.timeout), target=args.target)
+        if args.json:
+            _write_json(stdout, result)
+        elif result["ok"]:
+            _write_stats_summary(stdout, result)
+        else:
+            _write_json(stderr, result)
+        return 0 if result["ok"] else 1
+
+    if args.command == "version":
+        result = {
+            "schema": "agentflow.version.v1",
+            "ok": True,
+            "version": __version__,
+            "package": "agentflow-proxy",
+            "command": "agentflow",
+        }
+        if args.json:
+            _write_json(stdout, result)
+        else:
+            stdout.write(f"agentflow {__version__}\n")
+        return 0
+
     parser.error("unknown command")
     return 2
+
+
+def _fetch_agentflow_stats(*, url: str = DEFAULT_STATS_URL, timeout: float = 5.0, target: str | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema": "agentflow.stats_cli.v1",
+        "ok": False,
+        "target": target,
+        "url": url,
+        "issues": [],
+    }
+    if not _is_loopback_url(url):
+        result["issues"].append({
+            "code": "non-loopback-url",
+            "message": "agentflow stats only reads loopback URLs by default.",
+        })
+        return result
+    try:
+        response = httpx.get(url, timeout=timeout)
+    except Exception as exc:
+        result["issues"].append({
+            "code": "stats-unreachable",
+            "message": f"Could not reach AgentFlow stats URL: {type(exc).__name__}",
+        })
+        return result
+    result["status_code"] = response.status_code
+    if response.status_code >= 400:
+        result["issues"].append({
+            "code": "stats-error",
+            "message": f"AgentFlow stats returned HTTP {response.status_code}.",
+        })
+        return result
+    try:
+        payload = response.json()
+    except ValueError:
+        result["issues"].append({"code": "stats-invalid-json", "message": "AgentFlow stats did not return JSON."})
+        return result
+    if not isinstance(payload, dict):
+        result["issues"].append({"code": "stats-invalid-payload", "message": "AgentFlow stats payload is not an object."})
+        return result
+    result["ok"] = True
+    result["stats"] = payload
+    return result
+
+
+def _write_stats_summary(stdout: Any, result: dict[str, Any]) -> None:
+    stats = result.get("stats") if isinstance(result.get("stats"), dict) else {}
+    stdout.write("AgentFlow stats status=ok\n")
+    stdout.write(f"Stats URL: {result.get('url')}\n")
+    if result.get("target"):
+        stdout.write(f"Target: {result.get('target')}\n")
+    for label, key in (
+        ("Calls", "calls"),
+        ("Cache hit rate", "cache_hit_rate"),
+        ("DB", "db"),
+    ):
+        if key in stats:
+            stdout.write(f"{label}: {stats.get(key)}\n")
 
 
 def _doctor_activation_target(profile: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:

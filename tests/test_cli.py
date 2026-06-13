@@ -38,6 +38,112 @@ class ManagedFeedbackFlushClient:
 
 
 class AgentflowActivationCliTests(unittest.TestCase):
+    def test_public_agentflow_help_lists_onboarding_commands_and_targets(self):
+        stdout = io.StringIO()
+
+        with patch("sys.stdout", stdout), self.assertRaises(SystemExit) as raised:
+            cli.agentflow_cli(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        output = stdout.getvalue()
+        for expected in ("activate", "stats", "doctor", "run", "version"):
+            self.assertIn(expected, output)
+        for target in ("openai", "claude", "codex", "claude-vscode"):
+            self.assertIn(target, output)
+        self.assertIn("127.0.0.1", output)
+
+    def test_public_agentflow_subcommand_help_works(self):
+        commands = [
+            ("activate", "--help"),
+            ("stats", "--help"),
+            ("doctor", "--help"),
+            ("run", "--help"),
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                stdout = io.StringIO()
+                with patch("sys.stdout", stdout), self.assertRaises(SystemExit) as raised:
+                    cli.agentflow_cli(list(command))
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("usage:", stdout.getvalue())
+
+    def test_agentflow_version_command_prints_version(self):
+        from agentflow_proxy import __version__
+
+        stdout = io.StringIO()
+
+        code = cli.agentflow_cli(["version"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout.getvalue(), f"agentflow {__version__}\n")
+
+    def test_agentflow_stats_fetches_loopback_stats_summary(self):
+        stdout = io.StringIO()
+
+        with patch("agentflow_proxy.cli.httpx.get") as http_get:
+            http_get.return_value = httpx.Response(
+                200,
+                json={"calls": 12, "cache_hit_rate": 0.25, "db": "/tmp/agentflow.sqlite3"},
+            )
+            code = cli.agentflow_cli(["stats", "openai"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        http_get.assert_called_once_with("http://127.0.0.1:4002/agentflow/stats", timeout=5.0)
+        output = stdout.getvalue()
+        self.assertIn("AgentFlow stats status=ok", output)
+        self.assertIn("Target: openai", output)
+        self.assertIn("Calls: 12", output)
+
+    def test_agentflow_stats_refuses_non_loopback_url(self):
+        stderr = io.StringIO()
+
+        code = cli.agentflow_cli(
+            ["stats", "--url", "https://example.com/agentflow/stats"],
+            stdout=io.StringIO(),
+            stderr=stderr,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("non-loopback-url", stderr.getvalue())
+
+    def test_unsupported_onboarding_doctor_target_returns_clear_message(self):
+        stderr = io.StringIO()
+
+        code = cli.agentflow_cli(["doctor", "codex"], stdout=io.StringIO(), stderr=stderr)
+
+        self.assertEqual(code, 2)
+        self.assertIn("AgentFlow doctor target is not implemented yet: codex", stderr.getvalue())
+        self.assertIn("Supported runtime targets are: openai, claude", stderr.getvalue())
+
+    def test_unsupported_subcommand_has_stable_argparse_exit(self):
+        stderr = io.StringIO()
+
+        with patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
+            cli.agentflow_cli(["nope"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("invalid choice", stderr.getvalue())
+
+    def test_pyproject_scripts_keep_public_and_legacy_entry_points(self):
+        raw = Path("pyproject.toml").read_text(encoding="utf-8").splitlines()
+        scripts: dict[str, str] = {}
+        in_scripts = False
+        for line in raw:
+            stripped = line.strip()
+            if stripped == "[project.scripts]":
+                in_scripts = True
+                continue
+            if in_scripts and stripped.startswith("["):
+                break
+            if in_scripts and "=" in stripped:
+                name, value = stripped.split("=", 1)
+                scripts[name.strip()] = value.strip().strip('"')
+
+        self.assertEqual(scripts["agentflow"], "agentflow_proxy.cli:agentflow_main")
+        self.assertEqual(scripts["agentflow-proxy"], "agentflow_proxy.cli:proxy_main")
+        self.assertEqual(scripts["agentflow-claude-proxy"], "agentflow_proxy.cli:proxy_main")
+        self.assertEqual(scripts["agentflow-dashboard"], "agentflow_proxy.dashboard:main")
+
     def test_activate_openai_writes_default_profile_idempotently(self):
         with TemporaryDirectory() as tmp:
             stdout_one = io.StringIO()
