@@ -10170,6 +10170,21 @@ async def stats_terminal_output_compaction_readiness(
     }
 
 
+async def stats_anthropic_thinking_compaction_impact(
+    store_obj: Any,
+    *,
+    limit: int = 500,
+    since: str | None = None,
+) -> dict[str, Any]:
+    from agentflow_proxy.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
+
+    return build_anthropic_thinking_compaction_impact_report(
+        store_obj,
+        limit=limit,
+        since=since,
+    )
+
+
 async def stats_repeated_scaffold_impact(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.repeated_scaffold_impact import build_repeated_scaffold_impact_report
 
@@ -17320,6 +17335,7 @@ def dashboard_html() -> str:
 <div class="research-grid">
   <button class="panel-btn" onclick="showTab('adoption')">Adoption quality</button>
   <button class="panel-btn" onclick="showTab('terminal')">Terminal compaction</button>
+  <button class="panel-btn" onclick="showTab('thinking')">Thinking compaction</button>
   <button class="panel-btn" onclick="showTab('scaffold')">Scaffold crunch</button>
   <button class="panel-btn" onclick="showTab('openai')">OpenAI optimization</button>
   <button class="panel-btn" onclick="showTab('evalqueue')">Eval queue</button>
@@ -17658,6 +17674,36 @@ def dashboard_html() -> str:
       <th data-sort-type="text">Surface</th><th data-sort-type="text">Status</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Hit type</th><th data-sort-type="text">Policy source</th><th data-sort-type="number">Calls</th>
     </tr></thead>
     <tbody id="cache-tbody"></tbody>
+  </table>
+</div>
+</div>
+
+<div class="tab-panel" id="tab-thinking">
+<div class="section">
+  <h2>Thinking-compaction impact</h2>
+  <table data-table-id="thinking-compaction-summary" data-filter-label="Filter thinking compaction summary">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Observed</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Skipped</th><th data-sort-type="number">Safety stops</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Net savings</th><th data-sort-type="number">Thinking tokens</th><th data-sort-type="number">Prompt-cache read</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="thinking-compaction-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Thinking budget feedback</h2>
+  <table data-table-id="thinking-budget-feedback" data-filter-label="Filter thinking budget feedback">
+    <thead><tr>
+      <th data-sort-type="text">Action</th><th data-sort-type="text">Reasons</th><th data-sort-type="text">Action counts</th><th data-sort-type="text">Locality</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="thinking-budget-feedback-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Thinking-compaction candidate impact</h2>
+  <table class="activity-table" data-table-id="thinking-compaction-candidates" data-filter-label="Filter thinking compaction candidates">
+    <thead><tr>
+      <th data-sort-type="text">Verdict</th><th data-sort-type="text">Candidate</th><th data-sort-type="text">Rule</th><th data-sort-type="text">Surface</th><th data-sort-type="text">Category</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="number">Skipped</th><th data-sort-type="number">Safety</th><th data-sort-type="number">Saved tokens</th><th data-sort-type="money">Net savings</th><th data-sort-type="money">Holdout projected</th><th data-sort-type="percent">Error delta</th><th data-sort-type="percent">Retry delta</th><th data-sort-type="number">Thinking delta</th><th data-sort-type="number">Sessions</th><th data-sort-type="text">Reasons</th>
+    </tr></thead>
+    <tbody id="thinking-compaction-candidates-tbody"></tbody>
   </table>
 </div>
 </div>
@@ -18708,7 +18754,7 @@ async function loadFullStats(){
 
 let activeTabName='activity';
 const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research'];
-const researchTabs=['adoption','terminal','scaffold','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext'];
+const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext'];
 const tabs=[...operationalTabs,...researchTabs];
 function isResearchTab(name){
   return researchTabs.includes(name);
@@ -19515,6 +19561,76 @@ function terminalCompactionStateBadges(states){
   states=states||[];
   if(!states.length)return'<span class="badge miss">none</span>';
   return states.map(row=>`<span class="badge ${row.active?terminalCompactionStatusBadge(row.state):'miss'}">${esc(row.state||'unknown')} ${(row.count||0).toLocaleString()}</span>`).join(' ');
+}
+function thinkingCompactionPrivacyBadges(privacy){
+  privacy=privacy||{};
+  return `${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">metadata unclear</span>'} ${privacy.raw_thinking_text_included?'<span class="badge err">thinking text</span>':'<span class="badge hit">thinking text omitted</span>'} ${privacy.raw_request_bodies_included?'<span class="badge err">raw bodies</span>':'<span class="badge hit">raw bodies omitted</span>'} ${privacy.raw_tool_payloads_included||privacy.tool_payloads_included?'<span class="badge err">tool payloads</span>':'<span class="badge hit">tool payloads omitted</span>'} ${privacy.request_ids_included?'<span class="badge err">request IDs</span>':'<span class="badge hit">request IDs omitted</span>'} ${privacy.session_ids_included||privacy.raw_session_ids_included?'<span class="badge err">session IDs</span>':'<span class="badge hit">session IDs omitted</span>'}`;
+}
+function thinkingActionBadge(action){
+  if(action==='widen')return'hit';
+  if(action==='hold'||action==='keep-holdout')return'routed';
+  if(action==='suppress')return'err';
+  return'miss';
+}
+async function refreshThinkingCompactionImpact(){
+  try{
+    const r=await fetch('/agentflow/stats/anthropic-thinking-compaction-impact?limit=500');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    const feedback=d.budget_governor_feedback||{};
+    document.getElementById('thinking-compaction-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${terminalCompactionStatusBadge(d.status)}">${esc(d.status||'unknown')}</span></td>
+      <td class="tokens">${(s.observed_thinking_compaction_metadata_row_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.candidate_group_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.skipped_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.safety_stop_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtTok(s.tokens_saved_est||0)}</td>
+      <td class="${(s.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(s.net_savings_usd||0,6)}</td>
+      <td class="tokens">${fmtTok(s.thinking_output_tokens||0)}</td>
+      <td class="tokens">${fmtTok(s.prompt_cache_read_tokens||0)}</td>
+      <td class="flags">${thinkingCompactionPrivacyBadges(privacy)}</td>
+    </tr>`;
+    document.getElementById('thinking-budget-feedback-tbody').innerHTML=`<tr>
+      <td><span class="badge ${thinkingActionBadge(feedback.recommended_budget_action)}">${esc(feedback.recommended_budget_action||'no-data')}</span></td>
+      <td class="flags">${terminalCompactionBreakdownBadges(feedback.reason_code_counts||[],'none','miss')}</td>
+      <td class="flags">${terminalCompactionBreakdownBadges(feedback.action_breakdown||[],'none','provider')}</td>
+      <td class="flags">${feedback.local_only?'<span class="badge hit">local only</span>':'<span class="badge err">remote</span>'} ${feedback.wrote_store?'<span class="badge err">writes store</span>':'<span class="badge hit">read only</span>'}</td>
+      <td class="flags">${thinkingCompactionPrivacyBadges(feedback.privacy||{})}</td>
+    </tr>`;
+    const rows=d.candidates||[];
+    document.getElementById('thinking-compaction-candidates-tbody').innerHTML=rows.map(row=>{
+      const cohorts=row.cohorts||{};
+      const applied=cohorts.applied||{};
+      const holdout=cohorts.holdout||{};
+      const skipped=cohorts.skipped||{};
+      const safety=cohorts.safety_stop||{};
+      const deltas=row.deltas||{};
+      const sessionImpact=row.session_budget_impact||{};
+      return `<tr>
+        <td><span class="badge ${thinkingActionBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+        <td class="model">${esc(row.candidate_id||'unknown')}</td>
+        <td class="model">${esc(row.rule_id||'unknown')}</td>
+        <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+        <td><span class="badge miss">${esc(row.category||'unknown')}</span></td>
+        <td class="tokens">${(applied.count||0).toLocaleString()}</td>
+        <td class="tokens">${(holdout.count||0).toLocaleString()}</td>
+        <td class="tokens">${(skipped.count||0).toLocaleString()}</td>
+        <td class="tokens">${(safety.count||0).toLocaleString()}</td>
+        <td class="tokens">${fmtTok(applied.tokens_saved_est||0)}</td>
+        <td class="${(applied.net_savings_usd||0)>=0?'savings':'cost'}">${fmt(applied.net_savings_usd||0,6)}</td>
+        <td class="savings">${fmt(holdout.gross_savings_usd||0,6)}</td>
+        <td class="${(deltas.error_rate_delta||0)>0?'cost':'tokens'}">${fmtPctValue(deltas.error_rate_delta||0)}</td>
+        <td class="${(deltas.retry_rate_delta||0)>0?'cost':'tokens'}">${fmtPctValue(deltas.retry_rate_delta||0)}</td>
+        <td class="tokens">${(deltas.thinking_tokens_avg_delta||0).toLocaleString()}</td>
+        <td class="tokens">${(sessionImpact.affected_session_count||0).toLocaleString()}</td>
+        <td class="flags">${terminalCompactionReasonBadges(row.reason_codes,row.verdict)}</td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="17" style="color:#8b949e">No thinking-compaction canary impact metadata yet</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
 }
 async function refreshTerminalOutputCompaction(){
   try{
@@ -21537,6 +21653,7 @@ const tabRefreshers={
   categories:[refreshCategories],
   cache:[refreshCache],
   terminal:[refreshTerminalOutputCompaction],
+  thinking:[refreshThinkingCompactionImpact],
   scaffold:[refreshRepeatedScaffold],
   errors:[refreshErrors],
   limiter:[refreshLimiter],

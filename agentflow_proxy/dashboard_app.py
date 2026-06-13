@@ -395,6 +395,21 @@ def create_dashboard_router(
             ),
         )
 
+    @router.get("/agentflow/stats/anthropic-thinking-compaction-impact")
+    async def stats_anthropic_thinking_compaction_impact(
+        limit: int = 500,
+        since: str | None = None,
+    ) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "anthropic-thinking-compaction-impact",
+            (int(limit), since or ""),
+            lambda: stats_views.stats_anthropic_thinking_compaction_impact(
+                _store(store_obj),
+                limit=limit,
+                since=since,
+            ),
+        )
+
     @router.get("/agentflow/stats/repeated-scaffold-impact")
     async def stats_repeated_scaffold_impact(limit: int = 500) -> dict[str, Any]:
         return await cached_expensive_stats(

@@ -4403,6 +4403,48 @@ def anthropic_thinking_compaction_opportunity_cli(argv: Sequence[str] | None = N
     return 0
 
 
+def anthropic_thinking_compaction_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure Anthropic thinking-history compaction canary impact from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=500,
+        help="Recent provider calls to inspect, default: 500, max: 10000",
+    )
+    parser.add_argument("--since", default=None, help="Optional inclusive UTC timestamp lower bound.")
+    parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied samples for budget feedback.")
+    parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout samples for budget feedback.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_anthropic_thinking_compaction_impact_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            min_applied_samples=args.min_applied_samples,
+            min_holdout_samples=args.min_holdout_samples,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def anthropic_thinking_compaction_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run Anthropic thinking-history compaction plans from local request metadata")
     parser.add_argument(
@@ -8126,6 +8168,10 @@ def codex_terminal_transcript_opportunity_main() -> None:
 
 def anthropic_thinking_compaction_opportunity_main() -> None:
     raise SystemExit(anthropic_thinking_compaction_opportunity_cli())
+
+
+def anthropic_thinking_compaction_impact_main() -> None:
+    raise SystemExit(anthropic_thinking_compaction_impact_cli())
 
 
 def anthropic_thinking_compaction_dry_run_main() -> None:

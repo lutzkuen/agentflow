@@ -8236,7 +8236,7 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("id=\"provider-tbody\"", html)
         self.assertNotIn("id=\"codex-tbody\"", html)
         self.assertIn("const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research']", html)
-        self.assertIn("const researchTabs=['adoption','terminal','scaffold','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext']", html)
+        self.assertIn("const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext']", html)
 
     def test_dashboard_exposes_terminal_output_compaction_readiness_panel(self):
         html = stats_views.dashboard_html()
