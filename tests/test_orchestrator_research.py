@@ -125,6 +125,106 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-candidate-secret", rendered)
         self.assertNotIn("req-candidate-secret", rendered)
 
+    def test_current_pass_through_routing_summary_is_ranked_into_activation_candidates(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2490,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4-mini",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "unknown",
+                        "c": 1232,
+                        "request_id": "req-secret-should-not-leak",
+                    },
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "reason": "thinking-context-blocked",
+                        "c": 956,
+                        "session_id": "session-secret-should-not-leak",
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "chat",
+                        "c": 212,
+                    },
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-haiku-4-5-20251001",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                        "category": "tool-result",
+                        "c": 51,
+                    },
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": None,
+                        "category": "unknown",
+                        "c": 38,
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        report = plan["evidence"]["stats_summary"]["pass_through_routing_report"]
+        self.assertEqual(report["schema"], "agentflow.pass_through_routing_activation_candidates.v1")
+        self.assertEqual(report["summary"]["pass_through_rows"], 2489)
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+
+        buckets = {
+            (bucket["provider"], bucket["requested_model"], bucket["routed_model"]): bucket
+            for bucket in report["buckets"]
+        }
+        gpt54 = buckets[("openai", "gpt-5.4", "gpt-5.4")]
+        gpt54_mini = buckets[("openai", "gpt-5.4-mini", "gpt-5.4-mini")]
+        self.assertEqual(gpt54["actionability"], "actionable")
+        self.assertEqual(gpt54["candidate_target_model"], "gpt-5.4-mini")
+        self.assertEqual(gpt54["required_local_executor"], "openai-routing-canary")
+        self.assertGreater(gpt54["estimated_savings_per_1000_calls_usd"], 0)
+        self.assertEqual(gpt54_mini["actionability"], "already-cheapest")
+        self.assertIsNotNone(gpt54_mini["no_op_reason"])
+
+        classes = {row["class"] for row in report["actionability_breakdown"]}
+        self.assertIn("actionable", classes)
+        self.assertIn("already-cheapest", classes)
+        self.assertIn("safety-blocked", classes)
+        self.assertIn("unsupported-provider-action", classes)
+
+        routing_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "routing")
+        signal = routing_candidate["projected_savings_signal"]
+        self.assertEqual(signal["actionability"], "actionable")
+        self.assertEqual(signal["requested_model"], "gpt-5.4")
+        self.assertEqual(signal["candidate_target_model"], "gpt-5.4-mini")
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("req-secret-should-not-leak", rendered)
+        self.assertNotIn("session-secret-should-not-leak", rendered)
+
     def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
         plan = build_research_plan(
             issues=[],

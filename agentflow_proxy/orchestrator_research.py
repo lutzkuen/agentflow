@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from agentflow_proxy.pricing import estimate_cost, pricing_basis
+
 
 SCHEMA = "agentflow.orchestrator_research_plan.v1"
 
@@ -437,6 +439,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     routing = stats.get("routing")
     if isinstance(routing, list):
         summary["routing_top"] = routing[:5]
+        pass_through_report = _pass_through_routing_report(routing)
+        if pass_through_report is not None:
+            summary["pass_through_routing_report"] = pass_through_report
     cache = stats.get("cache_decision_breakdown")
     if isinstance(cache, list):
         summary["cache_decision_breakdown_top"] = cache[:5]
@@ -517,6 +522,209 @@ def _surface_bucket(row: dict[str, Any], *, fallback: str = "mixed") -> str:
     return "/".join(parts) if parts else fallback
 
 
+def _routing_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _routing_lower(value: Any) -> str:
+    return _routing_text(value).lower()
+
+
+def _routing_skip_reason(row: dict[str, Any]) -> str:
+    for key in ("skip_reason", "routing_skip_reason", "reason", "blocker", "omission_reason", "omitted_reason"):
+        text = _routing_text(row.get(key))
+        if text:
+            return sanitize_value(text)
+    return ""
+
+
+def _routing_candidate_target(provider: str, requested_model: str, category: str, phase: str) -> tuple[str | None, str | None, str]:
+    requested = requested_model.lower()
+    category = category.lower()
+    phase = phase.lower()
+    if provider == "openai":
+        if requested == "gpt-5.4":
+            return "gpt-5.4-mini", "openai-routing-canary", "gpt-5.4 canary can evaluate gpt-5.4-mini on local metadata cohorts"
+        return None, None, "no lower safe OpenAI broad-routing target is available from aggregate metadata"
+
+    if provider == "anthropic":
+        if "opus" in requested:
+            return "claude-sonnet-4-6", "anthropic-routing-rules", "Opus pass-through may have a Sonnet downgrade path after quality evidence"
+        if "sonnet" in requested and (category in {"tool-result", "tool-light", "short-completion", "summary"} or phase in {"tool-execution", "summary"}):
+            return "claude-haiku-4-5-20251001", "anthropic-routing-rules", "phase/category metadata matches existing local Haiku executor shapes"
+        return None, None, "Anthropic aggregate bucket needs phase or thinking/tool safety evidence before downgrade"
+
+    return None, None, "provider/action pair has no local routing executor"
+
+
+def _already_cheapest_reason(provider: str, requested_model: str) -> str | None:
+    requested = requested_model.lower()
+    if provider == "openai" and requested in {"gpt-5.4-mini", "gpt-5-mini", "gpt-5-nano"}:
+        return "already at the lowest broad safe OpenAI tier represented by aggregate routing metadata"
+    if provider == "anthropic" and "haiku" in requested:
+        return "already at the lowest broad Anthropic tier represented by aggregate routing metadata"
+    return None
+
+
+def _estimated_savings_per_1000(provider: str, requested_model: str, target_model: str | None) -> float:
+    if not target_model:
+        return 0.0
+    requested = estimate_cost(requested_model, 1000, 250, provider=provider)
+    target = estimate_cost(target_model, 1000, 250, provider=provider)
+    if requested is None or target is None:
+        return 0.0
+    return round(max(0.0, requested - target) * 1000.0, 6)
+
+
+def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
+    provider = _routing_lower(row.get("provider")) or "unknown"
+    requested = _routing_text(row.get("requested_model")) or "unknown"
+    routed = row.get("routed_model")
+    routed_text = _routing_text(routed)
+    category = _routing_text(row.get("category")) or "unknown"
+    phase = _routing_text(row.get("phase") or row.get("workflow_phase")) or "unknown"
+    skip_reason = _routing_skip_reason(row)
+    count = _to_int(row.get("c") or row.get("count"))
+    source_surface = _routing_text(row.get("source_surface") or row.get("surface")) or "unknown"
+    endpoint = _routing_text(row.get("endpoint")) or "unknown"
+    target_model, executor, target_reason = _routing_candidate_target(provider, requested, category, phase)
+    cheapest_reason = _already_cheapest_reason(provider, requested)
+    savings_per_1000 = _estimated_savings_per_1000(provider, requested, target_model)
+    cost_known = bool(pricing_basis(requested, provider=provider).get("cost_known")) if provider in {"openai", "anthropic"} else False
+    skip_l = skip_reason.lower()
+
+    actionability = "needs-lifecycle-evidence"
+    no_op_reason = ""
+    if provider not in {"openai", "anthropic"} or not cost_known:
+        actionability = "unsupported-provider-action"
+        no_op_reason = "missing supported provider pricing or local routing executor"
+        target_model = None
+        executor = None
+        savings_per_1000 = 0.0
+    elif routed is None:
+        actionability = "unsupported-provider-action"
+        no_op_reason = "routed model metadata is missing for this bucket"
+        target_model = None
+        executor = None
+        savings_per_1000 = 0.0
+    elif cheapest_reason:
+        actionability = "already-cheapest"
+        no_op_reason = cheapest_reason
+        target_model = None
+        executor = None
+        savings_per_1000 = 0.0
+    elif any(term in skip_l for term in ("thinking", "tool-protocol", "safety", "unsafe")):
+        actionability = "safety-blocked"
+        no_op_reason = skip_reason or "safety metadata blocks automatic routing activation"
+    elif target_model and savings_per_1000 > 0:
+        actionability = "actionable"
+    elif target_model:
+        actionability = "needs-lifecycle-evidence"
+        no_op_reason = "candidate target has no positive aggregate savings estimate yet"
+    else:
+        actionability = "needs-lifecycle-evidence" if provider in {"openai", "anthropic"} else "unsupported-provider-action"
+        no_op_reason = target_reason
+
+    return {
+        "provider": provider,
+        "source_surface": sanitize_value(source_surface),
+        "endpoint": sanitize_value(endpoint),
+        "requested_model": sanitize_value(requested),
+        "routed_model": sanitize_value(routed_text or None),
+        "category": sanitize_value(category),
+        "workflow_phase": sanitize_value(phase),
+        "skip_reason": sanitize_value(skip_reason or None),
+        "sample_count": count,
+        "actionability": actionability,
+        "candidate_target_model": sanitize_value(target_model),
+        "required_local_executor": sanitize_value(executor),
+        "candidate_reason": sanitize_value(target_reason),
+        "no_op_reason": sanitize_value(no_op_reason or None),
+        "estimated_savings_per_1000_calls_usd": savings_per_1000,
+        "estimate_basis": "1000 input tokens and 250 output tokens per reference call; aggregate bucket ranking only",
+    }
+
+
+def _bucket_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
+    action_rank = {
+        "actionable": 0,
+        "needs-lifecycle-evidence": 1,
+        "safety-blocked": 2,
+        "unsupported-provider-action": 3,
+        "already-cheapest": 4,
+    }.get(str(row.get("actionability")), 9)
+    return (
+        action_rank,
+        -_to_float(row.get("estimated_savings_per_1000_calls_usd")),
+        -_to_int(row.get("sample_count")),
+        str(row.get("requested_model") or ""),
+    )
+
+
+def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[str, Any] | None:
+    if not isinstance(routing_rows, list):
+        return None
+    buckets: list[dict[str, Any]] = []
+    total_rows = 0
+    pass_through_rows = 0
+    routed_down_rows = 0
+    for raw in routing_rows:
+        if not isinstance(raw, dict):
+            continue
+        count = _to_int(raw.get("c") or raw.get("count"))
+        if count <= 0:
+            continue
+        total_rows += count
+        requested = raw.get("requested_model")
+        routed = raw.get("routed_model")
+        if routed is not None and requested != routed:
+            routed_down_rows += count
+            continue
+        pass_through_rows += count
+        buckets.append(_classify_pass_through_bucket(raw))
+
+    if pass_through_rows <= 0:
+        return None
+
+    buckets.sort(key=_bucket_sort_key)
+    actionability_counts: Counter[str] = Counter()
+    for bucket in buckets:
+        actionability_counts[str(bucket.get("actionability") or "unknown")] += _to_int(bucket.get("sample_count"))
+    ranked = []
+    for rank, bucket in enumerate(buckets[: max(1, limit)], start=1):
+        item = dict(bucket)
+        item["rank"] = rank
+        ranked.append(item)
+    top = ranked[0] if ranked else {}
+    return {
+        "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+        "summary": {
+            "routing_rows_scanned": total_rows,
+            "pass_through_rows": pass_through_rows,
+            "routed_down_rows": routed_down_rows,
+            "candidate_bucket_count": len(buckets),
+            "top_actionability": top.get("actionability"),
+            "top_requested_model": top.get("requested_model"),
+            "top_candidate_target_model": top.get("candidate_target_model"),
+        },
+        "actionability_breakdown": [
+            {"class": key, "count": value}
+            for key, value in sorted(actionability_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "buckets": ranked,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
 def _candidate(
     *,
     lever: str,
@@ -580,6 +788,47 @@ def _routing_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             safety_status="review-required" if action["activation_ready"] else "blocked",
             score=10_000.0 + action["savings_per_1000_calls_usd"],
         )
+
+    pass_through_report = stats_summary.get("pass_through_routing_report")
+    if isinstance(pass_through_report, dict):
+        buckets = [row for row in pass_through_report.get("buckets") or [] if isinstance(row, dict)]
+        actionable = [row for row in buckets if row.get("actionability") == "actionable"]
+        top = (actionable or buckets or [None])[0]
+        if top is not None:
+            actionability = str(top.get("actionability") or "unknown")
+            count = _to_int(top.get("sample_count"))
+            target = str(top.get("candidate_target_model") or "")
+            requested = str(top.get("requested_model") or "unknown")
+            blocker = (
+                f"pass-through-routing-{actionability}"
+                if actionability != "actionable"
+                else "pass-through-routing-activation-candidate"
+            )
+            return _candidate(
+                lever="routing",
+                provider_surface_bucket=_surface_bucket(top, fallback="mixed"),
+                blocker=blocker,
+                estimated_savings_path=(
+                    f"Stage a local routing canary from {requested} to {target} for the ranked pass-through bucket."
+                    if target
+                    else f"Keep {requested} pass-through explicit with a no-op reason before creating activation work."
+                ),
+                projected_savings_signal={
+                    "report_schema": pass_through_report.get("schema"),
+                    "actionability": actionability,
+                    "sample_count": count,
+                    "requested_model": requested,
+                    "candidate_target_model": top.get("candidate_target_model"),
+                    "required_local_executor": top.get("required_local_executor"),
+                    "estimated_savings_per_1000_calls_usd": top.get("estimated_savings_per_1000_calls_usd"),
+                    "no_op_reason": top.get("no_op_reason"),
+                    "actionability_breakdown": pass_through_report.get("actionability_breakdown"),
+                },
+                confidence="medium" if actionability == "actionable" else "low",
+                sequencing="Use the ranked pass-through bucket before generic routing activation issues; already-cheapest and safety-blocked buckets should remain explicit no-ops.",
+                safety_status="review-required" if actionability == "actionable" else "blocked",
+                score=float(count) + (1000.0 if actionability == "actionable" else 0.0),
+            )
 
     routing_rows = stats_summary.get("routing_top")
     if not isinstance(routing_rows, list) or not routing_rows:
