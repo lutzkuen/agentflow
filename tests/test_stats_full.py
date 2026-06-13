@@ -2233,6 +2233,123 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("secret-cache-key-must-not-appear", rendered)
         self.assertNotIn("codex-readiness-session-secret", rendered)
 
+    def test_codex_effectiveness_endpoint_keeps_terminal_compaction_metadata_content_free(self):
+        raw_request_id = "raw-codex-terminal-dashboard-request-id-must-not-leak"
+        raw_thread_id = "raw-codex-terminal-dashboard-thread-id-must-not-leak"
+        raw_session_id = "raw-codex-terminal-dashboard-session-id-must-not-leak"
+        raw_terminal = "raw codex terminal dashboard transcript must not leak"
+        raw_path = "/workspace/private/raw-codex-terminal-dashboard.log"
+        raw_cache_key = "raw-codex-terminal-dashboard-cache-key-must-not-leak"
+        terminal_family = "codex_terminal_transcript_compaction"
+
+        server.store.log_codex_app_event(
+            id="start-codex-terminal-dashboard",
+            created_at=utc_now(),
+            direction="client_to_server",
+            method="turn/start",
+            request_id=raw_request_id,
+            thread_id=raw_thread_id,
+            message_chars=42_000,
+            params_chars=41_000,
+            input_items=1,
+            input_text_chars=40_000,
+            result_chars=None,
+            error_code=None,
+            error_message=None,
+            latency_ms=None,
+            session_id=raw_session_id,
+            routing_json=stable_json({
+                "status": "not-applicable",
+                "reason": "codex-turn-start-model-field-absent",
+                "workflow_phase": "tool_execution",
+            }),
+            crunch_json=stable_json({
+                "status": "applied",
+                "reason": "terminal-transcript-compacted",
+                "applied": True,
+                "changed": True,
+                "saved_chars": 8000,
+                "tokens_saved_est": 2000,
+                terminal_family: {
+                    "status": "applied",
+                    "reason": "terminal-transcript-compacted",
+                    "candidate_id": raw_path,
+                    "rule_id": "raw-dashboard-terminal-rule-id-must-not-leak",
+                    "debug": raw_terminal,
+                    "provider_body": {"raw": raw_terminal},
+                    "raw_text_included": False,
+                    "raw_commands_included": False,
+                },
+            }),
+            cache_json=stable_json({
+                "status": "skipped",
+                "reason": "codex-app-cache-disabled",
+                "eligible": False,
+                "cache_key": raw_cache_key,
+            }),
+            event_window_json=stable_json({
+                "schema": "agentflow.codex_app_event_window.v1",
+                "workflow_phase": "tool_execution",
+                "input_text_chars": 40_000,
+                "method_counts": {"turn/start": 1, "item/commandExecution/outputDelta": 10},
+                "request_id": raw_request_id,
+                "thread_id": raw_thread_id,
+                "session_id": raw_session_id,
+                "file_path": raw_path,
+                "provider_body": {"raw": raw_terminal},
+            }),
+        )
+        server.store.log_codex_app_event(
+            id="response-codex-terminal-dashboard",
+            created_at=utc_now(),
+            direction="server_to_client",
+            method="turn/completed",
+            request_id=raw_request_id,
+            thread_id=raw_thread_id,
+            message_chars=200,
+            params_chars=None,
+            input_items=None,
+            input_text_chars=None,
+            result_chars=200,
+            error_code=None,
+            error_message=raw_terminal,
+            latency_ms=120,
+            session_id=raw_session_id,
+        )
+
+        app = create_dashboard_app(
+            store_obj=server.store,
+            default_db=self.tmp.name,
+            upstream="https://api.anthropic.com",
+            limiter_status=lambda: [],
+            limiter_config={},
+            full_stats_ttl_s=0,
+        )
+        with TestClient(app) as client:
+            response = client.get("/agentflow/stats/codex-effectiveness?limit=5")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertEqual(payload["summary"]["turn_start_rows"], 1)
+        self.assertEqual(payload["summary"]["crunch_applied"], 1)
+        self.assertEqual(payload["summary"]["total_saved_chars"], 8000)
+        self.assertFalse(payload["privacy"]["raw_prompts_included"])
+        self.assertFalse(payload["privacy"]["raw_params_included"])
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            raw_request_id,
+            raw_thread_id,
+            raw_session_id,
+            raw_terminal,
+            raw_path,
+            raw_cache_key,
+            "raw-dashboard-terminal-rule-id-must-not-leak",
+            "/workspace/private",
+            '"provider_body"',
+            '"cache_key"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_codex_effectiveness_reports_quota_token_usage_without_raw_payloads(self):
         raw_prompt = "seeded raw prompt must not appear"
         raw_command = "seeded raw command must not appear"

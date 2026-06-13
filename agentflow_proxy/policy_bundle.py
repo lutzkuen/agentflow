@@ -16,6 +16,7 @@ import yaml
 from agentflow_proxy import __version__
 from agentflow_proxy.codex_app_policy import CODEX_APP_SOURCE_SURFACE, canonical_source_surface
 from agentflow_proxy.pattern_rollout import pattern_canary_decision
+from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import utc_now
 
 POLICY_BUNDLE_APPLY_SCHEMA = "agentflow.policy_bundle_apply.v1"
@@ -3918,7 +3919,8 @@ def _validate_codex_terminal_transcript_compaction_policy(
             _add_error(errors, f"{base}.conditions", "expected object")
         else:
             for key in sorted(set(conditions) - _CODEX_TERMINAL_TRANSCRIPT_CONDITION_KEYS):
-                _add_error(errors, f"{base}.conditions.{key}", "unknown Codex terminal-transcript condition")
+                safe_key = public_label(key, "redacted")
+                _add_error(errors, f"{base}.conditions.{safe_key}", "unknown Codex terminal-transcript condition")
             for key, value in conditions.items():
                 if key not in _CODEX_TERMINAL_TRANSCRIPT_CONDITION_KEYS:
                     continue
@@ -3935,7 +3937,8 @@ def _validate_codex_terminal_transcript_compaction_policy(
             _add_error(errors, f"{base}.action", "expected object")
         else:
             for key in sorted(set(action) - _CODEX_TERMINAL_TRANSCRIPT_ACTION_KEYS):
-                _add_error(errors, f"{base}.action.{key}", "unknown Codex terminal-transcript action")
+                safe_key = public_label(key, "redacted")
+                _add_error(errors, f"{base}.action.{safe_key}", "unknown Codex terminal-transcript action")
             for key in ("type",):
                 if key in action:
                     _validate_non_empty_string(errors, f"{base}.action.{key}", action[key])

@@ -234,7 +234,7 @@ def _condition_blockers(rule: dict[str, Any], features: dict[str, Any], projecte
     conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
     blockers: list[str] = []
     for key in sorted(set(conditions) - _SUPPORTED_CONDITIONS):
-        blockers.append(f"unsupported-condition:{key}")
+        blockers.append(f"unsupported-condition:{public_label(key, 'unknown')}")
     for key, expected in conditions.items():
         if key not in _SUPPORTED_CONDITIONS:
             continue

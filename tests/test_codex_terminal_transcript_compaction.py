@@ -104,6 +104,45 @@ class TerminalTranscriptCompactionDecisionTests(unittest.TestCase):
         rendered = json.dumps(result)
         self.assertNotIn(_terminal_block(lines=1)[:20], rendered)
 
+    def test_preserved_diagnostic_lines_stay_out_of_runtime_metadata(self):
+        raw_command = "$ cat /workspace/private/raw-codex-terminal-path-must-not-leak.log"
+        raw_error = "ERROR raw codex terminal diagnostic must not leak"
+        block = "\n".join(
+            [f"$ setup_step_{index} --secret raw-command-secret-{index}" for index in range(6)]
+            + [raw_command, raw_error]
+            + [f"[2026-06-13T00:00:{index:02d}Z] INFO progress {index}" for index in range(100)]
+            + [f"[2026-06-13T00:01:{index:02d}Z] INFO tail {index}" for index in range(40)]
+        )
+        params = {"input": block, "model": "gpt-5"}
+        policy = _enabled_policy(
+            fraction=1.0,
+            holdout=0.0,
+            keep_recent_turns=0,
+            min_block_chars=100,
+            min_saved_chars=50,
+            max_evidence_lines=20,
+            preserve_diagnostics=True,
+            preserve_error_lines=True,
+        )
+
+        new_params, meta = codex_terminal_transcript_compaction_decision(params, policy=policy)
+        result = meta[FAMILY]
+
+        self.assertTrue(result["applied"], result)
+        self.assertIn(raw_error, new_params["input"], "diagnostic evidence is preserved in the local request")
+        rendered_meta = json.dumps(result, sort_keys=True)
+        for forbidden in (
+            raw_command,
+            raw_error,
+            "raw-command-secret",
+            "/workspace/private",
+            "setup_step_",
+            "INFO progress",
+        ):
+            self.assertNotIn(forbidden, rendered_meta)
+        self.assertFalse(result["raw_text_included"])
+        self.assertFalse(result["raw_commands_included"])
+
     def test_safety_blocker_action_like_params(self):
         params = {
             "input": _terminal_block(lines=100),

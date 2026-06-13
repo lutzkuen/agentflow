@@ -1025,6 +1025,33 @@ terminal_transcript_compaction:
         finally:
             asyncio.run(reload_policy_modules())
 
+    def test_codex_terminal_transcript_validation_errors_do_not_echo_raw_policy_keys(self):
+        raw_condition_key = "/workspace/private/raw-terminal-condition-key-must-not-leak"
+        raw_action_key = "/workspace/private/raw-terminal-action-key-must-not-leak"
+        raw_condition_value = "raw terminal condition value must not leak"
+        raw_action_value = "raw terminal action value must not leak"
+        bundle = asyncio.run(build_policy_bundle())
+        terminal = bundle["policies"]["codex_app"]["terminal_transcript_compaction"]
+        terminal["conditions"][raw_condition_key] = raw_condition_value
+        terminal["action"][raw_action_key] = raw_action_value
+
+        result = validate_policy_bundle(bundle)
+
+        self.assertFalse(result["ok"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertIn("unknown Codex terminal-transcript condition", rendered)
+        self.assertIn("unknown Codex terminal-transcript action", rendered)
+        self.assertIn(".conditions.redacted", rendered)
+        self.assertIn(".action.redacted", rendered)
+        for forbidden in (
+            raw_condition_key,
+            raw_action_key,
+            raw_condition_value,
+            raw_action_value,
+            "/workspace/private",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_policy_bundle_compare_reports_no_changes_for_identical_bundles(self):
         bundle = asyncio.run(build_policy_bundle())
 

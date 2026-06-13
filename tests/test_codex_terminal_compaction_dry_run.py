@@ -176,7 +176,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
             error_message=None,
             latency_ms=None,
             routing_json=stable_json({"reason": "non-text-input"}),
-            crunch_json=stable_json({}),
+            crunch_json=stable_json({"status": "skipped", "reason": "file-dependency-missing"}),
             cache_json=stable_json({"status": "skipped", "reason": "action-like-params"}),
             event_window_json=stable_json({
                 "workflow_phase": "unknown",
@@ -221,6 +221,7 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
         blocker_values = {item["value"] for item in payload["blocker_reason_breakdown"]}
         self.assertIn("non-text-input", blocker_values)
         self.assertIn("action-like-params", blocker_values)
+        self.assertIn("stale-risk-blockers", blocker_values)
         self.assertFalse(payload["privacy"]["raw_terminal_lines_included"])
         self.assertFalse(payload["privacy"]["request_ids_included"])
         self.assertFalse(payload["privacy"]["file_paths_included"])
@@ -264,6 +265,58 @@ class CodexTerminalTranscriptDryRunTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["holdout_candidate_count"], 1)
         self.assertNotIn(RAW_REQUEST_ID, stdout.getvalue())
         self.assertNotIn(RAW_TERMINAL, stdout.getvalue())
+
+    def test_raw_policy_metadata_and_unsupported_conditions_are_publicized(self):
+        raw_rule_id = "/workspace/private/raw-terminal-rule-id-must-not-leak"
+        raw_candidate_id = "/workspace/private/raw-terminal-candidate-id-must-not-leak"
+        raw_action_id = "/workspace/private/raw-terminal-action-id-must-not-leak"
+        raw_condition_key = "/workspace/private/raw-terminal-condition-key-must-not-leak"
+        raw_condition_value = "raw terminal condition value must not leak"
+        policy = json.loads(json.dumps(self._policy()))
+        terminal_policy = policy["terminal_transcript_compaction"]
+        terminal_policy["rule_id"] = raw_rule_id
+        terminal_policy["candidate_id"] = raw_candidate_id
+        terminal_policy["action_id"] = raw_action_id
+        terminal_policy["policy_source"] = "managed-recommended"
+        terminal_policy["conditions"][raw_condition_key] = raw_condition_value
+
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                self._log_candidate_turn(store)
+                payload = build_codex_terminal_transcript_compaction_dry_run(
+                    store,
+                    limit=10,
+                    policy=policy,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(payload["summary"]["blocked_candidate_count"], 1)
+        blockers = {item["value"] for item in payload["blocker_reason_breakdown"]}
+        self.assertIn("unsupported-condition:unknown", blockers)
+        plan = payload["plans"][0]
+        self.assertTrue(str(plan["candidate_id"]).startswith("codex-terminal-transcript-dry-run:"))
+        self.assertTrue(str(plan["policy_candidate_id"]).startswith("codex-terminal-transcript-candidate:"))
+        self.assertTrue(str(plan["rule_id"]).startswith("codex-terminal-transcript-rule:"))
+        self.assertTrue(str(plan["action_id"]).startswith("codex-terminal-transcript-action:"))
+
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            raw_rule_id,
+            raw_candidate_id,
+            raw_action_id,
+            raw_condition_key,
+            raw_condition_value,
+            RAW_REQUEST_ID,
+            RAW_THREAD_ID,
+            RAW_SESSION_ID,
+            RAW_PATH,
+            RAW_TERMINAL,
+            RAW_CACHE_KEY,
+            "/workspace/private",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
 
 if __name__ == "__main__":
