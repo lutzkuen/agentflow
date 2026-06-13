@@ -4335,6 +4335,74 @@ def codex_terminal_transcript_opportunity_cli(argv: Sequence[str] | None = None,
     return 0
 
 
+def anthropic_thinking_compaction_opportunity_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Measure Anthropic thinking-session compaction opportunity from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent provider calls to inspect, default: 1000, max: 10000",
+    )
+    parser.add_argument(
+        "--min-text-chars",
+        type=int,
+        default=8000,
+        help="Minimum thinking-session input size for candidate rows, default: 8000",
+    )
+    parser.add_argument(
+        "--max-plateau-delta-ratio",
+        type=float,
+        default=0.03,
+        help="Maximum adjacent text size delta ratio for plateau detection, default: 0.03",
+    )
+    parser.add_argument(
+        "--metadata-compaction-ratio",
+        type=float,
+        default=0.20,
+        help="Projected removable fraction of input chars when raw bodies are unavailable, default: 0.20",
+    )
+    parser.add_argument(
+        "--body-compaction-ratio",
+        type=float,
+        default=0.65,
+        help="Projected removable fraction of detected thinking-history chars when local bodies are available, default: 0.65",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print JSON instead of emitting one compact line.",
+    )
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.anthropic_thinking_compaction_report import build_anthropic_thinking_compaction_opportunity_report
+    from agentflow_proxy.optimization.cli_support import open_store_for_db, write_json
+
+    store = open_store_for_db(str(args.db))
+    try:
+        result = build_anthropic_thinking_compaction_opportunity_report(
+            store,
+            limit=args.limit,
+            min_text_chars=args.min_text_chars,
+            max_plateau_delta_ratio=args.max_plateau_delta_ratio,
+            metadata_compaction_ratio=args.metadata_compaction_ratio,
+            body_compaction_ratio=args.body_compaction_ratio,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        write_json(stdout, result)
+    return 0
+
+
 def codex_terminal_transcript_dry_run_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Dry-run Codex terminal-transcript compaction plans from local event windows")
     parser.add_argument(
@@ -7960,6 +8028,10 @@ def terminal_output_compaction_opportunity_main() -> None:
 
 def codex_terminal_transcript_opportunity_main() -> None:
     raise SystemExit(codex_terminal_transcript_opportunity_cli())
+
+
+def anthropic_thinking_compaction_opportunity_main() -> None:
+    raise SystemExit(anthropic_thinking_compaction_opportunity_cli())
 
 
 def codex_terminal_transcript_dry_run_main() -> None:

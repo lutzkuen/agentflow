@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 HAS_RUNTIME_DEPS = all(
@@ -1234,12 +1235,17 @@ class StatsFullTest(unittest.TestCase):
                 routed_model_family="gpt-5",
             )
 
-        log_canary_call("openai-canary-ready-a1", cohort="canary_applied", created_at="2026-06-10T04:00:00+00:00")
-        log_canary_call("openai-canary-ready-a2", cohort="canary_applied", created_at="2026-06-10T04:01:00+00:00")
+        fresh_base = datetime.now(timezone.utc) - timedelta(minutes=30)
+        log_canary_call("openai-canary-ready-a1", cohort="canary_applied", created_at=fresh_base.isoformat())
+        log_canary_call(
+            "openai-canary-ready-a2",
+            cohort="canary_applied",
+            created_at=(fresh_base + timedelta(minutes=1)).isoformat(),
+        )
         log_canary_call(
             "openai-canary-ready-h1",
             cohort="canary_holdout",
-            created_at="2026-06-10T04:02:00+00:00",
+            created_at=(fresh_base + timedelta(minutes=2)).isoformat(),
             actual=0.003,
             baseline=0.003,
         )
