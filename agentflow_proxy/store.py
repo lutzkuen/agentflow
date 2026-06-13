@@ -505,6 +505,42 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists request_shape_rollups (
+              id text primary key,
+              run_id text not null,
+              generated_at text not null,
+              window_start text,
+              window_end text,
+              rollup_key text not null,
+              candidate_id text not null,
+              source_surface text,
+              endpoint text,
+              provider_family text,
+              requested_model_family text,
+              routed_model_family text,
+              category text,
+              workflow_phase text,
+              stream integer,
+              has_tools integer,
+              text_bucket text,
+              token_bucket text,
+              cache_status text,
+              routing_status text,
+              candidate_families_json text not null,
+              blocker_codes_json text not null,
+              row_count integer not null,
+              error_count integer not null default 0,
+              retry_count integer not null default 0,
+              cache_hit_count integer not null default 0,
+              cost_est_usd real,
+              baseline_cost_usd real,
+              observed_savings_usd real,
+              input_tokens integer,
+              output_tokens integer,
+              metadata_json text not null
+            )
+            """)
+            cur.execute("""
             create table if not exists agentflow_sqlite_maintenance_runs (
               id text primary key,
               created_at text not null,
@@ -552,6 +588,10 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_optimization_eval_results_recent
             on optimization_eval_results(created_at, status_class)
+            """)
+            cur.execute("""
+            create index if not exists idx_request_shape_rollups_recent
+            on request_shape_rollups(generated_at, candidate_id)
             """)
             cur.execute("""
             create index if not exists idx_agentflow_sqlite_maintenance_runs_recent
@@ -790,6 +830,7 @@ class SQLiteStore:
                     ("routing_experiments", "created_at < ?", (cutoff_at,)),
                     ("codex_app_events", "created_at < ?", (cutoff_at,)),
                     ("provider_tool_adoption_windows", "created_at < ?", (cutoff_at,)),
+                    ("request_shape_rollups", "generated_at < ?", (cutoff_at,)),
                     (
                         "managed_outcome_feedback_queue",
                         "created_at < ? and status not in ('queued', 'retryable-error', 'sending')",
@@ -1413,6 +1454,65 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def persist_request_shape_rollups(
+        self,
+        *,
+        run_id: str,
+        generated_at: str,
+        rows: list[dict[str, Any]],
+    ) -> int:
+        cols = [
+            "id", "run_id", "generated_at", "window_start", "window_end",
+            "rollup_key", "candidate_id", "source_surface", "endpoint",
+            "provider_family", "requested_model_family", "routed_model_family",
+            "category", "workflow_phase", "stream", "has_tools", "text_bucket",
+            "token_bucket", "cache_status", "routing_status",
+            "candidate_families_json", "blocker_codes_json", "row_count",
+            "error_count", "retry_count", "cache_hit_count", "cost_est_usd",
+            "baseline_cost_usd", "observed_savings_usd", "input_tokens",
+            "output_tokens", "metadata_json",
+        ]
+        with self._lock:
+            self.conn.execute("delete from request_shape_rollups where run_id = ?", (run_id,))
+            for row in rows:
+                values = [row.get(c) for c in cols]
+                self.conn.execute(
+                    f"insert into request_shape_rollups({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+                    values,
+                )
+            self.conn.commit()
+        return len(rows)
+
+    def request_shape_rollup_rows(
+        self,
+        *,
+        run_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        if run_id:
+            rows = self.conn.execute(
+                """
+                select *
+                from request_shape_rollups
+                where run_id = ?
+                order by row_count desc, cost_est_usd desc, candidate_id asc
+                limit ?
+                """,
+                (run_id, capped),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                select *
+                from request_shape_rollups
+                order by generated_at desc, row_count desc, cost_est_usd desc
+                limit ?
+                """,
+                (capped,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
 
 class PostgresStore(SQLiteStore):
     backend = "postgres"
@@ -1624,6 +1724,42 @@ class PostgresStore(SQLiteStore):
               result_json text not null
             )
             """,
+            """
+            create table if not exists request_shape_rollups (
+              id text primary key,
+              run_id text not null,
+              generated_at timestamptz not null,
+              window_start timestamptz,
+              window_end timestamptz,
+              rollup_key text not null,
+              candidate_id text not null,
+              source_surface text,
+              endpoint text,
+              provider_family text,
+              requested_model_family text,
+              routed_model_family text,
+              category text,
+              workflow_phase text,
+              stream integer,
+              has_tools integer,
+              text_bucket text,
+              token_bucket text,
+              cache_status text,
+              routing_status text,
+              candidate_families_json text not null,
+              blocker_codes_json text not null,
+              row_count integer not null,
+              error_count integer not null default 0,
+              retry_count integer not null default 0,
+              cache_hit_count integer not null default 0,
+              cost_est_usd numeric,
+              baseline_cost_usd numeric,
+              observed_savings_usd numeric,
+              input_tokens integer,
+              output_tokens integer,
+              metadata_json text not null
+            )
+            """,
         ):
             self.conn.execute(sql)
         for column in ("routing_json", "crunch_json", "cache_json", "event_window_json", "metadata_json"):
@@ -1671,6 +1807,10 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_optimization_eval_results_recent
             on optimization_eval_results(created_at, status_class)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_request_shape_rollups_recent
+            on request_shape_rollups(generated_at, candidate_id)
         """)
 
     def set_cache(
