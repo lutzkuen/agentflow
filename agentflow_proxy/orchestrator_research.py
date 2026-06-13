@@ -41,7 +41,11 @@ _RAW_FIELD_NAMES = {
     "response_body",
     "response_json",
 }
-_ID_FIELD_RE = re.compile(r"(?:^|_)(?:request|session|thread|tenant|trace|cache|candidate)_?id$")
+_ID_FIELD_RE = re.compile(
+    r"(?:(?:^|_)(?:request|session|thread|tenant|trace|candidate|cohort|proposal|rule)_?(?:id|key|fingerprint)$)"
+    r"|(?:(?:^|_)cache_?(?:id|key|fingerprint)$)"
+    r"|(?:^|_)pattern_hash(?:es)?$"
+)
 _DIAGNOSTIC_RE = re.compile(
     r"(?:skip[_ -]?reason|omitted[_ -]?reason|blocker|blocked|reason|verdict)\s*[:=]\s*[\"']?([A-Za-z0-9_.:-]+(?:[ -][A-Za-z0-9_.:-]+){0,5})",
     re.IGNORECASE,
@@ -246,6 +250,29 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     cache = stats.get("cache_decision_breakdown")
     if isinstance(cache, list):
         summary["cache_decision_breakdown_top"] = cache[:5]
+    ladder = stats.get("cache_zero_hit_blocker_ladder")
+    if isinstance(ladder, dict):
+        ladder_summary = ladder.get("summary") if isinstance(ladder.get("summary"), dict) else {}
+        ladder_rows = ladder.get("ladder") if isinstance(ladder.get("ladder"), list) else []
+        summary["cache_zero_hit_blocker_ladder"] = {
+            "schema": ladder.get("schema"),
+            "summary": ladder_summary,
+            "ladder": ladder_rows[:5],
+            "privacy": ladder.get("privacy") if isinstance(ladder.get("privacy"), dict) else {},
+        }
+    cohorts = (
+        stats.get("cache_replay_cohort_ranking")
+        or stats.get("cache_replay_cohorts")
+        or stats.get("cache_replay_plateau_cohort_ranking")
+    )
+    if isinstance(cohorts, dict):
+        cohort_rows = cohorts.get("cohorts") if isinstance(cohorts.get("cohorts"), list) else []
+        summary["cache_replay_cohort_ranking"] = {
+            "schema": cohorts.get("schema"),
+            "summary": cohorts.get("summary") if isinstance(cohorts.get("summary"), dict) else {},
+            "cohorts": cohort_rows[:5],
+            "privacy": cohorts.get("privacy") if isinstance(cohorts.get("privacy"), dict) else {},
+        }
     return summary
 
 
@@ -621,6 +648,159 @@ def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, 
     }
 
 
+_CACHE_ACTION_ISSUE_TITLES = {
+    "stage-replay-policy": "Stage cache replay canary for {cohort}",
+    "collect-dependency-evidence": "Collect cache replay dependency evidence for {cohort}",
+    "reload-cache-policy": "Reload or enable cache policy for {cohort}",
+    "promote-or-rebalance-canary": "Review cache replay holdout evidence for {cohort}",
+    "review-safety-stop": "Review cache replay safety stop for {cohort}",
+    "instrument-cache-decision": "Instrument cache decisions for {cohort}",
+    "accept-non-repeatable-traffic": "Confirm non-repeatable cache cohort for {cohort}",
+}
+
+_CACHE_ACTION_LABELS = {
+    "stage-replay-policy": "stage a local cache replay canary",
+    "collect-dependency-evidence": "collect local invalidation and dependency evidence",
+    "reload-cache-policy": "enable or reload the local cache policy",
+    "promote-or-rebalance-canary": "review holdout evidence before promotion",
+    "review-safety-stop": "review the safety stop before activation",
+    "instrument-cache-decision": "add explicit cache decision instrumentation",
+    "accept-non-repeatable-traffic": "prove this traffic is non-repeatable or find a narrower repeated shape",
+}
+
+_CACHE_ACTION_ACCEPTANCE = {
+    "stage-replay-policy": "A dry-run or canary check shows projected hit recovery for the cohort, with holdout traffic still bypassing unchanged.",
+    "collect-dependency-evidence": "The cohort reports stable dependency evidence or a smaller stale-risk blocker count before replay activation is considered.",
+    "reload-cache-policy": "The cache policy state is loaded and the cohort's disabled/reload blocker count falls in the next bounded metadata window.",
+    "promote-or-rebalance-canary": "Holdout evidence is summarized with projected hits and a safe promote, rebalance, or keep-holdout decision.",
+    "review-safety-stop": "The safety-stop reason is either resolved with an explicit safe bypass reduction check or kept blocked with a narrow blocker.",
+    "instrument-cache-decision": "New rows for the surface include explicit cache status and reason metadata instead of unknown-cache-decision.",
+    "accept-non-repeatable-traffic": "The cohort is marked research-only or blocked unless repeated request-shape evidence appears.",
+}
+
+_CACHE_ACTION_CONCRETE = {
+    "stage-replay-policy",
+    "collect-dependency-evidence",
+    "reload-cache-policy",
+    "promote-or-rebalance-canary",
+    "review-safety-stop",
+    "instrument-cache-decision",
+}
+
+
+def _cache_cohort_name(row: dict[str, Any]) -> str:
+    blocker = str(row.get("blocker_code") or row.get("readiness") or "cache-replay").strip() or "cache-replay"
+    provider = str(row.get("provider") or "").strip()
+    surface = str(row.get("source_surface") or "").strip()
+    endpoint = str(row.get("endpoint") or "").strip()
+    parts = [part for part in (provider, surface, endpoint) if part]
+    if parts:
+        return f"{blocker} on {'/'.join(parts)}"
+    return blocker
+
+
+def _top_cache_replay_issue_row(stats_summary: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    cohorts = stats_summary.get("cache_replay_cohort_ranking")
+    if isinstance(cohorts, dict):
+        for row in cohorts.get("cohorts") or []:
+            if not isinstance(row, dict):
+                continue
+            readiness = str(row.get("readiness") or "")
+            if readiness not in {"activation-ready", "needs-more-evidence", "blocked"}:
+                continue
+            action = "stage-replay-policy" if readiness == "activation-ready" else "collect-dependency-evidence"
+            issue_row = dict(row)
+            issue_row["next_action_family"] = action
+            issue_row["next_action_label"] = _CACHE_ACTION_LABELS[action]
+            if not issue_row.get("blocker_code"):
+                blockers = issue_row.get("blocker_reasons") if isinstance(issue_row.get("blocker_reasons"), list) else []
+                issue_row["blocker_code"] = blockers[0] if blockers else readiness
+            return issue_row, "cache_replay_cohort_ranking"
+
+    ladder = stats_summary.get("cache_zero_hit_blocker_ladder")
+    if isinstance(ladder, dict):
+        ladder_summary = ladder.get("summary") if isinstance(ladder.get("summary"), dict) else {}
+        if not bool(ladder_summary.get("zero_hit_window")):
+            return None, ""
+        for row in ladder.get("ladder") or []:
+            if not isinstance(row, dict):
+                continue
+            blocker = str(row.get("blocker_code") or "")
+            if blocker == "cache-hit-observed":
+                continue
+            action = str(row.get("next_action_family") or "")
+            if action == "none":
+                continue
+            return row, "cache_zero_hit_blocker_ladder"
+    return None, ""
+
+
+def _proposal_from_cache_replay_blocker(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    row, source = _top_cache_replay_issue_row(stats_summary)
+    if row is None:
+        return None
+    action_family = str(row.get("next_action_family") or "instrument-cache-decision")
+    cohort = _cache_cohort_name(row)
+    action_label = str(row.get("next_action_label") or _CACHE_ACTION_LABELS.get(action_family, "inspect the cache replay cohort"))
+    replayability = str(row.get("replayability_level") or "")
+    aggregate_only_ladder = source == "cache_zero_hit_blocker_ladder" and replayability in {"features_only", "aggregate-only"}
+    is_activation_action = action_family in _CACHE_ACTION_CONCRETE and not aggregate_only_ladder
+    activation_mode = "activation-candidate" if is_activation_action else "research-only"
+    if aggregate_only_ladder:
+        title = f"Collect cache replay evidence for {cohort}"
+    else:
+        title_template = _CACHE_ACTION_ISSUE_TITLES.get(action_family, _CACHE_ACTION_ISSUE_TITLES["instrument-cache-decision"])
+        title = title_template.format(cohort=cohort)
+    evidence = [
+        f"Source metadata: {source}",
+        f"Top blocker cohort: {cohort}",
+        f"Local action needed: {action_label}",
+        f"Activation mode: {activation_mode}",
+    ]
+    for key in (
+        "count",
+        "projected_hits",
+        "projected_saved_cost_usd",
+        "readiness",
+        "dependency_state",
+        "provider_adoption_state",
+        "replayability_level",
+        "stream_mode",
+        "tool_presence",
+        "cache_status",
+        "cache_reason",
+    ):
+        if row.get(key) is not None:
+            evidence.append(f"{key}: {row.get(key)}")
+    implementation = [
+        "Use the bounded cache zero-hit blocker ladder and replay cohort ranking; do not inspect prompts, responses, cache keys, file paths, request IDs, or session IDs.",
+        f"Focus on the named cohort and {action_label}.",
+        "If the cohort remains aggregate-only or stale-risk blocked, keep the follow-up as evidence collection instead of enabling replay.",
+        "Record the resulting local cache policy, canary, reload, or evidence decision in machine-readable cache metadata.",
+    ]
+    acceptance = [
+        _CACHE_ACTION_ACCEPTANCE.get(action_family, _CACHE_ACTION_ACCEPTANCE["instrument-cache-decision"]),
+        "The follow-up reports either hit recovery for the cohort or a measurable safe bypass/blocker reduction in the next bounded metadata window.",
+        "Generated and follow-up evidence remains aggregate-only and excludes prompts, provider bodies, file paths, cache keys, request IDs, and session IDs.",
+    ]
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": ["backlog", "status:ready", "priority:p1", "core-feature", "correctness", "cache", "privacy"],
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "Research mode found a zero-hit cache window with a named blocker cohort. "
+                "The next cache issue should target that cohort's local replay, invalidation, policy reload, or instrumentation action instead of treating zero hits as a generic observation."
+            ),
+            evidence=evidence,
+            implementation=implementation,
+            acceptance=acceptance,
+            sequencing="Sequence before broad cache canaries so replay work targets the highest-value zero-hit blocker cohort first.",
+        ),
+    }
+
+
 def _blocked_comment(issue: dict[str, Any], diagnostics: list[dict[str, Any]], stats_summary: dict[str, Any]) -> dict[str, Any]:
     evidence = [
         f"Blocked issue has been stale for {issue.get('age_days', 'unknown')} days.",
@@ -687,6 +867,9 @@ def build_research_plan(
                 diagnostics=diagnostics,
             )
         )
+        cache_replay_proposal = _proposal_from_cache_replay_blocker(summary)
+        if cache_replay_proposal is not None:
+            create_issues.append(cache_replay_proposal)
         if diagnostics and diagnostics[0].get("count", 0) > 1:
             create_issues.append(_proposal_from_repeated_diagnostic(diagnostics[0]))
         for issue in blocked_stale[:3]:

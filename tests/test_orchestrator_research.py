@@ -125,6 +125,109 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-candidate-secret", rendered)
         self.assertNotIn("req-candidate-secret", rendered)
 
+    def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2778,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "cache_zero_hit_blocker_ladder": {
+                    "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+                    "summary": {
+                        "scanned_rows": 1000,
+                        "cache_hits": 0,
+                        "zero_hit_window": True,
+                        "top_blocker_code": "skipped-streaming",
+                        "top_next_action_family": "stage-replay-policy",
+                    },
+                    "ladder": [
+                        {
+                            "blocker_code": "skipped-streaming",
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "stream_mode": "stream",
+                            "tool_presence": "no-tools",
+                            "replayability_level": "features_only",
+                            "cache_policy_source": "local-default",
+                            "cache_status": "skipped",
+                            "cache_reason": "streaming",
+                            "next_action_family": "stage-replay-policy",
+                            "next_action_label": "stage streaming-safe cache replay policy",
+                            "count": 700,
+                            "cache_key": "cache-secret-should-redact",
+                            "session_id": "session-secret-should-redact",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        created = plan["backlog_changes"]["create_issues"]
+        cache_issues = [item for item in created if "cache replay" in item["title"].lower()]
+        self.assertGreaterEqual(len(cache_issues), 1)
+        body = cache_issues[0]["body"]
+        self.assertIn("Top blocker cohort: skipped-streaming on openai/openai_responses/responses", body)
+        self.assertIn("Local action needed: stage streaming-safe cache replay policy", body)
+        self.assertIn("Activation mode: research-only", body)
+        self.assertIn("hit recovery", body)
+        self.assertIn("safe bypass/blocker reduction", body)
+        self.assertIn("cache", cache_issues[0]["labels"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("cache-secret-should-redact", rendered)
+        self.assertNotIn("session-secret-should-redact", rendered)
+
+    def test_cache_replay_cohort_ranking_prefers_activation_ready_issue(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 10,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "cache_replay_cohort_ranking": {
+                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "summary": {
+                        "candidate_rows": 3,
+                        "activation_ready_count": 1,
+                        "projected_ready_hits": 2,
+                    },
+                    "cohorts": [
+                        {
+                            "readiness": "activation-ready",
+                            "source_surface": "anthropic_messages",
+                            "category": "tool-result",
+                            "workflow_phase": "tool-execution",
+                            "stream": True,
+                            "has_tools": True,
+                            "replayability_level": "local-exact-response",
+                            "dependency_state": "stable",
+                            "provider_adoption_state": "ready",
+                            "count": 3,
+                            "projected_hits": 2,
+                            "projected_saved_cost_usd": 0.04,
+                            "cohort_id": "cache-replay-cohort:secretid",
+                            "raw_session_id": "raw-session-secret",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        cache_issue = [item for item in plan["backlog_changes"]["create_issues"] if "cache replay" in item["title"].lower()][0]
+        self.assertIn("Stage cache replay canary", cache_issue["title"])
+        self.assertIn("activation-candidate", cache_issue["body"])
+        self.assertIn("projected_hits: 2", cache_issue["body"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-session-secret", rendered)
+        self.assertNotIn("secretid", rendered)
+
     def test_enough_ready_issues_is_noop(self):
         plan = build_research_plan(
             issues=[
