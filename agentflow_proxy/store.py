@@ -715,6 +715,49 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def cache_pattern_observed_call_count(
+        self,
+        *,
+        rule_id: str | None,
+        matched_hashes: list[str] | tuple[str, ...] | None,
+        requested_model: str | None = None,
+        routed_model: str | None = None,
+        category: str | None = None,
+        stream: bool = True,
+    ) -> int:
+        if not rule_id:
+            return 0
+        hashes = [str(item) for item in (matched_hashes or []) if str(item).startswith("sha256:")]
+        if not hashes:
+            return 0
+        clauses = [
+            "stream = ?",
+            "cache_hit = 0",
+            "status_code >= 200",
+            "status_code < 400",
+            "cache_json like ?",
+            "(" + " or ".join(["cache_json like ?"] * len(hashes)) + ")",
+        ]
+        params: list[Any] = [
+            1 if stream else 0,
+            f'%{stable_json({"rule_id": str(rule_id)})[1:-1]}%',
+            *[f"%{pattern_hash}%" for pattern_hash in hashes],
+        ]
+        if requested_model:
+            clauses.append("requested_model = ?")
+            params.append(str(requested_model))
+        if routed_model:
+            clauses.append("routed_model = ?")
+            params.append(str(routed_model))
+        if category:
+            clauses.append("category = ?")
+            params.append(str(category))
+        row = self.conn.execute(
+            f"select count(*) as count from calls where {' and '.join(clauses)}",
+            tuple(params),
+        ).fetchone()
+        return int(row["count"] or 0) if row else 0
+
     def sqlite_retention_status(self) -> dict[str, Any]:
         days = sqlite_retention_days_from_env()
         last_run = self.latest_sqlite_maintenance_run()

@@ -74,6 +74,28 @@ class CacheDecisionMetaTest(unittest.TestCase):
         self.assertEqual(meta["hit_type"], "exact")
         self.assertEqual(meta["policy_source"], "local-default")
 
+    def test_packaged_haiku_short_completion_streaming_rule_is_narrow_and_warm(self):
+        rules = list(cache_module.CACHE_PATTERN_RULES)
+        [rule] = [
+            item for item in rules
+            if item.get("id") == "local-haiku-short-completion-streaming-cache"
+        ]
+
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(rule["policy_source"], "local-manual")
+        self.assertEqual(rule["conditions"]["source_surface"], "anthropic_messages")
+        self.assertEqual(rule["conditions"]["app_family"], "claude_code")
+        self.assertEqual(rule["conditions"]["model_pattern"], "haiku")
+        self.assertEqual(rule["conditions"]["category"], "short-completion")
+        self.assertTrue(rule["conditions"]["stream"])
+        self.assertFalse(rule["conditions"]["has_tools"])
+        self.assertEqual(rule["conditions"]["cacheability_bucket"], "high")
+        self.assertTrue(rule["conditions"]["static_information_hint"])
+        self.assertFalse(rule["action"]["allow_tool_calls"])
+        self.assertTrue(rule["action"]["streaming"])
+        self.assertEqual(rule["action"]["scope"], "session")
+        self.assertEqual(rule["action"]["min_call_count"], 5)
+
     def test_tool_requests_are_skipped_when_tool_cache_disabled(self):
         can_exact, can_semantic, meta = cache_module.cache_lookup_meta(has_tool_blocks=True)
 

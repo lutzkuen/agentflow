@@ -1314,6 +1314,33 @@ async def anthropic_messages(context: ProviderContext, request: Request) -> Resp
             if replay_pattern_rule is not None:
                 cache_meta["replay_scope"] = replay_scope
                 cache_meta["replay_scope_id_available"] = bool(replay_scope_id)
+            if can_stream_cache and replay_pattern_rule is not None:
+                min_call_count = max(1, int(replay_pattern_rule.get("min_call_count") or 1))
+                if min_call_count > 1:
+                    prior_observed = context.store.cache_pattern_observed_call_count(
+                        rule_id=str(replay_pattern_rule.get("rule_id") or ""),
+                        matched_hashes=replay_pattern_rule.get("matched_hashes") or [],
+                        requested_model=requested_model,
+                        routed_model=str(crunched.get("model") or ""),
+                        category=category,
+                        stream=True,
+                    )
+                    observed_count = prior_observed + 1
+                    cache_meta["pattern_rule_warmup"] = {
+                        "schema": "agentflow.cache_pattern_warmup.v1",
+                        "rule_id": replay_pattern_rule.get("rule_id"),
+                        "candidate_id": replay_pattern_rule.get("candidate_id"),
+                        "policy_source": replay_pattern_rule.get("policy_source"),
+                        "min_call_count": min_call_count,
+                        "prior_observed_call_count": prior_observed,
+                        "observed_call_count": observed_count,
+                        "met": observed_count >= min_call_count,
+                        "metadata_only": True,
+                    }
+                    if observed_count < min_call_count:
+                        can_stream_cache = False
+                        cache_meta["status"] = "skipped"
+                        cache_meta["reason"] = "streaming-min-call-count-not-met"
             stream_cache_key_variants = _cache_key_variants_for_models(
                 crunched,
                 path,

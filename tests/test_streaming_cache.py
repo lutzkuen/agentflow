@@ -355,6 +355,7 @@ class StreamingCacheTest(unittest.TestCase):
         canary_fraction=1.0,
         safe_invalidation=False,
         allow_tool_calls=False,
+        min_call_count=1,
         session_id="streaming-cache-test",
     ):
         features = self._pattern_features_for_request(request_body, session_id=session_id)
@@ -390,6 +391,7 @@ class StreamingCacheTest(unittest.TestCase):
                 "streaming": True,
                 "allow_tool_calls": allow_tool_calls,
                 "safe_invalidation": safe_invalidation,
+                "min_call_count": min_call_count,
             },
         }])[0]
 
@@ -843,6 +845,68 @@ class StreamingCacheTest(unittest.TestCase):
             self.assertEqual(second_cache["stream_replay"]["media_type"], "text/event-stream")
             self.assertEqual(second_cache["stream_replay"]["frame_count"], len(STREAM_FRAMES))
             self.assertTrue(second_cache["stream_replay"]["complete"])
+        finally:
+            cache_module.CACHE_PATTERN_RULES = old_rules
+
+    def test_streamed_haiku_short_completion_rule_warms_before_replay(self):
+        request_body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "What is the capital of France?"}],
+        }
+        old_rules = cache_module.CACHE_PATTERN_RULES
+        try:
+            cache_module.CACHE_PATTERN_RULES = (
+                self._streaming_cache_rule_for_request(request_body, min_call_count=5),
+            )
+            headers = {"x-session-id": "streaming-cache-test"}
+            cache_headers = []
+            bodies = []
+            with patch.object(server.httpx, "AsyncClient", FakeAsyncClient):
+                client = TestClient(server.app)
+                for _ in range(6):
+                    with client.stream("POST", "/v1/messages", json=request_body, headers=headers) as response:
+                        cache_headers.append(response.headers["x-agentflow-cache"])
+                        bodies.append(b"".join(response.iter_bytes()))
+
+            self.assertEqual(cache_headers, [
+                "skip-streaming",
+                "skip-streaming",
+                "skip-streaming",
+                "skip-streaming",
+                "miss",
+                "hit",
+            ])
+            self.assertEqual(FakeAsyncClient.calls, 5)
+            self.assertTrue(all(body == b"".join(STREAM_FRAMES) for body in bodies))
+
+            rows = server.store.conn.execute(
+                "select cache_hit, cache_json from calls order by created_at"
+            ).fetchall()
+            self.assertEqual([row["cache_hit"] for row in rows], [0, 0, 0, 0, 0, 1])
+            cache_rows = [json.loads(row["cache_json"]) for row in rows]
+            self.assertEqual(
+                [cache["reason"] for cache in cache_rows],
+                [
+                    "streaming-min-call-count-not-met",
+                    "streaming-min-call-count-not-met",
+                    "streaming-min-call-count-not-met",
+                    "streaming-min-call-count-not-met",
+                    "streaming-exact-pattern-miss",
+                    "streaming-exact-match",
+                ],
+            )
+            self.assertEqual(
+                [cache["pattern_rule_warmup"]["observed_call_count"] for cache in cache_rows[:5]],
+                [1, 2, 3, 4, 5],
+            )
+            self.assertFalse(cache_rows[3]["pattern_rule_warmup"]["met"])
+            self.assertTrue(cache_rows[4]["pattern_rule_warmup"]["met"])
+            self.assertEqual(cache_rows[5]["hit_type"], "streaming-exact")
+            self.assertEqual(cache_rows[5]["cache_replay_canary"]["status"], "applied")
+            self.assertEqual(cache_rows[5]["cache_replay_lifecycle_feedback"]["status"], "disabled")
+            self.assertTrue(cache_rows[5]["pattern_rule_warmup"]["met"])
         finally:
             cache_module.CACHE_PATTERN_RULES = old_rules
 

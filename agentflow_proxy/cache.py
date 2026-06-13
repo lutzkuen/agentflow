@@ -204,6 +204,15 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
+def _as_int(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -222,6 +231,10 @@ def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
         if not pattern_hashes:
             continue
         rule_id = str(item.get("id") or item.get("rule_id") or f"cache-pattern-rule-{index + 1}")
+        min_call_count = max(1, _as_int(
+            action.get("min_call_count", conditions.get("min_call_count", item.get("min_call_count"))),
+            1,
+        ))
         rules.append({
             "id": rule_id,
             "enabled": _as_bool(item.get("enabled"), True),
@@ -248,6 +261,7 @@ def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
                 ),
                 "streaming": _as_bool(action.get("streaming"), False),
                 "scope": str(action.get("scope") or "session"),
+                "min_call_count": min_call_count,
             },
             "rollout": normalize_pattern_rollout(item.get("rollout")),
         })
@@ -653,6 +667,7 @@ def _cache_pattern_rule_match(
                 "allow_tool_calls": bool(action.get("allow_tool_calls")),
                 "safe_invalidation": bool(action.get("safe_invalidation")),
                 "scope": str(action.get("scope") or "session"),
+                "min_call_count": max(1, _as_int(action.get("min_call_count"), 1)),
                 "rollout": pattern_rollout_public_meta(rule.get("rollout")),
                 "canary": canary if canary.get("enabled") else None,
             }, skip_reasons
@@ -682,6 +697,7 @@ def _attach_cache_pattern_meta(
                 "allow_tool_calls",
                 "safe_invalidation",
                 "scope",
+                "min_call_count",
                 "rollout",
                 "canary",
             }
@@ -763,6 +779,8 @@ def cache_hit_decision_meta(
         meta["session_memory_replayability"] = lookup_meta["session_memory_replayability"]
     if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("cache_replay_canary"), dict):
         meta["cache_replay_canary"] = lookup_meta["cache_replay_canary"]
+    if isinstance(lookup_meta, dict) and isinstance(lookup_meta.get("pattern_rule_warmup"), dict):
+        meta["pattern_rule_warmup"] = lookup_meta["pattern_rule_warmup"]
     if estimated_saved_cost_usd is not None:
         meta["estimated_saved_cost_usd"] = round(max(0.0, float(estimated_saved_cost_usd)), 9)
     return meta
@@ -1621,7 +1639,30 @@ def streaming_cache_lookup_meta(
         reason = "streaming-thinking-disabled"
     elif pattern_skip_reasons:
         status = "skipped"
-        reason = str(pattern_skip_reasons[-1].get("reason") or "streaming-pattern-rule-skipped")
+        selected_reason = str(pattern_skip_reasons[-1].get("reason") or "streaming-pattern-rule-skipped")
+        no_matching_rule_reasons = {
+            "disabled",
+            "pattern-features-missing",
+            "pattern-hash-mismatch",
+            "has-tools-mismatch",
+            "stream-mismatch",
+            "model-pattern-mismatch",
+            "category-mismatch",
+            "source_surface-mismatch",
+            "endpoint-mismatch",
+            "app_family-mismatch",
+            "text_bucket-mismatch",
+            "token_bucket-mismatch",
+            "workflow_phase-mismatch",
+            "replayability-gate-mismatch",
+            "unsupported-action",
+            "streaming-not-allowed",
+        }
+        reason = (
+            "streaming-pattern-rule-required"
+            if selected_reason in no_matching_rule_reasons
+            else selected_reason
+        )
     elif CACHE_ENABLED and base_exact_enabled:
         status = "skipped"
         reason = "streaming-pattern-rule-required"

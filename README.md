@@ -327,6 +327,61 @@ is treated as loopback-only and does not require `AGENTFLOW_MANAGED_API_KEY`.
 Remote managed servers still require an API key. Managed calls send derived
 feature metadata only; provider request bodies stay local.
 
+## Local cache rules
+
+Cache policy is loaded from the first existing path in this order:
+
+```text
+AGENTFLOW_CACHE_RULES
+config/cache_rules.yaml
+~/.agentflow/cache_rules.yaml
+bundled agentflow_proxy/cache_rules.yaml
+```
+
+The bundled cache rules include a reviewed local rule for Claude Code
+`short-completion` streaming requests routed to Haiku. It only applies when
+metadata says the request is non-tool, high-cacheability, static information,
+and not time-sensitive or user-specific. The first four matching successful
+calls warm the rule; the fifth matching call is allowed to store the streamed
+response, and later identical session-scoped calls can replay it.
+
+If you maintain your own `config/cache_rules.yaml` or
+`~/.agentflow/cache_rules.yaml`, include an equivalent pattern rule:
+
+```yaml
+pattern_rules:
+  - id: local-haiku-short-completion-streaming-cache
+    enabled: true
+    policy_source: local-manual
+    conditions:
+      pattern_hashes: ["sha256:*"]
+      source_surface: anthropic_messages
+      app_family: claude_code
+      model_pattern: haiku
+      category: short-completion
+      stream: true
+      has_tools: false
+      cacheability_bucket: high
+      static_information_hint: true
+      time_sensitive_hint: false
+      user_specific_hint: false
+      exact_cache_candidate_hint: true
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: 1.0
+      canary_salt: local-haiku-short-completion-streaming-cache-v1
+      canary_unit: request_fingerprint
+    action:
+      type: exact_cache_pattern
+      streaming: true
+      allow_tool_calls: false
+      safe_invalidation: false
+      scope: session
+      min_call_count: 5
+```
+
 ## Advanced policy and diagnostics
 
 The README keeps the happy path short. Advanced local policy review/apply/rollback, managed recommendation bridge, replayability reports, routing experiments, and promotion diagnostics are available as CLI entry points installed by `pip install -e .`.

@@ -11,7 +11,44 @@ file_watch:
   # capture_candidates: false  # Set true to snapshot workspace files for tool-result/streaming candidates
   #   that carry no explicit path references in the request body.  Off by default: only enable
   #   when local files are known to be the relevant dependency signal for repeated shapes.
-pattern_rules: []
+pattern_rules:
+  # Reviewed local streaming replay for deterministic Claude Code short-completion turns
+  # routed to Haiku. This remains narrow: streaming only, no tools, no thinking, session
+  # scoped, high/static cacheability metadata required, and the fifth matching local
+  # observation is the first one allowed to populate the replay cache.
+  - id: local-haiku-short-completion-streaming-cache
+    enabled: true
+    policy_source: local-manual
+    candidate_id: local-haiku-short-completion-streaming-cache
+    conditions:
+      pattern_hashes:
+        - "sha256:*"
+      source_surface: anthropic_messages
+      app_family: claude_code
+      model_pattern: haiku
+      category: short-completion
+      stream: true
+      has_tools: false
+      cacheability_bucket: high
+      static_information_hint: true
+      time_sensitive_hint: false
+      user_specific_hint: false
+      exact_cache_candidate_hint: true
+    rollout:
+      schema: agentflow.pattern_policy_rollout.v1
+      recommendation_mode: canary-only
+      canary_enabled: true
+      canary_fraction: 1.0
+      canary_salt: local-haiku-short-completion-streaming-cache-v1
+      canary_unit: request_fingerprint
+    action:
+      type: exact_cache_pattern
+      streaming: true
+      allow_tool_calls: false
+      safe_invalidation: false
+      scope: session
+      min_call_count: 5
+
 # Example managed/reviewed exact replay canary action fields:
 # action:
 #   type: exact_cache_pattern
