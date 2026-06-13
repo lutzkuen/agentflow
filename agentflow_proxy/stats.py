@@ -15817,10 +15817,17 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "codex_app_exact_local_cache_usd": round(codex_cache_savings, 6),
         "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
     }
+    # AgentFlow-controlled savings keys only (routing, crunching, local exact-cache).
+    # provider_prompt_cache_discount_usd is provider-side billing economics, not AgentFlow-generated.
+    # sub-buckets provider_exact_local_cache_usd / codex_app_exact_local_cache_usd are already
+    # counted inside exact_local_cache_usd, so exclude them from the sum to avoid double-counting.
+    _AGENTFLOW_SAVINGS_KEYS = ("routing_usd", "crunching_usd", "exact_local_cache_usd")
+    today_agentflow_generated_savings = sum(float(today_savings_buckets[k] or 0.0) for k in _AGENTFLOW_SAVINGS_KEYS)
+    agentflow_generated_savings = sum(float(savings_buckets[k] or 0.0) for k in _AGENTFLOW_SAVINGS_KEYS)
     today_total_savings = sum(float(value or 0.0) for value in today_savings_buckets.values())
     total_savings = sum(float(value or 0.0) for value in savings_buckets.values())
-    today_observed_baseline = today_cost + today_total_savings
-    observed_baseline = total_cost + total_savings
+    today_observed_baseline = today_cost + today_agentflow_generated_savings
+    observed_baseline = total_cost + agentflow_generated_savings
     today_calculated_spend = today_cost + today_codex_cost_est
     calculated_spend = total_cost + codex_cost_est
     today_observed_baseline_with_codex = today_observed_baseline + today_codex_cost_est
@@ -15876,6 +15883,27 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "cost_basis": CODEX_APP_COST_BASIS,
         },
         "savings": {
+            "today_agentflow_generated_savings_usd": round(today_agentflow_generated_savings, 6),
+            "agentflow_generated_savings_usd": round(agentflow_generated_savings, 6),
+            "today_agentflow_generated_buckets": {k: today_savings_buckets[k] for k in (*_AGENTFLOW_SAVINGS_KEYS, "provider_exact_local_cache_usd", "codex_app_exact_local_cache_usd")},
+            "agentflow_generated_buckets": {k: savings_buckets[k] for k in (*_AGENTFLOW_SAVINGS_KEYS, "provider_exact_local_cache_usd", "codex_app_exact_local_cache_usd")},
+            "provider_prompt_cache_discount_usd": round(prompt_cache_savings, 6),
+            "today_provider_prompt_cache_discount_usd": round(today_prompt_cache_savings, 6),
+            "provider_prompt_cache_economics": {
+                "today_read_discount_usd": round(today_prompt_cache_savings, 6),
+                "read_discount_usd": round(prompt_cache_savings, 6),
+                "today_cached_read_cost_usd": round(today_prompt_cache_cached_read_cost, 6),
+                "cached_read_cost_usd": round(prompt_cache_cached_read_cost, 6),
+                "today_creation_cost_usd": round(today_prompt_cache_creation_cost, 6),
+                "creation_cost_usd": round(prompt_cache_creation_cost, 6),
+                "today_creation_premium_usd": round(today_prompt_cache_creation_premium, 6),
+                "creation_premium_usd": round(prompt_cache_creation_premium, 6),
+                "today_net_discount_usd": round(today_prompt_cache_net_discount, 6),
+                "net_discount_usd": round(prompt_cache_net_discount, 6),
+                "label": "provider billing efficiency",
+                "boundary": "provider-side pricing; separate from AgentFlow local exact-cache replay savings",
+            },
+            # backward-compat: these include provider_prompt_cache_discount_usd; prefer agentflow_generated_savings_usd
             "today_total_savings_usd": round(today_total_savings, 6),
             "total_savings_usd": round(total_savings, 6),
             "today_buckets": today_savings_buckets,
@@ -15886,7 +15914,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
             "unavoidable_provider_spend_usd": round(hard_floor, 6),
             "today_unavoidable_calculated_spend_usd": round(today_hard_floor, 6),
             "unavoidable_calculated_spend_usd": round(hard_floor, 6),
-            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline_with_codex - today_total_savings, 6),
+            "today_baseline_minus_feasible_savings_usd": round(today_observed_baseline_with_codex - today_agentflow_generated_savings, 6),
             "excludes_unknown_codex_app_cost": not today_codex_cost_known,
             "codex_app_cost_estimated": today_codex_cost_known,
             "cost_basis": CODEX_APP_COST_BASIS,
@@ -19060,10 +19088,11 @@ async function refresh(){
     document.getElementById('c-tokens-codex').textContent=basisText;
     document.getElementById('c-spend').textContent=fmt(acct.cost_est_usd??spend.today_calculated_spend_usd??spend.today_provider_spend_usd??0,4);
     document.getElementById('c-spend-sub').textContent=fmt(acctTotal.cost_est_usd??spend.calculated_spend_usd??spend.total_provider_spend_usd??0,4)+' total · '+fmt(spend.today_provider_spend_usd||0,4)+' provider reported · '+fmt(spend.today_codex_app_estimated_spend_usd||0,4)+' Codex est';
-    document.getElementById('c-savings').textContent=fmt((acct.routing_savings_usd||0)+(acct.crunch_savings_usd||0)+(acct.cache_savings_usd||0)||savings.today_total_savings_usd||0,4);
-    document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??buckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??buckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??buckets.exact_local_cache_usd??0,4);
+    const agentflowBuckets=savings.today_agentflow_generated_buckets||buckets;
+    document.getElementById('c-savings').textContent=fmt((acct.routing_savings_usd||0)+(acct.crunch_savings_usd||0)+(acct.cache_savings_usd||0)||savings.today_agentflow_generated_savings_usd??savings.today_total_savings_usd??0,4);
+    document.getElementById('c-savings-sub').textContent='routing '+fmt(acct.routing_savings_usd??agentflowBuckets.routing_usd??0,4)+' · crunch '+fmt(acct.crunch_savings_usd??agentflowBuckets.crunching_usd??0,4)+' · cache '+fmt(acct.cache_savings_usd??agentflowBuckets.exact_local_cache_usd??0,4);
     document.getElementById('c-floor').textContent=fmt(acct.hard_floor_usd??floor.today_unavoidable_provider_spend_usd??0,4);
-    document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_calculated_cost_usd??spend.today_baseline_provider_cost_usd??0,4)+' - feasible savings '+fmt(savings.today_total_savings_usd||0,4)+'; Codex estimated';
+    document.getElementById('c-floor-sub').textContent='baseline '+fmt(spend.today_baseline_calculated_cost_usd??spend.today_baseline_provider_cost_usd??0,4)+' - AgentFlow savings '+fmt(savings.today_agentflow_generated_savings_usd??savings.today_total_savings_usd??0,4)+'; Codex estimated';
     document.getElementById('c-health').textContent=(health.errors||0).toLocaleString()+' errors';
     document.getElementById('c-health-sub').textContent='avg latency '+fmtMs(health.avg_latency_ms||0)+' · '+(s.today_calls||0).toLocaleString()+' provider calls today';
 

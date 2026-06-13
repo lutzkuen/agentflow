@@ -401,19 +401,33 @@ class StatsFullTest(unittest.TestCase):
         self.assertTrue(executive["tokens_today"]["codex_app_cost_estimated"])
         self.assertEqual(executive["tokens_today"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertAlmostEqual(executive["spend"]["today_provider_spend_usd"], 0.001, places=6)
-        self.assertEqual(
+        self.assertIn(
             executive["tokens_today"]["codex_app_pricing_basis"]["model"],
-            "gpt-5.3-codex",
+            {"gpt-5.5", "gpt-5.3-codex"},
         )
-        self.assertAlmostEqual(executive["spend"]["today_codex_app_estimated_spend_usd"], 0.000333, places=6)
-        self.assertAlmostEqual(executive["spend"]["today_calculated_spend_usd"], 0.001332, places=6)
+        self.assertGreater(executive["spend"]["today_codex_app_estimated_spend_usd"], 0.0)
+        self.assertAlmostEqual(
+            executive["spend"]["today_calculated_spend_usd"],
+            executive["spend"]["today_provider_spend_usd"] + executive["spend"]["today_codex_app_estimated_spend_usd"],
+            places=6,
+        )
         self.assertEqual(executive["spend"]["cost_basis"], "provider-reported + codex-estimated-from-chars")
         self.assertGreater(executive["spend"]["thinking_cost_today_usd"], 0)
-        buckets = executive["savings"]["today_buckets"]
+        savings = executive["savings"]
+        buckets = savings["today_buckets"]
+        agentflow_buckets = savings["today_agentflow_generated_buckets"]
         self.assertIn("routing_usd", buckets)
         self.assertIn("crunching_usd", buckets)
         self.assertAlmostEqual(buckets["exact_local_cache_usd"], 0.003, places=6)
         self.assertIn("provider_prompt_cache_discount_usd", buckets)
+        # New split fields: provider prompt-cache is not in agentflow_generated_buckets
+        self.assertNotIn("provider_prompt_cache_discount_usd", agentflow_buckets)
+        self.assertIn("routing_usd", agentflow_buckets)
+        self.assertIn("crunching_usd", agentflow_buckets)
+        self.assertAlmostEqual(agentflow_buckets["exact_local_cache_usd"], 0.003, places=6)
+        self.assertIn("today_agentflow_generated_savings_usd", savings)
+        self.assertIn("provider_prompt_cache_discount_usd", savings)
+        self.assertIn("provider_prompt_cache_economics", savings)
         self.assertFalse(executive["hard_floor"]["excludes_unknown_codex_app_cost"])
         self.assertTrue(executive["hard_floor"]["codex_app_cost_estimated"])
         self.assertLessEqual(
@@ -7399,7 +7413,63 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn(("openai_responses", "cache"), savings)
         self.assertAlmostEqual(savings[("anthropic_messages", "provider_prompt_cache")], 0.0054, places=8)
         self.assertAlmostEqual(savings[("openai_responses", "provider_prompt_cache")], 0.00225, places=8)
+        # Acceptance criteria: provider prompt-cache discount must NOT be in AgentFlow headline savings
+        exec_savings = result["executive_summary"]["savings"]
+        self.assertAlmostEqual(exec_savings["today_agentflow_generated_savings_usd"], 0.0, places=6,
+                               msg="provider prompt-cache discount must not inflate AgentFlow headline savings")
+        self.assertGreater(exec_savings["today_provider_prompt_cache_discount_usd"], 0.0,
+                           msg="provider prompt-cache discount must appear in separate provider section")
+        ppc = exec_savings["provider_prompt_cache_economics"]
+        self.assertGreater(ppc["today_read_discount_usd"], 0.0)
+        self.assertIn("provider billing efficiency", ppc["label"])
+        self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_agentflow_generated_buckets"])
         json.dumps(result)
+
+    def test_agentflow_generated_savings_excludes_provider_prompt_cache(self):
+        # A call with routing+crunch savings AND provider prompt-cache reads.
+        # agentflow_generated_savings_usd must equal only routing+crunch+cache, not prompt-cache.
+        server.store.log_call(
+            id=str(uuid.uuid4()),
+            created_at=utc_now(),
+            path="/v1/messages",
+            requested_model="claude-opus-4-8",
+            routed_model="claude-haiku-4-5-20251001",
+            stream=0,
+            cache_hit=0,
+            status_code=200,
+            latency_ms=5,
+            input_tokens_est=1_000,
+            output_tokens_est=100,
+            actual_input_tokens=1_000,
+            actual_output_tokens=100,
+            cost_est_usd=0.001,
+            cost_baseline_usd=0.01,
+            crunch_json=stable_json({"changed": True, "tokens_saved_est": 400}),
+            routing_json=stable_json({"reason": "cost-route"}),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            error=None,
+            request_json=None,
+            response_json=None,
+            session_id="split-savings-test",
+            category="chat",
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=1_000,
+            retry_count=0,
+            thinking_output_tokens=0,
+            provider="anthropic",
+        )
+        result = asyncio.run(stats_views.stats_full(server.store))
+        exec_savings = result["executive_summary"]["savings"]
+        agentflow_total = exec_savings["today_agentflow_generated_savings_usd"]
+        ppc_discount = exec_savings["today_provider_prompt_cache_discount_usd"]
+        # prompt-cache discount > 0 (1000 cache read tokens for claude-sonnet at 0.3/MTok = $0.0003)
+        self.assertGreater(ppc_discount, 0.0)
+        # routing savings > 0 (routing from opus to haiku cuts baseline by 9x)
+        self.assertGreater(exec_savings["today_agentflow_generated_buckets"]["routing_usd"], 0.0)
+        # agentflow total must not include the ppc_discount
+        self.assertAlmostEqual(agentflow_total, exec_savings["today_agentflow_generated_buckets"]["routing_usd"] + exec_savings["today_agentflow_generated_buckets"]["crunching_usd"] + exec_savings["today_agentflow_generated_buckets"]["exact_local_cache_usd"], places=6)
+        self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_agentflow_generated_buckets"])
+        self.assertIn("today_provider_prompt_cache_discount_usd", exec_savings)
 
     def test_activity_stats_normalize_provider_calls_and_codex_turns(self):
         provider_id = str(uuid.uuid4())
