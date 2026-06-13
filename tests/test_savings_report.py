@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from agentflow_proxy import cli
+from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
 from agentflow_proxy.savings_report import (
     OPPORTUNITY_FAMILY_ACTIVATION,
     OPPORTUNITY_FAMILY_CACHE_REPLAY,
@@ -332,6 +333,73 @@ class TestBuildSavingsReportWithStore(_StoreFixture):
         self.assertFalse(privacy["filesystem_paths_included"])
         self.assertFalse(privacy["provider_calls_made"])
         self.assertFalse(privacy["managed_server_calls_made"])
+
+    def test_savings_report_summarizes_activation_lifecycle_feedback_states(self) -> None:
+        now = utc_now()
+        for idx, (state, cohort) in enumerate(
+            (
+                ("holdout_only", "holdout"),
+                ("suppressed", "suppressed"),
+                ("rollback_required", "rollback_required"),
+            )
+        ):
+            event = {
+                "schema": "agentflow.openai_optimization_lifecycle_feedback.v1",
+                "event_type": "activation_staged_optimization_lifecycle",
+                "occurred_at": now,
+                "provider": "openai",
+                "source_surface": LIFECYCLE_SOURCE_SURFACE,
+                "endpoint": "responses",
+                "event_phase": "dry_run",
+                "lifecycle_state": state,
+                "family_events": [
+                    {
+                        "action_family": "routing",
+                        "cohort": cohort,
+                        "status": cohort,
+                        "candidate_id": f"candidate-{idx}",
+                        "rule_id": f"rule-{idx}",
+                        "reason_codes": [state],
+                    }
+                ],
+                "privacy": {
+                    "metadata_only": True,
+                    "raw_prompts_included": False,
+                    "raw_provider_bodies_included": False,
+                    "request_ids_included": False,
+                    "raw_session_ids_included": False,
+                    "cache_keys_included": False,
+                    "tenant_ids_included": False,
+                    "file_paths_included": False,
+                },
+            }
+            self.store.enqueue_managed_outcome_feedback(
+                id=f"activation-lifecycle-{idx}",
+                created_at=now,
+                updated_at=now,
+                source_surface=LIFECYCLE_SOURCE_SURFACE,
+                endpoint="/v1/policy-events",
+                optimization_unit_id=0,
+                payload_json=stable_json(event),
+                status="queued",
+                attempts=0,
+                next_attempt_at=now,
+            )
+
+        result = build_savings_report(_openai_activation_config(), store=self.store, limit=50)
+
+        feedback = result["activation_lifecycle_feedback"]
+        self.assertEqual(feedback["schema"], "agentflow.activation_staged_lifecycle_feedback_summary.v1")
+        self.assertEqual(feedback["queue_rows"], 3)
+        states = {item["value"]: item["count"] for item in feedback["state_breakdown"]}
+        self.assertEqual(states["holdout_only"], 1)
+        self.assertEqual(states["suppressed"], 1)
+        self.assertEqual(states["rollback_required"], 1)
+        self.assertFalse(feedback["payload_json_included"])
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(_SECRET_PROMPT, rendered)
+        self.assertNotIn(_SECRET_SESSION, rendered)
+        self.assertNotIn(_SECRET_REQUEST_ID, rendered)
 
 
 class TestSavingsReportCLI(unittest.TestCase):

@@ -12,8 +12,11 @@ from unittest.mock import patch
 import yaml
 
 from agentflow_proxy import cli
+from agentflow_proxy.managed_egress import assert_managed_egress_safe
+from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
 from agentflow_proxy.openai_routing_canary_stage import stage_openai_routing_canary_drafts
 from agentflow_proxy.openai_routing_report import build_openai_routing_report
+from agentflow_proxy.optimization import feedback
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
 from agentflow_proxy.store import SQLiteStore, stable_json
 
@@ -230,6 +233,85 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         self.assertFalse((Path(self.tmpdir.name) / "drafts").exists())
         self.assertNotIn("secret raw prompt", stdout.getvalue())
         self.assertNotIn("req_secret", stdout.getvalue())
+
+    def test_cli_queue_feedback_emits_metadata_only_activation_lifecycle_row(self) -> None:
+        report = {
+            "schema": "agentflow.openai_routing_opportunity.v1",
+            "generated_at": utc_now(),
+            "candidates": [{
+                "candidate_id": "activation-public-candidate",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "category": "chat",
+                "matched_count": 6,
+                "blocked_count": 0,
+                "projected_savings_usd": 0.01,
+                "estimated_baseline_cost_usd": 0.02,
+                "text_bucket": "lt-1_5k",
+                "token_bucket": "lt-1k",
+                "input_tokens": 1800,
+            }],
+            "privacy": {"metadata_only": True, "raw_prompts_included": False},
+        }
+        stdout = io.StringIO()
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENTFLOW_RECOMMENDATION_ENABLED": "0",
+                "AGENTFLOW_RECOMMENDATION_SERVER_URL": "",
+            },
+            clear=False,
+        ):
+            code = cli.openai_routing_canary_stage_cli(
+                [
+                    "-",
+                    "--workspace",
+                    str(Path(self.tmpdir.name) / "drafts"),
+                    "--db",
+                    self.db_path,
+                    "--queue-feedback",
+                ],
+                stdin=io.StringIO(json.dumps(report)),
+                stdout=stdout,
+            )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(code, 0, stdout.getvalue())
+        self.assertEqual(payload["lifecycle_feedback"]["status"], "queued")
+        self.assertFalse(payload["lifecycle_feedback"]["payload_included"])
+        rows = self.store.managed_outcome_feedback_payload_rows(source_surface=LIFECYCLE_SOURCE_SURFACE, limit=10)
+        self.assertEqual(len(rows), 1)
+        event = json.loads(rows[0]["payload_json"])
+        self.assertEqual(event["schema"], "agentflow.openai_optimization_lifecycle_feedback.v1")
+        self.assertEqual(event["event_type"], "activation_staged_optimization_lifecycle")
+        self.assertEqual(event["event_phase"], "stage")
+        self.assertEqual(event["lifecycle_state"], "healthy_canary")
+        self.assertEqual(event["family_events"][0]["action_family"], "routing")
+        self.assertEqual(event["family_events"][0]["cohort"], "staged")
+        self.assertEqual(event["family_events"][0]["candidate_id"], "activation-public-candidate")
+        self.assertFalse(event["privacy"]["raw_prompts_included"])
+        self.assertFalse(event["privacy"]["raw_provider_bodies_included"])
+        self.assertFalse(event["privacy"]["raw_tool_payloads_included"])
+        self.assertFalse(event["privacy"]["request_ids_included"])
+        self.assertFalse(event["privacy"]["raw_session_ids_included"])
+        self.assertFalse(event["privacy"]["cache_keys_included"])
+        self.assertFalse(event["privacy"]["tenant_ids_included"])
+        self.assertFalse(event["privacy"]["file_paths_included"])
+        assert_managed_egress_safe(event)
+
+        status = feedback.managed_feedback_status_result(
+            self.store,
+            source_surface=LIFECYCLE_SOURCE_SURFACE,
+            sample_limit=5,
+        )
+        lifecycle = status["openai_optimization_lifecycle"]
+        self.assertEqual(lifecycle["queue_rows"], 1)
+        self.assertIn({"value": "staged", "count": 1}, lifecycle["cohort_breakdown"])
+        rendered = json.dumps(status, sort_keys=True) + stdout.getvalue()
+        self.assertNotIn("raw prompt must not appear", rendered)
+        self.assertNotIn("secret-openai-session-id", rendered)
 
 
 if __name__ == "__main__":

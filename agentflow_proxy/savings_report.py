@@ -279,6 +279,15 @@ def build_savings_report(
 
     opportunities.sort(key=_opportunity_sort_key)
 
+    lifecycle_feedback = None
+    if store is not None:
+        try:
+            from agentflow_proxy.activation_lifecycle_feedback import activation_lifecycle_feedback_summary
+
+            lifecycle_feedback = activation_lifecycle_feedback_summary(store, limit=limit)
+        except Exception:
+            lifecycle_feedback = None
+
     return {
         "schema": SCHEMA,
         "ok": True,
@@ -286,4 +295,17 @@ def build_savings_report(
         "privacy": _privacy_summary(),
         "opportunities": opportunities,
         "opportunity_count": len(opportunities),
+        "activation_lifecycle_feedback": lifecycle_feedback
+        or {
+            "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+            "queue_rows": 0,
+            "family_event_count": 0,
+            "state_breakdown": [],
+            "event_phase_breakdown": [],
+            "cohort_breakdown": [],
+            "family_state_breakdown": [],
+            "candidate_id_breakdown": [],
+            "payload_json_included": False,
+            "privacy": _privacy_summary(),
+        },
     }

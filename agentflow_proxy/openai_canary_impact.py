@@ -528,6 +528,22 @@ def build_openai_canary_impact_report(
     for item in candidates:
         for reason in item.get("reason_codes") or []:
             reason_counts[str(reason)] += 1
+    try:
+        from agentflow_proxy.activation_lifecycle_feedback import activation_lifecycle_feedback_summary
+
+        lifecycle_feedback = activation_lifecycle_feedback_summary(store_obj, limit=lookback_limit)
+    except Exception:
+        lifecycle_feedback = {
+            "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+            "queue_rows": 0,
+            "family_event_count": 0,
+            "state_breakdown": [],
+            "event_phase_breakdown": [],
+            "cohort_breakdown": [],
+            "family_state_breakdown": [],
+            "candidate_id_breakdown": [],
+            "payload_json_included": False,
+        }
 
     return {
         "schema": SCHEMA,
@@ -553,5 +569,6 @@ def build_openai_canary_impact_report(
             "reason_code_counts": _counter_rows(reason_counts),
         },
         "candidates": candidates,
+        "activation_lifecycle_feedback": lifecycle_feedback,
         "privacy": _privacy_summary(),
     }

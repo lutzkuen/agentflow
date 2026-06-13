@@ -14,6 +14,7 @@ from unittest.mock import patch
 from agentflow_proxy import cli
 from agentflow_proxy import router as router_module
 from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
+from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
 from agentflow_proxy.openai_routing_report import build_openai_routing_report
 from agentflow_proxy.optimization.openai_outcomes import record_managed_outcome_feedback
 from agentflow_proxy.stats import stats_openai_canary_readiness
@@ -364,6 +365,60 @@ class OpenAICanaryPrivacyFixturesTest(unittest.TestCase):
         self.assertEqual(readiness["policy"]["rule_path_included"], False)
         self.assertEqual(readiness["summary"]["canary_holdout_count"], 1)
         _assert_openai_canary_privacy_clean(self, readiness)
+
+    def test_openai_canary_impact_includes_activation_lifecycle_feedback_state(self) -> None:
+        now = utc_now()
+        event = {
+            "schema": "agentflow.openai_optimization_lifecycle_feedback.v1",
+            "event_type": "activation_staged_optimization_lifecycle",
+            "occurred_at": now,
+            "provider": "openai",
+            "source_surface": LIFECYCLE_SOURCE_SURFACE,
+            "endpoint": "responses",
+            "event_phase": "dry_run",
+            "lifecycle_state": "rollback_required",
+            "family_events": [
+                {
+                    "action_family": "routing",
+                    "cohort": "rollback_required",
+                    "status": "rollback_required",
+                    "candidate_id": "openai-canary-candidate-privacy",
+                    "rule_id": "local-openai-canary-privacy",
+                    "reason_codes": ["safety-stop-observed"],
+                }
+            ],
+            "privacy": {
+                "metadata_only": True,
+                "raw_prompts_included": False,
+                "raw_provider_bodies_included": False,
+                "request_ids_included": False,
+                "raw_session_ids_included": False,
+                "cache_keys_included": False,
+                "tenant_ids_included": False,
+                "file_paths_included": False,
+            },
+        }
+        self.store.enqueue_managed_outcome_feedback(
+            id="activation-lifecycle-impact",
+            created_at=now,
+            updated_at=now,
+            source_surface=LIFECYCLE_SOURCE_SURFACE,
+            endpoint="/v1/policy-events",
+            optimization_unit_id=0,
+            payload_json=stable_json(event),
+            status="queued",
+            attempts=0,
+            next_attempt_at=now,
+        )
+
+        impact = build_openai_canary_impact_report(self.store, limit=10)
+
+        feedback = impact["activation_lifecycle_feedback"]
+        self.assertEqual(feedback["queue_rows"], 1)
+        states = {item["value"]: item["count"] for item in feedback["state_breakdown"]}
+        self.assertEqual(states["rollback_required"], 1)
+        self.assertFalse(feedback["payload_json_included"])
+        _assert_openai_canary_privacy_clean(self, impact)
 
     def test_openai_managed_outcome_feedback_queue_payload_is_metadata_only(self) -> None:
         store = FakeQueuedFeedbackStore()
