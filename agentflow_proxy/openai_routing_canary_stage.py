@@ -371,6 +371,50 @@ def _projected_lifecycle_coverage(
     }
 
 
+def _stage_review_intent(canary: dict[str, Any]) -> dict[str, Any]:
+    promotion = canary.get("promotion") if isinstance(canary.get("promotion"), dict) else {}
+    lifecycle = (
+        promotion.get("projected_openai_canary_lifecycle_evidence")
+        if isinstance(promotion.get("projected_openai_canary_lifecycle_evidence"), dict)
+        else {}
+    )
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    return {
+        "schema": "agentflow.openai_routing_canary_stage_review_intent.v1",
+        "status": "ready-for-operator-review",
+        "routing_change_mode": "draft-only",
+        "active_policy_changed": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "requested_model": canary.get("model_pattern"),
+        "target_model": canary.get("target_model"),
+        "matched_count": _as_int(promotion.get("matched_count")),
+        "intended_canary_fraction": canary.get("canary_fraction"),
+        "intended_holdout_fraction": canary.get("holdout_fraction"),
+        "projected_canary_applied_count": _as_int(counts.get("canary_applied")),
+        "projected_canary_holdout_count": _as_int(counts.get("canary_holdout")),
+        "safety_stop_enabled": bool((canary.get("safety_stop") or {}).get("enabled"))
+        if isinstance(canary.get("safety_stop"), dict)
+        else False,
+        "fallback_enabled": bool((canary.get("fallback") or {}).get("enabled"))
+        if isinstance(canary.get("fallback"), dict)
+        else False,
+        "privacy_proof": {
+            "schema": "agentflow.openai_routing_canary_stage_privacy_proof.v1",
+            "metadata_only": True,
+            "local_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+        },
+    }
+
+
 def _candidate_payload(
     report: dict[str, Any],
     candidate: dict[str, Any],
@@ -1037,11 +1081,13 @@ async def stage_openai_routing_canary_drafts(
             },
         )
         canary = payload["openai_canary"]
+        review_intent = _stage_review_intent(canary)
         staged.append({
             "schema": STAGED_SCHEMA,
             "candidate_id": candidate_id,
             "section": "routing",
             "target_local_policy": "openai_canary",
+            "review_intent": review_intent,
             "draft_id": draft_result.get("draft_id"),
             "ok": bool(draft_result.get("ok")),
             "workspace": draft_result.get("workspace"),
@@ -1055,6 +1101,7 @@ async def stage_openai_routing_canary_drafts(
             "requested_model": candidate.get("requested_model"),
             "target_model": candidate.get("target_model"),
             "expected_local_executor": canary["promotion"]["expected_local_executor"],
+            "matched_count": review_intent["matched_count"],
             "canary_fraction": canary["canary_fraction"],
             "holdout_fraction": canary["holdout_fraction"],
             "reason_codes": canary["promotion"]["reason_codes"],
@@ -1063,6 +1110,7 @@ async def stage_openai_routing_canary_drafts(
             "projected_cohort_counts": canary["promotion"]["projected_cohort_counts"],
             "projected_openai_canary_lifecycle_evidence": canary["promotion"]["projected_openai_canary_lifecycle_evidence"],
             "safety_stop_metadata": canary["safety_stop"],
+            "fallback_metadata": canary["fallback"],
             "aggregate_inference": canary["promotion"]["aggregate_inference"],
             "rollback_metadata": canary["promotion"]["rollback_metadata"],
             "draft": draft_result.get("draft"),
@@ -1087,6 +1135,7 @@ async def stage_openai_routing_canary_drafts(
             "staged_count": len(staged),
             "omitted_count": len(omitted),
             "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in staged), 6),
+            "matched_count": sum(_as_int(item.get("matched_count")) for item in staged),
             "projected_canary_applied_count": sum(
                 _as_int((item.get("projected_cohort_counts") or {}).get("canary_applied"))
                 for item in staged
