@@ -3274,8 +3274,15 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.optimization_promotion_rollout_actions.v1")
         self.assertEqual(payload["summary"]["action_count"], 2)
         self.assertEqual(payload["summary"]["omitted_count"], 1)
+        self.assertEqual(payload["summary"]["omission_bucket_count"], 1)
+        self.assertEqual(payload["summary"]["top_omission_next_action"], "run-local-shadow-eval")
         sections = {row["policy_section"] for row in payload["actions"]}
         self.assertEqual(sections, {"routing", "cache"})
+        bucket = payload["omission_buckets"][0]
+        self.assertEqual(bucket["action_family"], "cache")
+        self.assertEqual(bucket["next_action"], "run-local-shadow-eval")
+        self.assertEqual(bucket["candidate_count"], 1)
+        self.assertNotIn("blocked-cli-action", json.dumps(bucket, sort_keys=True))
         omitted = payload["omitted"][0]
         self.assertEqual(omitted["target_candidate_id"], "blocked-cli-action")
         self.assertEqual(omitted["reason"], "insufficient-eval-evidence")

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import yaml
 
@@ -30,6 +30,7 @@ from agentflow_proxy.optimization_rollout_review import (
 )
 from agentflow_proxy.cli import optimization_rollout_actions_apply_cli
 from agentflow_proxy.optimization_shadow_eval import run_optimization_shadow_eval
+from agentflow_proxy.stats import stats_optimization_promotion_funnel
 from agentflow_proxy.store import Store, stable_json, utc_now
 
 
@@ -923,6 +924,145 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(cache["local_policy_update"]["candidate_profile"], "replay-safe-exact-candidate")
         self.assertEqual(result["omitted"][0]["target_candidate_id"], "blocked-action-candidate")
         self.assertEqual(result["omitted"][0]["reason"], "insufficient-eval-evidence")
+        self._assert_privacy_clean(result)
+
+    def test_promotion_actions_rank_aggregate_omission_buckets_without_candidate_ids(self):
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "blocked-cache-high",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.12,
+                    "sample_count": 12,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing", "insufficient-eval-pass-results"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "blocked-cache-low",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.03,
+                    "sample_count": 4,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "blocked-routing-holdout",
+                    "optimization_family": "openai_local_routing",
+                    "action_family": "routing",
+                    "source_surface": "openai_provider_request",
+                    "app_family": "generic_openai",
+                    "projected_savings_usd": 0.08,
+                    "sample_count": 8,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["insufficient-canary-holdout-samples"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "blocked-cache-stale",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.01,
+                    "sample_count": 2,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["stale-evidence", "dependency-freshness-missing"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+            ],
+        }
+
+        result = build_optimization_promotion_actions(report)
+
+        self.assertEqual(result["summary"]["action_count"], 0)
+        self.assertEqual(result["summary"]["omitted_count"], 4)
+        self.assertEqual(result["summary"]["omission_bucket_count"], 3)
+        buckets = result["omission_buckets"]
+        top = buckets[0]
+        self.assertEqual(top["action_family"], "cache")
+        self.assertEqual(top["optimization_family"], "cache-replayability")
+        self.assertEqual(top["source_surface"], "anthropic-messages")
+        self.assertEqual(top["candidate_count"], 2)
+        self.assertEqual(top["sample_count"], 16)
+        self.assertEqual(top["projected_savings_usd"], 0.15)
+        self.assertEqual(top["next_action"], "run-local-shadow-eval")
+        self.assertEqual(top["top_reason_codes"][:2], ["eval-results-missing", "insufficient-eval-pass-results"])
+        next_actions = {bucket["next_action"] for bucket in buckets}
+        self.assertIn("collect-canary-holdout", next_actions)
+        self.assertIn("fix-dependency-freshness", next_actions)
+        encoded_buckets = json.dumps(buckets, sort_keys=True)
+        for candidate_id in (
+            "blocked-cache-high",
+            "blocked-cache-low",
+            "blocked-routing-holdout",
+            "blocked-cache-stale",
+        ):
+            self.assertNotIn(candidate_id, encoded_buckets)
+        self.assertTrue(all(bucket["privacy"]["metadata_only"] for bucket in buckets))
+        self._assert_privacy_clean(result)
+
+    def test_promotion_funnel_stats_include_aggregate_omission_buckets(self):
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [],
+        }
+        promotion_report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "stats-omitted-cache-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.04,
+                    "sample_count": 7,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                }
+            ],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                with patch(
+                    "agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan",
+                    new=AsyncMock(return_value=plan),
+                ), patch(
+                    "agentflow_proxy.optimization_promotion_report.build_optimization_promotion_report",
+                    return_value=promotion_report,
+                ), patch(
+                    "agentflow_proxy.policy_events.recent_policy_events",
+                    return_value={"events": []},
+                ):
+                    result = asyncio.run(stats_optimization_promotion_funnel(store, limit=10))
+            finally:
+                store.conn.close()
+
+        self.assertEqual(result["schema"], "agentflow.optimization_promotion_funnel.v1")
+        self.assertEqual(result["summary"]["promotion_action_count"], 0)
+        self.assertEqual(result["summary"]["promotion_omitted_count"], 1)
+        self.assertEqual(result["summary"]["promotion_omission_bucket_count"], 1)
+        self.assertEqual(result["summary"]["top_promotion_omission_next_action"], "run-local-shadow-eval")
+        self.assertEqual(result["source_reports"]["promotion_actions_schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(result["omission_buckets"][0]["next_action"], "run-local-shadow-eval")
+        self.assertNotIn("stats-omitted-cache-candidate", json.dumps(result["omission_buckets"], sort_keys=True))
         self._assert_privacy_clean(result)
 
     def test_promotion_canary_apply_records_deterministic_holdout_and_safety_stop(self):

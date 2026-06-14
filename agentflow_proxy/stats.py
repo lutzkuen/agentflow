@@ -11819,12 +11819,14 @@ def _promotion_executor_readiness(
 
 async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
+    from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
     from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
     from agentflow_proxy.policy_events import recent_policy_events
 
     capped_limit = max(1, min(int(limit or 500), 10_000))
     plan = await build_optimization_eval_plan(store_obj, limit=capped_limit, min_samples=1)
     promotion = build_optimization_promotion_report(store_obj, plan=plan, limit=capped_limit)
+    promotion_actions = build_optimization_promotion_actions(promotion)
     observed = _promotion_observed_canary_rows(store_obj, capped_limit * 5)
     events = recent_policy_events(limit=500).get("events", [])
     lifecycle = _promotion_lifecycle_rows(events if isinstance(events, list) else [])
@@ -11940,6 +11942,10 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
             "canary_applied_count": sum(_as_int((row.get("canary") or {}).get("applied_count")) for row in candidates),
             "canary_holdout_count": sum(_as_int((row.get("canary") or {}).get("holdout_count")) for row in candidates),
             "pending_lifecycle_feedback_count": sum(_as_int((row.get("executor_readiness") or {}).get("pending_lifecycle_feedback_count")) for row in candidates),
+            "promotion_action_count": _as_int((promotion_actions.get("summary") or {}).get("action_count")),
+            "promotion_omitted_count": _as_int((promotion_actions.get("summary") or {}).get("omitted_count")),
+            "promotion_omission_bucket_count": _as_int((promotion_actions.get("summary") or {}).get("omission_bucket_count")),
+            "top_promotion_omission_next_action": (promotion_actions.get("summary") or {}).get("top_omission_next_action"),
             "last_evidence_at": max((str(row.get("last_evidence_at")) for row in candidates if row.get("last_evidence_at")), default=None),
         },
         "state_counts": _count_breakdown(state_counts),
@@ -11948,10 +11954,12 @@ async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) 
         "executor_readiness_by_policy_section": _count_breakdown(readiness_policy_counts),
         "action_family_policy_section_counts": _count_breakdown(action_family_policy_counts),
         "reason_counts": _count_breakdown(reason_counts),
+        "omission_buckets": promotion_actions.get("omission_buckets") if isinstance(promotion_actions.get("omission_buckets"), list) else [],
         "candidates": candidates,
         "source_reports": {
             "eval_plan_schema": plan.get("schema") if isinstance(plan, dict) else None,
             "promotion_report_schema": promotion.get("schema") if isinstance(promotion, dict) else None,
+            "promotion_actions_schema": promotion_actions.get("schema") if isinstance(promotion_actions, dict) else None,
             "policy_event_count": len(events) if isinstance(events, list) else 0,
         },
         "privacy": _promotion_privacy_summary(),

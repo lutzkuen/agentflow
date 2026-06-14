@@ -12,6 +12,7 @@ from agentflow_proxy.store import utc_now
 SCHEMA = "agentflow.optimization_promotion_rollout_actions.v1"
 ACTION_SCHEMA = "agentflow.optimization_promotion_rollout_action.v1"
 OMISSION_SCHEMA = "agentflow.optimization_promotion_rollout_omission.v1"
+OMISSION_BUCKET_SCHEMA = "agentflow.optimization_promotion_rollout_omission_bucket.v1"
 
 ACTIONABLE_VERDICTS = {"widen", "hold", "rollback"}
 LOCAL_POLICY_SECTIONS = {
@@ -126,6 +127,12 @@ def _string_list(value: Any) -> list[str]:
 
 def _counter_rows(values: list[str]) -> list[dict[str, Any]]:
     counts = Counter(values)
+    rows = [{"value": value, "count": count} for value, count in counts.items()]
+    rows.sort(key=lambda row: (-_as_int(row["count"]), str(row["value"])))
+    return rows
+
+
+def _sum_counter_rows(counts: dict[str, int]) -> list[dict[str, Any]]:
     rows = [{"value": value, "count": count} for value, count in counts.items()]
     rows.sort(key=lambda row: (-_as_int(row["count"]), str(row["value"])))
     return rows
@@ -474,6 +481,100 @@ def _omission(candidate: dict[str, Any], *, reason: str) -> dict[str, Any]:
     }
 
 
+def _omission_bucket_next_action(reason: str, reason_codes: list[str], *, action_family: str) -> str:
+    reasons = {str(item or "").strip().lower().replace("_", "-") for item in reason_codes if str(item or "").strip()}
+    reason_l = str(reason or "").strip().lower().replace("_", "-")
+    haystack = " ".join(sorted(reasons | {reason_l}))
+    family_l = str(action_family or "").strip().lower().replace("_", "-")
+    if "privacy" in haystack or "unsupported-local-policy-section" in haystack:
+        return "keep-blocked"
+    if "safety" in haystack or "rollback" in haystack or "regression" in haystack or "eval-failed" in haystack:
+        return "review-safety-stop"
+    if "dependency" in haystack or "freshness" in haystack or "stale-risk" in haystack or "stale-evidence" in haystack:
+        return "fix-dependency-freshness"
+    if "insufficient-canary-holdout" in haystack or "missing-holdout" in haystack:
+        return "collect-canary-holdout"
+    if "insufficient-canary-applied" in haystack or "missing-applied" in haystack or "missing-canary-lifecycle" in haystack:
+        return "collect-canary-applied"
+    if "eval-results-missing" in haystack or "insufficient-eval" in haystack or "eval-queued" in haystack or reason_l == "insufficient-eval-evidence":
+        return "run-local-shadow-eval"
+    if "cache" in family_l and ("invalidation" in haystack or "stale" in haystack):
+        return "fix-dependency-freshness"
+    if reason_l.startswith("unsupported-"):
+        return "keep-blocked"
+    return "inspect-promotion-evidence"
+
+
+def _omission_buckets(omitted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for row in omitted:
+        if not isinstance(row, dict):
+            continue
+        evidence = row.get("evidence_summary") if isinstance(row.get("evidence_summary"), dict) else {}
+        reason = _reason(row.get("reason")) or "unknown"
+        reason_codes = _reason_codes(evidence.get("reason_codes"))
+        action_family = str(row.get("action_family") or "unknown").strip().lower().replace("_", "-") or "unknown"
+        optimization_family = str(row.get("optimization_family") or "unknown").strip().lower().replace("_", "-") or "unknown"
+        source_surface = str(row.get("source_surface") or "unknown").strip().lower().replace("_", "-") or "unknown"
+        app_family = str(row.get("app_family") or "unknown").strip().lower().replace("_", "-") or "unknown"
+        next_action = _omission_bucket_next_action(reason, reason_codes, action_family=action_family)
+        key = (action_family, optimization_family, source_surface, app_family, reason, next_action)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "schema": OMISSION_BUCKET_SCHEMA,
+                "status": "omitted",
+                "bucket_id": _stable_id("promotion-omission-bucket", key),
+                "action_family": action_family,
+                "optimization_family": optimization_family,
+                "source_surface": source_surface,
+                "app_family": app_family,
+                "reason": reason,
+                "next_action": next_action,
+                "candidate_count": 0,
+                "sample_count": 0,
+                "projected_savings_usd": 0.0,
+                "reason_code_counts": {},
+                "verdict_counts": {},
+                "privacy": _privacy_summary(),
+            },
+        )
+        bucket["candidate_count"] += 1
+        bucket["sample_count"] += _as_int(evidence.get("sample_count"))
+        bucket["projected_savings_usd"] += _as_float(evidence.get("projected_savings_usd"))
+        _counter = bucket["reason_code_counts"]
+        if not reason_codes:
+            reason_codes = [reason]
+        for code in reason_codes:
+            _counter[code] = _counter.get(code, 0) + 1
+        verdict = str(row.get("verdict") or "unknown")
+        bucket["verdict_counts"][verdict] = bucket["verdict_counts"].get(verdict, 0) + 1
+
+    buckets: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        reason_counts = _sum_counter_rows(bucket.pop("reason_code_counts"))
+        verdict_counts = _sum_counter_rows(bucket.pop("verdict_counts"))
+        bucket["projected_savings_usd"] = round(_as_float(bucket["projected_savings_usd"]), 8)
+        bucket["reason_code_counts"] = reason_counts
+        bucket["top_reason_codes"] = [str(row["value"]) for row in reason_counts[:5]]
+        bucket["verdict_counts"] = verdict_counts
+        buckets.append(bucket)
+    buckets.sort(
+        key=lambda row: (
+            -_as_float(row.get("projected_savings_usd")),
+            -_as_int(row.get("candidate_count")),
+            str(row.get("next_action")),
+            str(row.get("action_family")),
+            str(row.get("optimization_family")),
+            str(row.get("source_surface")),
+            str(row.get("reason")),
+        )
+    )
+    for index, bucket in enumerate(buckets, start=1):
+        bucket["rank"] = index
+    return buckets
+
+
 def build_optimization_promotion_actions(
     promotion_report: dict[str, Any],
     *,
@@ -517,6 +618,8 @@ def build_optimization_promotion_actions(
     action_families = [str(row.get("action_family") or "unknown") for row in actions]
     policy_sections = [str(row.get("policy_section") or "unknown") for row in actions]
     omission_reasons = [str(row.get("reason") or "unknown") for row in omitted]
+    omission_buckets = _omission_buckets(omitted)
+    top_omission_bucket = omission_buckets[0] if omission_buckets else None
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -533,8 +636,12 @@ def build_optimization_promotion_actions(
             "action_family_counts": _counter_rows(action_families),
             "policy_section_counts": _counter_rows(policy_sections),
             "omission_reason_counts": _counter_rows(omission_reasons),
+            "omission_bucket_count": len(omission_buckets),
+            "top_omission_next_action": top_omission_bucket.get("next_action") if top_omission_bucket else None,
+            "top_omission_bucket": top_omission_bucket,
         },
         "actions": actions,
+        "omission_buckets": omission_buckets,
         "omitted": omitted,
         "privacy": _privacy_summary(),
     }
