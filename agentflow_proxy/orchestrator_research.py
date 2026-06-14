@@ -530,6 +530,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     managed_health = _managed_recommendation_health_signal(stats)
     if managed_health is not None:
         summary["managed_recommendation_health"] = managed_health
+    shape_signal = _request_shape_rollup_signal(stats)
+    if shape_signal is not None:
+        summary["request_shape_rollup_candidates"] = shape_signal
     return summary
 
 
@@ -969,6 +972,193 @@ def _managed_recommendation_health_signal(stats: dict[str, Any]) -> dict[str, An
         "top_omission": top,
         "omissions": ranked,
         "missing_measurements": missing,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
+def _request_shape_report(stats: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("request_shape_rollups", "request_shape_rollup_report", "request_shape_rollup_candidates_report"):
+        report = stats.get(key)
+        if isinstance(report, dict):
+            return report
+    return None
+
+
+def _shape_row_classes(row: dict[str, Any]) -> list[str]:
+    classes = row.get("candidate_work_classes")
+    if isinstance(classes, list):
+        cleaned = [sanitize_value(str(item)) for item in classes if str(item or "").strip()]
+        if cleaned:
+            return sorted(set(cleaned))
+    families = [str(item) for item in row.get("candidate_families") or []]
+    blockers = [str(item) for item in row.get("blocker_codes") or []]
+    text_bucket = str(row.get("text_bucket") or "")
+    row_count = _to_int(row.get("row_count") or row.get("count"))
+    derived: set[str] = set()
+    if row_count >= 2 and text_bucket in {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}:
+        derived.update({"repeated_context", "crunch"})
+    if any(family in {"cache_replay", "cache_blocker"} for family in families) or any(
+        blocker
+        in {
+            "unsupported-streaming-shape",
+            "tool-call-cache-disabled",
+            "semantic-cache-disabled",
+            "exact-cache-miss",
+            "cache-skipped",
+        }
+        for blocker in blockers
+    ):
+        derived.add("replayability")
+    if "routing_candidate" in families or row.get("routing_status") == "passthrough":
+        derived.add("routing")
+    if "routing_evidence" in families or _to_float(row.get("observed_savings_usd")) > 0:
+        derived.add("routing_evidence")
+    return sorted(derived or {"observability"})
+
+
+def _request_shape_next_action(classes: list[str], blockers: list[str]) -> str:
+    class_set = set(classes)
+    blocker_set = set(blockers)
+    if "repeated_context" in class_set and "replayability" in class_set:
+        return "rank-repeated-context-replayability-cohort"
+    if "repeated_context" in class_set and "crunch" in class_set:
+        return "rank-repeated-context-crunch-dry-run"
+    if "routing" in class_set:
+        return "stage-routing-lifecycle-evidence"
+    if blocker_set:
+        return "classify-request-shape-blocker"
+    return "keep-observability-only"
+
+
+def _request_shape_candidate_row(row: dict[str, Any], *, source_schema: Any, rank: int) -> dict[str, Any]:
+    classes = _shape_row_classes(row)
+    blockers = [sanitize_value(str(item)) for item in row.get("blocker_codes") or [] if str(item or "").strip()]
+    families = [sanitize_value(str(item)) for item in row.get("candidate_families") or [] if str(item or "").strip()]
+    provider = sanitize_value(row.get("provider_family") or row.get("provider") or "unknown")
+    source_surface = sanitize_value(row.get("source_surface") or "unknown")
+    endpoint = sanitize_value(row.get("endpoint") or "unknown")
+    count = _to_int(row.get("row_count") or row.get("count"))
+    cost = _to_float(row.get("cost_est_usd"))
+    savings = _to_float(row.get("observed_savings_usd"))
+    error_count = _to_int(row.get("error_count"))
+    retry_count = _to_int(row.get("retry_count"))
+    return {
+        "rank": rank,
+        "source_schema": sanitize_value(source_schema),
+        "provider_surface_bucket": "/".join(part for part in (provider, source_surface, endpoint) if part) or "mixed",
+        "provider_family": provider,
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "requested_model_family": sanitize_value(row.get("requested_model_family") or "unknown"),
+        "routed_model_family": sanitize_value(row.get("routed_model_family") or "unknown"),
+        "category": sanitize_value(row.get("category") or "unknown"),
+        "workflow_phase": sanitize_value(row.get("workflow_phase") or "unknown"),
+        "stream": bool(row.get("stream")),
+        "has_tools": bool(row.get("has_tools")),
+        "text_bucket": sanitize_value(row.get("text_bucket") or "unknown"),
+        "token_bucket": sanitize_value(row.get("token_bucket") or "unknown"),
+        "cache_status": sanitize_value(row.get("cache_status") or "unknown"),
+        "routing_status": sanitize_value(row.get("routing_status") or "unknown"),
+        "row_count": count,
+        "error_count": error_count,
+        "retry_count": retry_count,
+        "cost_est_usd": round(cost, 6),
+        "observed_savings_usd": round(savings, 6),
+        "candidate_work_classes": classes,
+        "candidate_families": sorted(set(families)),
+        "blocker_codes": sorted(set(blockers)),
+        "next_action": _request_shape_next_action(classes, blockers),
+        "_score": (
+            count
+            + cost * 1000.0
+            + savings * 2000.0
+            + (350.0 if "repeated_context" in classes else 0.0)
+            + (250.0 if "replayability" in classes else 0.0)
+            + (150.0 if "routing" in classes else 0.0)
+            + (125.0 if "crunch" in classes else 0.0)
+            - error_count * 5.0
+            - retry_count * 0.5
+        ),
+    }
+
+
+def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
+    calls = _to_int(stats.get("today_calls") or stats.get("calls"))
+    report = _request_shape_report(stats)
+    if report is None:
+        if calls <= 0:
+            return None
+        return {
+            "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+            "status": "missing-request-shape-rollups",
+            "source_schema": None,
+            "summary": {
+                "calls": calls,
+                "rows_considered": 0,
+                "rollup_count": 0,
+                "ranked_candidate_count": 0,
+                "top_next_action": "emit-request-shape-rollups",
+            },
+            "top_candidate": None,
+            "candidates": [],
+            "missing_measurements": ["request_shape_rollups"],
+            "privacy": _candidate_privacy(),
+        }
+
+    rollups = [row for row in report.get("rollups") or report.get("candidates") or [] if isinstance(row, dict)]
+    source_schema = report.get("schema")
+    ranked = [
+        _request_shape_candidate_row(row, source_schema=source_schema, rank=index)
+        for index, row in enumerate(rollups, start=1)
+    ]
+    ranked.sort(key=lambda item: (_to_float(item.get("_score")), _to_int(item.get("row_count"))), reverse=True)
+    class_counts: Counter[str] = Counter()
+    blocker_counts: Counter[str] = Counter()
+    for rank, row in enumerate(ranked[:10], start=1):
+        row["rank"] = rank
+        for value in row.get("candidate_work_classes") or []:
+            class_counts[str(value)] += _to_int(row.get("row_count"))
+        for value in row.get("blocker_codes") or []:
+            blocker_counts[str(value)] += _to_int(row.get("row_count"))
+    clean_ranked = []
+    for row in ranked[:10]:
+        clean = dict(row)
+        clean.pop("_score", None)
+        clean_ranked.append(clean)
+    report_summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    status = "candidates-ranked" if clean_ranked else "no-request-shape-candidates"
+    return {
+        "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+        "status": status,
+        "source_schema": sanitize_value(source_schema),
+        "summary": {
+            "calls": calls,
+            "rows_considered": _to_int(report_summary.get("rows_considered") or report_summary.get("scanned_rows")),
+            "rollup_count": _to_int(report_summary.get("rollup_count") or len(rollups)),
+            "ranked_candidate_count": len(clean_ranked),
+            "top_next_action": clean_ranked[0]["next_action"] if clean_ranked else None,
+            "class_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(class_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+            "blocker_breakdown": [
+                {"value": key, "count": value}
+                for key, value in sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))
+            ],
+        },
+        "top_candidate": clean_ranked[0] if clean_ranked else None,
+        "candidates": clean_ranked,
+        "missing_measurements": [] if clean_ranked else ["ranked_request_shape_rollup"],
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -1647,6 +1837,53 @@ def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str
     )
 
 
+def _request_shape_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    signal = (
+        stats_summary.get("request_shape_rollup_candidates")
+        if isinstance(stats_summary.get("request_shape_rollup_candidates"), dict)
+        else {}
+    )
+    if not signal:
+        return None
+    status = str(signal.get("status") or "unknown")
+    calls = _to_int(signal.get("summary", {}).get("calls")) if isinstance(signal.get("summary"), dict) else 0
+    top = signal.get("top_candidate") if isinstance(signal.get("top_candidate"), dict) else {}
+    if top:
+        next_action = str(top.get("next_action") or "rank-request-shape-cohort")
+        blocker = f"request-shape-{next_action}"
+        path = "Use the top aggregate request-shape cohort to choose the next repeated-context, replayability, routing, or crunch follow-up."
+        confidence = "medium" if "repeated_context" in (top.get("candidate_work_classes") or []) else "low"
+        safety_status = "review-required"
+        score = float(_to_int(top.get("row_count"))) + _to_float(top.get("cost_est_usd")) * 1000.0 + 300.0
+        bucket = str(top.get("provider_surface_bucket") or "mixed")
+    elif status == "missing-request-shape-rollups":
+        blocker = "request-shape-rollup-report-missing"
+        path = "Emit a bounded request-shape rollup report before selecting repeated-context or replayability activation work."
+        confidence = "low"
+        safety_status = "blocked"
+        score = float(calls) * 0.04
+        bucket = "mixed"
+    else:
+        blocker = "request-shape-rollup-candidates-empty"
+        path = "Keep request-shape follow-up blocked until aggregate rollups contain at least one repeated-context, replayability, routing, or crunch cohort."
+        confidence = "low"
+        safety_status = "blocked"
+        score = float(calls) * 0.02
+        bucket = "mixed"
+
+    return _candidate(
+        lever="request-shape-rollups",
+        provider_surface_bucket=bucket,
+        blocker=blocker,
+        estimated_savings_path=path,
+        projected_savings_signal=signal,
+        confidence=confidence,
+        sequencing="Use after direct routing/cache/crunch blockers; the top shape row should decide which follow-up lever owns the next implementation issue.",
+        safety_status=safety_status,
+        score=score,
+    )
+
+
 def _fallback_candidates(existing_levers: set[str], stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
     calls = _to_int(stats_summary.get("calls") or stats_summary.get("today_calls"))
     fallbacks: list[dict[str, Any]] = []
@@ -1692,6 +1929,7 @@ def _optimization_candidates(
             _routing_candidate(stats_summary),
             _crunch_candidate(stats_summary),
             _managed_recommendation_candidate(stats_summary),
+            _request_shape_candidate(stats_summary),
             _diagnostic_candidate(diagnostics),
         )
         if item is not None

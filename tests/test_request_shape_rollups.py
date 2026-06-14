@@ -150,7 +150,12 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(repeated["text_bucket"], "8k_32k_chars")
         self.assertIn("cache_replay", repeated["candidate_families"])
         self.assertIn("cache_blocker", repeated["candidate_families"])
+        self.assertIn("repeated_context", repeated["candidate_work_classes"])
+        self.assertIn("replayability", repeated["candidate_work_classes"])
+        self.assertIn("crunch", repeated["candidate_work_classes"])
         self.assertIn("unsupported-streaming-shape", repeated["blocker_codes"])
+        class_breakdown = {item["value"]: item["count"] for item in repeated["metadata"]["candidate_class_breakdown"]}
+        self.assertEqual(class_breakdown["repeated_context"], 3)
         self.assertEqual(
             {item["value"]: item["count"] for item in repeated["metadata"]["cost_bucket_breakdown"]},
             {"0_01_0_05_usd": 3},
@@ -228,4 +233,3 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(payload["persisted"])
         self.assertEqual(payload["persisted_count"], 0)
         self.assertEqual(self.store.request_shape_rollup_rows(run_id="cli-dry"), [])
-

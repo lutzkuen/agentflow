@@ -550,6 +550,109 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(managed_candidate["blocker"], "managed-recommendation-health-report-missing")
         self.assertEqual(managed_candidate["projected_savings_signal"]["status"], "missing-managed-recommendation-health-report")
 
+    def test_request_shape_rollup_report_ranks_repeated_context_candidate(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {
+                        "rows_considered": 40,
+                        "rollup_count": 2,
+                    },
+                    "rollups": [
+                        {
+                            "candidate_id": "request-shape:secret-candidate-id",
+                            "provider_family": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "endpoint": "messages",
+                            "requested_model_family": "claude-sonnet",
+                            "routed_model_family": "claude-sonnet",
+                            "category": "tool-result",
+                            "workflow_phase": "tool-execution",
+                            "stream": True,
+                            "has_tools": True,
+                            "text_bucket": "32k_128k_chars",
+                            "token_bucket": "8k_32k_tokens",
+                            "cache_status": "skipped",
+                            "routing_status": "passthrough",
+                            "row_count": 24,
+                            "error_count": 0,
+                            "retry_count": 1,
+                            "cost_est_usd": 0.96,
+                            "observed_savings_usd": 0.0,
+                            "candidate_work_classes": ["repeated_context", "replayability", "crunch"],
+                            "candidate_families": ["cache_replay", "cache_blocker"],
+                            "blocker_codes": ["unsupported-streaming-shape"],
+                            "metadata": {
+                                "cache_key": "cache-key-secret",
+                                "request_id": "request-secret",
+                                "session_id": "session-secret",
+                                "file_path": "/tmp/shape-secret.py",
+                            },
+                        },
+                        {
+                            "candidate_id": "request-shape:smaller-secret",
+                            "provider_family": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "category": "chat",
+                            "workflow_phase": "chat",
+                            "stream": False,
+                            "has_tools": False,
+                            "text_bucket": "lt_2k_chars",
+                            "token_bucket": "lt_500_tokens",
+                            "cache_status": "miss",
+                            "routing_status": "passthrough",
+                            "row_count": 2,
+                            "cost_est_usd": 0.01,
+                            "candidate_families": ["routing_candidate"],
+                            "blocker_codes": ["exact-cache-miss"],
+                        },
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["request_shape_rollup_candidates"]
+        self.assertEqual(signal["schema"], "agentflow.request_shape_rollup_candidate_signal.v1")
+        self.assertEqual(signal["status"], "candidates-ranked")
+        self.assertEqual(signal["summary"]["ranked_candidate_count"], 2)
+        self.assertEqual(signal["summary"]["top_next_action"], "rank-repeated-context-replayability-cohort")
+        top = signal["top_candidate"]
+        self.assertEqual(top["provider_surface_bucket"], "anthropic/anthropic_messages/messages")
+        self.assertEqual(top["row_count"], 24)
+        self.assertIn("repeated_context", top["candidate_work_classes"])
+        self.assertIn("replayability", top["candidate_work_classes"])
+        self.assertIn("unsupported-streaming-shape", top["blocker_codes"])
+
+        shape_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "request-shape-rollups")
+        self.assertEqual(shape_candidate["blocker"], "request-shape-rank-repeated-context-replayability-cohort")
+        self.assertEqual(shape_candidate["provider_surface_bucket"], "anthropic/anthropic_messages/messages")
+        self.assertEqual(shape_candidate["projected_savings_signal"]["top_candidate"]["row_count"], 24)
+        self.assertTrue(shape_candidate["privacy"]["metadata_only"])
+
+        created = plan["backlog_changes"]["create_issues"]
+        shape_issues = [item for item in created if item["title"] == "Generate request-shape rollup candidates for repeated context work"]
+        self.assertEqual(len(shape_issues), 1)
+        self.assertIn("rank-repeated-context-replayability-cohort", shape_issues[0]["body"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret-candidate-id", rendered)
+        self.assertNotIn("smaller-secret", rendered)
+        self.assertNotIn("cache-key-secret", rendered)
+        self.assertNotIn("request-secret", rendered)
+        self.assertNotIn("session-secret", rendered)
+        self.assertNotIn("/tmp/shape-secret.py", rendered)
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["provider_bodies_included"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+        self.assertFalse(signal["privacy"]["session_ids_included"])
+        self.assertFalse(signal["privacy"]["cache_keys_included"])
+
     def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
         plan = build_research_plan(
             issues=[],

@@ -11,6 +11,7 @@ from agentflow_proxy.store import stable_json, utc_now
 
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
+REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -326,6 +327,17 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
 def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     candidate_family_counts = group.pop("candidate_family_counts", {})
     blocker_counts = group.pop("blocker_counts", {})
+    candidate_families = sorted(candidate_family_counts)
+    blocker_codes = sorted(blocker_counts)
+    candidate_classes = _candidate_work_classes(
+        row_count=_as_int(group.get("row_count")),
+        text_bucket=str(group.get("text_bucket") or "unknown"),
+        token_bucket=str(group.get("token_bucket") or "unknown"),
+        candidate_families=candidate_families,
+        blocker_codes=blocker_codes,
+        routing_status=str(group.get("routing_status") or "unknown"),
+        observed_savings=_as_float(group.get("observed_savings_usd")),
+    )
     metadata = {
         "schema": "agentflow.request_shape_rollup_metadata.v1",
         "status_breakdown": _breakdown(group.pop("status_counts", {})),
@@ -335,12 +347,12 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         "cache_reason_breakdown": _breakdown(group.pop("cache_reason_counts", {})),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
+        "candidate_class_breakdown": [{"value": value, "count": _as_int(group.get("row_count"))} for value in candidate_classes],
         "raw_body_required": False,
         "aggregate_only": True,
     }
-    candidate_families = sorted(candidate_family_counts)
-    blocker_codes = sorted(blocker_counts)
     group["candidate_families"] = candidate_families
+    group["candidate_work_classes"] = candidate_classes
     group["blocker_codes"] = blocker_codes
     group["cost_est_usd"] = round(_as_float(group.get("cost_est_usd")), 6)
     group["baseline_cost_usd"] = round(_as_float(group.get("baseline_cost_usd")), 6)
@@ -361,6 +373,41 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         "request_fingerprints_included": False,
     }
     return group
+
+
+def _candidate_work_classes(
+    *,
+    row_count: int,
+    text_bucket: str,
+    token_bucket: str,
+    candidate_families: list[str],
+    blocker_codes: list[str],
+    routing_status: str,
+    observed_savings: float,
+) -> list[str]:
+    classes: set[str] = set()
+    repeated_large_context = row_count >= 2 and text_bucket in REPEATED_CONTEXT_TEXT_BUCKETS
+    token_heavy_context = token_bucket in {"8k_32k_tokens", "gte_32k_tokens"}
+    if repeated_large_context or (row_count >= 2 and token_heavy_context):
+        classes.add("repeated_context")
+        classes.add("crunch")
+    if any(family in {"cache_replay", "cache_blocker"} for family in candidate_families) or any(
+        code
+        in {
+            "unsupported-streaming-shape",
+            "tool-call-cache-disabled",
+            "semantic-cache-disabled",
+            "exact-cache-miss",
+            "cache-skipped",
+        }
+        for code in blocker_codes
+    ):
+        classes.add("replayability")
+    if "routing_candidate" in candidate_families or routing_status == "passthrough":
+        classes.add("routing")
+    if "routing_evidence" in candidate_families or observed_savings > 0:
+        classes.add("routing_evidence")
+    return sorted(classes or {"observability"})
 
 
 def _persistable_row(
