@@ -78,6 +78,14 @@ _SAFETY_STOP_UNCLASSIFIED_RE = re.compile(
     r"(?:safety[-_]stop(?:ped)?|stopped[-_]by[-_]safety|canary[-_]safety[-_]stop|safety[-_]gate[-_]block(?:ed)?)",
     re.IGNORECASE,
 )
+_SAFETY_STOP_SIGNAL_RE = re.compile(
+    r"(?:"
+    r"\b(?:blocker|blocked|skip(?:ped)?|omitted|reason|status|cohort|verdict)\s*[:= -]*[\"']?"
+    r"(?:safety[-_]stop(?:ped)?|safety[-_]stopped)"
+    r"|(?:safety[-_]stop(?:ped)?|safety[-_]stopped)\b.*\b(?:by|blocker|blocked|skip(?:ped)?|tripped|regression|failed|gate|canary)\b"
+    r")",
+    re.IGNORECASE,
+)
 _KNOWN_DIAGNOSTIC_TERMS = (
     "need-more-samples",
     "missing dependency evidence",
@@ -106,6 +114,15 @@ _KNOWN_DIAGNOSTIC_TERMS = (
     "no local representation",
     "no-local-representation",
 )
+
+
+def _is_safety_stop_signal_line(line: str) -> bool:
+    lowered = line.lower()
+    if "safety-stop" not in lowered and "safety_st" not in lowered:
+        return False
+    if _SUCCESS_LINE_RE.search(line):
+        return False
+    return bool(_SAFETY_STOP_SIGNAL_RE.search(line))
 
 _PASS_DIAGNOSTIC_REASONS = {
     "pass",
@@ -400,12 +417,16 @@ def _diagnostics_from_logs(log_sources: Iterable[str | Path], *, limit: int = 10
             for match in _DIAGNOSTIC_RE.finditer(line):
                 reason = match.group(1).strip(" .'\",").lower().replace(" ", "-")
                 if reason:
+                    if "safety-stop" in reason and not _is_safety_stop_signal_line(line):
+                        continue
                     counter[reason] += 1
                     examples.setdefault(reason, line[:240])
                     matched = True
             for term in _KNOWN_DIAGNOSTIC_TERMS:
                 if term in lowered:
                     reason = term.lower().replace(" ", "-")
+                    if reason == "safety-stop" and not _is_safety_stop_signal_line(line):
+                        continue
                     counter[reason] += 1
                     examples.setdefault(reason, line[:240])
                     matched = True

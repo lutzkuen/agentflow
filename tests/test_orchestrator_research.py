@@ -2561,6 +2561,33 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertNotIn("sec-secret-a", rendered)
         self.assertNotIn("sec-secret-b", rendered)
 
+    def test_successful_field_list_does_not_become_safety_stop_diagnostic(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "- Captured aggregate cache/crunch/routing outcome fields: action family, evidence source, bucket, "
+                        "policy/rule reference, applied/holdout/safety-stop/error/retry/fallback counts.",
+                        "- Captured aggregate cache/crunch/routing outcome fields: action family, evidence source, bucket, "
+                        "policy/rule reference, applied/holdout/safety-stop/error/retry/fallback counts.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        self.assertNotIn("safety-stop", [d["reason"] for d in diagnostics])
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("safety stop diagnostics" in title for title in created_titles))
+
     def test_evidence_to_activation_burndown_uses_safety_stop_keep_blocked_reason(self):
         plan = build_research_plan(
             issues=[],
