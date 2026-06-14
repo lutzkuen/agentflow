@@ -1821,6 +1821,23 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["session_memory_replay_eligible_count"], 2)
         self.assertEqual(payload["session_memory_replay_proposals"][0]["status"], "session-plateau-dry-run-eligible")
         self.assertEqual(payload["session_memory_replay_proposals"][0]["rule_id"], "cli-session-memory-cache")
+        evidence = payload["cache_replayability_evidence"]
+        self.assertEqual(evidence["schema"], "agentflow.cache_replayability_evidence.v1")
+        self.assertEqual(evidence["status"], "no-safe-replayable-cohorts")
+        self.assertEqual(evidence["summary"]["total_rows_considered"], 2)
+        self.assertEqual(evidence["summary"]["repeated_shape_groups"], 1)
+        self.assertIn("cache hits are zero", evidence["zero_hit_explanation"])
+        self.assertEqual(evidence["ranked_replayability_cohorts"][0]["provider"], "anthropic")
+        self.assertEqual(evidence["ranked_replayability_cohorts"][0]["endpoint"], "messages")
+        self.assertEqual(evidence["ranked_replayability_cohorts"][0]["request_shape"]["category"], "chat")
+        self.assertEqual(evidence["ranked_replayability_cohorts"][0]["cache_decision_reason"], "streaming")
+        self.assertIn(
+            "streaming-response-cache-missing",
+            evidence["ranked_replayability_cohorts"][0]["blocker_codes"],
+        )
+        self.assertTrue(evidence["privacy"]["aggregate_only"])
+        self.assertFalse(evidence["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(evidence["privacy"]["cache_keys_included"])
         encoded = json.dumps(payload, sort_keys=True)
         self.assertNotIn("private cli cache prompt", encoded)
         self.assertNotIn("cli-cache-session-secret", encoded)

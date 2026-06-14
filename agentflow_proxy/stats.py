@@ -2091,6 +2091,20 @@ def _source_surface(provider: str, path: str) -> str:
     return "unknown"
 
 
+def _endpoint_label(provider: str, path: str) -> str:
+    provider_l = (provider or "").lower()
+    path_l = (path or "").lower()
+    if provider_l in {"codex-app", "codex_app"}:
+        return "codex_app_turn"
+    if "chat/completions" in path_l:
+        return "chat_completions"
+    if "responses" in path_l:
+        return "responses"
+    if "messages" in path_l:
+        return "messages"
+    return "unknown"
+
+
 def _app_family_for_call(provider: str, requested_model: Any, path: str) -> str:
     provider_l = (provider or "").lower()
     model_l = str(requested_model or "").lower()
@@ -6883,9 +6897,13 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         if isinstance(session_memory_hints.get("dry_run_replay_proposal"), dict)
         else None
     )
+    provider = public_label(row.get("provider") or ("codex-app" if is_codex_turn_source_surface(source_surface) else "unknown"), "unknown")
+    endpoint = public_label(row.get("endpoint") or _endpoint_label(provider, str(row.get("path") or "")), "unknown")
     unit = {
         "source_surface": canonical_source_surface(source_surface),
         "granularity": granularity,
+        "provider": provider,
+        "endpoint": endpoint,
         "created_at": row.get("created_at"),
         "session_id": row.get("session_id"),
         "stream": bool(_as_int(row.get("stream"))),
@@ -6940,6 +6958,8 @@ def _cache_replayability_fingerprint_basis(unit: dict[str, Any]) -> dict[str, An
     return {
         "source_surface": unit["source_surface"],
         "granularity": unit["granularity"],
+        "provider": unit.get("provider", "unknown"),
+        "endpoint": unit.get("endpoint", "unknown"),
         "cache_status": unit["cache_status"],
         "cache_reason": unit["cache_reason"],
         "category": unit["category"],
@@ -7114,6 +7134,190 @@ def _session_memory_replay_proposal_rows(units: list[dict[str, Any]], *, limit: 
     return rows[: max(1, int(limit or 25))]
 
 
+_CACHE_REPLAY_EVIDENCE_BLOCKER_CODES = {
+    "streaming": "streaming-response-cache-missing",
+    "streaming-not-allowed": "streaming-response-cache-missing",
+    "tool-call-disabled": "tool-cache-invalidator-missing",
+    "safe-invalidation-required": "tool-cache-invalidator-missing",
+    "file-dependency-evidence-absent": "tool-cache-invalidator-missing",
+    "file-dependency-missing": "tool-cache-invalidator-missing",
+    "dependency-missing": "tool-cache-invalidator-missing",
+    "dependency-cap-exceeded": "tool-cache-invalidator-missing",
+    "dependency-changed": "tool-cache-invalidator-missing",
+    "dependency-created": "tool-cache-invalidator-missing",
+    "dependency-deleted": "tool-cache-invalidator-missing",
+    "file-watch-disabled": "tool-cache-invalidator-missing",
+    "true-one-off-miss": "no-repeat-normalized-shape",
+    "session-context-changed": "session-scoped-shape-changed",
+    "semantic-cache-disabled": "reviewed-cache-replay-policy-missing",
+    "missing-cache-metadata": "cache-decision-metadata-missing",
+    "turn-level-only": "turn-level-cache-replay-interface-missing",
+    "current-state": "time-sensitive-shape",
+    "user-specific": "user-specific-shape",
+    "low-cacheability": "low-cacheability-shape",
+}
+
+
+def _cache_replay_evidence_blocker_codes(group: dict[str, Any]) -> list[str]:
+    blockers = [str(item) for item in group.get("replayability_blockers") or []]
+    codes = {
+        _CACHE_REPLAY_EVIDENCE_BLOCKER_CODES.get(blocker, blocker)
+        for blocker in blockers
+        if blocker
+    }
+    if not codes and _as_int(group.get("count")) <= 1:
+        codes.add("no-repeat-normalized-shape")
+    if bool(group.get("stream")):
+        codes.add("streaming-response-cache-missing")
+    if bool(group.get("has_tools")) and not bool(group.get("safe_invalidation_evidence")):
+        codes.add("tool-cache-invalidator-missing")
+    return sorted(codes)
+
+
+def _cache_replay_evidence_status(group: dict[str, Any], blocker_codes: list[str]) -> str:
+    if not blocker_codes and bool(group.get("repeated")):
+        return "safe-replayable-cohort"
+    if "no-repeat-normalized-shape" in blocker_codes:
+        return "not-repeated"
+    if "streaming-response-cache-missing" in blocker_codes:
+        return "blocked-streaming-replay"
+    if "tool-cache-invalidator-missing" in blocker_codes:
+        return "blocked-tool-invalidation"
+    return "blocked"
+
+
+def _cache_replayability_evidence_from_report(
+    *,
+    groups: list[dict[str, Any]],
+    summary: dict[str, Any],
+    blocker_breakdown: list[dict[str, Any]],
+    limit: int,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    blocker_counts: dict[str, int] = {}
+    safe_count = 0
+    for group in groups:
+        blocker_codes = _cache_replay_evidence_blocker_codes(group)
+        status = _cache_replay_evidence_status(group, blocker_codes)
+        if status == "safe-replayable-cohort":
+            safe_count += 1
+        for code in blocker_codes or ["none"]:
+            blocker_counts[code] = blocker_counts.get(code, 0) + _as_int(group.get("count"))
+        dependency = (
+            group.get("file_dependency_audit")
+            if isinstance(group.get("file_dependency_audit"), dict)
+            else {}
+        )
+        rows.append({
+            "rank": 0,
+            "status": status,
+            "provider": public_label(group.get("provider") or "unknown", "unknown"),
+            "endpoint": public_label(group.get("endpoint") or "unknown", "unknown"),
+            "source_surface": public_label(group.get("source_surface") or "unknown", "unknown"),
+            "granularity": public_label(group.get("granularity") or "unknown", "unknown"),
+            "shape_fingerprint": f"sha256:{group.get('shape_fingerprint')}",
+            "request_shape": {
+                "category": public_label(group.get("category") or "unknown", "unknown"),
+                "workflow_phase": public_label(group.get("workflow_phase") or "unknown", "unknown"),
+                "text_size_bucket": str(group.get("text_size_bucket") or "unknown"),
+                "input_items_bucket": str(group.get("input_items_bucket") or "unknown"),
+                "requested_tier": public_label(group.get("requested_tier") or "unknown", "unknown"),
+                "target_tier": public_label(group.get("target_tier") or "unknown", "unknown"),
+                "cacheability_bucket": public_label(group.get("cacheability_bucket") or "unknown", "unknown"),
+            },
+            "stream": bool(group.get("stream")),
+            "has_tools": bool(group.get("has_tools")),
+            "dependency_freshness_state": (
+                "fresh"
+                if bool(group.get("safe_invalidation_evidence"))
+                else (
+                    "not-required"
+                    if not bool(group.get("has_tools"))
+                    else public_label(dependency.get("invalidation_reason") or "unknown", "unknown")
+                )
+            ),
+            "cache_decision_reason": public_label(group.get("cache_reason") or "unknown", "unknown"),
+            "cache_decision_status": public_label(group.get("cache_status") or "unknown", "unknown"),
+            "calls": _as_int(group.get("count")),
+            "sessions": _as_int(group.get("sessions")),
+            "repeated": bool(group.get("repeated")),
+            "replayability_level": public_label(group.get("replayability_level") or "unknown", "unknown"),
+            "blocker_codes": blocker_codes,
+            "estimated_avoided_cost_usd": round(_as_float(group.get("projected_repeated_call_cost_usd")), 6),
+            "estimated_cohort_cost_usd": round(_as_float(group.get("estimated_cost_usd")), 6),
+            "aggregate_only": True,
+            "raw_session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+        })
+
+    rows.sort(
+        key=lambda row: (
+            row["status"] == "safe-replayable-cohort",
+            _as_float(row.get("estimated_avoided_cost_usd")),
+            _as_int(row.get("calls")),
+            _as_float(row.get("estimated_cohort_cost_usd")),
+        ),
+        reverse=True,
+    )
+    output_limit = max(1, int(limit or 25))
+    for index, row in enumerate(rows[:output_limit], start=1):
+        row["rank"] = index
+
+    total_rows = _as_int(summary.get("candidate_rows"))
+    repeated_groups = _as_int(summary.get("repeated_shape_groups"))
+    if total_rows == 0:
+        status = "no-cache-replayability-data"
+        zero_hit_explanation = "no local non-hit cache metadata rows were available for replayability analysis"
+    elif safe_count > 0:
+        status = "safe-replayable-cohorts-present"
+        zero_hit_explanation = "cache hits are zero but at least one repeated metadata shape appears safe enough for reviewed local replay canarying"
+    elif repeated_groups > 0:
+        status = "no-safe-replayable-cohorts"
+        zero_hit_explanation = "cache hits are zero because repeated metadata shapes are blocked by streaming, tool invalidation, or cacheability evidence"
+    else:
+        status = "no-safe-replayable-cohorts"
+        zero_hit_explanation = "cache hits are zero because no repeated normalized metadata shape was observed"
+
+    return {
+        "schema": "agentflow.cache_replayability_evidence.v1",
+        "generated_at": utc_now(),
+        "status": status,
+        "zero_hit_explanation": zero_hit_explanation,
+        "summary": {
+            "total_rows_considered": total_rows,
+            "shape_groups": _as_int(summary.get("shape_groups")),
+            "repeated_shape_groups": repeated_groups,
+            "safe_replayable_cohort_count": safe_count,
+            "ranked_replayability_cohort_count": len(rows),
+            "projected_repeated_call_cost_usd": round(_as_float(summary.get("projected_repeated_call_cost_usd")), 6),
+            "top_blocker_code": next(iter(_breakdown_from_counts(blocker_counts)), {}).get("value") if blocker_counts else None,
+            "legacy_blocker_breakdown_count": len(blocker_breakdown),
+        },
+        "blocker_code_breakdown": _breakdown_from_counts(blocker_counts),
+        "ranked_replayability_cohorts": rows[:output_limit],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "raw_messages_included": False,
+            "raw_request_bodies_included": False,
+            "raw_responses_included": False,
+            "raw_tool_payloads_included": False,
+            "provider_bodies_included": False,
+            "file_paths_included": False,
+            "request_ids_included": False,
+            "raw_session_ids_included": False,
+            "cache_keys_included": False,
+            "pattern_hashes_included": False,
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+            "basis": "stored cache decision, route, dependency freshness, and aggregate cost metadata only",
+        },
+    }
+
+
 def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit: int = 25) -> dict[str, Any]:
     grouped: dict[str, dict[str, Any]] = {}
     one_off_rows = 0
@@ -7126,6 +7330,8 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
                 "fingerprint_basis": basis,
                 "source_surface": unit["source_surface"],
                 "granularity": unit["granularity"],
+                "provider": unit.get("provider", "unknown"),
+                "endpoint": unit.get("endpoint", "unknown"),
                 "cache_status": unit["cache_status"],
                 "cache_reason": unit["cache_reason"],
                 "category": unit["category"],
@@ -7303,6 +7509,47 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
     for row in session_memory_proposals:
         status = str(row.get("status") or "unknown")
         session_memory_status_counts[status] = session_memory_status_counts.get(status, 0) + _as_int(row.get("count"))
+    summary = {
+        "candidate_rows": len(units),
+        "shape_groups": len(groups),
+        "repeated_shape_groups": repeated_groups,
+        "repeated_candidate_rows": repeated_rows,
+        "one_off_candidate_rows": one_off_rows,
+        "repeated_estimated_cost_usd": round(repeated_cost, 6),
+        "projected_repeated_call_cost_usd": round(projected_repeated_cost, 6),
+        "unsafe_repeated_rows": unsafe_repeated_rows,
+        "unsafe_repeated_estimated_cost_usd": round(unsafe_repeated_cost, 6),
+        "no_repeated_shape_exists": repeated_groups == 0,
+        "repeated_shape_exists_but_cache_is_unsafe": unsafe_repeated_rows > 0,
+        "blocker_burn_down_rows": len(blocker_burn_down),
+        "top_blocker_burn_down_projected_cost_usd": (
+            _as_float(blocker_burn_down[0].get("projected_repeated_call_cost_usd"))
+            if blocker_burn_down
+            else 0.0
+        ),
+        "top_blocker_burn_down_next_action_family": (
+            blocker_burn_down[0].get("next_action_family")
+            if blocker_burn_down
+            else None
+        ),
+        "session_memory_replay_proposal_count": sum(_as_int(row.get("count")) for row in session_memory_proposals),
+        "session_memory_replay_eligible_count": sum(
+            _as_int(row.get("count"))
+            for row in session_memory_proposals
+            if row.get("status") == "session-plateau-dry-run-eligible"
+        ),
+        "session_memory_replay_blocked_count": sum(
+            _as_int(row.get("count"))
+            for row in session_memory_proposals
+            if row.get("status") != "session-plateau-dry-run-eligible"
+        ),
+    }
+    evidence = _cache_replayability_evidence_from_report(
+        groups=groups,
+        summary=summary,
+        blocker_breakdown=blocker_rows,
+        limit=limit,
+    )
     return {
         "schema": "agentflow.cache_replayability.v1",
         "generated_at": utc_now(),
@@ -7319,41 +7566,8 @@ def _cache_replayability_report_from_units(units: list[dict[str, Any]], *, limit
             "raw_session_ids_included": False,
             "basis": "metadata-derived shape fingerprints only; request/response bodies are not inspected",
         },
-        "summary": {
-            "candidate_rows": len(units),
-            "shape_groups": len(groups),
-            "repeated_shape_groups": repeated_groups,
-            "repeated_candidate_rows": repeated_rows,
-            "one_off_candidate_rows": one_off_rows,
-            "repeated_estimated_cost_usd": round(repeated_cost, 6),
-            "projected_repeated_call_cost_usd": round(projected_repeated_cost, 6),
-            "unsafe_repeated_rows": unsafe_repeated_rows,
-            "unsafe_repeated_estimated_cost_usd": round(unsafe_repeated_cost, 6),
-            "no_repeated_shape_exists": repeated_groups == 0,
-            "repeated_shape_exists_but_cache_is_unsafe": unsafe_repeated_rows > 0,
-            "blocker_burn_down_rows": len(blocker_burn_down),
-            "top_blocker_burn_down_projected_cost_usd": (
-                _as_float(blocker_burn_down[0].get("projected_repeated_call_cost_usd"))
-                if blocker_burn_down
-                else 0.0
-            ),
-            "top_blocker_burn_down_next_action_family": (
-                blocker_burn_down[0].get("next_action_family")
-                if blocker_burn_down
-                else None
-            ),
-            "session_memory_replay_proposal_count": sum(_as_int(row.get("count")) for row in session_memory_proposals),
-            "session_memory_replay_eligible_count": sum(
-                _as_int(row.get("count"))
-                for row in session_memory_proposals
-                if row.get("status") == "session-plateau-dry-run-eligible"
-            ),
-            "session_memory_replay_blocked_count": sum(
-                _as_int(row.get("count"))
-                for row in session_memory_proposals
-                if row.get("status") != "session-plateau-dry-run-eligible"
-            ),
-        },
+        "summary": summary,
+        "cache_replayability_evidence": evidence,
         "blocker_breakdown": blocker_rows,
         "blocker_burn_down": blocker_burn_down,
         "session_memory_replay_proposal_breakdown": _breakdown_from_counts(session_memory_status_counts),
@@ -7418,6 +7632,9 @@ def _cache_replayability_units_from_store(store_obj: Any, *, row_limit: int | No
         estimates = _codex_estimates_with_cache(row.get("text_chars"), row.get("response_result_chars"), _json_obj(row.get("cache_json")))
         prepared = {
             **row,
+            "provider": "codex-app",
+            "path": "codex_app_turn",
+            "endpoint": "codex_app_turn",
             "requested_model": CODEX_APP_MODEL,
             "routed_model": CODEX_APP_MODEL,
             "stream": 0,
