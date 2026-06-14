@@ -1320,7 +1320,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("cache", {row["local_action_family"] for row in signal["omissions"]})
 
         managed_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "managed-recommendation")
-        self.assertEqual(managed_candidate["blocker"], "managed-recommendation-health-report-missing")
+        self.assertTrue(managed_candidate["blocker"].startswith("managed-recommendation-health-report-missing"))
+        self.assertEqual(managed_candidate["safety_status"], "review-required")
         self.assertEqual(managed_candidate["projected_savings_signal"]["status"], "missing-managed-recommendation-health-report")
 
     def test_managed_recommendation_handoff_reports_omitted_local_action_reason(self):
@@ -1367,9 +1368,62 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(top["local_file_backed_representation"]["exists"])
         self.assertEqual(top["local_file_backed_representation"]["rule_file"], "crunch_rules.yaml")
 
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        managed_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "managed-recommendation")
+        self.assertEqual(managed_entry["current_status"], "projected")
+        self.assertEqual(managed_entry["omitted_reason"], "repeated-context-crunch-opportunity")
+        self.assertEqual(managed_entry["local_action_family"], "crunch")
+        self.assertEqual(managed_entry["managed_dependency"], "optional")
+        self.assertTrue(managed_entry["local_file_backed_representation"]["exists"])
+        self.assertEqual(managed_entry["local_file_backed_representation"]["policy_section"], "crunch")
+
         self.assertFalse(signal["privacy"]["raw_prompts_included"])
         self.assertFalse(signal["privacy"]["provider_bodies_included"])
         self.assertTrue(signal["privacy"]["metadata_only"])
+
+    def test_missing_managed_report_ledger_points_to_projected_local_policy_handoff(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2767,
+                "request_shape_crunch_opportunity": {
+                    "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                    "status": "projected-savings-ranked",
+                    "summary": {
+                        "rows_considered": 2767,
+                        "matched_count": 724,
+                        "projected_saved_usd": 3.865624,
+                        "projected_saved_tokens": 1301438,
+                        "activation_state": "activation-ready",
+                        "next_action": "stage-repeated-context-crunch-canary",
+                        "top_blocker": "repeated-context-crunch-opportunity",
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
+        self.assertEqual(signal["status"], "missing-managed-recommendation-health-report")
+        self.assertEqual(signal["summary"]["managed_dependency"], "optional")
+        self.assertEqual(signal["top_omission"]["local_action_family"], "crunch")
+        self.assertEqual(signal["top_omission"]["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(signal["top_omission"]["follow_up_owner"], "local-policy")
+        self.assertTrue(signal["top_omission"]["local_file_backed_representation"]["exists"])
+        self.assertEqual(signal["top_omission"]["local_file_backed_representation"]["rule_file"], "crunch_rules.yaml")
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        managed_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "managed-recommendation")
+        self.assertEqual(managed_entry["current_status"], "projected")
+        self.assertEqual(managed_entry["follow_up_owner"], "local-policy")
+        self.assertEqual(managed_entry["managed_dependency"], "optional")
+        self.assertEqual(managed_entry["local_action_family"], "crunch")
+        self.assertEqual(managed_entry["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertTrue(managed_entry["omitted_reason"].startswith("managed-recommendation-health-report-missing"))
+        self.assertTrue(managed_entry["local_file_backed_representation"]["exists"])
+        self.assertEqual(managed_entry["local_file_backed_representation"]["policy_section"], "crunch")
 
     def test_request_shape_rollup_report_ranks_repeated_context_candidate(self):
         plan = build_research_plan(

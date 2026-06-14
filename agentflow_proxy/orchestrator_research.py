@@ -2056,6 +2056,19 @@ def build_evidence_to_activation_next_action_ledger(
             entry["requested_model"] = sanitize_value(stage.get("requested_model"))
         if stage.get("candidate_target_model"):
             entry["candidate_target_model"] = sanitize_value(stage.get("candidate_target_model"))
+        if stage.get("omitted_reason"):
+            entry["omitted_reason"] = sanitize_value(stage.get("omitted_reason"))
+        if stage.get("follow_up_owner"):
+            entry["follow_up_owner"] = sanitize_value(stage.get("follow_up_owner"))
+        if stage.get("managed_dependency"):
+            entry["managed_dependency"] = sanitize_value(stage.get("managed_dependency"))
+        representation = (
+            stage.get("local_file_backed_representation")
+            if isinstance(stage.get("local_file_backed_representation"), dict)
+            else {}
+        )
+        if representation:
+            entry["local_file_backed_representation"] = sanitize_value(representation)
         matched = _ledger_issue_match(entry, existing_issues)
         if matched is not None and str(matched.get("number") or ""):
             entry["prior_issue"] = matched
@@ -2297,6 +2310,58 @@ def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] |
     }
 
 
+def _managed_recommendation_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    health = (
+        stats_summary.get("managed_recommendation_health")
+        if isinstance(stats_summary.get("managed_recommendation_health"), dict)
+        else {}
+    )
+    if not health:
+        return None
+    top = health.get("top_omission") if isinstance(health.get("top_omission"), dict) else {}
+    if not top:
+        return None
+    representation = (
+        top.get("local_file_backed_representation")
+        if isinstance(top.get("local_file_backed_representation"), dict)
+        else {}
+    )
+    represented = bool(representation.get("exists"))
+    follow_up_owner = str(top.get("follow_up_owner") or ("local-policy" if represented else "blocked-boundary-review"))
+    omitted_reason = str(health.get("omitted_local_action_reason") or top.get("omitted_reason") or "").strip()
+    missing = [str(item) for item in health.get("missing_measurements") or [] if str(item or "").strip()]
+    blocker_codes = [str(item) for item in top.get("blocker_codes") or [] if str(item or "").strip()]
+    if not blocker_codes and omitted_reason:
+        blocker_codes = [omitted_reason]
+    local_state = str(top.get("local_evidence_state") or "").strip()
+    if (
+        str(health.get("status") or "") == "missing-managed-recommendation-health-report"
+        and local_state in {"missing-evidence", "blocked"}
+    ):
+        return None
+    if represented and follow_up_owner == "local-policy":
+        state = local_state if local_state in {"missing-evidence", "blocked"} else "ranked-evidence"
+    elif missing or omitted_reason:
+        state = "missing-evidence"
+    else:
+        state = "no-op"
+    summary = health.get("summary") if isinstance(health.get("summary"), dict) else {}
+    return {
+        "lever": "managed-recommendation",
+        "state": state,
+        "evidence_source": health.get("schema"),
+        "local_action_family": sanitize_value(top.get("local_action_family") or "unknown"),
+        "next_action": sanitize_value(top.get("next_action") or "emit-managed-recommendation-health-rollup"),
+        "blocker_codes": sanitize_value(blocker_codes or missing),
+        "sample_count": _to_int(top.get("count") or health.get("calls")),
+        "projected_saved_usd": round(_to_float(summary.get("observed_savings_usd")), 8),
+        "omitted_reason": sanitize_value(omitted_reason or "unknown"),
+        "follow_up_owner": sanitize_value(follow_up_owner),
+        "managed_dependency": sanitize_value(summary.get("managed_dependency") or "optional"),
+        "local_file_backed_representation": representation,
+    }
+
+
 def _evidence_to_activation_loop(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     stages = [
         stage
@@ -2305,6 +2370,7 @@ def _evidence_to_activation_loop(stats_summary: dict[str, Any]) -> dict[str, Any
             _cache_loop_stage(stats_summary),
             _crunch_loop_stage(stats_summary),
             _request_shape_loop_stage(stats_summary),
+            _managed_recommendation_loop_stage(stats_summary),
         )
         if stage is not None
     ]
@@ -3321,7 +3387,15 @@ def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str
         else {}
     )
     represented = bool(representation.get("exists"))
-    if status == "missing-managed-recommendation-health-report":
+    follow_up_owner = str(top.get("follow_up_owner") or "")
+    if status == "missing-managed-recommendation-health-report" and represented and follow_up_owner == "local-policy":
+        reason_fragment = omitted_reason if omitted_reason.startswith("managed-recommendation") else f"managed-recommendation-{omitted_reason}"
+        blocker = reason_fragment
+        path = "Continue with the ranked local file-backed policy follow-up while treating managed recommendation health as optional."
+        confidence = "medium"
+        safety_status = "review-required"
+        score = float(_to_int(top.get("count")) or calls) + 250.0
+    elif status == "missing-managed-recommendation-health-report":
         blocker = "managed-recommendation-health-report-missing"
         path = "Emit a bounded managed recommendation health rollup before choosing local policy or managed optimizer follow-up."
         confidence = "low"
