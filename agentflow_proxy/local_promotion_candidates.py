@@ -354,8 +354,52 @@ def _cache_candidates(cache_impact: dict[str, Any], rollups: dict[str, Any]) -> 
     return candidates
 
 
-def _crunch_candidates(rollups: dict[str, Any]) -> list[dict[str, Any]]:
+def _crunch_candidates(rollups: dict[str, Any], thinking_impact: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    impact_report = thinking_impact if isinstance(thinking_impact, dict) else {}
+    for source_rank, item in enumerate(impact_report.get("candidates") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        cohorts = item.get("cohorts") if isinstance(item.get("cohorts"), dict) else {}
+        applied = _as_int((cohorts.get("applied") or {}).get("count"))
+        holdout = _as_int((cohorts.get("holdout") or {}).get("count"))
+        safety = _as_int((cohorts.get("safety_stop") or {}).get("count"))
+        verdict = str(item.get("canary_impact_decision") or item.get("verdict") or "")
+        candidates.append(
+            _candidate(
+                action_family="crunch",
+                source_schema=str(impact_report.get("schema") or ""),
+                source_status=str(impact_report.get("status") or ""),
+                source_rank=source_rank,
+                candidate=item,
+                observed_savings_usd=_as_float(item.get("observed_saved_usd")),
+                projected_savings_usd=_as_float(item.get("projected_saved_usd")),
+                sample_count=applied + holdout + safety + _as_int((cohorts.get("skipped") or {}).get("count")),
+                applied_count=applied,
+                holdout_count=holdout,
+                safety_stop_count=safety,
+                verdict=verdict,
+                next_action_fallback="review-repeated-context-crunch-canary-impact-blocker",
+                extras={
+                    "projected_saved_tokens": _as_int(item.get("projected_saved_tokens")),
+                    "observed_saved_tokens": _as_int(item.get("observed_saved_tokens")),
+                    "avg_crunch_ratio": _round(item.get("avg_crunch_ratio"), 6),
+                    "stream": item.get("stream"),
+                    "requested_model_family": item.get("requested_model_family"),
+                    "routed_model_family": item.get("routed_model_family"),
+                    "first_observed_at": item.get("first_observed_at"),
+                    "last_observed_at": item.get("last_observed_at"),
+                    "canary_impact_decision": item.get("canary_impact_decision"),
+                    "budget_governor_action": ((item.get("budget_governor_feedback") or {}).get("recommended_budget_action"))
+                    if isinstance(item.get("budget_governor_feedback"), dict)
+                    else None,
+                },
+            )
+        )
+
+    if candidates:
+        return candidates
+
     impact = rollups.get("crunch_canary_impact") if isinstance(rollups.get("crunch_canary_impact"), dict) else {}
     for source_rank, item in enumerate(impact.get("candidates") or [], start=1):
         if not isinstance(item, dict):
@@ -487,12 +531,17 @@ def _routing_candidates(claude_impact: dict[str, Any], openai_routing: dict[str,
 def build_local_promotion_candidates_from_reports(source_reports: dict[str, Any]) -> dict[str, Any]:
     cache_impact = source_reports.get("cache_impact") if isinstance(source_reports.get("cache_impact"), dict) else {}
     rollups = source_reports.get("request_shape_rollups") if isinstance(source_reports.get("request_shape_rollups"), dict) else {}
+    thinking_impact = (
+        source_reports.get("anthropic_thinking_compaction_impact")
+        if isinstance(source_reports.get("anthropic_thinking_compaction_impact"), dict)
+        else {}
+    )
     claude_impact = source_reports.get("claude_routing_impact") if isinstance(source_reports.get("claude_routing_impact"), dict) else {}
     openai_routing = source_reports.get("openai_routing_report") if isinstance(source_reports.get("openai_routing_report"), dict) else {}
 
     candidates = (
         _cache_candidates(cache_impact, rollups)
-        + _crunch_candidates(rollups)
+        + _crunch_candidates(rollups, thinking_impact)
         + _routing_candidates(claude_impact, openai_routing)
     )
     candidates.sort(
@@ -544,6 +593,7 @@ def build_local_promotion_candidates_from_reports(source_reports: dict[str, Any]
         "source_reports": {
             "cache_impact_schema": cache_impact.get("schema"),
             "request_shape_rollups_schema": rollups.get("schema"),
+            "anthropic_thinking_compaction_impact_schema": thinking_impact.get("schema"),
             "claude_routing_impact_schema": claude_impact.get("schema"),
             "openai_routing_report_schema": openai_routing.get("schema"),
             "raw_source_reports_included": False,
@@ -564,6 +614,7 @@ def build_local_promotion_candidates_report(
 ) -> dict[str, Any]:
     capped_limit = max(1, min(int(limit or 1000), 10_000))
     from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+    from agentflow_proxy.anthropic_thinking_compaction_impact import build_anthropic_thinking_compaction_impact_report
     from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
     from agentflow_proxy.openai_routing_report import build_openai_routing_report
     from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
@@ -571,6 +622,7 @@ def build_local_promotion_candidates_report(
     source_reports = {
         "cache_impact": build_openai_cache_replay_impact_report(store_obj, limit=capped_limit, since=since),
         "request_shape_rollups": build_request_shape_rollups_report(store_obj, limit=capped_limit, persist=False),
+        "anthropic_thinking_compaction_impact": build_anthropic_thinking_compaction_impact_report(store_obj, limit=capped_limit, since=since),
         "claude_routing_impact": build_claude_canary_impact_report(store_obj, limit=capped_limit, since=since),
         "openai_routing_report": build_openai_routing_report(store_obj, limit=capped_limit),
     }

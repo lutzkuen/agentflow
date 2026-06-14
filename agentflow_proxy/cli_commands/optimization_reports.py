@@ -3930,6 +3930,82 @@ def local_promotion_candidates_cli(argv: Sequence[str] | None = None, *, stdout:
     return 0
 
 
+def crunch_promotion_draft_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Dry-run guarded crunch rule drafts from local promotion candidates")
+    parser.add_argument(
+        "promotion_report",
+        nargs="?",
+        help="Local promotion candidates report JSON path, or '-' for stdin. If omitted, a fresh report is built from local metadata.",
+    )
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent local metadata rows to inspect when building a fresh report, default: 1000, max: 10000.",
+    )
+    parser.add_argument("--since", help="Optional ISO timestamp lower bound when building fresh canary impact reports.")
+    parser.add_argument(
+        "--initial-canary-fraction",
+        type=float,
+        default=0.10,
+        help="Deterministic applied canary fraction for drafted crunch rule, default: 0.10.",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.10,
+        help="Deterministic holdout fraction for drafted crunch rule, default: 0.10.",
+    )
+    parser.add_argument(
+        "--max-evidence-age-hours",
+        type=float,
+        default=168.0,
+        help="Maximum age for promotion evidence before the dry-run no-ops, default: 168.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+
+    if args.promotion_report:
+        report = _read_json_input(str(args.promotion_report), stdin=stdin)
+    else:
+        from agentflow_proxy.local_promotion_candidates import build_local_promotion_candidates_report
+
+        store = _open_store_for_db(str(args.db))
+        try:
+            report = build_local_promotion_candidates_report(store, limit=args.limit, since=args.since)
+        finally:
+            store.conn.close()
+
+    from agentflow_proxy.crunch_promotion_drafts import dry_run_crunch_promotion_drafts
+
+    result = dry_run_crunch_promotion_drafts(
+        report,
+        initial_canary_fraction=args.initial_canary_fraction,
+        holdout_fraction=args.holdout_fraction,
+        max_evidence_age_hours=args.max_evidence_age_hours,
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    if (result.get("error") or {}).get("type") in {"invalid_report", "raw_payload_rejected"}:
+        return 1
+    return 0
+
+
 def openai_cache_replay_apply_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Graduate ready OpenAI cache replay candidates into a local cache canary overlay")
     parser.add_argument(
