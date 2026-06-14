@@ -15,6 +15,39 @@ OMISSION_SCHEMA = "agentflow.optimization_promotion_rollout_omission.v1"
 OMISSION_BUCKET_SCHEMA = "agentflow.optimization_promotion_rollout_omission_bucket.v1"
 
 ACTIONABLE_VERDICTS = {"widen", "hold", "rollback"}
+CACHE_STALE_DEPENDENCY_REASONS = {
+    "dependency-cap-exceeded",
+    "dependency-changed",
+    "dependency-created",
+    "dependency-deleted",
+    "file-dependency-changed",
+    "file-dependency-invalidated",
+    "stale-dependency-blocker",
+    "stale-risk-blockers",
+}
+CACHE_MISSING_INVALIDATION_REASONS = {
+    "dependency-audit-missing",
+    "dependency-freshness-missing",
+    "dependency-missing",
+    "file-dependency-evidence-absent",
+    "file-dependency-missing",
+    "file-watch-disabled",
+    "missing-safe-invalidation-evidence",
+    "safe-invalidation-required",
+    "tool-call-cache-disabled",
+}
+CACHE_STABLE_DEPENDENCY_STATUSES = {"fresh", "stable", "dependency-stable", "safe", "valid"}
+CACHE_UNSTABLE_DEPENDENCY_STATUSES = {"invalidated", "stale", "stale-risk", "changed", "unsafe"}
+CACHE_MISSING_DEPENDENCY_STATUSES = {"missing", "unknown-missing", "absent", "unavailable"}
+CACHE_REPLAY_FEEDBACK_OUTCOMES = [
+    "cache-hit",
+    "cache-miss",
+    "canary-holdout",
+    "invalidated",
+    "stale-risk",
+    "safety-stopped",
+    "noop",
+]
 LOCAL_POLICY_SECTIONS = {
     "routing": {
         "policy_section": "routing",
@@ -85,6 +118,172 @@ def _reason_codes(values: Any) -> list[str]:
         return []
     reasons = {_reason(value) for value in values}
     return sorted(reason for reason in reasons if reason)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "safe", "stable", "fresh"}
+    return bool(value)
+
+
+def _cache_dependency_audit(candidate: dict[str, Any]) -> dict[str, Any]:
+    for key in (
+        "file_dependency_audit",
+        "dependency_audit",
+        "dependency_freshness",
+        "dependency_evidence",
+        "local_dependency_freshness",
+    ):
+        value = candidate.get(key)
+        if isinstance(value, dict):
+            return value
+    cacheability = candidate.get("cacheability") if isinstance(candidate.get("cacheability"), dict) else {}
+    for key in ("file_dependency_audit", "dependency_audit", "dependency_freshness"):
+        value = cacheability.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _cache_reason_set(candidate: dict[str, Any]) -> set[str]:
+    reasons: set[str] = set(_reason_codes(candidate.get("reason_codes")))
+    for key in ("blockers", "warning_codes", "cache_replay_blocker_reasons"):
+        reasons.update(_reason_codes(candidate.get(key)))
+    for key in ("blocker_reason_breakdown", "invalidation_reason_breakdown", "stale_dependency_breakdown"):
+        rows = candidate.get(key)
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    reason = _reason(row.get("value") or row.get("reason"))
+                    if reason:
+                        reasons.add(reason)
+    audit = _cache_dependency_audit(candidate)
+    for key in ("invalidation_reason", "dependency_capture_reason", "status", "reason"):
+        reason = _reason(audit.get(key))
+        if reason:
+            reasons.add(reason)
+    return reasons
+
+
+def _cache_dependency_status(candidate: dict[str, Any]) -> str | None:
+    for key in ("file_dependency_status", "dependency_status", "dependency_health", "dependency_gate_status"):
+        value = str(candidate.get(key) or "").strip().lower().replace("_", "-")
+        if value:
+            return value
+    audit = _cache_dependency_audit(candidate)
+    for key in ("status", "dependency_status", "dependency_health"):
+        value = str(audit.get(key) or "").strip().lower().replace("_", "-")
+        if value:
+            return value
+    return None
+
+
+def _cache_safe_invalidation(candidate: dict[str, Any]) -> bool:
+    audit = _cache_dependency_audit(candidate)
+    cacheability = candidate.get("cacheability") if isinstance(candidate.get("cacheability"), dict) else {}
+    return any(
+        _truthy(value)
+        for value in (
+            candidate.get("safe_invalidation_evidence"),
+            candidate.get("safe_invalidation"),
+            candidate.get("file_dependency_evidence_available"),
+            candidate.get("file_dependency_fingerprint_available"),
+            cacheability.get("safe_invalidation_evidence"),
+            cacheability.get("file_dependency_evidence_available"),
+            audit.get("safe_invalidation_evidence"),
+            audit.get("file_dependency_evidence_available"),
+        )
+    )
+
+
+def _cache_tool_or_stream_related(candidate: dict[str, Any]) -> bool:
+    category = str(candidate.get("category") or "").strip().lower().replace("_", "-")
+    return bool(candidate.get("has_tools") or candidate.get("stream") or category.startswith("tool-"))
+
+
+def _cache_dependency_gate(candidate: dict[str, Any]) -> dict[str, Any]:
+    reasons = _cache_reason_set(candidate)
+    status = _cache_dependency_status(candidate)
+    audit = _cache_dependency_audit(candidate)
+    safe = _cache_safe_invalidation(candidate)
+    explicit_dependency_signal = bool(
+        status
+        or audit
+        or safe
+        or reasons & (CACHE_STALE_DEPENDENCY_REASONS | CACHE_MISSING_INVALIDATION_REASONS)
+    )
+    requires_dependency = bool(
+        _cache_tool_or_stream_related(candidate)
+        or explicit_dependency_signal
+        or candidate.get("requires_dependency_evidence")
+        or candidate.get("safe_invalidation_required")
+    )
+    stale = sorted(reasons & CACHE_STALE_DEPENDENCY_REASONS)
+    missing = sorted(reasons & CACHE_MISSING_INVALIDATION_REASONS)
+    if status in CACHE_UNSTABLE_DEPENDENCY_STATUSES or stale or audit.get("cap_exceeded") or audit.get("invalidation_reason"):
+        return {
+            "status": "blocked",
+            "reason": stale[0] if stale else str(audit.get("invalidation_reason") or status or "stale-dependency-blocker"),
+            "safety_outcome": "stale-risk",
+            "requires_dependency_evidence": requires_dependency,
+            "safe_invalidation_evidence": False,
+        }
+    if status in CACHE_MISSING_DEPENDENCY_STATUSES or missing or (requires_dependency and not safe):
+        return {
+            "status": "blocked",
+            "reason": missing[0] if missing else "missing-safe-invalidation-evidence",
+            "safety_outcome": "noop",
+            "requires_dependency_evidence": requires_dependency,
+            "safe_invalidation_evidence": False,
+        }
+    if safe or status in CACHE_STABLE_DEPENDENCY_STATUSES:
+        return {
+            "status": "ready",
+            "reason": "dependency-stable",
+            "safety_outcome": "canary",
+            "requires_dependency_evidence": requires_dependency,
+            "safe_invalidation_evidence": True,
+        }
+    return {
+        "status": "ready",
+        "reason": "no-dependency-required",
+        "safety_outcome": "canary",
+        "requires_dependency_evidence": False,
+        "safe_invalidation_evidence": False,
+    }
+
+
+def _cache_dependency_omission_reason(candidate: dict[str, Any]) -> str | None:
+    if _local_policy(candidate) != LOCAL_POLICY_SECTIONS["cache"]:
+        return None
+    if str(candidate.get("verdict") or "") == "rollback":
+        return None
+    gate = _cache_dependency_gate(candidate)
+    if gate["status"] == "ready":
+        return None
+    reason = str(gate.get("reason") or "")
+    if gate.get("safety_outcome") == "stale-risk" or "stale" in reason or "changed" in reason or "invalidated" in reason:
+        return "cache-replay-stale-dependency-risk"
+    return "cache-replay-missing-invalidation-evidence"
+
+
+def _projected_cache_hit_metadata(candidate: dict[str, Any]) -> dict[str, Any]:
+    matched = _as_int(candidate.get("matched_count") or candidate.get("sample_count"))
+    projected_hits = _as_int(
+        candidate.get("projected_hit_count")
+        or candidate.get("duplicate_fingerprint_rows")
+        or candidate.get("session_pattern_repeated_rows")
+        or candidate.get("safety_eligible_count")
+    )
+    hit_rate_value = candidate.get("projected_hit_rate")
+    if hit_rate_value is None and matched > 0 and projected_hits > 0:
+        hit_rate_value = projected_hits / matched
+    return {
+        "matched_count": matched,
+        "projected_hit_count": projected_hits,
+        "projected_hit_rate": _bounded_fraction(hit_rate_value, 0.0),
+        "projected_savings_usd": round(_as_float(candidate.get("projected_savings_usd")), 8),
+    }
 
 
 def _normalize_pattern_hash(value: Any) -> str | None:
@@ -230,7 +429,7 @@ def _recommended_canary_fraction(
 def _evidence_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     eval_evidence = candidate.get("eval_evidence") if isinstance(candidate.get("eval_evidence"), dict) else {}
     score_summary = eval_evidence.get("score_summary") if isinstance(eval_evidence.get("score_summary"), dict) else {}
-    return {
+    result = {
         "projected_savings_usd": round(_as_float(candidate.get("projected_savings_usd")), 8),
         "sample_count": _as_int(candidate.get("sample_count")),
         "cohort_counts": _cohort_counts(candidate),
@@ -244,6 +443,20 @@ def _evidence_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "avg_quality_score": score_summary.get("avg_quality_score"),
         "reason_codes": _reason_codes(candidate.get("reason_codes")),
     }
+    if _local_policy(candidate) == LOCAL_POLICY_SECTIONS["cache"]:
+        gate = _cache_dependency_gate(candidate)
+        result["cache_replay_dependency_gate"] = {
+            "status": gate["status"],
+            "reason": gate["reason"],
+            "requires_dependency_evidence": gate["requires_dependency_evidence"],
+            "safe_invalidation_evidence": gate["safe_invalidation_evidence"],
+            "file_paths_included": False,
+            "dependency_path_values_included": False,
+            "dependency_fingerprints_included": False,
+        }
+        result["cache_replay_projection"] = _projected_cache_hit_metadata(candidate)
+        result["cache_replay_feedback_outcomes"] = CACHE_REPLAY_FEEDBACK_OUTCOMES
+    return result
 
 
 def _privacy_blocked(candidate: dict[str, Any]) -> bool:
@@ -272,6 +485,8 @@ def _omission_reason(candidate: dict[str, Any], *, policy: dict[str, str] | None
     reasons = set(_reason_codes(candidate.get("reason_codes")))
     if verdict == "needs_eval" or "eval-results-missing" in reasons or any(reason.startswith("insufficient-") for reason in reasons):
         return "insufficient-eval-evidence"
+    if dependency_reason := _cache_dependency_omission_reason(candidate):
+        return dependency_reason
     if verdict not in ACTIONABLE_VERDICTS:
         return "unsupported-promotion-verdict"
     return None
@@ -376,6 +591,8 @@ def _action(
             "max_error_rate_delta": _as_float(safety.get("max_error_rate_delta"), 0.05),
         }
     if policy["policy_section"] == "cache":
+        dependency_gate = _cache_dependency_gate(candidate)
+        projection = _projected_cache_hit_metadata(candidate)
         pattern_hashes = _collect_pattern_hashes(candidate)
         conditions: dict[str, Any] = {}
         if pattern_hashes:
@@ -411,7 +628,7 @@ def _action(
                 conditions[key] = bool(candidate.get(key))
             elif key in cacheability:
                 conditions[key] = bool(cacheability.get(key))
-        safe_invalidation = bool(candidate.get("safe_invalidation_evidence") or candidate.get("file_dependency_evidence_available"))
+        safe_invalidation = bool(dependency_gate.get("safe_invalidation_evidence"))
         local_policy_update["conditions"] = conditions
         local_policy_update["action"] = {
             "type": "exact_cache_pattern",
@@ -420,6 +637,24 @@ def _action(
             "safe_invalidation_evidence": safe_invalidation,
             "streaming": bool(candidate.get("stream")),
             "estimated_saved_cost_usd": round(_as_float(candidate.get("projected_savings_usd")), 8),
+            "projected_hit_count": projection["projected_hit_count"],
+            "projected_hit_rate": projection["projected_hit_rate"],
+        }
+        local_policy_update["cache_replay_canary"] = {
+            "schema": "agentflow.cache_replay_dependency_gated_canary.v1",
+            "dependency_gate": dependency_gate,
+            "projection": projection,
+            "canary_fraction": canary_fraction,
+            "holdout_fraction": 0.0 if action_type == "rollback" else _bounded_fraction(holdout_fraction),
+            "feedback_outcomes": CACHE_REPLAY_FEEDBACK_OUTCOMES,
+            "records_hit_miss_holdout_invalidated_stale_risk_safety_stop_noop": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "dependency_path_values_included": False,
+            "individual_candidate_ids_included": False,
         }
         local_policy_update["safety_stop"] = {
             "min_outcome_samples": 5,

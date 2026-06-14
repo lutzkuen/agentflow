@@ -1019,6 +1019,132 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertTrue(all(bucket["privacy"]["metadata_only"] for bucket in buckets))
         self._assert_privacy_clean(result)
 
+    def test_cache_promotion_actions_apply_dependency_gated_replay_canary(self):
+        pattern_hash = "sha256:" + ("e" * 64)
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "stable-cache-replay-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "text_bucket": "8k_32k_chars",
+                    "token_bucket": "1k_4k_tokens",
+                    "has_tools": True,
+                    "stream": False,
+                    "pattern_hash": pattern_hash,
+                    "replayability_level": "local-exact-response",
+                    "file_dependency_status": "stable",
+                    "safe_invalidation_evidence": True,
+                    "file_dependency_evidence_available": True,
+                    "matched_count": 10,
+                    "projected_hit_count": 4,
+                    "projected_hit_rate": 0.4,
+                    "projected_savings_usd": 0.042,
+                    "sample_count": 10,
+                    "cohort_counts": {"canary_applied": 0, "canary_holdout": 0, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0, "blocked_count": 0},
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                }
+            ],
+        }
+
+        result = build_optimization_promotion_actions(report, initial_canary_fraction=0.1, holdout_fraction=0.2)
+
+        self.assertEqual(result["summary"]["action_count"], 1)
+        self.assertEqual(result["summary"]["omitted_count"], 0)
+        action = result["actions"][0]
+        local_update = action["local_policy_update"]
+        self.assertEqual(action["policy_section"], "cache")
+        self.assertEqual(action["canary_fraction"], 0.1)
+        self.assertEqual(action["holdout_fraction"], 0.2)
+        self.assertTrue(local_update["action"]["allow_tool_calls"])
+        self.assertTrue(local_update["action"]["safe_invalidation_evidence"])
+        self.assertEqual(local_update["action"]["projected_hit_count"], 4)
+        self.assertEqual(local_update["action"]["projected_hit_rate"], 0.4)
+        gate = local_update["cache_replay_canary"]["dependency_gate"]
+        self.assertEqual(gate["status"], "ready")
+        self.assertEqual(gate["reason"], "dependency-stable")
+        self.assertTrue(gate["safe_invalidation_evidence"])
+        self.assertIn("cache-hit", local_update["cache_replay_canary"]["feedback_outcomes"])
+        self.assertIn("canary-holdout", local_update["cache_replay_canary"]["feedback_outcomes"])
+        self.assertIn("stale-risk", local_update["cache_replay_canary"]["feedback_outcomes"])
+        self.assertFalse(local_update["cache_replay_canary"]["dependency_path_values_included"])
+        self.assertFalse(action["evidence_summary"]["cache_replay_dependency_gate"]["dependency_path_values_included"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            applied = apply_optimization_promotion_canaries(result, config_dir=tmp, dry_run=False)
+            self.assertTrue(applied["ok"])
+            written = yaml.safe_load((Path(tmp) / "cache_rules.yaml").read_text(encoding="utf-8"))
+
+        rule = written["pattern_rules"][0]
+        self.assertEqual(rule["conditions"]["pattern_hashes"], [pattern_hash])
+        self.assertTrue(rule["conditions"]["has_tools"])
+        self.assertFalse(rule["conditions"]["stream"])
+        self.assertTrue(rule["action"]["allow_tool_calls"])
+        self.assertTrue(rule["action"]["safe_invalidation_evidence"])
+        self.assertEqual(rule["action"]["estimated_saved_cost_usd"], 0.042)
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.1)
+        self.assertEqual(rule["rollout"]["holdout_fraction"], 0.2)
+        self._assert_privacy_clean(result)
+
+    def test_cache_promotion_actions_omit_stale_or_missing_dependency_replay(self):
+        base = {
+            "optimization_family": "cache_replayability",
+            "action_family": "cache",
+            "source_surface": "openai_responses",
+            "app_family": "generic_openai",
+            "category": "tool-result",
+            "has_tools": True,
+            "pattern_hash": "sha256:" + ("f" * 64),
+            "matched_count": 6,
+            "projected_hit_count": 3,
+            "projected_savings_usd": 0.03,
+            "sample_count": 6,
+            "cohort_counts": {"canary_applied": 0, "canary_holdout": 0, "bypassed_or_disabled": 0},
+            "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0},
+            "verdict": "widen",
+            "privacy": {"metadata_only": True, "raw_prompts_included": False},
+        }
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    **base,
+                    "candidate_id": "stale-cache-replay-candidate",
+                    "file_dependency_status": "invalidated",
+                    "reason_codes": ["stale-risk-blockers"],
+                },
+                {
+                    **base,
+                    "candidate_id": "missing-cache-replay-candidate",
+                    "file_dependency_status": "missing",
+                    "reason_codes": ["file-dependency-missing"],
+                },
+            ],
+        }
+
+        result = build_optimization_promotion_actions(report)
+
+        self.assertEqual(result["summary"]["action_count"], 0)
+        self.assertEqual(result["summary"]["omitted_count"], 2)
+        reasons = {row["target_candidate_id"]: row["reason"] for row in result["omitted"]}
+        self.assertEqual(reasons["stale-cache-replay-candidate"], "cache-replay-stale-dependency-risk")
+        self.assertEqual(reasons["missing-cache-replay-candidate"], "cache-replay-missing-invalidation-evidence")
+        summaries = {row["target_candidate_id"]: row["evidence_summary"] for row in result["omitted"]}
+        self.assertEqual(summaries["stale-cache-replay-candidate"]["cache_replay_dependency_gate"]["status"], "blocked")
+        self.assertEqual(summaries["missing-cache-replay-candidate"]["cache_replay_dependency_gate"]["status"], "blocked")
+        self.assertFalse(summaries["stale-cache-replay-candidate"]["cache_replay_dependency_gate"]["dependency_path_values_included"])
+        next_actions = {bucket["next_action"] for bucket in result["omission_buckets"]}
+        self.assertIn("fix-dependency-freshness", next_actions)
+        self._assert_privacy_clean(result)
+
     def test_promotion_blocker_recommendation_review_groups_sanitized_local_candidates(self):
         payload = {
             "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
