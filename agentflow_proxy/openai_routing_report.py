@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from agentflow_proxy.optimization.openai_features import openai_endpoint, openai_model_family, openai_source_surface
@@ -13,6 +14,7 @@ SCHEMA = "agentflow.openai_routing_opportunity.v1"
 DEFAULT_MIN_SAMPLES = 5
 DEFAULT_MAX_ERROR_RATE = 0.05
 DEFAULT_MAX_RETRY_RATE = 0.20
+DEFAULT_MAX_EVIDENCE_AGE_HOURS = 72.0
 DEFAULT_SMALL_TEXT_CHARS_LT = 6000
 DEFAULT_TINY_TEXT_CHARS_LT = 1500
 
@@ -58,6 +60,18 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _increment(counter: dict[str, int], key: Any, amount: int = 1) -> None:
@@ -181,6 +195,153 @@ def _projected_savings(row: dict[str, Any], requested_model: str, target_model: 
     return max(0.0, baseline - target_cost), blockers
 
 
+def _canary_cohort(canary: dict[str, Any]) -> str:
+    status = str(canary.get("status") or "").strip()
+    cohort = str(canary.get("cohort") or "").strip()
+    reason = str(canary.get("reason") or "").strip()
+    safety = canary.get("safety_stop") if isinstance(canary.get("safety_stop"), dict) else {}
+    if status == "applied" or cohort == "canary_applied":
+        return "canary_applied"
+    if status == "holdout" or cohort == "canary_holdout":
+        return "canary_holdout"
+    if status == "safety_stopped" or safety.get("tripped") or "safety-stop" in reason:
+        return "safety_stopped"
+    if status in {"disabled", "ineligible", "noop"} or cohort == "bypassed_or_disabled":
+        return "bypassed_or_disabled"
+    if status in {"not_selected", "skipped"} or cohort == "skipped":
+        return "skipped"
+    return "unknown"
+
+
+def _empty_lifecycle() -> dict[str, Any]:
+    return {
+        "cohort_counts": {
+            "canary_applied": 0,
+            "canary_holdout": 0,
+            "safety_stopped": 0,
+            "skipped": 0,
+            "bypassed_or_disabled": 0,
+            "unknown": 0,
+        },
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "reason_counts": {},
+        "oldest_observed_at": None,
+        "latest_observed_at": None,
+    }
+
+
+def _canary_matches_candidate(bucket: dict[str, Any], canary: dict[str, Any]) -> bool:
+    requested = str(canary.get("requested_model") or canary.get("original_model") or "").strip().lower()
+    target = str(canary.get("target_model") or "").strip().lower()
+    if requested and requested != str(bucket.get("requested_model") or "").lower():
+        return False
+    if target and target != str(bucket.get("target_model") or "").lower():
+        return False
+    return True
+
+
+def _add_canary_lifecycle(bucket: dict[str, Any], row: dict[str, Any], canary: dict[str, Any]) -> None:
+    if not canary or not _canary_matches_candidate(bucket, canary):
+        return
+    lifecycle = bucket.setdefault("openai_canary_lifecycle", _empty_lifecycle())
+    cohort = _canary_cohort(canary)
+    lifecycle["cohort_counts"][cohort] = _as_int(lifecycle["cohort_counts"].get(cohort)) + 1
+    status_code = _as_int(row.get("status_code"), -1)
+    if status_code >= 400:
+        lifecycle["error_count"] += 1
+    if _as_int(row.get("retry_count")) > 0:
+        lifecycle["retry_count"] += 1
+    if canary.get("fallback_reason"):
+        lifecycle["fallback_count"] += 1
+    _increment(lifecycle["reason_counts"], canary.get("reason") or "unknown")
+
+    created_at = row.get("created_at")
+    if created_at:
+        created = str(created_at)
+        if lifecycle["latest_observed_at"] is None or created > str(lifecycle["latest_observed_at"]):
+            lifecycle["latest_observed_at"] = created
+        if lifecycle["oldest_observed_at"] is None or created < str(lifecycle["oldest_observed_at"]):
+            lifecycle["oldest_observed_at"] = created
+
+
+def _finalize_lifecycle(raw: dict[str, Any] | None, *, matched_count: int) -> dict[str, Any]:
+    raw = raw or _empty_lifecycle()
+    counts = {key: _as_int(value) for key, value in (raw.get("cohort_counts") or {}).items()}
+    observed = sum(counts.values())
+    applied = _as_int(counts.get("canary_applied"))
+    holdout = _as_int(counts.get("canary_holdout"))
+    safety_stopped = _as_int(counts.get("safety_stopped"))
+    latest = _parse_time(raw.get("latest_observed_at"))
+    age_hours = None
+    stale = False
+    if latest is not None:
+        age_hours = round((datetime.now(timezone.utc) - latest).total_seconds() / 3600.0, 3)
+        stale = age_hours > DEFAULT_MAX_EVIDENCE_AGE_HOURS
+
+    blocker_counts: dict[str, int] = {}
+    if observed == 0:
+        blocker_counts["missing-canary-lifecycle-evidence"] = matched_count
+    if applied == 0:
+        blocker_counts["missing-applied-coverage"] = matched_count
+    if holdout == 0:
+        blocker_counts["missing-holdout-coverage"] = matched_count
+    if _as_int(raw.get("error_count")):
+        blocker_counts["error-observed"] = _as_int(raw.get("error_count"))
+    if _as_int(raw.get("retry_count")):
+        blocker_counts["retry-observed"] = _as_int(raw.get("retry_count"))
+    if _as_int(raw.get("fallback_count")):
+        blocker_counts["fallback-observed"] = _as_int(raw.get("fallback_count"))
+    if safety_stopped:
+        blocker_counts["safety-stop-observed"] = safety_stopped
+    if stale:
+        blocker_counts["stale-evidence"] = observed
+
+    return {
+        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+        "status": "matched" if observed else "no-openai-canary-metadata",
+        "observed_count": observed,
+        "cohort_counts": {
+            "canary_applied": applied,
+            "canary_holdout": holdout,
+            "safety_stopped": safety_stopped,
+            "skipped": _as_int(counts.get("skipped")),
+            "bypassed_or_disabled": _as_int(counts.get("bypassed_or_disabled")),
+            "unknown": _as_int(counts.get("unknown")),
+        },
+        "coverage": {
+            "matched_count": matched_count,
+            "observed_rate": round(observed / matched_count, 6) if matched_count else 0.0,
+            "applied_rate": round(applied / matched_count, 6) if matched_count else 0.0,
+            "holdout_rate": round(holdout / matched_count, 6) if matched_count else 0.0,
+        },
+        "error_count": _as_int(raw.get("error_count")),
+        "retry_count": _as_int(raw.get("retry_count")),
+        "fallback_count": _as_int(raw.get("fallback_count")),
+        "oldest_observed_at": raw.get("oldest_observed_at"),
+        "latest_observed_at": raw.get("latest_observed_at"),
+        "stale_evidence": {
+            "stale": stale,
+            "age_hours": age_hours,
+            "max_age_hours": DEFAULT_MAX_EVIDENCE_AGE_HOURS,
+        },
+        "reason_breakdown": _breakdown(raw.get("reason_counts") or {}),
+        "blocker_codes": sorted(blocker_counts),
+        "blocker_reason_breakdown": _breakdown(blocker_counts),
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "file_paths_included": False,
+        },
+    }
+
+
 def _candidate_id(
     *,
     endpoint: str,
@@ -228,6 +389,7 @@ def _new_bucket(row: dict[str, Any], *, candidate_id: str, target_model: str, ta
         "cache_status_counts": {},
         "blocker_counts": {},
         "row_blocked_count": 0,
+        "openai_canary_lifecycle": _empty_lifecycle(),
     }
 
 
@@ -272,6 +434,10 @@ def _finalize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     bucket["blocker_reason_breakdown"] = _breakdown(blocker_counts)
     bucket["status_breakdown"] = _breakdown(bucket.pop("status_counts", {}))
     bucket["cache_status_breakdown"] = _breakdown(bucket.pop("cache_status_counts", {}))
+    bucket["openai_canary_lifecycle_evidence"] = _finalize_lifecycle(
+        bucket.pop("openai_canary_lifecycle", None),
+        matched_count=matched,
+    )
     bucket["suggested_canary_fraction"] = suggested
     bucket["privacy"] = {"metadata_only": True, "candidate_id_derived_from_raw_body": False}
     bucket.pop("stream_count", None)
@@ -327,6 +493,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
         token_bucket = _token_bucket(input_tokens)
         requested_family = str(row.get("requested_model_family") or openai_model_family(requested_model) or "unknown")
         cache_status = str(cache.get("status") or ("hit" if _as_int(row.get("cache_hit")) else "missing"))
+        openai_canary = routing.get("openai_canary") if isinstance(routing.get("openai_canary"), dict) else {}
         current_routed = bool(requested_model and routed_model and requested_model != routed_model)
         if current_routed:
             current_routed_total += 1
@@ -372,6 +539,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
         bucket["current_routed_count"] += int(current_routed)
         bucket["error_count"] += int(_as_int(row.get("status_code")) >= 400)
         bucket["retry_count"] += int(_as_int(row.get("retry_count")) > 0)
+        _add_canary_lifecycle(bucket, row, openai_canary)
         if stream:
             bucket["stream_count"] = _as_int(bucket.get("stream_count")) + 1
         latency = _as_int(row.get("latency_ms"))
@@ -414,6 +582,12 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
     blocked_count = sum(_as_int(item.get("blocked_count")) for item in candidates)
     projected_savings = sum(_as_float(item.get("projected_savings_usd")) for item in candidates)
     estimated_baseline_cost = sum(_as_float(item.get("estimated_baseline_cost_usd")) for item in candidates)
+    canary_applied_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("canary_applied")) for item in candidates)
+    canary_holdout_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("canary_holdout")) for item in candidates)
+    canary_safety_stopped_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("safety_stopped")) for item in candidates)
+    canary_error_count = sum(_as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("error_count")) for item in candidates)
+    canary_retry_count = sum(_as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("retry_count")) for item in candidates)
+    canary_fallback_count = sum(_as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("fallback_count")) for item in candidates)
     for item in candidates:
         for blocker in item.get("blocker_reason_breakdown") or []:
             _increment(blocker_totals, blocker["value"], _as_int(blocker.get("count")))
@@ -435,6 +609,12 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "projected_savings_usd": round(projected_savings, 6),
             "estimated_baseline_cost_usd": round(estimated_baseline_cost, 6),
             "suggested_canary_fraction": suggested_fraction,
+            "openai_canary_applied_count": canary_applied_count,
+            "openai_canary_holdout_count": canary_holdout_count,
+            "openai_canary_safety_stopped_count": canary_safety_stopped_count,
+            "openai_canary_error_count": canary_error_count,
+            "openai_canary_retry_count": canary_retry_count,
+            "openai_canary_fallback_count": canary_fallback_count,
         },
         "simulation_policy": {
             "schema": "agentflow.openai_routing_simulation_policy.v1",

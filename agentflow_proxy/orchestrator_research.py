@@ -588,6 +588,81 @@ def _estimated_savings_per_1000(provider: str, requested_model: str, target_mode
     return round(max(0.0, requested - target) * 1000.0, 6)
 
 
+def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_count: int) -> dict[str, Any]:
+    applied = _to_int(row.get("openai_canary_applied_count") or row.get("canary_applied_count"))
+    holdout = _to_int(row.get("openai_canary_holdout_count") or row.get("canary_holdout_count"))
+    safety_stopped = _to_int(row.get("openai_canary_safety_stopped_count") or row.get("safety_stopped_count"))
+    skipped = _to_int(row.get("openai_canary_skipped_count") or row.get("canary_skipped_count"))
+    bypassed = _to_int(row.get("openai_canary_bypassed_count") or row.get("canary_bypassed_count"))
+    unknown = _to_int(row.get("openai_canary_unknown_count") or row.get("canary_unknown_count"))
+    error_count = _to_int(row.get("openai_canary_error_count") or row.get("canary_error_count"))
+    retry_count = _to_int(row.get("openai_canary_retry_count") or row.get("canary_retry_count"))
+    fallback_count = _to_int(row.get("openai_canary_fallback_count") or row.get("canary_fallback_count"))
+    observed = applied + holdout + safety_stopped + skipped + bypassed + unknown
+    stale = bool(row.get("openai_canary_stale_evidence") or row.get("stale_evidence"))
+
+    blockers: Counter[str] = Counter()
+    if observed == 0:
+        blockers["missing-canary-lifecycle-evidence"] = sample_count
+    if applied == 0:
+        blockers["missing-applied-coverage"] = sample_count
+    if holdout == 0:
+        blockers["missing-holdout-coverage"] = sample_count
+    if error_count:
+        blockers["error-observed"] = error_count
+    if retry_count:
+        blockers["retry-observed"] = retry_count
+    if fallback_count:
+        blockers["fallback-observed"] = fallback_count
+    if safety_stopped:
+        blockers["safety-stop-observed"] = safety_stopped
+    if stale:
+        blockers["stale-evidence"] = observed or sample_count
+
+    return {
+        "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+        "status": "matched" if observed else "no-openai-canary-metadata",
+        "observed_count": observed,
+        "cohort_counts": {
+            "canary_applied": applied,
+            "canary_holdout": holdout,
+            "safety_stopped": safety_stopped,
+            "skipped": skipped,
+            "bypassed_or_disabled": bypassed,
+            "unknown": unknown,
+        },
+        "coverage": {
+            "matched_count": sample_count,
+            "observed_rate": round(observed / sample_count, 6) if sample_count else 0.0,
+            "applied_rate": round(applied / sample_count, 6) if sample_count else 0.0,
+            "holdout_rate": round(holdout / sample_count, 6) if sample_count else 0.0,
+        },
+        "error_count": error_count,
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+        "latest_observed_at": sanitize_value(row.get("openai_canary_latest_observed_at") or row.get("canary_latest_observed_at")),
+        "stale_evidence": {
+            "stale": stale,
+            "max_age_hours": 72.0,
+        },
+        "blocker_codes": sorted(blockers),
+        "blocker_reason_breakdown": [
+            {"value": key, "count": value}
+            for key, value in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
 def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
     provider = _routing_lower(row.get("provider")) or "unknown"
     requested = _routing_text(row.get("requested_model")) or "unknown"
@@ -654,6 +729,9 @@ def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
         "no_op_reason": sanitize_value(no_op_reason or None),
         "estimated_savings_per_1000_calls_usd": savings_per_1000,
         "estimate_basis": "1000 input tokens and 250 output tokens per reference call; aggregate bucket ranking only",
+        "openai_canary_lifecycle_evidence": _aggregate_openai_canary_lifecycle_evidence(row, sample_count=count)
+        if provider == "openai" and target_model
+        else None,
     }
 
 
@@ -700,8 +778,18 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
 
     buckets.sort(key=_bucket_sort_key)
     actionability_counts: Counter[str] = Counter()
+    lifecycle_totals: Counter[str] = Counter()
     for bucket in buckets:
         actionability_counts[str(bucket.get("actionability") or "unknown")] += _to_int(bucket.get("sample_count"))
+        lifecycle = bucket.get("openai_canary_lifecycle_evidence")
+        if isinstance(lifecycle, dict):
+            cohorts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+            lifecycle_totals["canary_applied"] += _to_int(cohorts.get("canary_applied"))
+            lifecycle_totals["canary_holdout"] += _to_int(cohorts.get("canary_holdout"))
+            lifecycle_totals["safety_stopped"] += _to_int(cohorts.get("safety_stopped"))
+            lifecycle_totals["error"] += _to_int(lifecycle.get("error_count"))
+            lifecycle_totals["retry"] += _to_int(lifecycle.get("retry_count"))
+            lifecycle_totals["fallback"] += _to_int(lifecycle.get("fallback_count"))
     ranked = []
     for rank, bucket in enumerate(buckets[: max(1, limit)], start=1):
         item = dict(bucket)
@@ -718,6 +806,12 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             "top_actionability": top.get("actionability"),
             "top_requested_model": top.get("requested_model"),
             "top_candidate_target_model": top.get("candidate_target_model"),
+            "openai_canary_applied_count": lifecycle_totals["canary_applied"],
+            "openai_canary_holdout_count": lifecycle_totals["canary_holdout"],
+            "openai_canary_safety_stopped_count": lifecycle_totals["safety_stopped"],
+            "openai_canary_error_count": lifecycle_totals["error"],
+            "openai_canary_retry_count": lifecycle_totals["retry"],
+            "openai_canary_fallback_count": lifecycle_totals["fallback"],
         },
         "actionability_breakdown": [
             {"class": key, "count": value}

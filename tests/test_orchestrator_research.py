@@ -336,8 +336,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(gpt54["candidate_target_model"], "gpt-5.4-mini")
         self.assertEqual(gpt54["required_local_executor"], "openai-routing-canary")
         self.assertGreater(gpt54["estimated_savings_per_1000_calls_usd"], 0)
+        lifecycle = gpt54["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["schema"], "agentflow.openai_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 0)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 0)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 212)
+        self.assertIn("missing-canary-lifecycle-evidence", lifecycle["blocker_codes"])
+        self.assertIn("missing-applied-coverage", lifecycle["blocker_codes"])
+        self.assertIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+        self.assertFalse(lifecycle["privacy"]["raw_prompts_included"])
+        self.assertFalse(lifecycle["privacy"]["request_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["session_ids_included"])
         self.assertEqual(gpt54_mini["actionability"], "already-cheapest")
         self.assertIsNotNone(gpt54_mini["no_op_reason"])
+        self.assertIsNone(gpt54_mini["openai_canary_lifecycle_evidence"])
+        self.assertEqual(report["summary"]["openai_canary_applied_count"], 0)
+        self.assertEqual(report["summary"]["openai_canary_holdout_count"], 0)
 
         classes = {row["class"] for row in report["actionability_breakdown"]}
         self.assertIn("actionable", classes)

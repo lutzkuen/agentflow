@@ -38,10 +38,24 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         retry_count: int = 0,
         session_id: str = "secret-openai-session",
         request_json: str | None = None,
+        openai_canary: dict[str, object] | None = None,
     ) -> None:
         routed_model = routed_model or requested_model
         actual_input_tokens = max(1, text_chars // 4)
         actual_output_tokens = 40
+        routing_json = {
+            "enabled": bool(openai_canary),
+            "provider": "openai",
+            "requested_model": requested_model,
+            "routed_model": routed_model,
+            "reason": "openai routing disabled",
+            "text_chars": text_chars,
+            "has_tools": has_tools,
+            "category": category,
+            "policy_source": "local-default",
+        }
+        if openai_canary is not None:
+            routing_json["openai_canary"] = openai_canary
         self.store.log_call(
             id=str(uuid.uuid4()),
             created_at=utc_now(),
@@ -56,22 +70,10 @@ class OpenAIRoutingReportTests(unittest.TestCase):
             output_tokens_est=actual_output_tokens,
             actual_input_tokens=actual_input_tokens,
             actual_output_tokens=actual_output_tokens,
-            cost_est_usd=0.001,
+            cost_est_usd=0.001 if routed_model != requested_model else 0.002,
             cost_baseline_usd=0.002,
             crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
-            routing_json=stable_json(
-                {
-                    "enabled": False,
-                    "provider": "openai",
-                    "requested_model": requested_model,
-                    "routed_model": routed_model,
-                    "reason": "openai routing disabled",
-                    "text_chars": text_chars,
-                    "has_tools": has_tools,
-                    "category": category,
-                    "policy_source": "local-default",
-                }
-            ),
+            routing_json=stable_json(routing_json),
             cache_json=stable_json(
                 {
                     "status": "skipped" if has_tools else "miss",
@@ -158,6 +160,96 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(candidate["current_routed_count"], 0)
         self.assertEqual(candidate["blocked_count"], 0)
         self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+
+    def test_report_names_gpt54_canary_lifecycle_coverage_and_blockers(self) -> None:
+        def canary(cohort: str, **extra: object) -> dict[str, object]:
+            status = "applied" if cohort == "canary_applied" else "holdout"
+            if cohort == "safety_stopped":
+                status = "safety_stopped"
+            return {
+                "enabled": True,
+                "policy_id": "local-openai-routing-canary-gpt54-mini",
+                "target_candidate_id": "openai-route:responses:gpt-5:chat:no-tools:nonstream:lt-1_5k:lt-1k:to-gpt-5-4-mini",
+                "status": status,
+                "cohort": cohort,
+                "reason": "selected-canary" if cohort == "canary_applied" else "selected-holdout",
+                "requested_model": "gpt-5.4",
+                "target_model": "gpt-5.4-mini",
+                "actual_forwarded_model": "gpt-5.4-mini" if cohort == "canary_applied" else "gpt-5.4",
+                "category": "chat",
+                "projected_input_savings_usd": 0.001,
+                "canary_fraction": 0.5,
+                "holdout_fraction": 0.25,
+                **extra,
+            }
+
+        for _ in range(2):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4-mini",
+                category="chat",
+                text_chars=1200,
+                openai_canary=canary("canary_applied"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4-mini",
+            category="chat",
+            text_chars=1200,
+            status_code=500,
+            retry_count=1,
+            openai_canary=canary("canary_applied", fallback_reason="rate_limited"),
+        )
+        for _ in range(2):
+            self._log_openai_call(
+                requested_model="gpt-5.4",
+                routed_model="gpt-5.4",
+                category="chat",
+                text_chars=1200,
+                openai_canary=canary("canary_holdout"),
+            )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="chat",
+            text_chars=1200,
+            openai_canary=canary(
+                "safety_stopped",
+                reason="safety-stop-tripped",
+                safety_stop={"tripped": True, "reason_codes": ["error-rate"]},
+            ),
+        )
+
+        result = build_openai_routing_report(self.store, limit=20)
+
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["requested_model"], "gpt-5.4")
+        self.assertEqual(candidate["target_model"], "gpt-5.4-mini")
+        self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["schema"], "agentflow.openai_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 3)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 2)
+        self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 1)
+        self.assertEqual(lifecycle["error_count"], 1)
+        self.assertEqual(lifecycle["retry_count"], 1)
+        self.assertEqual(lifecycle["fallback_count"], 1)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 6)
+        self.assertIn("error-observed", lifecycle["blocker_codes"])
+        self.assertIn("retry-observed", lifecycle["blocker_codes"])
+        self.assertIn("fallback-observed", lifecycle["blocker_codes"])
+        self.assertIn("safety-stop-observed", lifecycle["blocker_codes"])
+        self.assertEqual(result["summary"]["openai_canary_applied_count"], 3)
+        self.assertEqual(result["summary"]["openai_canary_holdout_count"], 2)
+        self.assertEqual(result["summary"]["openai_canary_safety_stopped_count"], 1)
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("secret-openai-session", rendered)
+        self.assertNotIn("secret raw prompt", rendered)
+        self.assertFalse(lifecycle["privacy"]["raw_prompts_included"])
+        self.assertFalse(lifecycle["privacy"]["request_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["session_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["cache_keys_included"])
 
     def test_stats_wrapper_and_cli_emit_report(self) -> None:
         for _ in range(5):
