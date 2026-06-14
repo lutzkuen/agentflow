@@ -2961,6 +2961,63 @@ def _cache_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     top_blocker = "zero-cache-hits" if cache_hits == 0 and calls > 0 else "cache-hit-rate-low"
     top_bucket = "mixed"
     top_count = 0
+    shape_signal = (
+        stats_summary.get("request_shape_rollup_candidates")
+        if isinstance(stats_summary.get("request_shape_rollup_candidates"), dict)
+        else {}
+    )
+    shape_replay = (
+        shape_signal.get("cache_replayability_dry_run")
+        if isinstance(shape_signal.get("cache_replayability_dry_run"), dict)
+        else {}
+    )
+    if shape_replay and (
+        _to_int((shape_replay.get("summary") if isinstance(shape_replay.get("summary"), dict) else {}).get("cohort_count")) > 0
+        or shape_replay.get("cohorts")
+    ):
+        replay_summary = shape_replay.get("summary") if isinstance(shape_replay.get("summary"), dict) else {}
+        replay_rows = [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
+        top_replay = replay_rows[0] if replay_rows else {}
+        ready = _to_int(replay_summary.get("replay_ready_cohort_count")) > 0 or top_replay.get("readiness") == "replay-ready"
+        blockers = [str(item) for item in top_replay.get("blockers") or [] if str(item or "").strip()]
+        replay_blocker = "replay-ready" if ready else str(
+            replay_summary.get("top_blocker_code")
+            or (blockers[0] if blockers else top_replay.get("reason"))
+            or "cache-replayability-evidence-missing"
+        )
+        replay_hits = _to_int(top_replay.get("projected_hits") or replay_summary.get("projected_hits"))
+        replay_rows_count = _to_int(top_replay.get("row_count") or replay_summary.get("rows_considered"))
+        replay_savings = _to_float(top_replay.get("projected_savings_usd") or replay_summary.get("projected_savings_usd"))
+        replay_bucket_row = dict(top_replay)
+        if replay_bucket_row.get("provider") is None and replay_bucket_row.get("provider_family") is not None:
+            replay_bucket_row["provider"] = replay_bucket_row.get("provider_family")
+        return _candidate(
+            lever="cache",
+            provider_surface_bucket=_surface_bucket(replay_bucket_row, fallback=str(top_replay.get("source_surface") or "mixed")),
+            blocker=replay_blocker,
+            estimated_savings_path=(
+                "Turn request-shape replayability evidence into a staged local exact-cache canary "
+                "or a narrower invalidation/dependency blocker."
+            ),
+            projected_savings_signal={
+                "source_schema": shape_replay.get("schema"),
+                "status": shape_replay.get("status"),
+                "readiness": "replay-ready" if ready else str(top_replay.get("readiness") or "skipped"),
+                "reason": top_replay.get("reason"),
+                "calls": calls,
+                "cache_hits": cache_hits,
+                "cache_hit_rate": cache_hit_rate,
+                "replay_ready_cohort_count": _to_int(replay_summary.get("replay_ready_cohort_count")),
+                "replay_ready_rows": _to_int(replay_summary.get("replay_ready_rows")),
+                "skipped_cohort_count": _to_int(replay_summary.get("skipped_cohort_count")),
+                "projected_hits": replay_hits,
+                "projected_savings_usd": round(replay_savings, 8),
+                "top_blocker_code": replay_summary.get("top_blocker_code"),
+            },
+            confidence="medium" if ready or replay_rows_count > 0 else "low",
+            sequencing="Use after request-shape rollups exist and before generic zero-cache-hit issue generation.",
+            score=float(replay_hits or replay_rows_count or calls) + (500.0 if ready else 250.0),
+        )
     if isinstance(breakdown, list) and breakdown:
         for row in breakdown:
             if not isinstance(row, dict):
@@ -4258,6 +4315,31 @@ def _top_cache_replay_issue_row(stats_summary: dict[str, Any]) -> tuple[dict[str
                 issue_row["blocker_code"] = blockers[0] if blockers else readiness
             return issue_row, "cache_replay_cohort_ranking"
 
+    shape_signal = stats_summary.get("request_shape_rollup_candidates")
+    shape_replay = shape_signal.get("cache_replayability_dry_run") if isinstance(shape_signal, dict) else None
+    if isinstance(shape_replay, dict):
+        for row in shape_replay.get("cohorts") or []:
+            if not isinstance(row, dict):
+                continue
+            readiness = str(row.get("readiness") or "")
+            if readiness not in {"replay-ready", "skipped"}:
+                continue
+            blockers = [str(item) for item in row.get("blockers") or [] if str(item or "").strip()]
+            action = "stage-replay-policy" if readiness == "replay-ready" else "collect-dependency-evidence"
+            issue_row = dict(row)
+            issue_row["next_action_family"] = action
+            issue_row["next_action_label"] = _CACHE_ACTION_LABELS[action]
+            issue_row["provider"] = issue_row.get("provider") or issue_row.get("provider_family")
+            issue_row["count"] = _to_int(issue_row.get("count") or issue_row.get("row_count"))
+            issue_row["projected_saved_cost_usd"] = round(
+                _to_float(issue_row.get("projected_saved_cost_usd") or issue_row.get("projected_savings_usd")),
+                8,
+            )
+            issue_row["blocker_code"] = "replay-ready" if readiness == "replay-ready" else (
+                blockers[0] if blockers else str(issue_row.get("reason") or "cache-replayability-evidence-missing")
+            )
+            return issue_row, "request_shape_cache_replayability_dry_run"
+
     ladder = stats_summary.get("cache_zero_hit_blocker_ladder")
     if isinstance(ladder, dict):
         ladder_summary = ladder.get("summary") if isinstance(ladder.get("summary"), dict) else {}
@@ -4314,7 +4396,7 @@ def _proposal_from_cache_replay_blocker(stats_summary: dict[str, Any]) -> dict[s
         if row.get(key) is not None:
             evidence.append(f"{key}: {row.get(key)}")
     implementation = [
-        "Use the bounded cache zero-hit blocker ladder and replay cohort ranking; do not inspect prompts, responses, cache keys, file paths, request IDs, or session IDs.",
+        "Use the bounded cache zero-hit blocker ladder, replay cohort ranking, or request-shape replayability dry-run; do not inspect prompts, responses, cache keys, file paths, request IDs, or session IDs.",
         f"Focus on the named cohort and {action_label}.",
         "If the cohort remains aggregate-only or stale-risk blocked, keep the follow-up as evidence collection instead of enabling replay.",
         "Record the resulting local cache policy, canary, reload, or evidence decision in machine-readable cache metadata.",
@@ -4331,7 +4413,7 @@ def _proposal_from_cache_replay_blocker(stats_summary: dict[str, Any]) -> dict[s
         "body": _issue_body(
             title=title,
             rationale=(
-                "Research mode found a zero-hit cache window with a named blocker cohort. "
+                "Research mode found a zero-hit cache window with named replayability evidence or a blocker cohort. "
                 "The next cache issue should target that cohort's local replay, invalidation, policy reload, or instrumentation action instead of treating zero hits as a generic observation."
             ),
             evidence=evidence,

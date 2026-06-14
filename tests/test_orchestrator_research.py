@@ -1491,6 +1491,131 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-session-secret", rendered)
         self.assertNotIn("cache-secret", rendered)
 
+    def test_request_shape_replay_ready_cache_evidence_supersedes_zero_hit_candidate(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 100,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "cache_zero_hit_blocker_ladder": {
+                    "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+                    "summary": {
+                        "top_blocker_code": "zero-cache-hits",
+                        "scanned_rows": 100,
+                        "zero_hit_window": True,
+                    },
+                    "ladder": [{"blocker_code": "zero-cache-hits", "count": 100}],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 56, "rollup_count": 1},
+                    "rollups": [],
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "ranked_candidate_count": 1,
+                            "top_next_action": "stage-cache-replay-canary",
+                            "top_local_action_family": "cache",
+                        },
+                        "candidates": [
+                            {
+                                "provider_surface_bucket": "openai/openai_responses/responses",
+                                "provider_family": "openai",
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "cache_status": "miss",
+                                "routing_status": "disabled",
+                                "next_action": "stage-cache-replay-canary",
+                                "local_action_family": "cache",
+                                "candidate_work_classes": ["replayability"],
+                                "candidate_families": ["cache_replay"],
+                                "blocker_codes": [],
+                                "row_count": 56,
+                                "cost_est_usd": 0.12,
+                                "observed_savings_usd": 0.0,
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "cohort_count": 1,
+                            "rows_considered": 56,
+                            "replay_ready_cohort_count": 1,
+                            "replay_ready_rows": 56,
+                            "skipped_cohort_count": 0,
+                            "projected_hits": 55,
+                            "projected_savings_usd": 0.121981,
+                        },
+                        "cohorts": [
+                            {
+                                "readiness": "replay-ready",
+                                "reason": "replay-ready-exact-non-tool-shape",
+                                "blockers": [],
+                                "provider_family": "openai",
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "workflow_phase": "chat",
+                                "stream": False,
+                                "has_tools": False,
+                                "cache_status": "miss",
+                                "routing_status": "disabled",
+                                "row_count": 56,
+                                "projected_hits": 55,
+                                "projected_savings_usd": 0.121981,
+                                "request_id": "request-secret-should-redact",
+                                "session_id": "session-secret-should-redact",
+                                "cache_key": "cache-secret-should-redact",
+                                "file_path": "/tmp/private-cache-replay.py",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        loop = stats_summary["evidence_to_activation_loop"]
+        cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache_stage["state"], "replay-ready")
+        self.assertEqual(cache_stage["evidence_source"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_stage["next_action"], "stage-cache-replay-canary")
+        self.assertEqual(cache_stage["projected_hits"], 55)
+        self.assertNotIn("zero-cache-hits", cache_stage["blocker_codes"])
+
+        created = plan["backlog_changes"]["create_issues"]
+        titles = [item["title"] for item in created]
+        self.assertIn("Stage cache replay canary for replay-ready on openai/openai_responses/responses", titles)
+        self.assertNotIn("Turn zero-cache-hits cache candidate into local replay evidence", titles)
+        cache_issue = next(item for item in created if item["title"].startswith("Stage cache replay canary"))
+        self.assertIn("Source metadata: request_shape_cache_replayability_dry_run", cache_issue["body"])
+        self.assertIn("projected_hits: 55", cache_issue["body"])
+        self.assertIn("Activation mode: activation-candidate", cache_issue["body"])
+
+        candidates = plan["evidence"]["optimization_candidates"]
+        cache_candidate = next(row for row in candidates if row["lever"] == "cache")
+        self.assertEqual(cache_candidate["blocker"], "replay-ready")
+        self.assertEqual(cache_candidate["projected_savings_signal"]["readiness"], "replay-ready")
+        self.assertEqual(cache_candidate["projected_savings_signal"]["projected_hits"], 55)
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("request-secret-should-redact", rendered)
+        self.assertNotIn("session-secret-should-redact", rendered)
+        self.assertNotIn("cache-secret-should-redact", rendered)
+        self.assertNotIn("/tmp/private-cache-replay.py", rendered)
+
     def test_cache_replay_cohort_ranking_prefers_activation_ready_issue(self):
         plan = build_research_plan(
             issues=[],
