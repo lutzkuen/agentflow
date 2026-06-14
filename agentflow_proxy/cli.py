@@ -132,6 +132,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     repeated_scaffold_activation_cli,
     openai_cache_replay_impact_cli,
     openai_cache_replay_readiness_cli,
+    local_promotion_candidates_cli,
     openai_cache_replay_apply_cli,
     openai_cache_replay_dry_run_cli,
     openai_old_context_summary_dry_run_cli,
@@ -755,6 +756,10 @@ def openai_cache_replay_impact_main() -> None:
 
 def openai_cache_replay_readiness_main() -> None:
     raise SystemExit(openai_cache_replay_readiness_cli())
+
+
+def local_promotion_candidates_main() -> None:
+    raise SystemExit(local_promotion_candidates_cli())
 
 
 def openai_cache_replay_apply_main() -> None:

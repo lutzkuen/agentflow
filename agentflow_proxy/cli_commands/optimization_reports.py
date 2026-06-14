@@ -3890,6 +3890,46 @@ def openai_cache_replay_readiness_cli(argv: Sequence[str] | None = None, *, stdo
     return 0
 
 
+def local_promotion_candidates_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Rank local promotion candidates from measured cache, crunch, and routing canaries")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Recent local metadata rows to inspect, default: 1000, max: 10000.",
+    )
+    parser.add_argument(
+        "--since",
+        help="Optional ISO timestamp lower bound for canary impact reports.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.local_promotion_candidates import build_local_promotion_candidates_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_local_promotion_candidates_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def openai_cache_replay_apply_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Graduate ready OpenAI cache replay candidates into a local cache canary overlay")
     parser.add_argument(

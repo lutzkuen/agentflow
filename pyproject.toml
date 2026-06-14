@@ -85,6 +85,7 @@ agentflow-repeated-scaffold-impact = "agentflow_proxy.cli:repeated_scaffold_impa
 agentflow-repeated-scaffold-activation = "agentflow_proxy.cli:repeated_scaffold_activation_main"
 agentflow-openai-cache-replay-impact = "agentflow_proxy.cli:openai_cache_replay_impact_main"
 agentflow-openai-cache-replay-readiness = "agentflow_proxy.cli:openai_cache_replay_readiness_main"
+agentflow-local-promotion-candidates = "agentflow_proxy.cli:local_promotion_candidates_main"
 agentflow-openai-cache-replay-apply = "agentflow_proxy.cli:openai_cache_replay_apply_main"
 agentflow-openai-cache-replay-dry-run = "agentflow_proxy.cli:openai_cache_replay_dry_run_main"
 agentflow-openai-old-context-summary-dry-run = "agentflow_proxy.cli:openai_old_context_summary_dry_run_main"
