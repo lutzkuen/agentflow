@@ -110,6 +110,38 @@ def _increment(counter: dict[str, int], value: Any) -> None:
     counter[key] = counter.get(key, 0) + 1
 
 
+def _public_recommendation(verdict: Any) -> str:
+    text = str(verdict or "").strip()
+    if text == "widen":
+        return "promote"
+    if text == "hold":
+        return "keep-canary"
+    if text == "rollback":
+        return "rollback"
+    return "needs-more-evidence"
+
+
+def _action_family(action: dict[str, Any]) -> str:
+    text = str(action.get("action_family") or action.get("optimization_family") or action.get("policy_section") or "").strip().lower()
+    text = text.replace("_", "-")
+    if text in {"route", "routing", "phase-routing", "provider-routing"}:
+        return "routing"
+    if text in {"cache", "cache-replay", "exact-cache", "semantic-cache"}:
+        return "cache"
+    if text in {
+        "crunch",
+        "old-context-summary",
+        "old-context-summarization",
+        "repeated-scaffold-crunch",
+        "terminal-output-compaction",
+        "anthropic-thinking-history-compaction",
+    }:
+        return "crunch"
+    if text in {"eval", "evaluation", "evaluation-only", "shadow-eval", "shadow-evaluation", "optimization-eval"}:
+        return "evaluation-only"
+    return text or "unknown"
+
+
 def _privacy_summary() -> dict[str, Any]:
     return {
         "metadata_only": True,
@@ -537,11 +569,136 @@ def _next_step(
 
     return {
         "verdict": verdict,
+        "recommendation": _public_recommendation(verdict),
         "reason_codes": reason_codes,
         "warning_codes": warning_codes,
         "projected_vs_observed_savings_ratio": projection_ratio,
         "recommended_local_next_step": verdict,
     }
+
+
+def _family_empty() -> dict[str, Any]:
+    return {
+        "action_count": 0,
+        "matched_metadata_row_count": 0,
+        "projected_savings_usd": 0.0,
+        "observed_savings_usd": 0.0,
+        "stale_evidence_action_count": 0,
+        "cohorts": {
+            "canary_applied": _empty_cohort(),
+            "canary_holdout": _empty_cohort(),
+            "skipped": _empty_cohort(),
+            "bypassed_or_disabled": _empty_cohort(),
+            "safety_stopped": _empty_cohort(),
+            "unknown": _empty_cohort(),
+        },
+        "verdicts": [],
+        "recommendations": [],
+        "reason_counts": {},
+        "warning_counts": {},
+    }
+
+
+def _merge_finalized_cohort(target: dict[str, Any], source: dict[str, Any]) -> None:
+    count = _as_int(source.get("count"))
+    target["count"] += count
+    target["error_count"] += _as_int(source.get("error_count"))
+    target["retry_count"] += _as_int(source.get("retry_count"))
+    target["savings_usd"] += _as_float(source.get("observed_savings_usd"))
+    latency = source.get("latency_avg_ms")
+    if latency is not None and count:
+        target["latency_ms_total"] += _as_float(latency) * count
+        target["latency_sample_count"] += count
+
+
+def _top_blocker(reason_counts: dict[str, int]) -> str | None:
+    blockers = {
+        key: count
+        for key, count in reason_counts.items()
+        if key not in {"promotion-impact-positive"}
+    }
+    if not blockers:
+        return None
+    return sorted(blockers.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _family_recommendation(recommendations: list[str]) -> str:
+    if not recommendations:
+        return "needs-more-evidence"
+    if "rollback" in recommendations:
+        return "rollback"
+    if "keep-canary" in recommendations:
+        return "keep-canary"
+    if "needs-more-evidence" in recommendations:
+        return "needs-more-evidence"
+    return "promote"
+
+
+def _family_impacts(action_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    families: dict[str, dict[str, Any]] = {}
+    for action in action_results:
+        family = _action_family(action)
+        row = families.setdefault(family, _family_empty())
+        actual = action.get("actual") if isinstance(action.get("actual"), dict) else {}
+        projection = action.get("projection") if isinstance(action.get("projection"), dict) else {}
+        next_step = action.get("next_step") if isinstance(action.get("next_step"), dict) else {}
+        cohorts = actual.get("cohorts") if isinstance(actual.get("cohorts"), dict) else {}
+        row["action_count"] += 1
+        row["matched_metadata_row_count"] += _as_int(actual.get("matched_metadata_row_count"))
+        row["projected_savings_usd"] += _as_float(projection.get("projected_savings_usd"))
+        row["observed_savings_usd"] += _as_float(actual.get("observed_savings_usd"))
+        if isinstance(action.get("stale_evidence"), dict) and action["stale_evidence"].get("stale"):
+            row["stale_evidence_action_count"] += 1
+        for cohort_name, cohort in cohorts.items():
+            if isinstance(cohort, dict):
+                bucket = row["cohorts"].setdefault(str(cohort_name), _empty_cohort())
+                _merge_finalized_cohort(bucket, cohort)
+        verdict = str(next_step.get("verdict") or "unknown")
+        recommendation = str(next_step.get("recommendation") or _public_recommendation(verdict))
+        row["verdicts"].append(verdict)
+        row["recommendations"].append(recommendation)
+        for reason in next_step.get("reason_codes") or []:
+            _increment(row["reason_counts"], reason)
+        for warning in next_step.get("warning_codes") or []:
+            _increment(row["warning_counts"], warning)
+
+    results: list[dict[str, Any]] = []
+    for family, row in sorted(families.items()):
+        finalized = {key: _finalize_cohort(value) for key, value in row["cohorts"].items()}
+        applied = finalized.get("canary_applied", _finalize_cohort(_empty_cohort()))
+        holdout = finalized.get("canary_holdout", _finalize_cohort(_empty_cohort()))
+        latency_delta = None
+        if applied.get("latency_avg_ms") is not None and holdout.get("latency_avg_ms") is not None:
+            latency_delta = round(_as_float(applied.get("latency_avg_ms")) - _as_float(holdout.get("latency_avg_ms")), 2)
+        recommendation = _family_recommendation(row["recommendations"])
+        result = {
+            "action_family": family,
+            "action_count": row["action_count"],
+            "matched_metadata_row_count": row["matched_metadata_row_count"],
+            "projected_savings_usd": round(_as_float(row["projected_savings_usd"]), 8),
+            "observed_savings_usd": round(_as_float(row["observed_savings_usd"]), 8),
+            "cohort_metrics": finalized,
+            "applied_vs_holdout_deltas": {
+                "applied_minus_holdout_error_rate": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
+                "applied_minus_holdout_retry_rate": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+                "applied_minus_holdout_latency_avg_ms": latency_delta,
+                "applied_minus_holdout_observed_savings_usd": round(
+                    _as_float(applied.get("observed_savings_usd")) - _as_float(holdout.get("observed_savings_usd")),
+                    8,
+                ),
+            },
+            "recommendation": recommendation,
+            "recommended_local_next_step": recommendation,
+            "top_blocker": _top_blocker(row["reason_counts"]),
+            "reason_counts": _counter_rows([key for key, count in row["reason_counts"].items() for _ in range(count)]),
+            "warning_counts": _counter_rows([key for key, count in row["warning_counts"].items() for _ in range(count)]),
+            "verdict_counts": _counter_rows(row["verdicts"]),
+            "recommendation_counts": _counter_rows(row["recommendations"]),
+            "stale_evidence_action_count": row["stale_evidence_action_count"],
+            "privacy": _privacy_summary(),
+        }
+        results.append(result)
+    return results
 
 
 def measure_optimization_promotion_impact(
@@ -645,6 +802,7 @@ def measure_optimization_promotion_impact(
             "path": f"$.actions[{index}]",
             "action_id": action.get("action_id"),
             "action_type": action.get("action_type"),
+            "action_family": _action_family(action),
             "policy_section": action.get("policy_section"),
             "target_candidate_id": action.get("target_candidate_id"),
             "target_rule_id": action.get("target_rule_id"),
@@ -661,6 +819,8 @@ def measure_optimization_promotion_impact(
 
     matched_count = sum(_as_int(action["actual"].get("matched_metadata_row_count")) for action in action_results)
     verdicts = [str(action["next_step"]["verdict"]) for action in action_results]
+    family_impacts = _family_impacts(action_results)
+    recommendations = [str(row.get("recommendation") or "needs-more-evidence") for row in family_impacts]
     result.update({
         "ok": True,
         "status": "matched" if matched_count else "no-post-apply-matches",
@@ -671,11 +831,13 @@ def measure_optimization_promotion_impact(
             "action_count": len(actions),
         },
         "actions": action_results,
+        "family_impacts": family_impacts,
         "summary": {
             "sampled_call_count": len(rows),
             "observed_promotion_metadata_row_count": len(observed),
             "actual_matched_metadata_row_count": matched_count,
             "action_count": len(actions),
+            "action_family_count": len(family_impacts),
             "actions_without_post_apply_matches": sum(1 for action in action_results if not action["actual"]["matched_metadata_row_count"]),
             "actual_canary_applied_count": sum(_as_int(action["actual"].get("actual_canary_applied_count")) for action in action_results),
             "actual_canary_holdout_count": sum(_as_int(action["actual"].get("actual_canary_holdout_count")) for action in action_results),
@@ -684,6 +846,7 @@ def measure_optimization_promotion_impact(
             "actual_safety_stopped_count": sum(_as_int(action["actual"].get("actual_safety_stopped_count")) for action in action_results),
             "observed_savings_usd": round(sum(_as_float(action["actual"].get("observed_savings_usd")) for action in action_results), 8),
             "next_step_counts": _counter_rows(verdicts),
+            "recommendation_counts": _counter_rows(recommendations),
             "stale_evidence_action_count": sum(1 for action in action_results if action["stale_evidence"]["stale"]),
         },
     })

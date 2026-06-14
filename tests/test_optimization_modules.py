@@ -1491,7 +1491,9 @@ class OptimizationModuleTests(unittest.TestCase):
         routing = self._promotion_impact_action("routing", "routing-impact")
         crunch = self._promotion_impact_action("crunch", "crunch-impact")
         cache = self._promotion_impact_action("cache", "cache-impact")
-        bundle = self._promotion_impact_bundle(routing, crunch, cache)
+        eval_only = self._promotion_impact_action("evaluation", "eval-impact")
+        eval_only["action_family"] = "evaluation-only"
+        bundle = self._promotion_impact_bundle(routing, crunch, cache, eval_only)
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))
             try:
@@ -1520,18 +1522,34 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertFalse(report["managed_server_calls_made"])
         self.assertEqual(report["summary"]["actual_canary_applied_count"], 3)
         self.assertEqual(report["summary"]["actual_canary_holdout_count"], 3)
-        self.assertEqual({row["next_step"]["verdict"] for row in report["actions"]}, {"widen"})
+        self.assertEqual({row["next_step"]["verdict"] for row in report["actions"] if row["policy_section"] != "evaluation"}, {"widen"})
         self.assertGreater(report["summary"]["observed_savings_usd"], 0)
         by_section = {row["policy_section"]: row for row in report["actions"]}
         self.assertEqual(by_section["routing"]["actual"]["actual_canary_applied_count"], 1)
         self.assertEqual(by_section["crunch"]["actual"]["actual_canary_holdout_count"], 1)
         self.assertEqual(by_section["cache"]["next_step"]["projected_vs_observed_savings_ratio"], 0.5)
+        self.assertEqual(by_section["routing"]["next_step"]["recommendation"], "promote")
+        by_family = {row["action_family"]: row for row in report["family_impacts"]}
+        self.assertEqual(set(by_family), {"routing", "crunch", "cache", "evaluation-only"})
+        self.assertEqual(by_family["routing"]["cohort_metrics"]["canary_applied"]["count"], 1)
+        self.assertEqual(by_family["routing"]["cohort_metrics"]["canary_holdout"]["count"], 1)
+        self.assertGreater(by_family["routing"]["applied_vs_holdout_deltas"]["applied_minus_holdout_observed_savings_usd"], 0)
+        self.assertEqual(by_family["routing"]["recommendation"], "promote")
+        self.assertEqual(by_family["crunch"]["recommendation"], "promote")
+        self.assertEqual(by_family["cache"]["recommendation"], "promote")
+        self.assertEqual(by_family["evaluation-only"]["recommendation"], "needs-more-evidence")
+        self.assertEqual(by_family["evaluation-only"]["top_blocker"], "insufficient-canary-applied-samples")
+        self.assertEqual(report["summary"]["recommendation_counts"], [
+            {"value": "promote", "count": 3},
+            {"value": "needs-more-evidence", "count": 1},
+        ])
         rendered = stable_json(report)
         self.assertNotIn("raw-session-secret", rendered)
         self.assertNotIn("request_json", rendered)
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
         self.assertFalse(report["privacy"]["cache_keys_included"])
+        self._assert_privacy_clean(report)
 
     def test_optimization_promotion_impact_verdicts_cover_safety_negative_stale_insufficient_and_privacy(self):
         scenarios = (
@@ -1573,7 +1591,9 @@ class OptimizationModuleTests(unittest.TestCase):
                         store.conn.close()
                 step = report["actions"][0]["next_step"]
                 self.assertEqual(step["verdict"], expected_verdict)
+                self.assertEqual(step["recommendation"], "needs-more-evidence" if expected_verdict == "needs_more_samples" else "keep-canary" if expected_verdict == "hold" else expected_verdict)
                 self.assertIn(expected_reason, step["reason_codes"])
+                self.assertEqual(report["family_impacts"][0]["recommendation"], step["recommendation"])
                 if scenario == "stale":
                     self.assertTrue(report["actions"][0]["stale_evidence"]["stale"])
 

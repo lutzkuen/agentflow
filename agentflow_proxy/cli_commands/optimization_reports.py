@@ -6337,6 +6337,8 @@ def _optimization_promotion_lifecycle_payload(command: str, result: dict[str, An
         "actual_safety_stopped_count": summary.get("actual_safety_stopped_count"),
         "observed_savings_usd": summary.get("observed_savings_usd"),
         "next_step_counts": summary.get("next_step_counts"),
+        "recommendation_counts": summary.get("recommendation_counts"),
+        "family_impacts": result.get("family_impacts") if command == "impact" else None,
         "stale_evidence_action_count": summary.get("stale_evidence_action_count"),
         "error_type": (result.get("error") or {}).get("type") if isinstance(result.get("error"), dict) else None,
         "privacy": {
