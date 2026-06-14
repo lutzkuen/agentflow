@@ -11,6 +11,7 @@ from agentflow_proxy.pricing import estimate_cost, pricing_basis
 
 
 SCHEMA = "agentflow.orchestrator_research_plan.v1"
+EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burndown.v1"
 
 SENSITIVE_VALUE = "[REDACTED]"
 SENSITIVE_ID = "[REDACTED_ID]"
@@ -1844,6 +1845,173 @@ def _evidence_to_activation_loop(stats_summary: dict[str, Any]) -> dict[str, Any
         "levers": stages,
         "privacy": _loop_privacy(),
     }
+
+
+def _burndown_state_rank(value: str) -> int:
+    if value in {"activation-ready", "replay-ready"}:
+        return 0
+    if value in {"ranked-evidence", "measured-savings", "projected-savings", "evidence-progress"}:
+        return 10
+    if value in {"missing-evidence", "blocked"}:
+        return 20
+    return 30
+
+
+def _burndown_row_from_loop_stage(stage: dict[str, Any]) -> dict[str, Any]:
+    blocker_codes = [str(item) for item in stage.get("blocker_codes") or [] if str(item or "").strip()]
+    return {
+        "lever": sanitize_value(stage.get("lever") or "unknown"),
+        "local_action_family": sanitize_value(stage.get("local_action_family") or stage.get("lever") or "unknown"),
+        "state": sanitize_value(stage.get("state") or "unknown"),
+        "next_action": sanitize_value(stage.get("next_action") or "inspect-local-evidence"),
+        "blocker_codes": sanitize_value(blocker_codes),
+        "evidence_source": sanitize_value(stage.get("evidence_source")),
+        "sample_count": _to_int(stage.get("sample_count")),
+        "savings_per_1000_calls_usd": round(_to_float(stage.get("savings_per_1000_calls_usd")), 8),
+        "projected_saved_usd": round(
+            _to_float(stage.get("projected_saved_usd") or stage.get("projected_saved_cost_usd")),
+            8,
+        ),
+        "owner": "local-policy",
+        "_score": (
+            -_burndown_state_rank(str(stage.get("state") or ""))
+            + _to_float(stage.get("savings_per_1000_calls_usd") or stage.get("projected_saved_cost_usd") or stage.get("projected_saved_usd")) * 1000.0
+            + min(_to_int(stage.get("sample_count")), 10000) / 100.0
+        ),
+    }
+
+
+def _burndown_row_from_managed_health(health: dict[str, Any]) -> dict[str, Any] | None:
+    top = health.get("top_omission") if isinstance(health.get("top_omission"), dict) else {}
+    missing = [str(item) for item in health.get("missing_measurements") or [] if str(item or "").strip()]
+    omitted_reason = str(top.get("omitted_reason") or "").strip()
+    blocker_codes = missing or ([omitted_reason] if omitted_reason else [])
+    if not blocker_codes and _to_int(health.get("calls")) <= 0:
+        return None
+    return {
+        "lever": "managed-recommendation",
+        "local_action_family": sanitize_value(top.get("local_action_family") or "unknown"),
+        "state": "missing-evidence" if blocker_codes else "ranked-evidence",
+        "next_action": sanitize_value(top.get("next_action") or "emit-managed-recommendation-health-rollup"),
+        "blocker_codes": sanitize_value(blocker_codes),
+        "evidence_source": sanitize_value(health.get("schema")),
+        "sample_count": _to_int(top.get("count") or health.get("calls")),
+        "savings_per_1000_calls_usd": 0.0,
+        "projected_saved_usd": round(_to_float((health.get("summary") or {}).get("observed_savings_usd")) if isinstance(health.get("summary"), dict) else 0.0, 8),
+        "owner": sanitize_value(top.get("follow_up_owner") or "local-policy"),
+        "_score": -20.0 + min(_to_int(top.get("count") or health.get("calls")), 10000) / 150.0,
+    }
+
+
+def _burndown_row_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] | None:
+    reason = str(diagnostic.get("reason") or diagnostic.get("diagnostic_class") or "").strip()
+    if not reason:
+        return None
+    return {
+        "lever": sanitize_value(diagnostic.get("source_lever") or "activation-feedback"),
+        "local_action_family": "activation-feedback",
+        "state": "blocked",
+        "next_action": sanitize_value(diagnostic.get("unblock_path") or "resolve-activation-feedback-blocker"),
+        "blocker_codes": sanitize_value([reason]),
+        "evidence_source": "orchestrator_logs",
+        "sample_count": _to_int(diagnostic.get("count") or diagnostic.get("observations")),
+        "savings_per_1000_calls_usd": 0.0,
+        "projected_saved_usd": 0.0,
+        "owner": "local-policy",
+        "_score": -20.0 + min(_to_int(diagnostic.get("count") or diagnostic.get("observations")), 10000) / 200.0,
+    }
+
+
+def build_evidence_to_activation_burndown(
+    plan: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Build a metadata-only activation burn-down report from a research plan."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    clean_plan = sanitize_value(plan)
+    evidence = clean_plan.get("evidence") if isinstance(clean_plan.get("evidence"), dict) else {}
+    stats_summary = evidence.get("stats_summary") if isinstance(evidence.get("stats_summary"), dict) else {}
+    loop = stats_summary.get("evidence_to_activation_loop") if isinstance(stats_summary.get("evidence_to_activation_loop"), dict) else {}
+
+    rows: list[dict[str, Any]] = []
+    for stage in loop.get("levers") or []:
+        if isinstance(stage, dict):
+            rows.append(_burndown_row_from_loop_stage(stage))
+
+    managed = stats_summary.get("managed_recommendation_health")
+    if isinstance(managed, dict):
+        row = _burndown_row_from_managed_health(managed)
+        if row is not None:
+            rows.append(row)
+
+    diagnostics = evidence.get("repeated_diagnostics") if isinstance(evidence.get("repeated_diagnostics"), list) else []
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict):
+            continue
+        diagnostic_class = str(diagnostic.get("diagnostic_class") or diagnostic.get("reason") or "")
+        if diagnostic_class in {"safety-stop", "privacy-blocked", "regression", "high-retry-error-rate"}:
+            row = _burndown_row_from_diagnostic(diagnostic)
+            if row is not None:
+                rows.append(row)
+
+    rows.sort(
+        key=lambda item: (
+            _to_float(item.get("_score")),
+            -_burndown_state_rank(str(item.get("state") or "")),
+            _to_int(item.get("sample_count")),
+            str(item.get("lever") or ""),
+        ),
+        reverse=True,
+    )
+    clean_rows: list[dict[str, Any]] = []
+    for rank, row in enumerate(rows, start=1):
+        clean = dict(row)
+        clean.pop("_score", None)
+        clean["rank"] = rank
+        clean_rows.append(clean)
+
+    top = clean_rows[0] if clean_rows else {}
+    missing_count = sum(1 for row in clean_rows if _loop_missing_state(str(row.get("state") or "")) or str(row.get("state")) == "blocked")
+    progressed_count = sum(1 for row in clean_rows if _loop_progress_state(str(row.get("state") or "")))
+    activation_ready_count = sum(1 for row in clean_rows if str(row.get("state")) in {"activation-ready", "replay-ready"})
+    represented = sorted({str(row.get("lever")) for row in clean_rows if row.get("lever")})
+    all_blockers = [code for row in clean_rows for code in row.get("blocker_codes") or []]
+
+    result = {
+        "schema": EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA,
+        "generated_at": now.isoformat(),
+        "source_schema": sanitize_value(clean_plan.get("schema")),
+        "source_generated_at": sanitize_value(clean_plan.get("generated_at")),
+        "status": loop.get("status") or ("empty" if not clean_rows else "ranked"),
+        "summary": {
+            "blocker_family_count": len(represented),
+            "represented_blocker_families": represented,
+            "ranked_blocker_count": len(clean_rows),
+            "missing_evidence_count": missing_count,
+            "progressed_count": progressed_count,
+            "activation_ready_count": activation_ready_count,
+            "total_sample_count": sum(_to_int(row.get("sample_count")) for row in clean_rows),
+            "top_lever": top.get("lever"),
+            "top_state": top.get("state"),
+            "top_next_action": top.get("next_action"),
+            "top_blocker_code": (top.get("blocker_codes") or [None])[0],
+            "unique_blocker_codes": sorted({str(code) for code in all_blockers if str(code or "").strip()}),
+        },
+        "blockers": clean_rows,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+    return sanitize_value(result)
 
 
 def _candidate_privacy() -> dict[str, Any]:

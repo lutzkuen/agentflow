@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from agentflow_proxy import cli
-from agentflow_proxy.orchestrator_research import build_research_plan
+from agentflow_proxy.orchestrator_research import build_evidence_to_activation_burndown, build_research_plan
 
 
 NOW = datetime(2026, 6, 11, 8, 40, tzinfo=timezone.utc)
@@ -525,6 +525,103 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(loop["privacy"]["cache_keys_included"])
         rendered = json.dumps(plan)
         self.assertNotIn("req-secret-loop", rendered)
+
+    def test_evidence_to_activation_burndown_ranks_current_blocker_families(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "routing blocker=safety-stop request_id=req-secret-burndown path=/tmp/secret.py",
+                        "routing blocker=safety-stop session_id=session-secret-burndown",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            plan = build_research_plan(
+                issues=[],
+                stats={
+                    "calls": 2626,
+                    "cache_hits": 0,
+                    "cache_hit_rate": 0.0,
+                    "routing": [
+                        {
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "requested_model": "gpt-5.4",
+                            "routed_model": "gpt-5.4",
+                            "category": "unknown",
+                            "c": 244,
+                        }
+                    ],
+                    "crunch_savings_usd": 0.0,
+                    "today_crunch_savings_usd": 0.0,
+                    "crunch_tokens_saved": 0,
+                    "crunch_chars_saved": 0,
+                },
+                log_sources=[log_path],
+                threshold=3,
+                now=NOW,
+            )
+
+        report = build_evidence_to_activation_burndown(plan, now=NOW)
+
+        self.assertEqual(report["schema"], "agentflow.evidence_to_activation_burndown.v1")
+        self.assertEqual(report["summary"]["top_lever"], "routing")
+        self.assertEqual(report["summary"]["top_next_action"], "activate-openai-routing-canary-cohorts")
+        families = set(report["summary"]["represented_blocker_families"])
+        self.assertIn("routing", families)
+        self.assertIn("cache", families)
+        self.assertIn("crunch", families)
+        self.assertIn("request-shape-rollups", families)
+        self.assertIn("managed-recommendation", families)
+        self.assertGreaterEqual(report["summary"]["blocker_family_count"], 4)
+        routing = next(row for row in report["blockers"] if row["lever"] == "routing")
+        self.assertIn("missing-applied-coverage", routing["blocker_codes"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["absolute_paths_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("req-secret-burndown", rendered)
+        self.assertNotIn("session-secret-burndown", rendered)
+        self.assertNotIn("/tmp/secret.py", rendered)
+
+    def test_evidence_to_activation_burndown_cli_reads_plan_json(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 10,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "c": 10,
+                    }
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+        with TemporaryDirectory() as tmp:
+            plan_path = Path(tmp) / "plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            stdout = io.StringIO()
+            code = cli.evidence_to_activation_burndown_cli(["--plan-json", str(plan_path), "--pretty"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["schema"], "agentflow.evidence_to_activation_burndown.v1")
+        self.assertEqual(report["summary"]["top_lever"], "routing")
+        self.assertGreaterEqual(report["summary"]["ranked_blocker_count"], 4)
 
     def test_evidence_to_activation_loop_reports_activation_progress(self):
         plan = build_research_plan(

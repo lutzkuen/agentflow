@@ -427,6 +427,35 @@ def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     return 0
 
 
+def evidence_to_activation_burndown_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Emit a metadata-only AgentFlow evidence-to-activation burn-down report")
+    parser.add_argument(
+        "--plan-json",
+        required=True,
+        help="Path to an AgentFlow orchestrator research plan JSON.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.orchestrator_research import build_evidence_to_activation_burndown, load_json_file, write_json
+
+    try:
+        plan = load_json_file(args.plan_json)
+    except (OSError, ValueError, TypeError) as exc:
+        _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+        return 1
+    if not isinstance(plan, dict):
+        _write_json(stderr, {"ok": False, "error": {"type": "invalid_plan_json", "message": "plan JSON must be an object"}})
+        return 1
+
+    report = build_evidence_to_activation_burndown(plan)
+    write_json(stdout, report, pretty=args.pretty)
+    return 0
+
+
 def proxy_main() -> None:
     # The provider proxy forwards real API credentials and request bodies upstream.
     # Keep installed CLI defaults localhost-only unless the user explicitly opts in
@@ -792,3 +821,7 @@ def sqlite_maintenance_main() -> None:
 
 def orchestrator_research_main() -> None:
     raise SystemExit(orchestrator_research_cli())
+
+
+def evidence_to_activation_burndown_main() -> None:
+    raise SystemExit(evidence_to_activation_burndown_cli())
