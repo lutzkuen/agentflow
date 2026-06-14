@@ -9,10 +9,12 @@ from typing import Any
 import yaml
 
 from agentflow_proxy.cache import _parse_pattern_hashes
+from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
 from agentflow_proxy.openai_cache_replay_report import _as_float, _as_int, _json_obj
 from agentflow_proxy.pattern_rollout import PATTERN_ROLLOUT_SCHEMA
+from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
 from agentflow_proxy.store import utc_now
 
 
@@ -23,6 +25,7 @@ CACHE_CANARY_POLICY_FILE = "cache_canary_policy.yaml"
 
 _READY_VERDICTS = {"widen", "promote", "ready"}
 _PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
+_REQUEST_SHAPE_PATTERN_WILDCARD = "sha256:*"
 
 
 def _bounded_fraction(value: Any, default: float) -> float:
@@ -242,6 +245,122 @@ def _rule_from_candidate(
     }, []
 
 
+def _shape_candidate_id(cohort: dict[str, Any]) -> str:
+    basis = {
+        "schema": "agentflow.openai_cache_replay_shape_candidate_basis.v1",
+        "provider_family": cohort.get("provider_family"),
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "stream": bool(cohort.get("stream")),
+        "has_tools": bool(cohort.get("has_tools")),
+        "cache_status": cohort.get("cache_status"),
+        "routing_status": cohort.get("routing_status"),
+        "text_bucket": cohort.get("text_bucket"),
+        "token_bucket": cohort.get("token_bucket"),
+    }
+    digest = hashlib.sha256(
+        yaml.safe_dump(basis, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    endpoint = str(cohort.get("endpoint") or "unknown").replace("_", "-")
+    category = str(cohort.get("category") or "unknown").replace("_", "-")
+    return _public_id(f"request-shape-cache:{endpoint}:{category}:{digest}", "shape-candidate")
+
+
+def _rule_from_request_shape_cohort(
+    cohort: dict[str, Any],
+    *,
+    holdout_fraction: float,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    blockers: list[str] = []
+    if str(cohort.get("readiness") or "") != "replay-ready":
+        blockers.append("not-replay-ready")
+    if str(cohort.get("provider_family") or "").lower() != "openai":
+        blockers.append("non-openai-provider")
+    if bool(cohort.get("has_tools")):
+        blockers.append("tools-present")
+    if bool(cohort.get("stream")):
+        blockers.append("streaming-replay-not-supported")
+    if _as_int(cohort.get("projected_hits")) <= 0:
+        blockers.append("non-positive-projected-hits")
+    if _as_float(cohort.get("projected_savings_usd")) <= 0:
+        blockers.append("non-positive-projected-savings")
+    if blockers:
+        return None, blockers
+
+    candidate_id = _shape_candidate_id(cohort)
+    rule_id = _public_id(candidate_id.replace("request-shape-cache:", "openai-cache-shape-"), "shape-rule")
+    canary_fraction = round(1.0 - holdout_fraction, 6)
+    conditions = {
+        "pattern_hashes": [_REQUEST_SHAPE_PATTERN_WILDCARD],
+        "source_surface": cohort.get("source_surface"),
+        "endpoint": cohort.get("endpoint"),
+        "category": cohort.get("category"),
+        "workflow_phase": cohort.get("workflow_phase"),
+        "text_bucket": cohort.get("text_bucket"),
+        "token_bucket": cohort.get("token_bucket"),
+        "has_tools": False,
+        "stream": False,
+        "replayability_levels": ["features_only", "local-exact-response"],
+    }
+    conditions = {key: value for key, value in conditions.items() if value not in (None, "", [])}
+    return {
+        "id": rule_id,
+        "enabled": True,
+        "policy_source": "managed-recommended",
+        "candidate_id": candidate_id,
+        "description": "Local OpenAI exact-cache canary staged from replay-ready request-shape evidence.",
+        "conditions": conditions,
+        "action": {
+            "type": "exact_cache_pattern",
+            "allow_tool_calls": False,
+            "safe_invalidation": False,
+            "streaming": False,
+            "scope": "session",
+            "min_call_count": 2,
+        },
+        "rollout": {
+            "schema": PATTERN_ROLLOUT_SCHEMA,
+            "recommendation_mode": "openai-cache-replay-request-shape-canary",
+            "canary_enabled": True,
+            "canary_fraction": canary_fraction,
+            "canary_salt": candidate_id,
+            "canary_unit": "request_fingerprint",
+            "local_feedback_fields": [
+                "cache_hit",
+                "status_code",
+                "retry_count",
+                "latency_ms",
+                "cost_est_usd",
+                "cost_baseline_usd",
+                "cache_replay_canary",
+            ],
+        },
+        "graduation": {
+            "schema": "agentflow.openai_cache_replay_shape_activation.v1",
+            "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+            "source_reason": cohort.get("reason"),
+            "projected_hits": cohort.get("projected_hits"),
+            "projected_savings_usd": cohort.get("projected_savings_usd"),
+            "sample_count": cohort.get("row_count"),
+            "aggregate_only": True,
+            "graduated_at": utc_now(),
+        },
+    }, []
+
+
+def _safety_stop_count(dry_run: dict[str, Any]) -> int:
+    count = 0
+    for row in dry_run.get("reason_breakdown") or []:
+        if isinstance(row, dict) and str(row.get("value") or "") == "local-canary-safety-stop":
+            count += _as_int(row.get("count"))
+    for row in dry_run.get("blocker_breakdown") or []:
+        if isinstance(row, dict) and str(row.get("value") or "") == "local-canary-safety-stop":
+            count += _as_int(row.get("count"))
+    return count
+
+
 def build_openai_cache_replay_apply_plan(
     store_obj: Any,
     *,
@@ -257,6 +376,17 @@ def build_openai_cache_replay_apply_plan(
         impact_limit=impact_limit,
     )
     impact = build_openai_cache_replay_impact_report(store_obj, limit=impact_limit)
+    request_shape = build_request_shape_rollups_report(
+        store_obj,
+        limit=opportunity_limit,
+        persist=False,
+        run_id="openai-cache-replay-apply-shape-evidence",
+    )
+    shape_replay = (
+        request_shape.get("cache_replayability_dry_run")
+        if isinstance(request_shape.get("cache_replayability_dry_run"), dict)
+        else {}
+    )
     indexed = _existing_rule_index(store_obj, limit=max(opportunity_limit, impact_limit))
     accepted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -333,12 +463,62 @@ def build_openai_cache_replay_apply_plan(
         if len(accepted) >= max(1, _as_int(max_candidates) or 10):
             break
 
+    shape_cohorts = [
+        item
+        for item in shape_replay.get("cohorts") or []
+        if isinstance(item, dict)
+    ]
+    shape_cohorts.sort(
+        key=lambda item: (
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("projected_hits")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    for cohort in shape_cohorts:
+        if len(accepted) >= max(1, _as_int(max_candidates) or 10):
+            break
+        candidate_id = _shape_candidate_id(cohort)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        rule, blockers = _rule_from_request_shape_cohort(cohort, holdout_fraction=holdout)
+        if rule is None:
+            skipped.append({
+                "candidate_id": candidate_id,
+                "verdict": str(cohort.get("readiness") or "unknown"),
+                "source_schema": shape_replay.get("schema"),
+                "reason_codes": blockers,
+            })
+            continue
+        rules.append(rule)
+        accepted.append({
+            "candidate_id": candidate_id,
+            "rule_id": rule["id"],
+            "verdict": "ready",
+            "source_schema": shape_replay.get("schema"),
+            "reason": cohort.get("reason"),
+            "projected_hits": cohort.get("projected_hits"),
+            "projected_savings_usd": cohort.get("projected_savings_usd"),
+            "sample_count": cohort.get("row_count"),
+            "canary_fraction": rule["rollout"]["canary_fraction"],
+            "holdout_fraction": holdout,
+            "pattern_hash_count": 0,
+            "pattern_hashes_included": False,
+            "aggregate_only": True,
+        })
+
     policy = {
         "schema": POLICY_SCHEMA,
         "generated_at": utc_now(),
         "policy_source": "managed-recommended",
         "pattern_rules": rules,
     }
+    canary_dry_run = build_openai_cache_replay_dry_run(store_obj, policy, limit=opportunity_limit) if rules else {}
+    canary_summary = canary_dry_run.get("summary") if isinstance(canary_dry_run.get("summary"), dict) else {}
+    projected_hits = sum(_as_int(item.get("projected_hits")) for item in accepted)
+    projected_savings = sum(_as_float(item.get("projected_savings_usd")) for item in accepted)
     return {
         "schema": PLAN_SCHEMA,
         "generated_at": utc_now(),
@@ -355,12 +535,40 @@ def build_openai_cache_replay_apply_plan(
             "holdout_fraction": holdout,
             "canary_fraction": round(1.0 - holdout, 6),
             "min_observed_savings_usd": float(min_observed_savings_usd),
+            "projected_hits": projected_hits,
+            "projected_savings_usd": round(projected_savings, 6),
+            "applied_count": _as_int(canary_summary.get("projected_applied_rows")),
+            "holdout_count": _as_int(canary_summary.get("holdout_rows")),
+            "skipped_count": max(
+                0,
+                _as_int(canary_summary.get("openai_rows_considered"))
+                - _as_int(canary_summary.get("matched_rows")),
+            ),
+            "safety_stop_count": _safety_stop_count(canary_dry_run),
         },
         "readiness": {
             "schema": readiness.get("schema"),
             "state": readiness.get("state"),
             "state_reason": readiness.get("state_reason"),
             "summary": readiness.get("summary") or {},
+        },
+        "request_shape_evidence": {
+            "schema": request_shape.get("schema"),
+            "summary": request_shape.get("summary") or {},
+            "cache_replayability_dry_run": {
+                "schema": shape_replay.get("schema"),
+                "status": shape_replay.get("status"),
+                "summary": shape_replay.get("summary") or {},
+                "privacy": shape_replay.get("privacy") or {},
+            },
+        },
+        "activation_dry_run": {
+            "schema": canary_dry_run.get("schema"),
+            "summary": canary_summary,
+            "status_breakdown": canary_dry_run.get("status_breakdown") or [],
+            "reason_breakdown": canary_dry_run.get("reason_breakdown") or [],
+            "blocker_breakdown": canary_dry_run.get("blocker_breakdown") or [],
+            "privacy": canary_dry_run.get("privacy") or {},
         },
         "impact": {
             "schema": impact.get("schema"),

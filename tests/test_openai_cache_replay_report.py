@@ -1366,6 +1366,82 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         finally:
             _reload_cache_module_for_test()
 
+    def test_openai_cache_replay_apply_stages_request_shape_canaries(self) -> None:
+        pattern_hash = "sha256:" + "f" * 64
+        for group in range(24):
+            for index, cost in enumerate((0.01, 0.03)):
+                self._log_openai_call(
+                    category="chat",
+                    cache_status="miss",
+                    cache_reason="exact-miss",
+                    request_fingerprint=f"raw-shape-fingerprint-{group}",
+                    pattern_hashes=[pattern_hash],
+                    cost=cost,
+                    session_id=f"raw-shape-session-{group}",
+                    created_at=f"2026-06-11T09:{group:02d}:{index:02d}+00:00",
+                )
+
+        plan = build_openai_cache_replay_apply_plan(
+            self.store,
+            opportunity_limit=100,
+            impact_limit=20,
+            holdout_fraction=0.5,
+            max_candidates=3,
+        )
+
+        self.assertTrue(plan["ok"])
+        accepted = [
+            row
+            for row in plan["accepted_candidates"]
+            if row.get("source_schema") == "agentflow.request_shape_cache_replayability_dry_run.v1"
+        ]
+        self.assertEqual(len(accepted), 1)
+        self.assertGreaterEqual(accepted[0]["projected_hits"], 1)
+        self.assertGreater(accepted[0]["projected_savings_usd"], 0)
+        self.assertEqual(plan["summary"]["projected_hits"], accepted[0]["projected_hits"])
+        self.assertEqual(plan["summary"]["projected_savings_usd"], accepted[0]["projected_savings_usd"])
+        self.assertGreater(plan["summary"]["applied_count"], 0)
+        self.assertGreater(plan["summary"]["holdout_count"], 0)
+        self.assertIn("skipped_count", plan["summary"])
+        self.assertEqual(plan["summary"]["safety_stop_count"], 0)
+
+        activation_summary = plan["activation_dry_run"]["summary"]
+        self.assertGreater(activation_summary["projected_hits"], 0)
+        self.assertGreater(activation_summary["projected_savings_usd"], 0)
+        statuses = {row["value"]: row["count"] for row in plan["activation_dry_run"]["status_breakdown"]}
+        self.assertGreater(statuses["projected-applied"], 0)
+        self.assertGreater(statuses["holdout"], 0)
+
+        policy = plan["policy"]
+        rule = policy["pattern_rules"][0]
+        self.assertEqual(rule["conditions"]["pattern_hashes"], ["sha256:*"])
+        self.assertEqual(rule["conditions"]["source_surface"], "openai_responses")
+        self.assertEqual(rule["conditions"]["endpoint"], "responses")
+        self.assertEqual(rule["conditions"]["category"], "chat")
+        self.assertFalse(rule["conditions"]["has_tools"])
+        self.assertFalse(rule["conditions"]["stream"])
+        self.assertFalse(rule["action"]["allow_tool_calls"])
+        self.assertFalse(rule["action"]["streaming"])
+        self.assertEqual(rule["rollout"]["canary_fraction"], 0.5)
+
+        rendered = json.dumps(plan, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "raw response must not leak",
+            "raw-cache-key-secret",
+            "raw-shape-fingerprint-",
+            "raw-shape-session-",
+            pattern_hash,
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(plan["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(plan["privacy"]["request_fingerprints_included"])
+        self.assertFalse(plan["privacy"]["session_ids_included"])
+        self.assertFalse(plan["privacy"]["cache_keys_included"])
+        self.assertFalse(plan["privacy"]["pattern_hashes_included"])
+        self.assertFalse(plan["request_shape_evidence"]["cache_replayability_dry_run"]["privacy"]["individual_candidate_ids_included"])
+        self.assertFalse(plan["activation_dry_run"]["privacy"]["pattern_hashes_included"])
+
     def test_openai_dry_run_projects_session_scoped_replay_and_dependency_blockers(self) -> None:
         pattern_hash = "sha256:" + "b" * 64
         policy = {

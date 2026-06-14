@@ -209,7 +209,8 @@ def _rule_decision(unit: dict[str, Any], rules: list[dict[str, Any]]) -> dict[st
             last_reason = "disabled"
             continue
         conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
-        matched_hashes = sorted(feature_hashes.intersection({str(item) for item in conditions.get("pattern_hashes") or []}))
+        rule_hashes = {str(item) for item in conditions.get("pattern_hashes") or []}
+        matched_hashes = sorted(feature_hashes) if "sha256:*" in rule_hashes else sorted(feature_hashes.intersection(rule_hashes))
         if not matched_hashes:
             last_reason = "pattern-hash-mismatch"
             continue
