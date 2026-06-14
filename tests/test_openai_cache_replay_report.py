@@ -1542,7 +1542,6 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
                     cache_status="miss",
                     cache_reason="exact-miss",
                     request_fingerprint=f"raw-shape-fingerprint-{group}",
-                    pattern_hashes=[pattern_hash],
                     cost=cost,
                     session_id=f"raw-shape-session-{group}",
                     created_at=f"2026-06-11T09:{group:02d}:{index:02d}+00:00",
@@ -1565,6 +1564,10 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertEqual(len(accepted), 1)
         self.assertGreaterEqual(accepted[0]["projected_hits"], 1)
         self.assertGreater(accepted[0]["projected_savings_usd"], 0)
+        self.assertEqual(
+            accepted[0]["cohort_bucket"],
+            "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens",
+        )
         self.assertEqual(plan["summary"]["projected_hits"], accepted[0]["projected_hits"])
         self.assertEqual(plan["summary"]["projected_savings_usd"], accepted[0]["projected_savings_usd"])
         self.assertGreater(plan["summary"]["applied_count"], 0)
@@ -1578,6 +1581,21 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         statuses = {row["value"]: row["count"] for row in plan["activation_dry_run"]["status_breakdown"]}
         self.assertGreater(statuses["projected-applied"], 0)
         self.assertGreater(statuses["holdout"], 0)
+        activation_rows = plan["activation_dry_run"]["rows"]
+        staged_rows = [
+            row
+            for row in activation_rows
+            if row.get("cohort_bucket") == accepted[0]["cohort_bucket"]
+        ]
+        self.assertGreaterEqual(len(staged_rows), 2)
+        self.assertEqual({row["status"] for row in staged_rows}, {"projected-applied", "holdout"})
+        for row in staged_rows:
+            self.assertEqual(row["matched_pattern_hash_count"], 0)
+            self.assertFalse(row["matched_pattern_hashes_included"])
+            self.assertEqual(row["projection"]["projected_hits"], accepted[0]["projected_hits"])
+            self.assertEqual(row["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+            self.assertFalse(row["projection"]["raw_request_bodies_included"])
+            self.assertFalse(row["projection"]["cache_keys_included"])
 
         policy = plan["policy"]
         rule = policy["pattern_rules"][0]
@@ -1590,6 +1608,8 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(rule["action"]["allow_tool_calls"])
         self.assertFalse(rule["action"]["streaming"])
         self.assertEqual(rule["rollout"]["canary_fraction"], 0.5)
+        self.assertEqual(rule["graduation"]["cohort_bucket"], accepted[0]["cohort_bucket"])
+        self.assertEqual(rule["graduation"]["projected_hits"], accepted[0]["projected_hits"])
 
         rendered = json.dumps(plan, sort_keys=True)
         for forbidden in (

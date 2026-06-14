@@ -292,6 +292,17 @@ def _rule_from_request_shape_cohort(
     candidate_id = _shape_candidate_id(cohort)
     rule_id = _public_id(candidate_id.replace("request-shape-cache:", "openai-cache-shape-"), "shape-rule")
     canary_fraction = round(1.0 - holdout_fraction, 6)
+    cohort_bucket = "/".join(
+        str(value or "unknown").replace("/", "_")
+        for value in (
+            cohort.get("source_surface"),
+            cohort.get("endpoint"),
+            cohort.get("category"),
+            cohort.get("workflow_phase"),
+            cohort.get("text_bucket"),
+            cohort.get("token_bucket"),
+        )
+    )
     conditions = {
         "pattern_hashes": [_REQUEST_SHAPE_PATTERN_WILDCARD],
         "source_surface": cohort.get("source_surface"),
@@ -341,6 +352,13 @@ def _rule_from_request_shape_cohort(
             "schema": "agentflow.openai_cache_replay_shape_activation.v1",
             "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
             "source_reason": cohort.get("reason"),
+            "cohort_bucket": cohort_bucket,
+            "source_surface": cohort.get("source_surface"),
+            "endpoint": cohort.get("endpoint"),
+            "category": cohort.get("category"),
+            "workflow_phase": cohort.get("workflow_phase"),
+            "text_bucket": cohort.get("text_bucket"),
+            "token_bucket": cohort.get("token_bucket"),
             "projected_hits": cohort.get("projected_hits"),
             "projected_savings_usd": cohort.get("projected_savings_usd"),
             "sample_count": cohort.get("row_count"),
@@ -499,6 +517,7 @@ def build_openai_cache_replay_apply_plan(
             "verdict": "ready",
             "source_schema": shape_replay.get("schema"),
             "reason": cohort.get("reason"),
+            "cohort_bucket": rule["graduation"].get("cohort_bucket"),
             "projected_hits": cohort.get("projected_hits"),
             "projected_savings_usd": cohort.get("projected_savings_usd"),
             "sample_count": cohort.get("row_count"),
@@ -568,6 +587,7 @@ def build_openai_cache_replay_apply_plan(
             "status_breakdown": canary_dry_run.get("status_breakdown") or [],
             "reason_breakdown": canary_dry_run.get("reason_breakdown") or [],
             "blocker_breakdown": canary_dry_run.get("blocker_breakdown") or [],
+            "rows": canary_dry_run.get("rows") or [],
             "privacy": canary_dry_run.get("privacy") or {},
         },
         "impact": {

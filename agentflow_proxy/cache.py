@@ -226,7 +226,19 @@ def _cache_pattern_graduation_meta(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     safe: dict[str, Any] = {}
-    for key in ("schema", "source_schema", "source_reason", "source_verdict"):
+    for key in (
+        "schema",
+        "source_schema",
+        "source_reason",
+        "source_verdict",
+        "cohort_bucket",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
+    ):
         if value.get(key) is not None:
             safe[key] = str(value.get(key))
     for key in (
@@ -257,6 +269,56 @@ def _cache_pattern_graduation_meta(value: Any) -> dict[str, Any] | None:
     safe["request_ids_included"] = False
     safe["session_ids_included"] = False
     return safe
+
+
+def _cache_replay_projection_meta(pattern_rule: dict[str, Any]) -> dict[str, Any] | None:
+    graduation = pattern_rule.get("graduation") if isinstance(pattern_rule.get("graduation"), dict) else None
+    if not isinstance(graduation, dict):
+        return None
+    projection: dict[str, Any] = {}
+    for key in (
+        "schema",
+        "source_schema",
+        "source_reason",
+        "source_verdict",
+        "cohort_bucket",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
+    ):
+        if graduation.get(key) is not None:
+            projection[key] = graduation.get(key)
+    for key in (
+        "projected_hits",
+        "projected_hit_count",
+        "sample_count",
+        "applied_count",
+        "holdout_count",
+    ):
+        if graduation.get(key) is not None:
+            projection[key] = _as_int(graduation.get(key), 0)
+    for key in (
+        "projected_savings_usd",
+        "observed_savings_usd",
+        "projected_saved_cost_usd",
+    ):
+        if graduation.get(key) is not None:
+            projection[key] = round(_as_float(graduation.get(key)), 9)
+    if graduation.get("aggregate_only") is not None:
+        projection["aggregate_only"] = bool(graduation.get("aggregate_only"))
+    if not projection:
+        return None
+    projection["metadata_only"] = True
+    projection["raw_prompts_included"] = False
+    projection["raw_request_bodies_included"] = False
+    projection["raw_responses_included"] = False
+    projection["cache_keys_included"] = False
+    projection["request_ids_included"] = False
+    projection["session_ids_included"] = False
+    return projection
 
 
 def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
@@ -521,6 +583,14 @@ def _cacheability_from_pattern_features(pattern_features: dict[str, Any] | None)
     return result
 
 
+def _has_pattern_hash_wildcard_rule() -> bool:
+    for rule in CACHE_PATTERN_RULES:
+        conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
+        if "sha256:*" in set(_parse_pattern_hashes(conditions.get("pattern_hashes"))):
+            return True
+    return False
+
+
 def _bool_condition_matches(conditions: dict[str, Any], key: str, actual: Any) -> bool:
     if key not in conditions:
         return True
@@ -575,7 +645,7 @@ def _cache_pattern_rule_match(
     skip_reasons: list[dict[str, Any]] = []
     if not CACHE_PATTERN_RULES:
         return None, skip_reasons
-    if not feature_hashes:
+    if not feature_hashes and not _has_pattern_hash_wildcard_rule():
         return None, [{"reason": "pattern-features-missing", "configured_count": len(CACHE_PATTERN_RULES)}]
 
     for rule in CACHE_PATTERN_RULES:
@@ -585,8 +655,9 @@ def _cache_pattern_rule_match(
             continue
         conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
         rule_hashes = set(_parse_pattern_hashes(conditions.get("pattern_hashes")))
-        matched_hashes = sorted(feature_hashes) if "sha256:*" in rule_hashes else sorted(feature_hashes.intersection(rule_hashes))
-        if not matched_hashes:
+        wildcard_rule = "sha256:*" in rule_hashes
+        matched_hashes = sorted(feature_hashes) if wildcard_rule else sorted(feature_hashes.intersection(rule_hashes))
+        if not matched_hashes and not wildcard_rule:
             skip_reasons.append({"rule_id": rule_id, "reason": "pattern-hash-mismatch"})
             continue
         if "has_tools" in conditions and _as_bool(conditions.get("has_tools"), False) != bool(has_tool_blocks):
@@ -872,6 +943,15 @@ def cache_replay_canary_decision(
         "canary_cohort": canary.get("cohort") if canary else None,
         "dependency_audit": dependency_audit,
     }
+    projection = _cache_replay_projection_meta(pattern_rule)
+    if projection:
+        decision["projection"] = projection
+        if projection.get("cohort_bucket") is not None:
+            decision["cohort_bucket"] = projection.get("cohort_bucket")
+        if projection.get("projected_hits") is not None:
+            decision["projected_hits"] = projection.get("projected_hits")
+        if projection.get("projected_savings_usd") is not None:
+            decision["projected_savings_usd"] = projection.get("projected_savings_usd")
     if canary and (canary.get("selected") is False or canary.get("cohort") == "canary_holdout"):
         decision.update({"status": "holdout", "reason": "canary_holdout"})
         return False, decision

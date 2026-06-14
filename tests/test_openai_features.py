@@ -671,9 +671,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         category="tool-light",
         has_tools=True,
         canary_fraction=1.0,
+        graduation=None,
     ):
-        rules = cache_module.normalize_cache_pattern_rules([
-            {
+        rule = {
                 "id": "reviewed-openai-cache-replay",
                 "enabled": True,
                 "policy_source": "managed-recommended",
@@ -703,7 +703,9 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
                     "scope": "session",
                 },
             }
-        ])
+        if graduation is not None:
+            rule["graduation"] = graduation
+        rules = cache_module.normalize_cache_pattern_rules([rule])
         old_rules = cache_module.CACHE_PATTERN_RULES
         cache_module.CACHE_PATTERN_RULES = tuple(rules)
         self.addCleanup(lambda: setattr(cache_module, "CACHE_PATTERN_RULES", old_rules))
@@ -817,6 +819,84 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         rendered = json.dumps({"seed": seed_cache, "hit": hit_cache}, sort_keys=True)
         self.assertNotIn("src/example.py", rendered)
         self.assertNotIn(watched, rendered)
+        self.assertNotIn("raw-openai-session-must-not-leak", rendered)
+
+    def test_openai_cache_replay_canary_decision_includes_request_shape_projection(self):
+        rule = cache_module.normalize_cache_pattern_rules([
+            {
+                "id": "reviewed-openai-cache-replay",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "candidate_id": "openai-cache-replay-candidate",
+                "conditions": {
+                    "pattern_hashes": ["sha256:*"],
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "category": "chat",
+                    "has_tools": False,
+                    "stream": False,
+                },
+                "rollout": {
+                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "recommendation_mode": "canary-only",
+                    "canary_enabled": True,
+                    "canary_fraction": 1.0,
+                    "canary_salt": "openai-cache-replay-test",
+                    "canary_unit": "request_fingerprint",
+                },
+                "action": {
+                    "type": "exact_cache_pattern",
+                    "allow_tool_calls": False,
+                    "safe_invalidation": False,
+                    "scope": "session",
+                },
+                "graduation": {
+                "schema": "agentflow.openai_cache_replay_shape_activation.v1",
+                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "source_reason": "replay-ready-exact-non-tool-shape",
+                "cohort_bucket": "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "chat",
+                "workflow_phase": "chat",
+                "text_bucket": "2k_8k_chars",
+                "token_bucket": "500_2k_tokens",
+                "projected_hits": 55,
+                "projected_savings_usd": 0.121981,
+                "sample_count": 56,
+                "aggregate_only": True,
+                "raw_prompt": "raw projection prompt must not leak",
+            },
+            }
+        ])[0]
+        rule["rule_id"] = rule["id"]
+        rule["canary"] = {
+            "schema": "agentflow.pattern_canary_decision.v1",
+            "enabled": True,
+            "selected": True,
+            "status": "applied",
+            "cohort": "canary_applied",
+            "rule_id": rule["id"],
+            "candidate_id": "openai-cache-replay-candidate",
+            "pattern_hashes": [],
+            "raw_pattern_strings_included": False,
+        }
+        canary_allowed, canary = cache_module.cache_replay_canary_decision(
+            cache_meta={"pattern_rule": rule},
+            dependency_audit=None,
+            session_id="raw-openai-session-must-not-leak",
+        )
+
+        self.assertTrue(canary_allowed)
+        self.assertEqual(canary["status"], "applied")
+        self.assertEqual(canary["policy_source"], "managed-recommended")
+        self.assertEqual(canary["cohort_bucket"], "openai_responses/responses/chat/chat/2k_8k_chars/500_2k_tokens")
+        self.assertEqual(canary["projected_hits"], 55)
+        self.assertEqual(canary["projection"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertFalse(canary["projection"]["raw_request_bodies_included"])
+        self.assertFalse(canary["projection"]["cache_keys_included"])
+        rendered = json.dumps(canary, sort_keys=True)
+        self.assertNotIn("raw projection prompt must not leak", rendered)
         self.assertNotIn("raw-openai-session-must-not-leak", rendered)
 
     def test_openai_cache_replay_canary_serves_cached_chat_response(self):

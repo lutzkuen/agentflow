@@ -97,6 +97,56 @@ def _public_canary(canary: dict[str, Any] | None) -> dict[str, Any] | None:
     return public
 
 
+def _projection_meta(rule: dict[str, Any]) -> dict[str, Any] | None:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else None
+    if not isinstance(graduation, dict):
+        return None
+    projection: dict[str, Any] = {}
+    for key in (
+        "schema",
+        "source_schema",
+        "source_reason",
+        "source_verdict",
+        "cohort_bucket",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
+    ):
+        if graduation.get(key) is not None:
+            projection[key] = graduation.get(key)
+    for key in (
+        "projected_hits",
+        "projected_hit_count",
+        "sample_count",
+        "applied_count",
+        "holdout_count",
+    ):
+        if graduation.get(key) is not None:
+            projection[key] = _as_int(graduation.get(key))
+    for key in (
+        "projected_savings_usd",
+        "observed_savings_usd",
+        "projected_saved_cost_usd",
+    ):
+        if graduation.get(key) is not None:
+            projection[key] = round(_as_float(graduation.get(key)), 9)
+    if graduation.get("aggregate_only") is not None:
+        projection["aggregate_only"] = bool(graduation.get("aggregate_only"))
+    if not projection:
+        return None
+    projection["metadata_only"] = True
+    projection["raw_prompts_included"] = False
+    projection["raw_request_bodies_included"] = False
+    projection["raw_responses_included"] = False
+    projection["cache_keys_included"] = False
+    projection["request_ids_included"] = False
+    projection["session_ids_included"] = False
+    return projection
+
+
 def _row_unit(row: dict[str, Any]) -> dict[str, Any] | None:
     if str(row.get("provider") or "").lower() != "openai":
         return None
@@ -210,8 +260,9 @@ def _rule_decision(unit: dict[str, Any], rules: list[dict[str, Any]]) -> dict[st
             continue
         conditions = rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {}
         rule_hashes = {str(item) for item in conditions.get("pattern_hashes") or []}
-        matched_hashes = sorted(feature_hashes) if "sha256:*" in rule_hashes else sorted(feature_hashes.intersection(rule_hashes))
-        if not matched_hashes:
+        wildcard_rule = "sha256:*" in rule_hashes
+        matched_hashes = sorted(feature_hashes) if wildcard_rule else sorted(feature_hashes.intersection(rule_hashes))
+        if not matched_hashes and not wildcard_rule:
             last_reason = "pattern-hash-mismatch"
             continue
         for key in ("source_surface", "endpoint", "category", "workflow_phase", "text_bucket"):
@@ -247,6 +298,15 @@ def _rule_decision(unit: dict[str, Any], rules: list[dict[str, Any]]) -> dict[st
                 "matched_pattern_hashes_included": False,
                 "rollout": pattern_rollout_public_meta(rule.get("rollout")),
             }
+            projection = _projection_meta(rule)
+            if projection:
+                base["projection"] = projection
+                if projection.get("cohort_bucket") is not None:
+                    base["cohort_bucket"] = projection.get("cohort_bucket")
+                if projection.get("projected_hits") is not None:
+                    base["projected_hits"] = projection.get("projected_hits")
+                if projection.get("projected_savings_usd") is not None:
+                    base["projected_savings_usd"] = projection.get("projected_savings_usd")
             if action.get("type") not in {"exact_cache", "exact_cache_pattern"}:
                 return {**base, "status": "blocked", "reason": "unsupported-action", "blockers": ["unsupported-action"]}
             if bool(unit.get("stream")) and not bool(action.get("streaming")):
@@ -419,6 +479,8 @@ def build_openai_cache_replay_dry_run(store_obj: Any, proposed_policy: Any, *, l
                 "requires_file_dependency_evidence": bool(decision.get("requires_file_dependency_evidence")),
                 "matched_pattern_hash_count": _as_int(decision.get("matched_pattern_hash_count")),
                 "matched_pattern_hashes_included": False,
+                "cohort_bucket": decision.get("cohort_bucket"),
+                "projection": decision.get("projection"),
                 "count": 0,
                 "input_tokens": 0,
                 "estimated_cost_usd": 0.0,
