@@ -298,6 +298,7 @@ def _cache_candidates(cache_impact: dict[str, Any], rollups: dict[str, Any]) -> 
         safety = _cohort_count(item, "safety_stop_count", "safety_stop")
         projected_hits = _as_int(item.get("projected_hits") or item.get("projected_hit_count"))
         actual_hits = _as_int(item.get("actual_hits") or item.get("actual_hit_count"))
+        measurement = item.get("canary_hit_measurement") if isinstance(item.get("canary_hit_measurement"), dict) else {}
         candidates.append(
             _candidate(
                 action_family="cache",
@@ -318,12 +319,23 @@ def _cache_candidates(cache_impact: dict[str, Any], rollups: dict[str, Any]) -> 
                     "actual_hits": actual_hits,
                     "invalidated_count": _as_int(item.get("invalidated_count")),
                     "miss_count": _as_int(item.get("miss_count")),
+                    "stream": item.get("stream"),
+                    "has_tools": item.get("has_tools"),
+                    "text_bucket": item.get("text_bucket"),
+                    "token_bucket": item.get("token_bucket"),
+                    "replay_source_schema": item.get("replay_source_schema"),
+                    "replay_ready": item.get("replay_ready"),
+                    "readiness": item.get("readiness"),
+                    "dry_run_projected_savings_usd": _round(item.get("dry_run_projected_savings_usd"), 8),
+                    "canary_hit_measurement": {
+                        "hit_realization_rate": measurement.get("hit_realization_rate"),
+                        "savings_realization_rate": measurement.get("savings_realization_rate"),
+                    },
+                    "first_observed_at": item.get("oldest_observed_at") or item.get("first_observed_at"),
+                    "last_observed_at": item.get("latest_observed_at") or item.get("last_observed_at"),
                 },
             )
         )
-
-    if candidates:
-        return candidates
 
     replay = rollups.get("cache_replayability_dry_run") if isinstance(rollups.get("cache_replayability_dry_run"), dict) else {}
     for source_rank, item in enumerate(replay.get("cohorts") or [], start=1):
@@ -347,8 +359,17 @@ def _cache_candidates(cache_impact: dict[str, Any], rollups: dict[str, Any]) -> 
                 safety_stop_count=0,
                 verdict="projected",
                 next_action_fallback="stage-cache-replay-canary",
-                extra_blockers=["missing-measured-cache-canary-impact"],
-                extras={"projected_hits": _as_int(item.get("projected_hits"))},
+                extra_blockers=["missing-measured-cache-canary-impact", *_reason_list(item.get("blockers"))],
+                extras={
+                    "projected_hits": _as_int(item.get("projected_hits")),
+                    "stream": item.get("stream"),
+                    "has_tools": item.get("has_tools"),
+                    "text_bucket": item.get("text_bucket"),
+                    "token_bucket": item.get("token_bucket"),
+                    "replay_source_schema": replay.get("schema"),
+                    "replay_ready": item.get("readiness") == "replay-ready",
+                    "readiness": item.get("readiness"),
+                },
             )
         )
     return candidates
