@@ -137,6 +137,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     openai_old_context_summary_dry_run_cli,
     openai_canary_impact_cli,
     claude_canary_impact_cli,
+    anthropic_routing_lifecycle_report_cli,
     claude_canary_actions_cli,
     claude_canary_actions_apply_cli,
     routing_canary_promote_cli,
@@ -774,6 +775,10 @@ def openai_canary_impact_main() -> None:
 
 def claude_canary_impact_main() -> None:
     raise SystemExit(claude_canary_impact_cli())
+
+
+def anthropic_routing_lifecycle_report_main() -> None:
+    raise SystemExit(anthropic_routing_lifecycle_report_cli())
 
 
 def claude_canary_actions_main() -> None:

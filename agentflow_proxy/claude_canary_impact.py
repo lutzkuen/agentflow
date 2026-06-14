@@ -16,6 +16,8 @@ from agentflow_proxy.store import utc_now
 
 SCHEMA = "agentflow.claude_canary_impact.v1"
 VERDICT_SCHEMA = "agentflow.claude_canary_promotion_verdict.v1"
+ANTHROPIC_LIFECYCLE_REPORT_SCHEMA = "agentflow.anthropic_routing_canary_lifecycle_report.v1"
+ANTHROPIC_LIFECYCLE_SCHEMA = "agentflow.anthropic_routing_canary_lifecycle_evidence.v1"
 
 _REASON_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,79}$")
 
@@ -634,5 +636,196 @@ def build_claude_canary_impact_report(
             "stripped_param_counts": _counter_rows(stripped_counts),
         },
         "candidates": candidates,
+        "privacy": _privacy_summary(),
+    }
+
+
+def _sum_cohort_metric(candidate: dict[str, Any], key: str) -> int:
+    metrics = candidate.get("cohort_metrics") if isinstance(candidate.get("cohort_metrics"), dict) else {}
+    total = 0
+    for value in metrics.values():
+        if isinstance(value, dict):
+            total += _as_int(value.get(key))
+    return total
+
+
+def _lifecycle_blocker_counts(candidate: dict[str, Any], *, observed: int, applied: int, holdout: int) -> Counter[str]:
+    blockers: Counter[str] = Counter()
+    if observed == 0:
+        blockers["missing-anthropic-canary-lifecycle-evidence"] += 1
+    if applied == 0:
+        blockers["missing-applied-coverage"] += max(1, observed)
+    if holdout == 0:
+        blockers["missing-holdout-coverage"] += max(1, observed)
+
+    safety_stopped = _as_int((candidate.get("cohort_counts") or {}).get("safety_stopped"))
+    if safety_stopped:
+        blockers["safety-stop-observed"] += safety_stopped
+    error_count = _sum_cohort_metric(candidate, "error_count")
+    retry_count = _sum_cohort_metric(candidate, "retry_count")
+    fallback_count = _sum_cohort_metric(candidate, "fallback_count")
+    if error_count:
+        blockers["error-observed"] += error_count
+    if retry_count:
+        blockers["retry-observed"] += retry_count
+    if fallback_count:
+        blockers["fallback-observed"] += fallback_count
+
+    stale = candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {}
+    if stale.get("stale"):
+        blockers["stale-evidence"] += max(1, observed)
+
+    for row in candidate.get("safety_skip_counts") or []:
+        if not isinstance(row, dict):
+            continue
+        reason = _reason_code(row.get("value"), "unknown-safety-skip")
+        count = max(1, _as_int(row.get("count")))
+        blockers[reason] += count
+        if "thinking" in reason:
+            blockers["thinking-routing-guard"] += count
+        if reason == "stream-scope-not-enabled":
+            blockers["unsupported-streaming-shape"] += count
+
+    for reason in candidate.get("reason_codes") or []:
+        text = _reason_code(reason, "unknown")
+        if text not in {"target-savings-met", "canary-full-coverage"}:
+            blockers[text] += 1
+    return blockers
+
+
+def _anthropic_lifecycle_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    counts = {
+        "canary_applied": _as_int((candidate.get("cohort_counts") or {}).get("canary_applied")),
+        "canary_holdout": _as_int((candidate.get("cohort_counts") or {}).get("canary_holdout")),
+        "safety_stopped": _as_int((candidate.get("cohort_counts") or {}).get("safety_stopped")),
+        "skipped": _as_int((candidate.get("cohort_counts") or {}).get("skipped")),
+        "bypassed_or_disabled": _as_int((candidate.get("cohort_counts") or {}).get("bypassed_or_disabled")),
+        "unknown": _as_int((candidate.get("cohort_counts") or {}).get("unknown")),
+    }
+    observed = sum(counts.values())
+    applied = counts["canary_applied"]
+    holdout = counts["canary_holdout"]
+    blockers = _lifecycle_blocker_counts(candidate, observed=observed, applied=applied, holdout=holdout)
+    return {
+        "schema": ANTHROPIC_LIFECYCLE_SCHEMA,
+        "status": "matched" if observed else "no-anthropic-canary-metadata",
+        "observed_count": observed,
+        "cohort_counts": counts,
+        "coverage": {
+            "matched_count": observed,
+            "observed_rate": 1.0 if observed else 0.0,
+            "applied_rate": round(applied / observed, 6) if observed else 0.0,
+            "holdout_rate": round(holdout / observed, 6) if observed else 0.0,
+        },
+        "error_count": _sum_cohort_metric(candidate, "error_count"),
+        "retry_count": _sum_cohort_metric(candidate, "retry_count"),
+        "fallback_count": _sum_cohort_metric(candidate, "fallback_count"),
+        "oldest_observed_at": candidate.get("oldest_observed_at"),
+        "latest_observed_at": candidate.get("latest_observed_at"),
+        "stale_evidence": candidate.get("stale_evidence") if isinstance(candidate.get("stale_evidence"), dict) else {},
+        "reason_breakdown": candidate.get("reason_buckets") or [],
+        "blocker_codes": sorted(blockers),
+        "blocker_reason_breakdown": _counter_rows(blockers),
+        "privacy": _privacy_summary(),
+    }
+
+
+def _anthropic_lifecycle_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = _anthropic_lifecycle_from_candidate(candidate)
+    return {
+        "schema": "agentflow.anthropic_routing_canary_lifecycle_candidate.v1",
+        "candidate_id": candidate.get("candidate_id"),
+        "target_candidate_id": candidate.get("target_candidate_id"),
+        "policy_id": candidate.get("policy_id"),
+        "policy_source": candidate.get("policy_source"),
+        "provider": candidate.get("provider") or "anthropic",
+        "source_surface": candidate.get("source_surface") or "anthropic_messages",
+        "app_family": candidate.get("app_family"),
+        "requested_model": candidate.get("original_model"),
+        "target_model": candidate.get("candidate_target_model"),
+        "category": candidate.get("category"),
+        "workflow_phase": candidate.get("workflow_phase"),
+        "workflow_phase_confidence": candidate.get("workflow_phase_confidence"),
+        "stream": candidate.get("stream"),
+        "canary_fraction": candidate.get("canary_fraction"),
+        "holdout_fraction": candidate.get("holdout_fraction"),
+        "observed_savings_usd": candidate.get("observed_savings_usd"),
+        "requested_model_fallback_cost_usd": candidate.get("requested_model_fallback_cost_usd"),
+        "next_action": candidate.get("next_action"),
+        "anthropic_canary_lifecycle_evidence": lifecycle,
+        "privacy": _privacy_summary(),
+    }
+
+
+def build_anthropic_routing_canary_lifecycle_report(
+    store_obj: Any,
+    *,
+    limit: int = 500,
+    since: str | None = None,
+    max_evidence_age_hours: float = 72.0,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    impact = build_claude_canary_impact_report(
+        store_obj,
+        limit=limit,
+        since=since,
+        min_applied_samples=0,
+        min_holdout_samples=0,
+        max_evidence_age_hours=max_evidence_age_hours,
+        now=now,
+    )
+    candidates = [_anthropic_lifecycle_candidate(candidate) for candidate in impact.get("candidates") or []]
+    blocker_totals: Counter[str] = Counter()
+    for candidate in candidates:
+        lifecycle = candidate.get("anthropic_canary_lifecycle_evidence") or {}
+        for row in lifecycle.get("blocker_reason_breakdown") or []:
+            if isinstance(row, dict):
+                blocker_totals[str(row.get("value") or "unknown")] += _as_int(row.get("count"))
+
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    return {
+        "schema": ANTHROPIC_LIFECYCLE_REPORT_SCHEMA,
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "lookback_limit": max(1, min(int(limit or 500), 10_000)),
+        "since": since,
+        "status": "matched" if candidates else "no-anthropic-canary-metadata",
+        "summary": {
+            "sampled_call_count": summary.get("sampled_call_count", 0),
+            "observed_anthropic_canary_metadata_row_count": summary.get("observed_claude_canary_metadata_row_count", 0),
+            "candidate_group_count": len(candidates),
+            "canary_applied_count": summary.get("canary_applied_count", 0),
+            "canary_holdout_count": summary.get("canary_holdout_count", 0),
+            "safety_stopped_count": summary.get("safety_stopped_count", 0),
+            "fallback_count": sum(
+                _as_int((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("fallback_count"))
+                for candidate in candidates
+            ),
+            "retry_count": sum(
+                _as_int((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("retry_count"))
+                for candidate in candidates
+            ),
+            "error_count": sum(
+                _as_int((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("error_count"))
+                for candidate in candidates
+            ),
+            "stale_evidence_count": sum(
+                _as_int((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("observed_count"))
+                for candidate in candidates
+                if ((candidate["anthropic_canary_lifecycle_evidence"] or {}).get("stale_evidence") or {}).get("stale")
+            ),
+            "blocker_reason_breakdown": _counter_rows(blocker_totals),
+        },
+        "candidates": candidates,
+        "source_report": {
+            "schema": impact.get("schema"),
+            "status": impact.get("status"),
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
         "privacy": _privacy_summary(),
     }

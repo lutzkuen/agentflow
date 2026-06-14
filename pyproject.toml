@@ -90,6 +90,7 @@ agentflow-openai-cache-replay-dry-run = "agentflow_proxy.cli:openai_cache_replay
 agentflow-openai-old-context-summary-dry-run = "agentflow_proxy.cli:openai_old_context_summary_dry_run_main"
 agentflow-openai-canary-impact = "agentflow_proxy.cli:openai_canary_impact_main"
 agentflow-claude-canary-impact = "agentflow_proxy.cli:claude_canary_impact_main"
+agentflow-anthropic-routing-lifecycle-report = "agentflow_proxy.cli:anthropic_routing_lifecycle_report_main"
 agentflow-claude-canary-actions = "agentflow_proxy.cli:claude_canary_actions_main"
 agentflow-claude-canary-actions-apply = "agentflow_proxy.cli:claude_canary_actions_apply_main"
 agentflow-routing-canary-promote = "agentflow_proxy.cli:routing_canary_promote_main"

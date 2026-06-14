@@ -86,6 +86,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "optimization_rollout_actions_review_cli",
             "optimization_rollout_actions_apply_cli",
             "openai_routing_report_cli",
+            "anthropic_routing_lifecycle_report_cli",
             "openai_cache_replay_report_cli",
             "optimization_eval_plan_cli",
             "optimization_promotion_report_cli",

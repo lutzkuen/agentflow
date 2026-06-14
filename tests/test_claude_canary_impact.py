@@ -13,7 +13,7 @@ import yaml
 
 from agentflow_proxy import cli
 from agentflow_proxy.claude_canary_actions import apply_claude_canary_actions, build_claude_canary_actions
-from agentflow_proxy.claude_canary_impact import build_claude_canary_impact_report
+from agentflow_proxy.claude_canary_impact import build_anthropic_routing_canary_lifecycle_report, build_claude_canary_impact_report
 from agentflow_proxy.routing_canary_promote import build_routing_canary_promotion_plan
 from agentflow_proxy.store import Store, stable_json
 
@@ -73,9 +73,17 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
         workflow_phase: str = "tool-execution",
         stream: int = 1,
         stripped_params: list[str] | None = None,
+        safety_reason_codes: list[str] | None = None,
         dangerous_meta: bool = False,
     ) -> None:
-        status = "applied" if cohort == "canary_applied" else "holdout" if cohort == "canary_holdout" else "safety_stopped"
+        status_by_cohort = {
+            "canary_applied": "applied",
+            "canary_holdout": "holdout",
+            "safety_stopped": "safety_stopped",
+            "skipped": "skipped",
+            "bypassed_or_disabled": "disabled",
+        }
+        status = status_by_cohort.get(cohort, "unknown")
         canary = {
             "enabled": True,
             "policy_id": "test-claude-phase-canary",
@@ -106,7 +114,7 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
             canary["fallback_reason"] = fallback_reason
             canary["actual_forwarded_model"] = "claude-sonnet-4-6"
         if status == "safety_stopped":
-            canary["safety_stop"] = {"tripped": True, "reason_codes": ["error-rate"]}
+            canary["safety_stop"] = {"tripped": True, "reason_codes": safety_reason_codes or ["error-rate"]}
         if dangerous_meta:
             canary.update({
                 "prompt": "raw claude prompt secret",
@@ -214,6 +222,92 @@ class ClaudeCanaryImpactTests(unittest.TestCase):
             self.assertEqual(endpoint_payload.status_code, 200)
             self.assertEqual(endpoint_payload.json()["schema"], "agentflow.claude_canary_impact.v1")
             _assert_privacy_clean(self, endpoint_payload.json())
+
+    def test_anthropic_routing_lifecycle_report_covers_holdout_thinking_guard_fallback_and_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            store = Store(db_path)
+            try:
+                self._log_claude_canary_call(store, candidate_id="candidate-lifecycle", cohort="canary_applied", suffix="a1", dangerous_meta=True)
+                self._log_claude_canary_call(
+                    store,
+                    candidate_id="candidate-lifecycle",
+                    cohort="canary_applied",
+                    suffix="a2",
+                    fallback_reason="rate_limited",
+                    retry_count=1,
+                )
+                self._log_claude_canary_call(store, candidate_id="candidate-lifecycle", cohort="canary_holdout", suffix="h1", cost_est=0.003, cost_baseline=0.003)
+                self._log_claude_canary_call(
+                    store,
+                    candidate_id="candidate-lifecycle",
+                    cohort="safety_stopped",
+                    suffix="s1",
+                    reason="thinking-safety-gate",
+                    safety_reason_codes=["thinking-history-blocked"],
+                )
+                self._log_claude_canary_call(store, candidate_id="candidate-missing-holdout", cohort="canary_applied", suffix="m1")
+                self._log_claude_canary_call(
+                    store,
+                    candidate_id="candidate-stale",
+                    cohort="canary_applied",
+                    suffix="old-a",
+                    created_at="2026-06-01T00:00:00+00:00",
+                )
+                self._log_claude_canary_call(
+                    store,
+                    candidate_id="candidate-stale",
+                    cohort="canary_holdout",
+                    suffix="old-h",
+                    created_at="2026-06-01T00:00:01+00:00",
+                    cost_est=0.003,
+                    cost_baseline=0.003,
+                )
+
+                report = build_anthropic_routing_canary_lifecycle_report(
+                    store,
+                    limit=20,
+                    max_evidence_age_hours=1,
+                    now=datetime(2026, 6, 10, 5, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+            cli_output = io.StringIO()
+            exit_code = cli.anthropic_routing_lifecycle_report_cli(
+                ["--db", db_path, "--limit", "20", "--max-evidence-age-hours", "1"],
+                stdout=cli_output,
+            )
+
+        self.assertEqual(report["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
+        self.assertEqual(report["summary"]["canary_applied_count"], 4)
+        self.assertEqual(report["summary"]["canary_holdout_count"], 2)
+        self.assertEqual(report["summary"]["safety_stopped_count"], 1)
+        self.assertEqual(report["summary"]["fallback_count"], 1)
+        self.assertEqual(report["summary"]["retry_count"], 1)
+
+        by_candidate = {candidate["candidate_id"]: candidate for candidate in report["candidates"]}
+        lifecycle = by_candidate["candidate-lifecycle"]["anthropic_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["schema"], "agentflow.anthropic_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 1)
+        self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 1)
+        self.assertEqual(lifecycle["fallback_count"], 1)
+        self.assertEqual(lifecycle["retry_count"], 1)
+        self.assertIn("thinking-routing-guard", lifecycle["blocker_codes"])
+        self.assertIn("thinking-history-blocked", lifecycle["blocker_codes"])
+
+        missing_holdout = by_candidate["candidate-missing-holdout"]["anthropic_canary_lifecycle_evidence"]
+        self.assertIn("missing-holdout-coverage", missing_holdout["blocker_codes"])
+        stale = by_candidate["candidate-stale"]["anthropic_canary_lifecycle_evidence"]
+        self.assertTrue(stale["stale_evidence"]["stale"])
+        self.assertIn("stale-evidence", stale["blocker_codes"])
+
+        self.assertEqual(exit_code, 0)
+        cli_payload = json.loads(cli_output.getvalue())
+        self.assertEqual(cli_payload["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
+        _assert_privacy_clean(self, report)
+        _assert_privacy_clean(self, cli_payload)
 
     def test_claude_canary_impact_verdicts_cover_gates(self) -> None:
         scenarios = (

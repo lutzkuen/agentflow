@@ -4273,6 +4273,40 @@ def claude_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     return 0
 
 
+def anthropic_routing_lifecycle_report_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Report Anthropic routing canary lifecycle evidence from local phase_canary metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument("--limit", type=int, default=500, help="Maximum recent Anthropic calls to scan, default: 500, max: 10000.")
+    parser.add_argument("--since", help="Only scan calls at or after this ISO-8601 timestamp.")
+    parser.add_argument("--max-evidence-age-hours", type=float, default=72.0, help="Mark evidence stale after this many hours, default: 72.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.claude_canary_impact import build_anthropic_routing_canary_lifecycle_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_anthropic_routing_canary_lifecycle_report(
+            store,
+            limit=args.limit,
+            since=args.since,
+            max_evidence_age_hours=args.max_evidence_age_hours,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def claude_canary_actions_cli(
     argv: Sequence[str] | None = None,
     *,
