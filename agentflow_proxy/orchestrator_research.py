@@ -204,6 +204,8 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
 )
 
 _CRUNCH_OPPORTUNITY_REPORT_KEYS = (
+    "request_shape_crunch_opportunity",
+    "request_shape_crunch_opportunity_dry_run",
     "old_context_summary_opportunity",
     "terminal_output_compaction_opportunity",
     "instruction_dedup_opportunity",
@@ -677,6 +679,13 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
         rollup = _crunch_report_rollup(key, report)
         if rollup is not None:
             reports.append(rollup)
+    shape_report = _request_shape_report(stats)
+    if isinstance(shape_report, dict):
+        shape_crunch = shape_report.get("crunch_opportunity_dry_run")
+        if isinstance(shape_crunch, dict):
+            rollup = _crunch_report_rollup("request_shape_crunch_opportunity", shape_crunch)
+            if rollup is not None:
+                reports.append(rollup)
     reports.sort(
         key=lambda item: (
             _to_float(item.get("projected_saved_usd")),

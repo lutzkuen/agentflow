@@ -5,6 +5,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
+from agentflow_proxy.pricing import pricing_basis
 from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import stable_json, utc_now
 
@@ -12,8 +13,10 @@ from agentflow_proxy.store import stable_json, utc_now
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
+CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
+REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -171,6 +174,39 @@ def _savings_bucket(savings: float) -> str:
     return "gte_0_25_usd"
 
 
+def _input_savings_usd(tokens: int, *, provider: str, model: str, fallback_cost: float = 0.0, fallback_tokens: int = 0) -> float:
+    if tokens <= 0:
+        return 0.0
+    basis = pricing_basis(model, provider)
+    price = _as_float(basis.get("input_usd_per_million"))
+    if price > 0:
+        return (tokens / 1_000_000.0) * price
+    if fallback_cost > 0 and fallback_tokens > 0:
+        return fallback_cost * (tokens / float(fallback_tokens))
+    return 0.0
+
+
+def _crunch_saved_tokens(crunch: dict[str, Any]) -> int:
+    for key in ("tokens_saved_est", "saved_tokens", "tokens_saved", "crunch_tokens_saved"):
+        value = _as_int(crunch.get(key))
+        if value > 0:
+            return value
+    saved_chars = _crunch_saved_chars(crunch)
+    return saved_chars // 4
+
+
+def _crunch_saved_chars(crunch: dict[str, Any]) -> int:
+    for key in ("saved_chars", "chars_saved", "crunch_chars_saved"):
+        value = _as_int(crunch.get(key))
+        if value > 0:
+            return value
+    before = _as_int(crunch.get("before_chars") or crunch.get("original_chars"))
+    after = _as_int(crunch.get("after_chars") or crunch.get("result_chars"))
+    if before > after > 0:
+        return before - after
+    return 0
+
+
 def _status_bucket(status_code: Any) -> str:
     code = _as_int(status_code, -1)
     if code < 0:
@@ -316,6 +352,11 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
         "observed_savings_usd": 0.0,
         "input_tokens": 0,
         "output_tokens": 0,
+        "successful_input_tokens": 0,
+        "input_token_cost_usd": 0.0,
+        "current_crunch_tokens_saved": 0,
+        "current_crunch_chars_saved": 0,
+        "current_crunch_savings_usd": 0.0,
         "candidate_family_counts": {},
         "blocker_counts": {},
         "status_counts": {},
@@ -359,6 +400,29 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     group["cost_est_usd"] = round(_as_float(group.get("cost_est_usd")), 6)
     group["baseline_cost_usd"] = round(_as_float(group.get("baseline_cost_usd")), 6)
     group["observed_savings_usd"] = round(_as_float(group.get("observed_savings_usd")), 6)
+    group["input_token_cost_usd"] = round(_as_float(group.get("input_token_cost_usd")), 6)
+    group["current_crunch_savings_usd"] = round(_as_float(group.get("current_crunch_savings_usd")), 6)
+    repeated_weight = 0.0
+    row_count = _as_int(group.get("row_count"))
+    if row_count > 1:
+        repeated_weight = (row_count - 1) / float(row_count)
+    if "repeated_context" in candidate_classes and "crunch" in candidate_classes:
+        projected_tokens = int(
+            _as_int(group.get("successful_input_tokens"))
+            * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE
+            * repeated_weight
+        )
+        projected_savings = (
+            _as_float(group.get("input_token_cost_usd"))
+            * REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE
+            * repeated_weight
+        )
+    else:
+        projected_tokens = 0
+        projected_savings = 0.0
+    group["projected_crunch_tokens_saved"] = max(0, projected_tokens)
+    group["projected_crunch_chars_saved"] = max(0, projected_tokens * 4)
+    group["projected_crunch_savings_usd"] = round(max(0.0, projected_savings), 6)
     group["metadata"] = metadata
     group["privacy"] = {
         "metadata_only": True,
@@ -397,6 +461,212 @@ def _replayability_privacy() -> dict[str, Any]:
         "individual_candidate_ids_included": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
+    }
+
+
+def _crunch_opportunity_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_responses_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "raw_session_ids_included": False,
+        "tenant_ids_included": False,
+        "cache_keys_included": False,
+        "request_fingerprints_included": False,
+        "individual_candidate_ids_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "policy_files_written": False,
+    }
+
+
+def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
+    row_count = _as_int(row.get("row_count") or row.get("count"))
+    classes = {str(item) for item in row.get("candidate_work_classes") or []}
+    text_bucket = str(row.get("text_bucket") or "unknown")
+    token_bucket = str(row.get("token_bucket") or "unknown")
+    projected_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+    observed_tokens = _as_int(row.get("current_crunch_tokens_saved"))
+    blockers: set[str] = set()
+
+    if row_count < 2:
+        blockers.add("insufficient-repeat-evidence")
+    if text_bucket not in REPEATED_CONTEXT_TEXT_BUCKETS and token_bucket not in {"8k_32k_tokens", "gte_32k_tokens"}:
+        blockers.add("not-large-context")
+    if "crunch" not in classes and "repeated_context" not in classes:
+        blockers.add("not-crunch-work-class")
+    if _as_int(row.get("successful_input_tokens") or row.get("input_tokens")) <= 0:
+        blockers.add("missing-token-metadata")
+    if projected_tokens <= 0 and observed_tokens <= 0:
+        blockers.add("non-positive-projection")
+
+    if not blockers:
+        return {
+            "readiness": "measurement-ready",
+            "reason": "repeated-context-crunch-opportunity",
+            "blockers": [],
+        }
+
+    reason_priority = (
+        "missing-token-metadata",
+        "insufficient-repeat-evidence",
+        "not-large-context",
+        "not-crunch-work-class",
+        "non-positive-projection",
+    )
+    return {
+        "readiness": "skipped",
+        "reason": next((item for item in reason_priority if item in blockers), sorted(blockers)[0]),
+        "blockers": sorted(blockers),
+    }
+
+
+def build_request_shape_crunch_opportunity_dry_run(
+    rollups: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    crunch_rows = [
+        row
+        for row in rollups
+        if isinstance(row, dict)
+        and (
+            "crunch" in {str(item) for item in row.get("candidate_work_classes") or []}
+            or "repeated_context" in {str(item) for item in row.get("candidate_work_classes") or []}
+        )
+    ]
+    cohorts: list[dict[str, Any]] = []
+    readiness_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    work_class_counts: dict[str, int] = {}
+    projected_tokens = 0
+    projected_chars = 0
+    projected_savings = 0.0
+    observed_tokens = 0
+    observed_chars = 0
+    observed_savings = 0.0
+
+    for row in crunch_rows:
+        decision = _shape_crunch_decision(row)
+        row_count = _as_int(row.get("row_count") or row.get("count"))
+        classes = sorted({public_label(item, "unknown") for item in row.get("candidate_work_classes") or []})
+        readiness = str(decision["readiness"])
+        reason = str(decision["reason"])
+        row_projected_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+        row_projected_chars = _as_int(row.get("projected_crunch_chars_saved"))
+        row_projected_savings = _as_float(row.get("projected_crunch_savings_usd"))
+        row_observed_tokens = _as_int(row.get("current_crunch_tokens_saved"))
+        row_observed_chars = _as_int(row.get("current_crunch_chars_saved"))
+        row_observed_savings = _as_float(row.get("current_crunch_savings_usd"))
+
+        _increment(readiness_counts, readiness)
+        _increment(reason_counts, reason)
+        for blocker in decision.get("blockers") or []:
+            _increment(blocker_counts, blocker)
+        for work_class in classes:
+            _increment(work_class_counts, work_class, row_count)
+        if readiness == "measurement-ready":
+            projected_tokens += row_projected_tokens
+            projected_chars += row_projected_chars
+            projected_savings += row_projected_savings
+            observed_tokens += row_observed_tokens
+            observed_chars += row_observed_chars
+            observed_savings += row_observed_savings
+
+        cohorts.append(
+            {
+                "schema": "agentflow.request_shape_crunch_opportunity_cohort.v1",
+                "readiness": readiness,
+                "reason": reason,
+                "blockers": decision.get("blockers") or [],
+                "provider_family": row.get("provider_family"),
+                "source_surface": row.get("source_surface"),
+                "endpoint": row.get("endpoint"),
+                "category": row.get("category"),
+                "workflow_phase": row.get("workflow_phase"),
+                "stream": bool(row.get("stream")),
+                "has_tools": bool(row.get("has_tools")),
+                "cache_status": row.get("cache_status"),
+                "routing_status": row.get("routing_status"),
+                "text_bucket": row.get("text_bucket"),
+                "token_bucket": row.get("token_bucket"),
+                "row_count": row_count,
+                "work_classes": classes,
+                "current_conservative_tokens_saved": row_observed_tokens,
+                "current_conservative_chars_saved": row_observed_chars,
+                "current_conservative_savings_usd": round(row_observed_savings, 6),
+                "projected_saved_tokens": row_projected_tokens,
+                "projected_saved_chars": row_projected_chars,
+                "projected_saved_usd": round(row_projected_savings, 6),
+                "candidate_rule": "repeated-context-conservative-dry-run",
+                "estimate_basis": (
+                    "metadata-only projection using aggregate input tokens, repeated-shape row count, "
+                    f"and {REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE:.0%} conservative input-token reduction"
+                ),
+                "aggregate_only": True,
+                "privacy": _crunch_opportunity_privacy(),
+            }
+        )
+
+    cohorts.sort(
+        key=lambda item: (
+            item.get("readiness") == "measurement-ready",
+            _as_float(item.get("projected_saved_usd")) + _as_float(item.get("current_conservative_savings_usd")),
+            _as_int(item.get("projected_saved_tokens")) + _as_int(item.get("current_conservative_tokens_saved")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    for rank, row in enumerate(cohorts, start=1):
+        row["rank"] = rank
+
+    blocker_breakdown = _breakdown(blocker_counts)
+    top_blocker = blocker_breakdown[0]["value"] if blocker_breakdown else None
+    status = "ranked" if projected_tokens > 0 or observed_tokens > 0 or projected_savings > 0 or observed_savings > 0 else "no-positive-crunch-opportunity"
+    if not cohorts:
+        status = "no-repeated-context-crunch-cohorts"
+    missing = []
+    if not cohorts:
+        missing.append("repeated-context-crunch-cohorts")
+    if projected_tokens <= 0 and observed_tokens <= 0 and projected_savings <= 0 and observed_savings <= 0:
+        missing.append("positive-observed-or-projected-savings")
+
+    return {
+        "schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
+        "status": status,
+        "summary": {
+            "candidate_count": len(cohorts),
+            "matched_count": sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows),
+            "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows),
+            "measurement_ready_cohort_count": readiness_counts.get("measurement-ready", 0),
+            "skipped_cohort_count": readiness_counts.get("skipped", 0),
+            "current_conservative_tokens_saved": observed_tokens,
+            "current_conservative_chars_saved": observed_chars,
+            "current_conservative_savings_usd": round(observed_savings, 6),
+            "projected_saved_tokens": projected_tokens,
+            "projected_saved_chars": projected_chars,
+            "projected_saved_usd": round(projected_savings, 6),
+            "top_blocker_code": top_blocker,
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "readiness_breakdown": _breakdown(readiness_counts),
+        "reason_breakdown": _breakdown(reason_counts),
+        "blocker_reason_breakdown": blocker_breakdown,
+        "work_class_breakdown": _breakdown(work_class_counts),
+        "cohorts": cohorts[: max(1, min(_as_int(limit) or 25, 1000))],
+        "missing_measurements": missing,
+        "privacy": _crunch_opportunity_privacy(),
     }
 
 
@@ -681,6 +951,7 @@ def build_request_shape_rollups_report(
             window_end = created_at if window_end is None else max(window_end, created_at)
         routing = _json_obj(row.get("routing_json"))
         cache = _json_obj(row.get("cache_json"))
+        crunch = _json_obj(row.get("crunch_json"))
         provider = _provider_family(row)
         endpoint = _endpoint(row)
         source_surface = _source_surface(row, provider, endpoint)
@@ -697,10 +968,29 @@ def build_request_shape_rollups_report(
         input_tokens = _as_int(row.get("actual_input_tokens")) or _as_int(row.get("input_tokens_est"))
         if text_chars <= 0 and input_tokens > 0:
             text_chars = input_tokens * 4
+        projection_input_tokens = max(input_tokens, text_chars // 4 if text_chars > 0 else 0)
         output_tokens = _as_int(row.get("actual_output_tokens")) or _as_int(row.get("output_tokens_est"))
         cost = _as_float(row.get("cost_est_usd"))
         baseline = _as_float(row.get("cost_baseline_usd"))
         observed_savings = max(0.0, baseline - cost)
+        status_bucket = _status_bucket(row.get("status_code"))
+        current_crunch_tokens = _crunch_saved_tokens(crunch)
+        current_crunch_chars = _crunch_saved_chars(crunch)
+        crunch_model = str(row.get("routed_model") or row.get("requested_model") or "")
+        current_crunch_savings = _input_savings_usd(
+            current_crunch_tokens,
+            provider=provider,
+            model=crunch_model,
+            fallback_cost=cost,
+            fallback_tokens=input_tokens,
+        )
+        input_token_cost = _input_savings_usd(
+            projection_input_tokens,
+            provider=provider,
+            model=crunch_model,
+            fallback_cost=cost,
+            fallback_tokens=input_tokens or projection_input_tokens,
+        )
         cache_status = _cache_status(row, cache)
         cache_reason = public_label(cache.get("reason"), "unknown")
         routing_status = _routing_status(row, routing)
@@ -747,8 +1037,14 @@ def build_request_shape_rollups_report(
         group["observed_savings_usd"] += observed_savings
         group["input_tokens"] += input_tokens
         group["output_tokens"] += output_tokens
+        if status_bucket in {"2xx", "3xx"}:
+            group["successful_input_tokens"] += projection_input_tokens
+            group["input_token_cost_usd"] += input_token_cost
+        group["current_crunch_tokens_saved"] += current_crunch_tokens
+        group["current_crunch_chars_saved"] += current_crunch_chars
+        group["current_crunch_savings_usd"] += current_crunch_savings
         _increment(provider_counts, provider)
-        _increment(group["status_counts"], _status_bucket(row.get("status_code")))
+        _increment(group["status_counts"], status_bucket)
         _increment(group["retry_bucket_counts"], _retry_bucket(_as_int(row.get("retry_count"))))
         _increment(group["cost_bucket_counts"], _cost_bucket(cost))
         _increment(group["savings_bucket_counts"], _savings_bucket(observed_savings))
@@ -813,6 +1109,7 @@ def build_request_shape_rollups_report(
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_code_breakdown": _breakdown(blocker_counts),
         "cache_replayability_dry_run": build_request_shape_cache_replayability_dry_run(rollups, limit=25),
+        "crunch_opportunity_dry_run": build_request_shape_crunch_opportunity_dry_run(rollups, limit=25),
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,

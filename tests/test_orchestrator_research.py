@@ -599,6 +599,65 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_candidate["blocker"], "missing-crunch-savings-signal")
         self.assertEqual(crunch_candidate["projected_savings_signal"]["status"], "missing-crunch-measurement")
 
+    def test_crunch_candidate_uses_request_shape_crunch_opportunity_dry_run(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 30, "rollup_count": 1},
+                    "crunch_opportunity_dry_run": {
+                        "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "candidate_count": 1,
+                            "matched_count": 24,
+                            "projected_saved_chars": 48000,
+                            "projected_saved_tokens": 12000,
+                            "projected_saved_usd": 0.036,
+                        },
+                        "blocker_reason_breakdown": [
+                            {"value": "session_id=raw-session-id-secret should not leak", "count": 1}
+                        ],
+                        "cohorts": [
+                            {
+                                "candidate_id": "raw-crunch-shape-secret",
+                                "session_id": "raw-session-id-secret",
+                                "cache_key": "cache-secret",
+                                "file_path": "/home/lutz/private/shape_secret.py",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "projected-savings-ranked")
+        self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_opportunity")
+        self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(signal["top_report"]["projected_saved_tokens"], 12000)
+        self.assertEqual(signal["top_report"]["projected_saved_usd"], 0.036)
+        self.assertEqual(signal["missing_measurements"], [])
+
+        crunch_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "crunch")
+        self.assertEqual(crunch_candidate["blocker"], "crunch-projected-savings-ranked")
+        self.assertEqual(crunch_candidate["provider_surface_bucket"], "request_shape_crunch_opportunity")
+        self.assertEqual(crunch_candidate["projected_savings_signal"]["top_report"]["matched_count"], 24)
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-crunch-shape-secret", rendered)
+        self.assertNotIn("raw-session-id-secret", rendered)
+        self.assertNotIn("cache-secret", rendered)
+        self.assertNotIn("/home/lutz/private/shape_secret.py", rendered)
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],

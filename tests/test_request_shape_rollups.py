@@ -309,6 +309,71 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["request_fingerprints_included"])
         self.assertFalse(dry_run["privacy"]["individual_candidate_ids_included"])
 
+    def test_crunch_opportunity_dry_run_projects_repeated_context_savings(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=80_000,
+                cost=cost,
+                baseline=cost,
+            )
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4-mini",
+            routed_model="gpt-5.4-mini",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="chat",
+            workflow_phase="chat",
+            stream=0,
+            has_tools=False,
+            cache_status="miss",
+            cache_reason="exact-miss",
+            text_chars=1_200,
+            cost=0.004,
+            baseline=0.004,
+        )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-dry-run")
+        dry_run = report["crunch_opportunity_dry_run"]
+
+        self.assertEqual(dry_run["schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
+        self.assertEqual(dry_run["status"], "ranked")
+        self.assertEqual(dry_run["summary"]["measurement_ready_cohort_count"], 1)
+        self.assertGreater(dry_run["summary"]["projected_saved_tokens"], 0)
+        self.assertGreater(dry_run["summary"]["projected_saved_usd"], 0)
+        top = dry_run["cohorts"][0]
+        self.assertEqual(top["readiness"], "measurement-ready")
+        self.assertEqual(top["reason"], "repeated-context-crunch-opportunity")
+        self.assertIn("repeated_context", top["work_classes"])
+        self.assertIn("crunch", top["work_classes"])
+        self.assertEqual(top["candidate_rule"], "repeated-context-conservative-dry-run")
+        class_counts = {item["value"]: item["count"] for item in dry_run["work_class_breakdown"]}
+        self.assertEqual(class_counts["repeated_context"], 3)
+        rendered = json.dumps(dry_run, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(dry_run["privacy"]["metadata_only"])
+        self.assertTrue(dry_run["privacy"]["aggregate_only"])
+        self.assertFalse(dry_run["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(dry_run["privacy"]["provider_bodies_included"])
+        self.assertFalse(dry_run["privacy"]["session_ids_included"])
+        self.assertFalse(dry_run["privacy"]["cache_keys_included"])
+
     def test_cli_persists_rollups_by_default_and_dry_run_skips_write(self) -> None:
         self._log_call()
         self._log_call()
