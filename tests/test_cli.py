@@ -14,6 +14,7 @@ import yaml
 
 from agentflow_proxy import activation
 from agentflow_proxy import cli
+from agentflow_proxy.cli_commands import onboarding as onboarding_cli
 from agentflow_proxy.cli_commands import policy_bundle as policy_bundle_cli
 from agentflow_proxy.cli_commands import policy_workbench as policy_workbench_cli
 
@@ -70,6 +71,30 @@ class AgentflowActivationCliTests(unittest.TestCase):
                     cli.agentflow_cli(list(command))
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn("usage:", stdout.getvalue())
+
+    def test_agentflow_cli_reexports_onboarding_command_group(self):
+        self.assertIs(cli.agentflow_cli, onboarding_cli.agentflow_cli)
+        self.assertIs(cli._activation_stats_result, onboarding_cli._activation_stats_result)
+        self.assertIs(cli._doctor_codex_target, onboarding_cli._doctor_codex_target)
+
+    def test_onboarding_module_version_json_path(self):
+        from agentflow_proxy import __version__
+
+        stdout = io.StringIO()
+
+        code = onboarding_cli.agentflow_cli(["version", "--json"], stdout=stdout)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {
+                "schema": "agentflow.version.v1",
+                "ok": True,
+                "version": __version__,
+                "package": "agentflow-proxy",
+                "command": "agentflow",
+            },
+        )
 
     def test_readme_onboarding_happy_path_stays_primary_and_private(self):
         readme = Path("README.md").read_text(encoding="utf-8")
