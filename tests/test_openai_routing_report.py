@@ -219,6 +219,20 @@ class OpenAIRoutingReportTests(unittest.TestCase):
                 safety_stop={"tripped": True, "reason_codes": ["error-rate"]},
             ),
         )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="chat",
+            text_chars=1200,
+            openai_canary=canary("skipped", status="not_selected", reason="outside-canary-fraction"),
+        )
+        self._log_openai_call(
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            category="chat",
+            text_chars=1200,
+            openai_canary=canary("bypassed_or_disabled", status="disabled", reason="disabled"),
+        )
 
         result = build_openai_routing_report(self.store, limit=20)
 
@@ -234,7 +248,9 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(lifecycle["error_count"], 1)
         self.assertEqual(lifecycle["retry_count"], 1)
         self.assertEqual(lifecycle["fallback_count"], 1)
-        self.assertEqual(lifecycle["coverage"]["matched_count"], 6)
+        self.assertEqual(lifecycle["cohort_counts"]["skipped"], 1)
+        self.assertEqual(lifecycle["cohort_counts"]["bypassed_or_disabled"], 1)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 8)
         self.assertIn("error-observed", lifecycle["blocker_codes"])
         self.assertIn("retry-observed", lifecycle["blocker_codes"])
         self.assertIn("fallback-observed", lifecycle["blocker_codes"])
@@ -242,6 +258,9 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(result["summary"]["openai_canary_applied_count"], 3)
         self.assertEqual(result["summary"]["openai_canary_holdout_count"], 2)
         self.assertEqual(result["summary"]["openai_canary_safety_stopped_count"], 1)
+        self.assertEqual(result["summary"]["openai_canary_skipped_count"], 1)
+        self.assertEqual(result["summary"]["openai_canary_bypassed_or_disabled_count"], 1)
+        self.assertEqual(result["summary"]["openai_canary_stale_evidence_count"], 0)
 
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn("secret-openai-session", rendered)

@@ -144,6 +144,17 @@ def _safe_evidence_summary(value: Any) -> dict[str, Any]:
         "projected_savings_bucket",
         "capability_checked",
         "capability_status",
+        "requested_model",
+        "requested_model_family",
+        "candidate_target_model",
+        "target_model",
+        "source_surface",
+        "provider_endpoint",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
     ):
         label = _safe_optional_label(value.get(key))
         if label:
@@ -155,10 +166,11 @@ def _candidate(recommendation: dict[str, Any]) -> dict[str, Any]:
     file_representation = _safe_file_backed_representation(recommendation.get("file_backed_policy_representation"))
     no_op_reasons = _safe_list(recommendation.get("no_op_reasons"))
     status = _safe_label(recommendation.get("status"), default="noop")
+    evidence_summary = _safe_evidence_summary(recommendation.get("evidence_summary"))
     if status not in {"recommended", "noop"}:
         status = "noop"
         no_op_reasons = sorted(set(no_op_reasons + ["unsupported-recommendation-status"]))
-    return {
+    candidate = {
         "schema": CANDIDATE_SCHEMA,
         "recommendation_id": _safe_label(recommendation.get("recommendation_id"), default="unknown-recommendation", max_length=240),
         "rank": _as_int(recommendation.get("rank")),
@@ -179,7 +191,7 @@ def _candidate(recommendation: dict[str, Any]) -> dict[str, Any]:
         "confidence": _bounded_confidence(recommendation.get("confidence")),
         "projected_savings_usd": round(_as_float(recommendation.get("projected_savings_usd")), 8),
         "no_op_reasons": no_op_reasons,
-        "evidence_summary": _safe_evidence_summary(recommendation.get("evidence_summary")),
+        "evidence_summary": evidence_summary,
         "required_local_review": True,
         "read_only": True,
         "feature_only": True,
@@ -189,6 +201,20 @@ def _candidate(recommendation: dict[str, Any]) -> dict[str, Any]:
         "managed_enforced": False,
         "privacy": _privacy_summary(),
     }
+    for key in (
+        "requested_model",
+        "requested_model_family",
+        "candidate_target_model",
+        "target_model",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
+    ):
+        value = _safe_optional_label(recommendation.get(key)) or evidence_summary.get(key)
+        if value:
+            candidate[key] = value
+    return candidate
 
 
 def _group_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

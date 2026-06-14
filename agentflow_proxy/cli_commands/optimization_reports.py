@@ -2179,6 +2179,10 @@ def openai_routing_canary_stage_cli(
         help="OpenAI routing report JSON path, or '-' for stdin. If omitted, a fresh report is built from local metadata.",
     )
     parser.add_argument(
+        "--promotion-blocker-review",
+        help="Promotion blocker review/recommendation JSON path, or '-' for stdin. When set, stage OpenAI canary drafts from reviewed canary lifecycle recommendations.",
+    )
+    parser.add_argument(
         "--db",
         default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
         help="AgentFlow database URL or SQLite path when building a fresh report, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
@@ -2201,7 +2205,30 @@ def openai_routing_canary_stage_cli(
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
 
-    if args.routing_report:
+    if args.routing_report and args.promotion_blocker_review:
+        _write_json(
+            stdout,
+            {
+                "ok": False,
+                "schema": "agentflow.openai_routing_canary_stage_error.v1",
+                "error": {
+                    "type": "conflicting_inputs",
+                    "message": "routing_report and --promotion-blocker-review are mutually exclusive",
+                },
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_active_policy_files": False,
+            },
+        )
+        return 2
+
+    if args.promotion_blocker_review:
+        from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
+
+        report = _read_json_input(str(args.promotion_blocker_review), stdin=stdin)
+        if report.get("schema") != "agentflow.promotion_blocker_recommendation_review.v1":
+            report = build_promotion_blocker_recommendation_review(report, limit=int(args.limit or 25))
+    elif args.routing_report:
         report = _read_json_input(str(args.routing_report), stdin=stdin)
     else:
         from agentflow_proxy.openai_routing_report import build_openai_routing_report
@@ -2272,7 +2299,7 @@ def openai_routing_canary_stage_cli(
         ok=bool(result.get("ok")),
         details={
             "source": "cli",
-            "path": args.routing_report,
+            "path": args.promotion_blocker_review or args.routing_report,
             "workspace": args.workspace,
             "candidate_count": summary.get("candidate_count", 0),
             "eligible_candidate_count": summary.get("eligible_candidate_count", 0),

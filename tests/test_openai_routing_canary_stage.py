@@ -18,6 +18,7 @@ from agentflow_proxy.openai_routing_canary_stage import stage_openai_routing_can
 from agentflow_proxy.openai_routing_report import build_openai_routing_report
 from agentflow_proxy.optimization import feedback
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
+from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
 from agentflow_proxy.store import SQLiteStore, stable_json
 
 
@@ -333,6 +334,140 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         self.assertIn("error-observed", result["omitted"][0]["blocker_codes"])
         self.assertFalse(result["provider_calls_made"])
 
+    def test_stages_promotion_blocker_routing_recommendation_as_canary_lifecycle_plan(self) -> None:
+        recommendations = {
+            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "recommendations": [{
+                "recommendation_id": "promotion-blocker-next-action:openai:routing:canary-gpt54-mini",
+                "rank": 1,
+                "status": "recommended",
+                "local_action_family": "routing",
+                "candidate_family": "provider-routing-rule",
+                "source_surface": "openai_provider_request",
+                "provider_family": "openai",
+                "provider_endpoint": "responses",
+                "blocker_family": "canary-missing",
+                "blocker_reason_codes": [
+                    "missing-canary-lifecycle-evidence",
+                    "missing-applied-coverage",
+                    "missing-holdout-coverage",
+                ],
+                "blocker_count": 238,
+                "recommendation_type": "collect-canary-lifecycle-evidence",
+                "next_action": "collect-local-canary-evidence",
+                "expected_local_executor": "openai-routing-canary",
+                "file_backed_policy_representation": {
+                    "exists": True,
+                    "policy_section": "routing",
+                    "policy_source": "local-manual",
+                    "rule_file": "routing_rules.yaml",
+                },
+                "local_executor_compatibility": {
+                    "status": "compatible",
+                    "local_action_family": "routing",
+                },
+                "requested_model": "gpt-5.4",
+                "candidate_target_model": "gpt-5.4-mini",
+                "category": "unknown",
+                "text_bucket": "unknown",
+                "token_bucket": "unknown",
+                "confidence": 0.93,
+                "projected_savings_usd": 1.04125,
+                "evidence_summary": {
+                    "record_count": 238,
+                    "candidate_count": 238,
+                    "promotion_status": "blocked",
+                    "capability_checked": "canary_holdout",
+                    "capability_status": "observe-only",
+                },
+                "prompt": "raw promotion blocker prompt secret",
+                "provider_body": {"input": "raw promotion blocker provider body secret"},
+                "request_id": "promotion-blocker-request-id-secret",
+                "session_id": "promotion-blocker-session-id-secret",
+                "cache_key": "promotion-blocker-cache-key-secret",
+            }],
+        }
+        review = build_promotion_blocker_recommendation_review(recommendations, limit=10)
+
+        result = asyncio.run(stage_openai_routing_canary_drafts(
+            review,
+            workspace=str(Path(self.tmpdir.name) / "drafts"),
+            canary_fraction=0.05,
+            holdout_fraction=0.10,
+        ))
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+        self.assertEqual(result["source_report_schema"], "agentflow.promotion_blocker_recommendation_review.v1")
+        self.assertEqual(result["summary"]["staged_count"], 1)
+        self.assertEqual(result["summary"]["projected_canary_applied_count"], 12)
+        self.assertEqual(result["summary"]["projected_canary_holdout_count"], 24)
+        staged = result["staged_drafts"][0]
+        self.assertEqual(staged["requested_model"], "gpt-5.4")
+        self.assertEqual(staged["target_model"], "gpt-5.4-mini")
+        self.assertEqual(staged["expected_local_executor"], "openai-routing-canary")
+        self.assertEqual(staged["projected_cohort_counts"]["matched"], 238)
+        self.assertEqual(staged["projected_cohort_counts"]["canary_applied"], 12)
+        self.assertEqual(staged["projected_cohort_counts"]["canary_holdout"], 24)
+        self.assertTrue(staged["safety_stop_metadata"]["enabled"])
+        self.assertEqual(staged["safety_stop_metadata"]["max_error_rate"], 0.03)
+        lifecycle = staged["projected_openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 12)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 24)
+        self.assertGreater(lifecycle["coverage"]["applied_rate"], 0)
+        self.assertGreater(lifecycle["coverage"]["holdout_rate"], 0)
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw promotion blocker prompt secret", rendered)
+        self.assertNotIn("raw promotion blocker provider body secret", rendered)
+        self.assertNotIn("promotion-blocker-request-id-secret", rendered)
+        self.assertNotIn("promotion-blocker-session-id-secret", rendered)
+        self.assertNotIn("promotion-blocker-cache-key-secret", rendered)
+
+    def test_promotion_blocker_recommendation_without_file_backed_policy_is_noop(self) -> None:
+        review = {
+            "schema": "agentflow.promotion_blocker_recommendation_review.v1",
+            "generated_at": utc_now(),
+            "candidates": [{
+                "schema": "agentflow.promotion_blocker_review_candidate.v1",
+                "recommendation_id": "promotion-blocker-next-action:openai:routing:missing-policy",
+                "rank": 1,
+                "status": "recommended",
+                "recommendation_type": "collect-canary-lifecycle-evidence",
+                "local_action_family": "routing",
+                "candidate_family": "provider-routing-rule",
+                "source_surface": "openai_provider_request",
+                "provider_family": "openai",
+                "provider_endpoint": "responses",
+                "blocker_family": "canary-missing",
+                "blocker_reason_codes": ["missing-canary-lifecycle-evidence"],
+                "blocker_count": 20,
+                "next_action": "collect-local-canary-evidence",
+                "expected_local_executor": "openai-routing-canary",
+                "file_backed_policy_representation": {
+                    "exists": False,
+                    "reason": "missing-file-backed-local-policy",
+                },
+                "requested_model": "gpt-5.4",
+                "candidate_target_model": "gpt-5.4-mini",
+                "evidence_summary": {"record_count": 20},
+                "projected_savings_usd": 0.1,
+                "privacy": {"metadata_only": True},
+            }],
+            "privacy": {"metadata_only": True},
+        }
+
+        result = asyncio.run(stage_openai_routing_canary_drafts(
+            review,
+            workspace=str(Path(self.tmpdir.name) / "drafts"),
+        ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"]["staged_count"], 0)
+        self.assertEqual(result["summary"]["omission_reason_counts"], [{"value": "missing-file-backed-local-policy", "count": 1}])
+        self.assertEqual(result["omitted"][0]["reason"], "missing-file-backed-local-policy")
+        self.assertFalse((Path(self.tmpdir.name) / "drafts").exists())
+        self.assertFalse(result["provider_calls_made"])
+
     def test_unsafe_candidates_are_omitted_with_machine_readable_reasons(self) -> None:
         base = {
             "source_surface": "openai_responses",
@@ -413,6 +548,62 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         self.assertFalse((Path(self.tmpdir.name) / "drafts").exists())
         self.assertNotIn("secret raw prompt", stdout.getvalue())
         self.assertNotIn("req_secret", stdout.getvalue())
+
+    def test_cli_stages_from_promotion_blocker_review_stdin(self) -> None:
+        recommendations = {
+            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "recommendations": [{
+                "recommendation_id": "promotion-blocker-next-action:openai:routing:cli-canary",
+                "rank": 1,
+                "status": "recommended",
+                "local_action_family": "routing",
+                "candidate_family": "provider-routing-rule",
+                "source_surface": "openai_provider_request",
+                "provider_family": "openai",
+                "provider_endpoint": "responses",
+                "blocker_family": "canary-missing",
+                "blocker_reason_codes": ["missing-canary-lifecycle-evidence"],
+                "blocker_count": 30,
+                "recommendation_type": "collect-canary-lifecycle-evidence",
+                "next_action": "collect-local-canary-evidence",
+                "expected_local_executor": "openai-routing-canary",
+                "file_backed_policy_representation": {
+                    "exists": True,
+                    "policy_section": "routing",
+                    "policy_source": "local-manual",
+                    "rule_file": "routing_rules.yaml",
+                },
+                "local_executor_compatibility": {"status": "compatible", "local_action_family": "routing"},
+                "requested_model": "gpt-5.4",
+                "candidate_target_model": "gpt-5.4-mini",
+                "evidence_summary": {"record_count": 30},
+                "projected_savings_usd": 0.13,
+                "prompt": "raw cli canary prompt secret",
+            }],
+        }
+
+        stdout = io.StringIO()
+        code = cli.openai_routing_canary_stage_cli(
+            [
+                "--promotion-blocker-review",
+                "-",
+                "--workspace",
+                str(Path(self.tmpdir.name) / "drafts"),
+                "--top-candidates",
+                "1",
+            ],
+            stdin=io.StringIO(json.dumps(recommendations)),
+            stdout=stdout,
+        )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(code, 0, stdout.getvalue())
+        self.assertEqual(payload["summary"]["staged_count"], 1)
+        staged = payload["staged_drafts"][0]
+        self.assertEqual(staged["requested_model"], "gpt-5.4")
+        self.assertEqual(staged["target_model"], "gpt-5.4-mini")
+        self.assertEqual(staged["expected_local_executor"], "openai-routing-canary")
+        self.assertNotIn("raw cli canary prompt secret", stdout.getvalue())
 
     def test_cli_queue_feedback_emits_metadata_only_activation_lifecycle_row(self) -> None:
         report = {

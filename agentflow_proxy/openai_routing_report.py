@@ -585,9 +585,17 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
     canary_applied_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("canary_applied")) for item in candidates)
     canary_holdout_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("canary_holdout")) for item in candidates)
     canary_safety_stopped_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("safety_stopped")) for item in candidates)
+    canary_skipped_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("skipped")) for item in candidates)
+    canary_bypassed_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("bypassed_or_disabled")) for item in candidates)
+    canary_unknown_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("unknown")) for item in candidates)
     canary_error_count = sum(_as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("error_count")) for item in candidates)
     canary_retry_count = sum(_as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("retry_count")) for item in candidates)
     canary_fallback_count = sum(_as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("fallback_count")) for item in candidates)
+    canary_stale_evidence_count = sum(
+        _as_int((item.get("openai_canary_lifecycle_evidence") or {}).get("observed_count"))
+        for item in candidates
+        if ((item.get("openai_canary_lifecycle_evidence") or {}).get("stale_evidence") or {}).get("stale")
+    )
     for item in candidates:
         for blocker in item.get("blocker_reason_breakdown") or []:
             _increment(blocker_totals, blocker["value"], _as_int(blocker.get("count")))
@@ -612,9 +620,13 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "openai_canary_applied_count": canary_applied_count,
             "openai_canary_holdout_count": canary_holdout_count,
             "openai_canary_safety_stopped_count": canary_safety_stopped_count,
+            "openai_canary_skipped_count": canary_skipped_count,
+            "openai_canary_bypassed_or_disabled_count": canary_bypassed_count,
+            "openai_canary_unknown_count": canary_unknown_count,
             "openai_canary_error_count": canary_error_count,
             "openai_canary_retry_count": canary_retry_count,
             "openai_canary_fallback_count": canary_fallback_count,
+            "openai_canary_stale_evidence_count": canary_stale_evidence_count,
         },
         "simulation_policy": {
             "schema": "agentflow.openai_routing_simulation_policy.v1",

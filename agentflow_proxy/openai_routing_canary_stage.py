@@ -37,10 +37,21 @@ PAYLOAD_PRIVACY = {
     "managed_server_calls_made": False,
 }
 
-SUPPORTED_SURFACES = {"openai", "openai_provider_request", "openai_responses", "openai_chat", "openai_chat_completions"}
-SUPPORTED_ENDPOINTS = {"responses", "chat", "chat_completions"}
+SUPPORTED_SURFACES = {
+    "openai",
+    "openai_provider_request",
+    "openai-provider-request",
+    "openai_responses",
+    "openai-responses",
+    "openai_chat",
+    "openai-chat",
+    "openai_chat_completions",
+    "openai-chat-completions",
+}
+SUPPORTED_ENDPOINTS = {"responses", "chat", "chat_completions", "chat-completions"}
 DEFAULT_EXCLUDED_CATEGORIES = ["tool-result", "tool-heavy", "tool-light", "code-gen", "long-context"]
 PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
+PROMOTION_BLOCKER_REVIEW_SCHEMA = "agentflow.promotion_blocker_recommendation_review.v1"
 PROJECTED_LIFECYCLE_SCHEMA = "agentflow.openai_routing_canary_projected_lifecycle_coverage.v1"
 RAW_KEYS = {
     "api_key",
@@ -137,7 +148,7 @@ def _privacy_errors(value: Any, *, path: str = "$") -> list[dict[str, str]]:
                 key_text = str(key).strip()
                 lowered = key_text.lower()
                 child_path = f"{item_path}.{key_text}"
-                if lowered in ALLOWED_RAW_FLAG_KEYS:
+                if lowered in ALLOWED_RAW_FLAG_KEYS or (lowered.endswith("_included") and isinstance(child, bool)):
                     continue
                 if lowered in RAW_KEYS or lowered.startswith("raw_"):
                     errors.append({
@@ -235,6 +246,18 @@ def _candidate_omission_reason(candidate: dict[str, Any], *, min_samples: int) -
             return "fallback-observed"
         if "stale-evidence" in blockers:
             return "stale-evidence"
+        if "missing-file-backed-local-policy" in blockers:
+            return "missing-file-backed-local-policy"
+        if "local-executor-incompatible" in blockers:
+            return "local-executor-incompatible"
+        if "unsupported-local-executor" in blockers:
+            return "unsupported-local-executor"
+        if "unsupported-recommendation-type" in blockers:
+            return "unsupported-recommendation-type"
+        if "unsupported-next-action" in blockers:
+            return "unsupported-next-action"
+        if "recommendation-not-recommended" in blockers:
+            return "recommendation-not-recommended"
         return sorted(blockers)[0] if blockers else "blocked-candidate"
     if bool(candidate.get("has_tools")) and not bool(candidate.get("allow_tools")):
         return "tool-safety-blocker"
@@ -443,6 +466,8 @@ def _candidate_payload(
             "applied_canary_category": category,
             "matched_count": _as_int(candidate.get("matched_count")),
             "source_actionability": candidate.get("actionability"),
+            "source_recommendation_id": candidate.get("source_recommendation_id"),
+            "expected_local_executor": candidate.get("expected_local_executor") or "openai-routing-canary",
             "projected_savings_usd": round(_as_float(candidate.get("projected_savings_usd")), 6),
             "estimated_savings_per_1000_calls_usd": round(savings_per_1000, 6),
             "estimated_baseline_cost_usd": round(_as_float(candidate.get("estimated_baseline_cost_usd")), 6),
@@ -549,8 +574,136 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _metadata_value(*values: Any) -> str:
+    for value in values:
+        text = _string(value)
+        if text and not _is_unknown(text):
+            return text
+    return ""
+
+
+def _candidate_from_promotion_blocker_review(candidate: dict[str, Any]) -> dict[str, Any]:
+    evidence = candidate.get("evidence_summary") if isinstance(candidate.get("evidence_summary"), dict) else {}
+    file_representation = (
+        candidate.get("file_backed_policy_representation")
+        if isinstance(candidate.get("file_backed_policy_representation"), dict)
+        else {}
+    )
+    compatibility = (
+        candidate.get("local_executor_compatibility")
+        if isinstance(candidate.get("local_executor_compatibility"), dict)
+        else {}
+    )
+    recommendation_id = _string(candidate.get("recommendation_id") or "unknown-recommendation")
+    source_surface = _metadata_value(candidate.get("source_surface"), evidence.get("source_surface"), "openai_provider_request")
+    endpoint = _metadata_value(candidate.get("provider_endpoint"), candidate.get("endpoint"), evidence.get("provider_endpoint"), evidence.get("endpoint"), "responses")
+    provider = _metadata_value(candidate.get("provider_family"), "openai")
+    requested = _metadata_value(
+        candidate.get("requested_model"),
+        evidence.get("requested_model"),
+        candidate.get("requested_model_family"),
+        evidence.get("requested_model_family"),
+    )
+    target = _metadata_value(
+        candidate.get("candidate_target_model"),
+        candidate.get("target_model"),
+        evidence.get("candidate_target_model"),
+        evidence.get("target_model"),
+    )
+    if not requested and target == "gpt-5.4-mini":
+        requested = "gpt-5.4"
+    if requested == "gpt-5.4" and not target:
+        target = "gpt-5.4-mini"
+    category = _metadata_value(candidate.get("category"), evidence.get("category"), "chat")
+    if _is_unknown(category):
+        category = "chat"
+    matched = _as_int(evidence.get("record_count")) or _as_int(evidence.get("candidate_count")) or _as_int(candidate.get("blocker_count"))
+    savings = _as_float(candidate.get("projected_savings_usd"))
+    savings_per_1000 = _as_float(candidate.get("estimated_savings_per_1000_calls_usd"))
+    if savings_per_1000 <= 0 and matched > 0:
+        savings_per_1000 = (savings / matched) * 1000.0
+
+    blocker_codes = set(_string_list(candidate.get("blocker_reason_codes")))
+    blockers: list[str] = []
+    if _string(candidate.get("status")) != "recommended":
+        blockers.append("recommendation-not-recommended")
+    if _string(candidate.get("local_action_family")) != "routing":
+        blockers.append("unsupported-local-action-family")
+    if provider and provider != "openai":
+        blockers.append("unsupported-source-surface")
+    if _string(candidate.get("expected_local_executor") or "") not in {"", "openai-routing-canary"}:
+        blockers.append("unsupported-local-executor")
+    if _string(candidate.get("recommendation_type")) not in {
+        "collect-canary-lifecycle-evidence",
+        "stage-routing-canary-lifecycle",
+        "stage-openai-routing-canary",
+        "review-promotion-blocker",
+    }:
+        blockers.append("unsupported-recommendation-type")
+    if _string(candidate.get("next_action")) not in {
+        "collect-local-canary-evidence",
+        "activate-openai-routing-canary-cohorts",
+        "stage-openai-routing-canary",
+        "stage-local-openai-routing-canary",
+        "collect-openai-canary-lifecycle-evidence",
+        "review-local-promotion-blocker",
+    }:
+        blockers.append("unsupported-next-action")
+    if file_representation and not bool(file_representation.get("exists")):
+        blockers.append("missing-file-backed-local-policy")
+    if compatibility and _string(compatibility.get("status")) not in {"", "compatible", "unknown"}:
+        blockers.append("local-executor-incompatible")
+    blockers.extend(_string_list(candidate.get("no_op_reasons")))
+    blockers.extend(
+        sorted(
+            blocker_codes
+            & {"safety-stop-observed", "error-observed", "retry-observed", "fallback-observed", "stale-evidence"}
+        )
+    )
+    has_tools = category.startswith("tool-")
+    return {
+        "candidate_id": _stable_id("openai-promotion-route", recommendation_id, source_surface, endpoint, requested, target, category),
+        "source_recommendation_id": recommendation_id,
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "requested_model": requested,
+        "target_model": target,
+        "category": category,
+        "matched_count": matched,
+        "blocked_count": matched if blockers else 0,
+        "current_routed_count": 0,
+        "projected_savings_usd": round(savings, 6),
+        "estimated_savings_per_1000_calls_usd": round(savings_per_1000, 6),
+        "estimated_baseline_cost_usd": 0.0,
+        "text_bucket": _metadata_value(candidate.get("text_bucket"), evidence.get("text_bucket"), "unknown"),
+        "token_bucket": _metadata_value(candidate.get("token_bucket"), evidence.get("token_bucket"), "unknown"),
+        "input_tokens": _as_int(candidate.get("input_tokens")) or _as_int(evidence.get("input_tokens")),
+        "has_tools": has_tools,
+        "allow_tools": category == "tool-light",
+        "stream": False,
+        "simulated_policy": candidate.get("expected_local_executor") or "openai-routing-canary",
+        "simulated_reason": candidate.get("next_action") or "promotion-blocker-canary-lifecycle-recommendation",
+        "actionability": "actionable" if not blockers else "blocked",
+        "expected_local_executor": candidate.get("expected_local_executor") or "openai-routing-canary",
+        "blockers": sorted(set(blockers)),
+        "aggregate_inference": {
+            "source": "promotion_blocker_recommendation_review",
+            "recommendation_id": recommendation_id,
+            "blocker_family": candidate.get("blocker_family"),
+            "blocker_reason_codes": sorted(blocker_codes),
+            "metadata_only": True,
+        },
+    }
+
+
 def _candidate_list_from_report(report: dict[str, Any]) -> list[Any] | None:
     candidates = report.get("candidates")
+    if report.get("schema") == PROMOTION_BLOCKER_REVIEW_SCHEMA and isinstance(candidates, list):
+        return [
+            _candidate_from_promotion_blocker_review(candidate)
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ]
     if isinstance(candidates, list):
         return candidates
     if report.get("schema") == PASS_THROUGH_SCHEMA and isinstance(report.get("buckets"), list):
@@ -671,6 +824,7 @@ async def stage_openai_routing_canary_drafts(
             "endpoint": candidate.get("endpoint"),
             "requested_model": candidate.get("requested_model"),
             "target_model": candidate.get("target_model"),
+            "expected_local_executor": canary["promotion"]["expected_local_executor"],
             "canary_fraction": canary["canary_fraction"],
             "holdout_fraction": canary["holdout_fraction"],
             "reason_codes": canary["promotion"]["reason_codes"],
@@ -678,6 +832,7 @@ async def stage_openai_routing_canary_drafts(
             "estimated_savings_per_1000_calls_usd": canary["promotion"]["estimated_savings_per_1000_calls_usd"],
             "projected_cohort_counts": canary["promotion"]["projected_cohort_counts"],
             "projected_openai_canary_lifecycle_evidence": canary["promotion"]["projected_openai_canary_lifecycle_evidence"],
+            "safety_stop_metadata": canary["safety_stop"],
             "aggregate_inference": canary["promotion"]["aggregate_inference"],
             "rollback_metadata": canary["promotion"]["rollback_metadata"],
             "draft": draft_result.get("draft"),
