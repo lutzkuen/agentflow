@@ -132,7 +132,7 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(meta["thinking_gate"]["reason"], "current-thinking-request")
         self.assertEqual(meta["policy_source"], "local-default")
 
-    def test_tool_result_with_assistant_thinking_history_routes_to_haiku_without_current_thinking(self):
+    def test_tool_result_with_assistant_thinking_history_stays_on_sonnet_without_current_thinking(self):
         body = {
             "model": SONNET_DEFAULT,
             "messages": [
@@ -152,13 +152,13 @@ class RouterTest(unittest.TestCase):
 
         routed, meta = route_model(body)
 
-        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["workflow_phase"], "tool-execution")
         self.assertEqual(meta["workflow_phase_reason"], "last-user-tool-result")
-        self.assertEqual(meta["reason"], "tool-result processing turn routed to Haiku")
-        self.assertEqual(meta["thinking_gate"]["status"], "bypassed")
-        self.assertEqual(meta["thinking_gate"]["reason"], "tool-result-current-turn-without-top-level-thinking")
+        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertEqual(meta["thinking_gate"]["status"], "blocked")
+        self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
 
     def test_workflow_phase_classifier_identifies_planning_turn(self):
         body = {
@@ -332,7 +332,7 @@ rules:
             finally:
                 importlib.reload(router_module)
 
-    def test_disabled_thinking_with_assistant_thinking_history_routes_tool_result_to_haiku(self):
+    def test_disabled_thinking_with_assistant_thinking_history_keeps_tool_result_on_sonnet(self):
         body = {
             "model": SONNET_DEFAULT,
             "thinking": {"type": "disabled"},
@@ -353,11 +353,12 @@ rules:
 
         routed, meta = route_model(body)
 
-        self.assertEqual(routed, HAIKU_DEFAULT)
+        self.assertEqual(routed, SONNET_DEFAULT)
         self.assertEqual(meta["category"], "tool-result")
         self.assertEqual(meta["workflow_phase"], "tool-execution")
-        self.assertEqual(meta["reason"], "tool-result processing turn routed to Haiku")
-        self.assertEqual(meta["thinking_gate"]["status"], "bypassed")
+        self.assertEqual(meta["reason"], "keep requested model for thinking request")
+        self.assertEqual(meta["thinking_gate"]["status"], "blocked")
+        self.assertEqual(meta["thinking_gate"]["reason"], "assistant-thinking-history")
 
     def test_openai_canary_is_enabled_for_tool_light_gpt_5_4_by_default(self):
         routed, meta = router_module.route_openai_model({
@@ -925,14 +926,16 @@ rules: []
                     self.assertEqual(routed, manual_router.SONNET_DEFAULT)
                     self.assertEqual(meta["workflow_phase"], "thinking")
                     self.assertEqual(meta["workflow_phase_reason"], "thinking-history")
-                    self.assertEqual(meta["phase_canary"]["status"], "ineligible")
-                    self.assertEqual(meta["phase_canary"]["reason"], "workflow-phase-not-enabled")
+                    self.assertEqual(meta["phase_canary"]["status"], "safety_stopped")
+                    self.assertEqual(meta["phase_canary"]["reason"], "thinking-safety-gate")
+                    self.assertEqual(meta["phase_canary"]["cohort"], "safety_stopped")
+                    self.assertIn("thinking-history-blocked", meta["phase_canary"]["safety_stop"]["reason_codes"])
                     self.assertTrue(meta["phase_canary"]["safety_gates"]["block_thinking_history"])
                     self.assertEqual(meta["thinking_gate"]["status"], "blocked")
             finally:
                 importlib.reload(router_module)
 
-    def test_phase_canary_evaluates_tool_result_with_thinking_history_and_safety_stop(self):
+    def test_phase_canary_safety_stops_tool_result_with_thinking_history(self):
         with TemporaryDirectory() as tmp:
             try:
                 with self._reload_with_routing_yaml(
@@ -969,15 +972,17 @@ rules: []
 
                     routed, meta = manual_router.route_model(body)
 
-                    self.assertEqual(routed, manual_router.HAIKU_DEFAULT)
+                    self.assertEqual(routed, manual_router.SONNET_DEFAULT)
                     self.assertEqual(meta["workflow_phase"], "tool-execution")
-                    self.assertEqual(meta["reason"], "phase canary selected Sonnet-to-Haiku route")
-                    self.assertEqual(meta["thinking_gate"]["status"], "bypassed")
-                    self.assertEqual(meta["phase_canary"]["status"], "applied")
+                    self.assertEqual(meta["reason"], "phase canary safety stop; keep requested model")
+                    self.assertEqual(meta["thinking_gate"]["status"], "blocked")
+                    self.assertEqual(meta["phase_canary"]["status"], "safety_stopped")
+                    self.assertEqual(meta["phase_canary"]["cohort"], "safety_stopped")
+                    self.assertEqual(meta["phase_canary"]["reason"], "thinking-safety-gate")
                     self.assertEqual(meta["phase_canary"]["workflow_phase"], "tool-execution")
                     self.assertTrue(meta["phase_canary"]["safety_stop"]["enabled"])
-                    self.assertEqual(meta["phase_canary"]["safety_stop"]["status"], "skipped")
-                    self.assertEqual(meta["phase_canary"]["safety_stop"]["reason_codes"], ["db-missing"])
+                    self.assertEqual(meta["phase_canary"]["safety_stop"]["status"], "tripped")
+                    self.assertEqual(meta["phase_canary"]["safety_stop"]["reason_codes"], ["thinking-history-blocked"])
             finally:
                 importlib.reload(router_module)
 

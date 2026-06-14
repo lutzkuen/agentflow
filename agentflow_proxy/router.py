@@ -245,21 +245,9 @@ def _has_top_level_thinking(body: dict[str, Any]) -> bool:
     return False
 
 
-def _allows_tool_result_thinking_history_routing(body: dict[str, Any], category: str) -> bool:
-    return category == "tool-result" and _has_assistant_thinking_history(body) and not _has_top_level_thinking(body)
-
-
 def _thinking_gate_meta(body: dict[str, Any], category: str) -> dict[str, Any]:
     top_level = _has_top_level_thinking(body)
     historical = _has_assistant_thinking_history(body)
-    if historical and category == "tool-result" and not top_level:
-        return {
-            "status": "bypassed",
-            "reason": "tool-result-current-turn-without-top-level-thinking",
-            "top_level_thinking": False,
-            "assistant_thinking_history": True,
-            "metadata_only": True,
-        }
     if top_level or historical:
         return {
             "status": "blocked",
@@ -957,6 +945,7 @@ def phase_canary_decision(
     category: str,
     stream: bool,
     phase_meta: dict[str, str],
+    thinking_gate: dict[str, Any] | None = None,
     session_id: str | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     target_key = str(ROUTING_PHASE_CANARY.get("target_model") or "haiku")
@@ -988,6 +977,31 @@ def phase_canary_decision(
     model_pattern = str(ROUTING_PHASE_CANARY.get("model_pattern") or "sonnet").lower()
     if model_pattern and model_pattern not in requested_l:
         meta.update({"status": "ineligible", "reason": "requested-model-not-enabled"})
+        return requested, meta
+
+    safety_gates = ROUTING_PHASE_CANARY.get("safety_gates") if isinstance(ROUTING_PHASE_CANARY.get("safety_gates"), dict) else {}
+    gate = thinking_gate if isinstance(thinking_gate, dict) else {}
+    top_level_thinking = bool(gate.get("top_level_thinking"))
+    thinking_history = bool(gate.get("assistant_thinking_history"))
+    reason_codes: list[str] = []
+    if top_level_thinking and _as_bool(safety_gates.get("block_top_level_thinking"), True):
+        reason_codes.append("top-level-thinking-blocked")
+    if thinking_history and _as_bool(safety_gates.get("block_thinking_history"), True):
+        reason_codes.append("thinking-history-blocked")
+    if reason_codes:
+        meta.update({
+            "status": "safety_stopped",
+            "cohort": "safety_stopped",
+            "reason": "thinking-safety-gate",
+            "actual_forwarded_model": requested,
+            "safety_stop": {
+                "enabled": True,
+                "status": "tripped",
+                "tripped": True,
+                "reason_codes": sorted(reason_codes),
+                "metadata_only": True,
+            },
+        })
         return requested, meta
 
     phase = str(phase_meta.get("workflow_phase") or "unknown")
@@ -1614,6 +1628,8 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
         if session_memory_meta:
             last_session_memory_meta = session_memory_meta
         if matched:
+            if thinking_gate.get("status") == "blocked":
+                continue
             matched_promoted_rules.add(index)
             routed, meta = _route_from_rule(
                 rule,
@@ -1635,6 +1651,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             category=category,
             stream=stream,
             phase_meta=phase_meta,
+            thinking_gate=thinking_gate,
             session_id=session_id,
         )
         if canary_meta.get("reason") != "requested-model-not-enabled":
@@ -1663,7 +1680,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             meta["thinking_gate"] = thinking_gate
             return routed, meta
 
-    if uses_thinking(body) and not _allows_tool_result_thinking_history_routing(body, category):
+    if uses_thinking(body):
         return requested, {
             "enabled": True,
             "requested_model": requested,

@@ -4145,6 +4145,80 @@ def openai_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any =
     return 0
 
 
+def _extract_anthropic_routing_report(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("schema") == "agentflow.pass_through_routing_activation_candidates.v1":
+        return payload
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    report = evidence.get("pass_through_routing_report")
+    if isinstance(report, dict):
+        return report
+    stats_summary = evidence.get("stats_summary") if isinstance(evidence.get("stats_summary"), dict) else {}
+    report = stats_summary.get("pass_through_routing_report")
+    if isinstance(report, dict):
+        return report
+    report = payload.get("pass_through_routing_report")
+    if isinstance(report, dict):
+        return report
+    return payload
+
+
+def anthropic_routing_canary_stage_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Stage default-off Anthropic Sonnet-to-Haiku tool-result routing canary drafts from aggregate local metadata")
+    parser.add_argument(
+        "routing_report",
+        help="Pass-through routing activation report JSON, research plan JSON, or '-' for stdin.",
+    )
+    parser.add_argument("--draft-id", help="Optional local draft ID. When multiple candidates are staged, a numeric suffix is added.")
+    parser.add_argument("--canary-fraction", type=float, default=0.05, help="Proposed deterministic canary fraction, default: 0.05.")
+    parser.add_argument("--holdout-fraction", type=float, default=0.10, help="Proposed deterministic holdout fraction, default: 0.10.")
+    parser.add_argument("--min-samples", type=int, default=5, help="Minimum candidate samples before staging, default: 5.")
+    parser.add_argument("--top-candidates", type=int, default=1, help="Maximum ranked eligible candidates to stage, default: 1.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    try:
+        payload = _read_json_input(str(args.routing_report), stdin=stdin)
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.anthropic_routing_canary_stage_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_active_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.anthropic_routing_canary_stage import build_anthropic_routing_canary_stage_report
+
+    result = build_anthropic_routing_canary_stage_report(
+        _extract_anthropic_routing_report(payload),
+        canary_fraction=args.canary_fraction,
+        holdout_fraction=args.holdout_fraction,
+        min_samples=args.min_samples,
+        top_candidates=args.top_candidates,
+        draft_id=args.draft_id,
+    )
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def claude_canary_impact_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude local routing canary impact and promotion verdicts from local metadata")
     parser.add_argument(

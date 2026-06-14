@@ -1,0 +1,146 @@
+import io
+import json
+import unittest
+
+from agentflow_proxy import cli
+from agentflow_proxy.anthropic_routing_canary_stage import build_anthropic_routing_canary_stage_report
+
+
+def _pass_through_report() -> dict:
+    return {
+        "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+        "generated_at": "2026-06-14T19:30:00+00:00",
+        "buckets": [
+            {
+                "rank": 1,
+                "provider": "anthropic",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "category": "tool-result",
+                "sample_count": 1102,
+                "actionability": "actionable",
+                "required_local_executor": "anthropic-routing-rules",
+                "estimated_savings_per_1000_calls_usd": 4.5,
+                "candidate_reason": "phase/category metadata matches existing local Haiku executor shapes",
+            },
+            {
+                "rank": 2,
+                "provider": "anthropic",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "category": "tool-result",
+                "sample_count": 32,
+                "actionability": "needs-lifecycle-evidence",
+                "no_op_reason": "Anthropic aggregate bucket needs phase or thinking/tool safety evidence before downgrade",
+                "required_local_executor": "anthropic-routing-rules",
+                "estimated_savings_per_1000_calls_usd": 4.5,
+            },
+        ],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+        },
+    }
+
+
+def _assert_privacy_clean(testcase: unittest.TestCase, payload: dict) -> None:
+    rendered = json.dumps(payload, sort_keys=True)
+    for forbidden in (
+        "raw prompt secret",
+        "raw response secret",
+        "request-id-secret",
+        "session-id-secret",
+        "cache-key-secret",
+        "/tmp/private",
+    ):
+        testcase.assertNotIn(forbidden, rendered)
+    testcase.assertFalse(payload["privacy"]["provider_calls_made"])
+    testcase.assertFalse(payload["privacy"]["managed_server_calls_made"])
+    testcase.assertFalse(payload["privacy"]["raw_prompts_included"])
+    testcase.assertFalse(payload["privacy"]["provider_bodies_included"])
+
+
+class AnthropicRoutingCanaryStageTests(unittest.TestCase):
+    def test_stages_tool_result_sonnet_to_haiku_canary_with_projected_lifecycle(self) -> None:
+        result = build_anthropic_routing_canary_stage_report(
+            _pass_through_report(),
+            canary_fraction=0.05,
+            holdout_fraction=0.10,
+            min_samples=5,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["schema"], "agentflow.anthropic_routing_canary_stage.v1")
+        self.assertEqual(result["summary"]["candidate_count"], 2)
+        self.assertEqual(result["summary"]["eligible_candidate_count"], 1)
+        self.assertEqual(result["summary"]["staged_count"], 1)
+        self.assertEqual(result["summary"]["omitted_count"], 1)
+        self.assertEqual(result["summary"]["projected_canary_applied_count"], 56)
+        self.assertEqual(result["summary"]["projected_canary_holdout_count"], 111)
+        self.assertEqual(result["summary"]["projected_safety_stopped_count"], 32)
+
+        draft = result["staged_drafts"][0]
+        self.assertFalse(draft["active_policy_changed"])
+        self.assertFalse(draft["wrote_active_policy_files"])
+        canary = draft["policies"]["routing"]["phase_canary"]
+        self.assertFalse(canary["enabled"])
+        self.assertTrue(canary["review_only"])
+        self.assertEqual(canary["provider"], "anthropic")
+        self.assertEqual(canary["source_surface"], "anthropic_messages")
+        self.assertEqual(canary["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(canary["target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(canary["eligible_categories"], ["tool-result"])
+        self.assertEqual(canary["eligible_workflow_phases"], ["tool-execution"])
+        self.assertTrue(canary["stream"])
+        self.assertEqual(canary["max_text_chars"], 0)
+        self.assertTrue(canary["safety_gates"]["block_thinking_history"])
+        self.assertTrue(canary["safety_gates"]["block_unsafe_tool_call_context"])
+
+        lifecycle = canary["promotion"]["projected_anthropic_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 56)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 111)
+        self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 0)
+        self.assertEqual(lifecycle["estimated_savings_per_1000_calls_usd"], 4.5)
+
+        omitted = result["omitted"][0]
+        self.assertEqual(omitted["status"], "safety_stopped")
+        self.assertIn(omitted["reason"], {"needs-lifecycle-evidence", "thinking-routing-guard"})
+        self.assertIn("thinking-routing-guard", omitted["projected_lifecycle_evidence"]["blocker_codes"])
+        _assert_privacy_clean(self, result)
+
+    def test_cli_extracts_nested_research_plan_report(self) -> None:
+        plan = {"schema": "agentflow.orchestrator_research_plan.v1", "evidence": {"pass_through_routing_report": _pass_through_report()}}
+        stdout = io.StringIO()
+
+        code = cli.anthropic_routing_canary_stage_cli(["-", "--draft-id", "anthropic-stage-test"], stdin=io.StringIO(json.dumps(plan)), stdout=stdout)
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.anthropic_routing_canary_stage.v1")
+        self.assertEqual(payload["staged_drafts"][0]["draft_id"], "anthropic-stage-test")
+        self.assertEqual(payload["summary"]["projected_canary_applied_count"], 56)
+        _assert_privacy_clean(self, payload)
+
+    def test_rejects_raw_payload_keys(self) -> None:
+        report = _pass_through_report()
+        report["raw_request"] = {"prompt": "raw prompt secret", "request_id": "request-id-secret"}
+
+        result = build_anthropic_routing_canary_stage_report(report)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["type"], "raw_payload_rejected")
+        _assert_privacy_clean(self, result)
+
+
+if __name__ == "__main__":
+    unittest.main()
