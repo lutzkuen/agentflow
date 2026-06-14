@@ -212,6 +212,20 @@ _CRUNCH_OPPORTUNITY_REPORT_KEYS = (
     "repeated_scaffold_opportunity",
 )
 
+_LOCAL_POLICY_REPRESENTATIONS = {
+    "routing": ("routing", "routing_rules.yaml"),
+    "crunch": ("crunch", "crunch_rules.yaml"),
+    "cache": ("cache", "cache_rules.yaml"),
+    "routing-experiment": ("routing_experiments", "routing_experiments.yaml"),
+    "codex-app": ("codex_app", "codex_app_rules.yaml"),
+}
+
+_UNSUPPORTED_LOCAL_ACTION_FAMILIES = {
+    "server-content-processing",
+    "prompt-replacement",
+    "provider-body-rewrite",
+}
+
 
 def redact_text(value: str) -> str:
     text = _SECRET_RE.sub(SENSITIVE_SECRET, value)
@@ -513,6 +527,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     crunch_signal = _crunch_savings_signal(stats)
     if crunch_signal is not None:
         summary["crunch_savings_signal"] = crunch_signal
+    managed_health = _managed_recommendation_health_signal(stats)
+    if managed_health is not None:
+        summary["managed_recommendation_health"] = managed_health
     return summary
 
 
@@ -708,6 +725,259 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             "request_ids_included": False,
             "session_ids_included": False,
             "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
+def _breakdown_value(row: dict[str, Any]) -> str:
+    for key in ("value", "reason", "code", "status", "state", "kind"):
+        text = str(row.get(key) or "").strip()
+        if text:
+            return sanitize_value(text)
+    return ""
+
+
+def _breakdown_count(row: dict[str, Any]) -> int:
+    for key in ("count", "rows", "candidate_count", "sample_count", "warning_count"):
+        if row.get(key) is not None:
+            return _to_int(row.get(key), 1)
+    return 1
+
+
+def _managed_health_report(stats: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "managed_recommendations",
+        "managed_recommendation_report",
+        "managed_recommendation_status",
+    ):
+        report = stats.get(key)
+        if isinstance(report, dict):
+            return report
+    health = stats.get("managed_recommendation_health")
+    if isinstance(health, dict):
+        return {"recommendation_health": health}
+    phase = stats.get("phase_routing")
+    if isinstance(phase, dict) and isinstance(phase.get("managed_recommendation_health"), dict):
+        return {"recommendation_health": phase["managed_recommendation_health"]}
+    return None
+
+
+def _managed_health_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    health = report.get("recommendation_health") if isinstance(report.get("recommendation_health"), dict) else {}
+    latest = health.get("latest_fetch_review") if isinstance(health.get("latest_fetch_review"), dict) else {}
+    rows = latest.get("rows") if isinstance(latest.get("rows"), list) else health.get("rows")
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
+def _managed_omission_reason(row: dict[str, Any], *, fallback: str = "unknown") -> str:
+    details = row.get("details") if isinstance(row.get("details"), dict) else {}
+    for source in (row, details):
+        for key in ("omitted_reason", "omission_reason", "reason", "code", "value", "status", "kind"):
+            text = str(source.get(key) or "").strip()
+            if text:
+                return sanitize_value(text)
+    return fallback
+
+
+def _managed_action_family(row: dict[str, Any]) -> str | None:
+    details = row.get("details") if isinstance(row.get("details"), dict) else {}
+    texts: list[str] = []
+    for source in (row, details):
+        for key in (
+            "local_action",
+            "local_action_family",
+            "action_family",
+            "required_local_action",
+            "policy_section",
+            "expected_policy_section",
+            "section",
+            "type",
+            "kind",
+            "code",
+            "reason",
+            "value",
+        ):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip().lower())
+        families = source.get("local_action_families") or source.get("action_families")
+        if isinstance(families, list):
+            texts.extend(str(item).strip().lower() for item in families if str(item).strip())
+    haystack = " ".join(texts)
+    if not haystack:
+        return None
+    if any(term in haystack for term in ("prompt-replacement", "replacement_prompt", "prompt replacement")):
+        return "prompt-replacement"
+    if any(term in haystack for term in ("provider-body", "body-rewrite", "request-rewrite", "content-processing")):
+        return "provider-body-rewrite"
+    if any(term in haystack for term in ("routing_experiment", "canary", "route-canary", "routing-experiment")):
+        return "routing-experiment"
+    if "codex" in haystack:
+        return "codex-app"
+    if any(term in haystack for term in ("cache", "replay", "exact-match")):
+        return "cache"
+    if any(term in haystack for term in ("crunch", "compaction", "summarization", "dedup", "scaffold")):
+        return "crunch"
+    if any(term in haystack for term in ("routing", "route", "model")):
+        return "routing"
+    return None
+
+
+def _local_file_backed_representation(action_family: str | None) -> dict[str, Any]:
+    if action_family in _LOCAL_POLICY_REPRESENTATIONS:
+        section, filename = _LOCAL_POLICY_REPRESENTATIONS[action_family]
+        bundled = Path(__file__).with_name(filename)
+        return {
+            "exists": bundled.exists(),
+            "policy_section": section,
+            "rule_file": filename,
+            "policy_source": "local-file-backed",
+            "reason": "file-backed-local-policy",
+        }
+    if action_family in _UNSUPPORTED_LOCAL_ACTION_FAMILIES:
+        return {
+            "exists": False,
+            "policy_section": None,
+            "rule_file": None,
+            "policy_source": None,
+            "reason": "server-content-processing-not-local-policy",
+        }
+    return {
+        "exists": False,
+        "policy_section": None,
+        "rule_file": None,
+        "policy_source": None,
+        "reason": "unknown-local-action-family",
+    }
+
+
+def _managed_omission_priority(reason: str, representation: dict[str, Any]) -> int:
+    reason_l = reason.lower()
+    if not representation.get("exists"):
+        return 10
+    if any(term in reason_l for term in ("safety", "privacy", "raw", "unsupported", "no-local", "omitted")):
+        return 20
+    if any(term in reason_l for term in ("server-error", "invalid", "threshold", "stale", "insufficient")):
+        return 30
+    if any(term in reason_l for term in ("disabled", "missing", "historical-null")):
+        return 40
+    return 50
+
+
+def _managed_omission_row(row: dict[str, Any], *, source: str) -> dict[str, Any]:
+    reason = _managed_omission_reason(row)
+    action_family = _managed_action_family(row)
+    representation = _local_file_backed_representation(action_family)
+    return {
+        "source": source,
+        "omitted_reason": reason,
+        "count": _breakdown_count(row),
+        "local_action_family": action_family or "unknown",
+        "local_file_backed_representation": representation,
+        "follow_up_owner": "local-policy" if representation.get("exists") else "blocked-boundary-review",
+        "next_action": "review-local-policy-representation" if representation.get("exists") else "define-or-keep-omitted-local-action",
+        "_priority": _managed_omission_priority(reason, representation),
+    }
+
+
+def _managed_recommendation_health_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
+    calls = _to_int(stats.get("today_calls") or stats.get("calls"))
+    report = _managed_health_report(stats)
+    rows: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {}
+    config: dict[str, Any] = {}
+    report_schema = None
+
+    if report is not None:
+        report_schema = sanitize_value(report.get("schema"))
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        config = report.get("current_config") if isinstance(report.get("current_config"), dict) else {}
+        for row in report.get("reason_breakdown") or []:
+            if isinstance(row, dict):
+                reason = _breakdown_value(row)
+                if reason and reason not in {"received", "applied", "ok", "success"}:
+                    rows.append(_managed_omission_row(row, source="reason_breakdown"))
+        for row in report.get("status_breakdown") or []:
+            if isinstance(row, dict):
+                status = _breakdown_value(row)
+                if status and status not in {"received", "applied", "available"}:
+                    rows.append(_managed_omission_row(row, source="status_breakdown"))
+        for row in _managed_health_rows(report):
+            rows.append(_managed_omission_row(row, source="recommendation_health"))
+
+        if not rows and config.get("enabled") is False:
+            disabled_count = _to_int(summary.get("disabled_count") or summary.get("window_calls") or calls)
+            rows.append(
+                _managed_omission_row(
+                    {"reason": "managed-recommendations-disabled", "count": disabled_count},
+                    source="current_config",
+                )
+            )
+
+    if rows:
+        rows.sort(key=lambda item: (_to_int(item.get("_priority"), 50), -_to_int(item.get("count"))))
+        ranked = []
+        for rank, row in enumerate(rows[:10], start=1):
+            clean = dict(row)
+            clean.pop("_priority", None)
+            clean["rank"] = rank
+            ranked.append(clean)
+        top = ranked[0]
+        status = "omission-reasons-ranked"
+        missing: list[str] = []
+    elif report is not None:
+        ranked = []
+        top = None
+        status = "no-omission-reasons-reported"
+        missing = []
+    elif calls > 0:
+        ranked = []
+        top = {
+            "rank": 1,
+            "source": "missing_report",
+            "omitted_reason": "managed-recommendation-health-report-missing",
+            "count": calls,
+            "local_action_family": "unknown",
+            "local_file_backed_representation": _local_file_backed_representation(None),
+            "follow_up_owner": "local-policy",
+            "next_action": "emit-managed-recommendation-health-rollup",
+        }
+        status = "missing-managed-recommendation-health-report"
+        missing = ["managed_recommendations_report", "omitted_local_action_reason"]
+    else:
+        return None
+
+    represented = sum(1 for row in ranked if row["local_file_backed_representation"].get("exists"))
+    unrepresented = len(ranked) - represented
+    return {
+        "schema": "agentflow.managed_recommendation_handoff_health.v1",
+        "status": status,
+        "source_schema": report_schema,
+        "calls": calls,
+        "summary": {
+            "window_calls": _to_int(summary.get("window_calls") or calls),
+            "metadata_rows": _to_int(summary.get("metadata_rows")),
+            "received_count": _to_int(summary.get("received_count")),
+            "applied_count": _to_int(summary.get("applied_count")),
+            "observed_savings_usd": round(_to_float(summary.get("observed_savings_usd")), 8),
+            "ranked_omission_count": len(ranked),
+            "local_file_backed_count": represented,
+            "no_local_representation_count": unrepresented,
+            "managed_dependency": "optional",
+        },
+        "top_omission": top,
+        "omissions": ranked,
+        "missing_measurements": missing,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
             "absolute_paths_included": False,
         },
     }
@@ -1321,6 +1591,62 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
     )
 
 
+def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    signal = (
+        stats_summary.get("managed_recommendation_health")
+        if isinstance(stats_summary.get("managed_recommendation_health"), dict)
+        else {}
+    )
+    if not signal:
+        return None
+    calls = _to_int(signal.get("calls") or stats_summary.get("calls") or stats_summary.get("today_calls"))
+    top = signal.get("top_omission") if isinstance(signal.get("top_omission"), dict) else {}
+    status = str(signal.get("status") or "unknown")
+    omitted_reason = str(top.get("omitted_reason") or status or "unknown")
+    representation = (
+        top.get("local_file_backed_representation")
+        if isinstance(top.get("local_file_backed_representation"), dict)
+        else {}
+    )
+    represented = bool(representation.get("exists"))
+    if status == "missing-managed-recommendation-health-report":
+        blocker = "managed-recommendation-health-report-missing"
+        path = "Emit a bounded managed recommendation health rollup before choosing local policy or managed optimizer follow-up."
+        confidence = "low"
+        safety_status = "blocked"
+        score = float(calls) * 0.05
+    elif status == "no-omission-reasons-reported":
+        blocker = "managed-recommendation-no-omission-reasons-reported"
+        path = "Keep managed recommendations as local-only/no-op until omitted local-action reasons appear in health metadata."
+        confidence = "low"
+        safety_status = "blocked"
+        score = float(calls) * 0.05
+    elif represented:
+        blocker = f"managed-recommendation-{omitted_reason}"
+        path = "Hand the top omitted managed recommendation reason to the matching local file-backed policy representation."
+        confidence = "medium"
+        safety_status = "review-required"
+        score = float(_to_int(top.get("count")) or calls) + 250.0
+    else:
+        blocker = "managed-recommendation-no-local-representation"
+        path = "Keep the recommendation omitted or define a safe local file-backed representation before any local handoff."
+        confidence = "medium"
+        safety_status = "blocked"
+        score = float(_to_int(top.get("count")) or calls) + 150.0
+
+    return _candidate(
+        lever="managed-recommendation",
+        provider_surface_bucket=str(top.get("local_action_family") or "mixed"),
+        blocker=blocker,
+        estimated_savings_path=path,
+        projected_savings_signal=signal,
+        confidence=confidence,
+        sequencing="Use after routing/cache/crunch evidence and before creating managed-server work so the local handoff boundary is explicit.",
+        safety_status=safety_status,
+        score=score,
+    )
+
+
 def _fallback_candidates(existing_levers: set[str], stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
     calls = _to_int(stats_summary.get("calls") or stats_summary.get("today_calls"))
     fallbacks: list[dict[str, Any]] = []
@@ -1365,6 +1691,7 @@ def _optimization_candidates(
             _cache_candidate(stats_summary),
             _routing_candidate(stats_summary),
             _crunch_candidate(stats_summary),
+            _managed_recommendation_candidate(stats_summary),
             _diagnostic_candidate(diagnostics),
         )
         if item is not None

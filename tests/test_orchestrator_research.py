@@ -448,6 +448,108 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(crunch_candidate["blocker"], "missing-crunch-savings-signal")
         self.assertEqual(crunch_candidate["projected_savings_signal"]["status"], "missing-crunch-measurement")
 
+    def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "managed_recommendations": {
+                    "schema": "agentflow.managed_recommendations.v1",
+                    "summary": {
+                        "window_calls": 400,
+                        "metadata_rows": 40,
+                        "received_count": 10,
+                        "applied_count": 0,
+                        "observed_savings_usd": 0.0,
+                    },
+                    "reason_breakdown": [
+                        {
+                            "value": "provider-capability-mismatch",
+                            "count": 12,
+                            "local_action": "routing",
+                        },
+                        {
+                            "value": "prompt-replacement-omitted",
+                            "count": 3,
+                            "local_action": "prompt_replacement",
+                            "candidate_id": "managed-candidate-secret",
+                        },
+                    ],
+                    "recommendation_health": {
+                        "latest_fetch_review": {
+                            "rows": [
+                                {
+                                    "kind": "omitted_candidate",
+                                    "code": "no-local-representation",
+                                    "candidate_id": "health-candidate-secret",
+                                    "details": {
+                                        "local_action": "prompt_replacement",
+                                        "reason": "server-content-processing",
+                                    },
+                                }
+                            ]
+                        }
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
+        self.assertEqual(signal["schema"], "agentflow.managed_recommendation_handoff_health.v1")
+        self.assertEqual(signal["status"], "omission-reasons-ranked")
+        self.assertEqual(signal["summary"]["local_file_backed_count"], 1)
+        self.assertGreaterEqual(signal["summary"]["no_local_representation_count"], 1)
+        top = signal["top_omission"]
+        self.assertEqual(top["omitted_reason"], "prompt-replacement-omitted")
+        self.assertEqual(top["local_action_family"], "prompt-replacement")
+        self.assertFalse(top["local_file_backed_representation"]["exists"])
+        self.assertEqual(
+            top["local_file_backed_representation"]["reason"],
+            "server-content-processing-not-local-policy",
+        )
+        routing_omission = next(row for row in signal["omissions"] if row["omitted_reason"] == "provider-capability-mismatch")
+        self.assertTrue(routing_omission["local_file_backed_representation"]["exists"])
+        self.assertEqual(routing_omission["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
+
+        managed_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "managed-recommendation")
+        self.assertEqual(managed_candidate["blocker"], "managed-recommendation-no-local-representation")
+        self.assertEqual(managed_candidate["projected_savings_signal"]["top_omission"]["omitted_reason"], "prompt-replacement-omitted")
+        self.assertTrue(managed_candidate["privacy"]["metadata_only"])
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("managed-candidate-secret", rendered)
+        self.assertNotIn("health-candidate-secret", rendered)
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["provider_bodies_included"])
+        self.assertFalse(signal["privacy"]["request_ids_included"])
+        self.assertFalse(signal["privacy"]["session_ids_included"])
+
+    def test_managed_recommendation_candidate_records_missing_health_report(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
+        self.assertEqual(signal["status"], "missing-managed-recommendation-health-report")
+        self.assertEqual(signal["top_omission"]["omitted_reason"], "managed-recommendation-health-report-missing")
+        self.assertIn("managed_recommendations_report", signal["missing_measurements"])
+        self.assertFalse(signal["top_omission"]["local_file_backed_representation"]["exists"])
+
+        managed_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "managed-recommendation")
+        self.assertEqual(managed_candidate["blocker"], "managed-recommendation-health-report-missing")
+        self.assertEqual(managed_candidate["projected_savings_signal"]["status"], "missing-managed-recommendation-health-report")
+
     def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
         plan = build_research_plan(
             issues=[],
