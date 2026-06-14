@@ -978,18 +978,36 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "recommended_count",
             "planned_count",
             "summary_model_hint_rows",
+            "matched_candidates",
+        ),
+    )
+    rows_considered = _first_int(
+        summary,
+        (
+            "rows_considered",
+            "total_rows_considered",
+            "scanned_rows",
+            "scanned_call_count",
+            "sampled_call_count",
+            "calls",
+            "window_calls",
         ),
     )
     matched_count = _first_int(
         summary,
         (
             "matched_count",
+            "matched_candidates",
             "scanned_call_count",
             "sampled_call_count",
             "turn_start_rows",
             "completed_rows",
+            "applied_count",
+            "crunched_count",
         ),
     )
+    applied_count = _first_int(summary, ("applied_count", "crunched_count", "summary_applied_count"))
+    skipped_count = _first_int(summary, ("skipped_count", "no_op_count", "ineligible_count", "suppressed_count"))
     projected_usd = _first_numeric(
         summary,
         (
@@ -1018,17 +1036,101 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         ),
     )
     status = "projected-savings-ranked" if projected_usd > 0 or projected_tokens > 0 or projected_chars > 0 else "no-positive-projection"
+    no_op_reason = sanitize_value(
+        summary.get("no_op_reason")
+        or summary.get("top_no_op_reason")
+        or summary.get("top_blocker_reason")
+        or blocker_value
+        or ("no-positive-projected-savings" if status == "no-positive-projection" else None)
+    )
+    next_action = sanitize_value(
+        summary.get("top_next_action")
+        or summary.get("next_action")
+        or (
+            "rank-crunch-opportunity-follow-up"
+            if status == "projected-savings-ranked"
+            else "inspect-crunch-coverage-and-projection"
+        )
+    )
     return {
         "report_key": report_key,
         "schema": sanitize_value(report.get("schema")),
         "status": status,
+        "rows_considered": rows_considered,
         "candidate_count": candidate_count,
         "matched_count": matched_count,
+        "applied_count": applied_count,
+        "skipped_count": skipped_count,
         "projected_saved_usd": round(projected_usd, 6),
         "projected_saved_tokens": projected_tokens,
         "projected_saved_chars": projected_chars,
         "top_blocker": sanitize_value(blocker_value),
         "top_blocker_count": blocker_count,
+        "no_op_reason": no_op_reason,
+        "next_action": next_action,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
+def _aggregate_crunch_report_rollup(
+    stats: dict[str, Any],
+    *,
+    calls: int,
+    today_savings: float,
+    total_savings: float,
+    tokens_saved: int,
+    chars_saved: int,
+    crunched_count: int,
+) -> dict[str, Any] | None:
+    if (
+        calls <= 0
+        and crunched_count <= 0
+        and tokens_saved <= 0
+        and chars_saved <= 0
+        and today_savings <= 0
+        and total_savings <= 0
+    ):
+        return None
+    projected_tokens = max(0, tokens_saved)
+    projected_chars = max(0, chars_saved)
+    projected_usd = max(0.0, today_savings or total_savings)
+    skipped_count = max(0, calls - crunched_count)
+    if crunched_count > 0 or tokens_saved > 0 or chars_saved > 0 or projected_usd > 0:
+        no_op_reason = None
+        next_action = "rank-observed-crunch-family-follow-up"
+        status = "projected-savings-ranked"
+    else:
+        no_op_reason = "no-observed-or-projected-crunch-savings"
+        next_action = "inspect-crunch-coverage-and-projection"
+        status = "no-positive-projection"
+    return {
+        "report_key": "aggregate_crunch_measurement",
+        "schema": "agentflow.aggregate_crunch_measurement.v1",
+        "status": status,
+        "rows_considered": calls,
+        "candidate_count": crunched_count,
+        "matched_count": crunched_count,
+        "applied_count": crunched_count,
+        "skipped_count": skipped_count,
+        "projected_saved_usd": round(projected_usd, 6),
+        "projected_saved_tokens": projected_tokens,
+        "projected_saved_chars": projected_chars,
+        "observed_savings_usd": round(total_savings, 6),
+        "today_observed_savings_usd": round(today_savings, 6),
+        "avg_crunch_ratio": round(_to_float(stats.get("avg_crunch_ratio")), 6),
+        "top_blocker": no_op_reason,
+        "top_blocker_count": skipped_count if no_op_reason else 0,
+        "no_op_reason": no_op_reason,
+        "next_action": next_action,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -1065,6 +1167,18 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             rollup = _crunch_report_rollup("request_shape_crunch_opportunity", shape_crunch)
             if rollup is not None:
                 reports.append(rollup)
+    if not reports:
+        aggregate_rollup = _aggregate_crunch_report_rollup(
+            stats,
+            calls=calls,
+            today_savings=today_savings,
+            total_savings=total_savings,
+            tokens_saved=tokens_saved,
+            chars_saved=chars_saved,
+            crunched_count=crunched_count,
+        )
+        if aggregate_rollup is not None:
+            reports.append(aggregate_rollup)
     reports.sort(
         key=lambda item: (
             _to_float(item.get("projected_saved_usd")),
@@ -1090,7 +1204,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
         missing = []
     elif reports:
         status = "non-positive-projection"
-        missing = ["positive-projected-savings"]
+        missing = ["positive-observed-or-projected-savings"]
     elif calls > 0:
         status = "missing-crunch-measurement"
         missing = ["crunch-opportunity-report", "positive-observed-or-projected-savings"]
@@ -1760,17 +1874,23 @@ def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         next_action = "produce-crunch-activation-follow-up"
     elif status == "projected-savings-ranked":
         state = "projected-savings"
-        next_action = "produce-crunch-opportunity-measurements"
+        next_action = str(top_report.get("next_action") or "produce-crunch-opportunity-measurements")
+    elif status == "non-positive-projection":
+        state = "no-op"
+        next_action = str(top_report.get("next_action") or "inspect-crunch-coverage-and-projection")
     else:
         state = "missing-evidence"
         next_action = "emit-crunch-opportunity-report"
+    blockers = [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()]
+    if not blockers and top_report.get("no_op_reason"):
+        blockers = [str(top_report.get("no_op_reason"))]
     return {
         "lever": "crunch",
         "state": state,
         "evidence_source": signal.get("schema"),
         "local_action_family": "crunch",
         "next_action": next_action,
-        "blocker_codes": [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()],
+        "blocker_codes": blockers,
         "sample_count": _to_int(signal.get("calls")),
         "crunch_savings_usd": round(_to_float(observed.get("crunch_savings_usd")), 8),
         "today_crunch_savings_usd": round(_to_float(observed.get("today_crunch_savings_usd")), 8),
