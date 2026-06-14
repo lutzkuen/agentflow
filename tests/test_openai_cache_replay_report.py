@@ -18,6 +18,7 @@ from agentflow_proxy import cli
 from agentflow_proxy.cache_smoke import build_cache_smoke_diagnostic
 from agentflow_proxy.dashboard_app import create_dashboard_app
 from agentflow_proxy.openai_cache_replay_apply import build_openai_cache_replay_apply_plan
+from agentflow_proxy.openai_cache_replay_blocker_outcomes import build_openai_cache_replay_blocker_outcomes_report
 from agentflow_proxy.openai_cache_replay_dry_run import build_openai_cache_replay_dry_run
 from agentflow_proxy.openai_cache_replay_impact import build_openai_cache_replay_impact_report
 from agentflow_proxy.openai_cache_replay_readiness import build_openai_cache_replay_readiness_report
@@ -1019,6 +1020,140 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         self.assertFalse(diagnostics["privacy"]["request_fingerprints_included"])
         self.assertFalse(diagnostics["privacy"]["raw_request_bodies_included"])
         self.assertFalse(diagnostics["provider_calls_made"])
+
+    def test_openai_cache_replay_blocker_outcomes_aggregate_dependency_checks_and_noops(self) -> None:
+        def replay_meta(
+            *,
+            candidate_id: str,
+            rule_id: str,
+            canary_status: str,
+            cohort: str,
+            reason: str,
+            projected: float = 0.02,
+        ) -> dict[str, object]:
+            rule: dict[str, object] = {
+                "rule_id": rule_id,
+                "candidate_id": candidate_id,
+                "policy_source": "managed-recommended",
+                "scope": "session",
+                "canary": {
+                    "enabled": True,
+                    "selected": cohort == "canary_applied",
+                    "cohort": cohort,
+                    "fraction": 0.5,
+                    "unit": "session",
+                    "status": "applied",
+                    "pattern_hashes": ["sha256:" + "d" * 64],
+                },
+            }
+            return {
+                "pattern_rule": rule,
+                "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": rule_id,
+                    "candidate_id": candidate_id,
+                    "policy_source": "managed-recommended",
+                    "status": canary_status,
+                    "reason": reason,
+                    "canary": rule["canary"],
+                    "projected_input_savings_usd": projected,
+                },
+                "estimated_saved_cost_usd": projected,
+                "cache_replay_blocker_reasons": [reason] if reason == "stale-risk-blockers" else [],
+            }
+
+        self._log_openai_call(request_fingerprint="raw-ready-cache-replay-fingerprint", cost=0.01)
+        self._log_openai_call(request_fingerprint="raw-ready-cache-replay-fingerprint", cost=0.03)
+        self._log_openai_call(
+            endpoint="chat_completions",
+            category="tool-light",
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            has_tools=True,
+            file_dependency_audit={
+                **self._audit(reason="file-dependency-missing", safe=False),
+                "paths": ["/tmp/private-openai-file.py"],
+                "root_path": "/tmp",
+            },
+            cost=0.04,
+        )
+        self._log_openai_call(
+            cache_status="skipped",
+            cache_reason="streaming",
+            stream=1,
+            cost=0.05,
+        )
+        self._log_openai_call(
+            cache_status="hit",
+            cache_reason="stale-risk-blockers",
+            cache_hit=1,
+            cost=0.0,
+            cost_baseline=0.02,
+            cache_extra=replay_meta(
+                candidate_id="raw-cache-key / request_id session secret",
+                rule_id="raw-rule-id / cache key",
+                canary_status="applied",
+                cohort="canary_applied",
+                reason="stale-risk-blockers",
+            ),
+        )
+
+        with patch.dict(os.environ, {"AGENTFLOW_CACHE_CANARY_POLICY": str(Path(self.tmpdir.name) / "missing.yaml")}):
+            report = build_openai_cache_replay_blocker_outcomes_report(
+                self.store,
+                opportunity_limit=20,
+                impact_limit=20,
+            )
+
+        self.assertEqual(report["schema"], "agentflow.openai_cache_replay_blocker_outcomes.v1")
+        self.assertEqual(report["top_next_action"], "refresh-cache-replay-dependency-evidence")
+        self.assertGreaterEqual(report["summary"]["replay_ready_count"], 2)
+        self.assertGreaterEqual(report["summary"]["stale_dependency_count"], 1)
+        self.assertGreaterEqual(report["summary"]["missing_invalidation_count"], 1)
+        self.assertGreaterEqual(report["summary"]["noop_count"], 1)
+        outcomes = {row["outcome"]: row["count"] for row in report["outcome_breakdown"]}
+        self.assertIn("replay-ready", outcomes)
+        self.assertIn("stale-dependency", outcomes)
+        self.assertIn("missing-invalidation", outcomes)
+        self.assertIn("noop", outcomes)
+        reasons = {row["value"]: row["count"] for row in report["reason_breakdown"]}
+        self.assertIn("stale-risk-blockers", reasons)
+        self.assertIn("file-dependency-missing", reasons)
+        self.assertIn("unsupported-streaming-shape", reasons)
+        self.assertFalse(report["source_reports"]["individual_candidate_ids_included"])
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["raw_provider_bodies_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        self.assertFalse(report["privacy"]["absolute_paths_included"])
+        self.assertFalse(report["privacy"]["individual_candidate_ids_included"])
+
+        output = io.StringIO()
+        exit_code = cli.openai_cache_replay_blocker_outcomes_cli(
+            ["--db", self.db_path, "--opportunity-limit", "20", "--impact-limit", "20"],
+            stdout=output,
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            json.loads(output.getvalue())["schema"],
+            "agentflow.openai_cache_replay_blocker_outcomes.v1",
+        )
+
+        rendered = json.dumps(report, sort_keys=True) + output.getvalue()
+        for forbidden in (
+            "raw prompt must not leak",
+            "raw response must not leak",
+            "raw-cache-key-secret",
+            "raw-openai-session-must-not-leak",
+            "raw-ready-cache-replay-fingerprint",
+            "raw-cache-key / request_id session secret",
+            "raw-rule-id / cache key",
+            "/tmp/private-openai-file.py",
+            "sha256:" + "d" * 64,
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_openai_cache_replay_readiness_diagnoses_staged_policy_can_run(self) -> None:
         pattern_hash = "sha256:" + "d" * 64
