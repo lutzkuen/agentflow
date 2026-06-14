@@ -1296,6 +1296,72 @@ def apply_request_shape_crunch_canary_action(
     }
 
 
+def _request_shape_crunch_follow_up(
+    *,
+    status: str,
+    recommended_action_count: int,
+    canary_applied_rows: int,
+    canary_holdout_rows: int,
+    canary_safety_stopped_rows: int,
+    top_blocker: str | None,
+    missing_measurements: list[str],
+) -> dict[str, Any]:
+    if canary_safety_stopped_rows > 0:
+        activation_state = "blocked"
+        next_action = "review-repeated-context-crunch-canary-safety-stop"
+        activation_mode = "review-required"
+        blocker = "canary-safety-stopped"
+    elif canary_applied_rows > 0 or canary_holdout_rows > 0:
+        activation_state = "measurement-required"
+        next_action = "measure-repeated-context-crunch-canary-impact"
+        activation_mode = "staged-canary-measurement"
+        blocker = "missing-crunch-canary-impact-measurement"
+    elif recommended_action_count > 0:
+        activation_state = "activation-ready"
+        next_action = "stage-repeated-context-crunch-canary"
+        activation_mode = "canary-candidate"
+        blocker = None
+    elif status == "no-repeated-context-crunch-cohorts":
+        activation_state = "missing-evidence"
+        next_action = "rank-repeated-context-crunch-dry-run"
+        activation_mode = "evidence-required"
+        blocker = "repeated-context-crunch-cohorts"
+    elif missing_measurements:
+        activation_state = "missing-measurement"
+        next_action = "inspect-crunch-coverage-and-projection"
+        activation_mode = "evidence-required"
+        blocker = missing_measurements[0]
+    else:
+        activation_state = "ranked"
+        next_action = "rank-crunch-opportunity-follow-up"
+        activation_mode = "review-required"
+        blocker = top_blocker
+
+    follow_up_missing = list(dict.fromkeys(str(item) for item in missing_measurements if str(item or "").strip()))
+    if activation_state == "measurement-required" and blocker not in follow_up_missing:
+        follow_up_missing.append(blocker)
+    if activation_state == "blocked" and blocker not in follow_up_missing:
+        follow_up_missing.append(blocker)
+
+    return {
+        "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+        "status": status,
+        "activation_state": activation_state,
+        "activation_mode": activation_mode,
+        "next_action": next_action,
+        "target_local_policy": "crunch_rules",
+        "policy_section": "crunch",
+        "local_file_backed": True,
+        "recommended_action_count": recommended_action_count,
+        "canary_applied_rows": canary_applied_rows,
+        "canary_holdout_rows": canary_holdout_rows,
+        "canary_safety_stopped_rows": canary_safety_stopped_rows,
+        "top_blocker": blocker or top_blocker,
+        "missing_measurements": follow_up_missing,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
 def build_request_shape_crunch_opportunity_dry_run(
     rollups: list[dict[str, Any]],
     *,
@@ -1437,6 +1503,15 @@ def build_request_shape_crunch_opportunity_dry_run(
         missing.append("repeated-context-crunch-cohorts")
     if projected_tokens <= 0 and observed_tokens <= 0 and projected_savings <= 0 and observed_savings <= 0:
         missing.append("positive-observed-or-projected-savings")
+    activation_follow_up = _request_shape_crunch_follow_up(
+        status=status,
+        recommended_action_count=len(recommended_actions),
+        canary_applied_rows=canary_applied_rows,
+        canary_holdout_rows=canary_holdout_rows,
+        canary_safety_stopped_rows=canary_safety_stopped_rows,
+        top_blocker=top_blocker,
+        missing_measurements=missing,
+    )
 
     return {
         "schema": CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA,
@@ -1462,10 +1537,13 @@ def build_request_shape_crunch_opportunity_dry_run(
             "projected_saved_chars": projected_chars,
             "projected_saved_usd": round(projected_savings, 6),
             "top_blocker_code": top_blocker,
+            "activation_state": activation_follow_up["activation_state"],
+            "top_next_action": activation_follow_up["next_action"],
             "provider_calls_made": 0,
             "cache_entries_written": 0,
             "policy_files_written": False,
         },
+        "activation_follow_up": activation_follow_up,
         "recommended_actions": recommended_actions,
         "readiness_breakdown": _breakdown(readiness_counts),
         "reason_breakdown": _breakdown(reason_counts),

@@ -954,9 +954,19 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                         "summary": {
                             "candidate_count": 1,
                             "matched_count": 24,
+                            "recommended_action_count": 1,
                             "projected_saved_chars": 48000,
                             "projected_saved_tokens": 12000,
                             "projected_saved_usd": 0.036,
+                            "activation_state": "activation-ready",
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                        },
+                        "activation_follow_up": {
+                            "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+                            "activation_state": "activation-ready",
+                            "next_action": "stage-repeated-context-crunch-canary",
+                            "missing_measurements": [],
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
                         },
                         "blocker_reason_breakdown": [
                             {"value": "session_id=raw-session-id-secret should not leak", "count": 1}
@@ -984,6 +994,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_opportunity_dry_run.v1")
         self.assertEqual(signal["top_report"]["projected_saved_tokens"], 12000)
         self.assertEqual(signal["top_report"]["projected_saved_usd"], 0.036)
+        self.assertEqual(signal["top_report"]["recommended_action_count"], 1)
+        self.assertEqual(signal["top_report"]["activation_state"], "activation-ready")
+        self.assertEqual(signal["top_report"]["next_action"], "stage-repeated-context-crunch-canary")
         self.assertEqual(signal["missing_measurements"], [])
 
         crunch_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "crunch")
@@ -995,6 +1008,51 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-session-id-secret", rendered)
         self.assertNotIn("cache-secret", rendered)
         self.assertNotIn("/home/lutz/private/shape_secret.py", rendered)
+
+    def test_crunch_candidate_preserves_activation_missing_measurement(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 30, "rollup_count": 1},
+                    "crunch_opportunity_dry_run": {
+                        "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                        "status": "canary-staged",
+                        "summary": {
+                            "candidate_count": 1,
+                            "matched_count": 24,
+                            "projected_saved_chars": 48000,
+                            "projected_saved_tokens": 12000,
+                            "projected_saved_usd": 0.036,
+                            "activation_state": "measurement-required",
+                            "top_next_action": "measure-repeated-context-crunch-canary-impact",
+                        },
+                        "activation_follow_up": {
+                            "schema": "agentflow.request_shape_crunch_activation_follow_up.v1",
+                            "activation_state": "measurement-required",
+                            "next_action": "measure-repeated-context-crunch-canary-impact",
+                            "missing_measurements": ["missing-crunch-canary-impact-measurement"],
+                            "privacy": {"metadata_only": True, "aggregate_only": True},
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "projected-savings-ranked")
+        self.assertEqual(signal["top_report"]["activation_state"], "measurement-required")
+        self.assertEqual(signal["top_report"]["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(signal["missing_measurements"], ["missing-crunch-canary-impact-measurement"])
 
     def test_crunch_candidate_prefers_request_shape_crunch_canary_impact(self):
         plan = build_research_plan(

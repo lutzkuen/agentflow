@@ -1029,6 +1029,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
     )
     applied_count = _first_int(summary, ("applied_count", "crunched_count", "summary_applied_count"))
     skipped_count = _first_int(summary, ("skipped_count", "no_op_count", "ineligible_count", "suppressed_count"))
+    recommended_action_count = _first_int(summary, ("recommended_action_count", "recommended_count", "planned_count"))
     projected_usd = _first_numeric(
         summary,
         (
@@ -1075,6 +1076,13 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             else "inspect-crunch-coverage-and-projection"
         )
     )
+    activation_follow_up = report.get("activation_follow_up") if isinstance(report.get("activation_follow_up"), dict) else {}
+    activation_state = sanitize_value(summary.get("activation_state") or activation_follow_up.get("activation_state"))
+    report_missing = [
+        sanitize_value(item)
+        for item in (report.get("missing_measurements") or activation_follow_up.get("missing_measurements") or [])
+        if sanitize_value(item)
+    ][:10]
     return {
         "report_key": report_key,
         "schema": sanitize_value(report.get("schema")),
@@ -1084,13 +1092,16 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
         "matched_count": matched_count,
         "applied_count": applied_count,
         "skipped_count": skipped_count,
+        "recommended_action_count": recommended_action_count,
         "projected_saved_usd": round(projected_usd, 6),
         "projected_saved_tokens": projected_tokens,
         "projected_saved_chars": projected_chars,
+        "activation_state": activation_state,
         "top_blocker": sanitize_value(blocker_value),
         "top_blocker_count": blocker_count,
         "no_op_reason": no_op_reason,
         "next_action": next_action,
+        "missing_measurements": report_missing,
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -1224,16 +1235,25 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
         or _to_int(top_report.get("projected_saved_chars")) > 0
     )
     observed_positive = today_savings > 0 or total_savings > 0 or tokens_saved > 0 or chars_saved > 0
+    top_report_missing = [
+        str(item)
+        for item in (top_report or {}).get("missing_measurements", [])
+        if str(item or "").strip()
+    ]
+    activation_state = str((top_report or {}).get("activation_state") or "")
 
     if positive_projection:
         status = "projected-savings-ranked"
-        missing: list[str] = []
+        if activation_state in {"blocked", "measurement-required", "missing-measurement", "missing-evidence"}:
+            missing = top_report_missing
+        else:
+            missing = []
     elif observed_positive:
         status = "observed-savings-ranked"
         missing = []
     elif reports:
         status = "non-positive-projection"
-        missing = ["positive-observed-or-projected-savings"]
+        missing = top_report_missing or ["positive-observed-or-projected-savings"]
     elif calls > 0:
         status = "missing-crunch-measurement"
         missing = ["crunch-opportunity-report", "positive-observed-or-projected-savings"]
