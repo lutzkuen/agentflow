@@ -277,6 +277,33 @@ def _finalize_entry(entry: dict[str, Any], meta: dict[str, Any], *extra_metas: d
     entry["policy_source"] = _policy_source(meta, *extra_metas)
     entry.update(_ids(meta, *extra_metas))
     entry["requires_local_policy_change"] = any(_local_policy_change_required(item) for item in (meta, *extra_metas))
+    for item in (meta, *extra_metas):
+        if not isinstance(item, dict):
+            continue
+        for source_key, target_key in (
+            ("projected_savings_usd", "projected_savings_usd"),
+            ("projected_saved_usd", "projected_savings_usd"),
+            ("estimated_saved_cost_usd", "projected_savings_usd"),
+            ("estimated_gross_savings_usd", "projected_savings_usd"),
+            ("gross_savings_usd", "projected_savings_usd"),
+            ("projected_holdout_savings_usd", "projected_savings_usd"),
+            ("net_savings_usd", "projected_savings_usd"),
+            ("tokens_saved_est", "projected_saved_tokens"),
+            ("saved_tokens_est", "projected_saved_tokens"),
+            ("projected_saved_tokens", "projected_saved_tokens"),
+            ("saved_chars", "projected_saved_chars"),
+            ("planned_saved_chars", "projected_saved_chars"),
+            ("projected_saved_chars", "projected_saved_chars"),
+        ):
+            if target_key in entry or source_key not in item:
+                continue
+            value = item.get(source_key)
+            if value in (None, ""):
+                continue
+            if target_key == "projected_savings_usd":
+                entry[target_key] = round(max(0.0, _as_float(value)), 8)
+            else:
+                entry[target_key] = max(0, _as_int(value))
     return {key: value for key, value in entry.items() if value not in (None, "", [])}
 
 

@@ -224,6 +224,7 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
                 "terminal_output_compaction": {
                     "status": "eligible",
                     "candidate_id": "terminal-candidate",
+                    "projected_saved_usd": 0.025,
                     "terminal_line": "terminal raw output secret",
                 },
             },
@@ -249,12 +250,79 @@ class OptimizationCoordinatorDryRunTests(unittest.TestCase):
         suppressed = {row["family"]: row["count"] for row in report["suppressed_family_counts"]}
         self.assertEqual(suppressed["terminal_output_compaction"], 1)
         self.assertEqual(report["conflict_buckets"][0]["reason"], "conflicts-with-selected-family")
+        suppression_bucket = report["suppression_opportunity_buckets"][0]
+        self.assertEqual(suppression_bucket["selected_family"], "routing")
+        self.assertEqual(suppression_bucket["suppressed_family"], "terminal_output_compaction")
+        self.assertEqual(suppression_bucket["projected_savings_lost_usd"], 0.025)
+        self.assertEqual(suppression_bucket["actionability"], "actionable")
+        self.assertEqual(suppression_bucket["next_action"], "run-suppressed-crunch-eval")
+        self.assertEqual(report["top_suppression_next_action"], "run-suppressed-crunch-eval")
         self.assertEqual(report["projected_savings_usd_est"], 0.04)
         self.assertEqual(report["status_counts"][0]["status_code"], 429)
         self.assertEqual(report["rows_with_errors"], 1)
         self.assertEqual(report["retry_count_buckets"][0]["retry_count_bucket"], "gte_3")
         self.assertFalse(report["privacy"]["provider_calls_made"])
         self.assertFalse(report["privacy"]["policy_files_changed"])
+        self._assert_private(report)
+
+    def test_suppression_buckets_rank_positive_zero_and_unknown_savings(self) -> None:
+        self._log_call(
+            crunch_meta={
+                "terminal_output_compaction": {
+                    "status": "eligible",
+                    "candidate_id": "terminal-positive-candidate",
+                    "projected_saved_usd": 0.03,
+                },
+            }
+        )
+        self._log_call(
+            crunch_meta={
+                "codex_repeated_scaffolding": {
+                    "status": "eligible",
+                    "candidate_id": "scaffold-zero-candidate",
+                    "projected_saved_usd": 0.0,
+                },
+            }
+        )
+        self._log_call(
+            routing_meta={
+                "provider": "openai",
+                "source_surface": "openai_responses",
+                "endpoint": "responses",
+                "category": "tool-result",
+                "workflow_phase": "tool-execution",
+                "text_chars": 12000,
+                "enabled": True,
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4-mini",
+                "reason": "selected-canary",
+                "managed_pattern_features": {
+                    "local_pattern_module_families": ["cacheability"],
+                    "reason_codes": ["pattern-family-observed"],
+                },
+            },
+        )
+
+        report = build_optimization_coordinator_dry_run(
+            self.store,
+            limit=10,
+            local_salt="coordinator-test",
+        )
+
+        buckets = {
+            row["suppressed_family"]: row
+            for row in report["suppression_opportunity_buckets"]
+        }
+        self.assertEqual(report["suppression_opportunity_buckets"][0]["suppressed_family"], "terminal_output_compaction")
+        self.assertEqual(buckets["terminal_output_compaction"]["projected_savings_lost_usd"], 0.03)
+        self.assertEqual(buckets["terminal_output_compaction"]["actionability"], "actionable")
+        self.assertEqual(buckets["repeated_scaffold_crunch"]["projected_savings_lost_usd"], 0.0)
+        self.assertEqual(buckets["repeated_scaffold_crunch"]["actionability"], "no-op")
+        self.assertEqual(buckets["repeated_scaffold_crunch"]["no_op_reason"], "no-positive-suppressed-savings")
+        self.assertEqual(buckets["pattern_crunch:cacheability"]["savings_status"], "unknown")
+        self.assertEqual(buckets["pattern_crunch:cacheability"]["actionability"], "no-op")
+        self.assertEqual(buckets["pattern_crunch:cacheability"]["no_op_reason"], "unknown-suppressed-savings")
+        self.assertEqual(buckets["pattern_crunch:cacheability"]["next_action"], "measure-pattern-crunch-savings")
         self._assert_private(report)
 
     def test_filters_provider_and_source_surface(self) -> None:

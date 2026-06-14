@@ -179,6 +179,28 @@ class OptimizationCoordinatorDashboardTests(unittest.TestCase):
         self.assertTrue(report["capabilities"]["dry_run_only"])
         self._assert_private(report)
 
+    def test_dry_run_summary_exposes_suppression_opportunity_buckets(self) -> None:
+        self._log_call(
+            crunch_meta={
+                "terminal_output_compaction": {
+                    "status": "eligible",
+                    "candidate_id": "terminal-dashboard-candidate",
+                    "projected_saved_usd": 0.02,
+                },
+            }
+        )
+
+        with patch.dict(os.environ, {"AGENTFLOW_OPTIMIZATION_COORDINATOR_ENFORCEMENT": "0"}):
+            report = self._report()
+
+        dry_run = report["dry_run_summary"]
+        bucket = dry_run["suppression_opportunity_buckets"][0]
+        self.assertEqual(bucket["selected_family"], "routing")
+        self.assertEqual(bucket["suppressed_family"], "terminal_output_compaction")
+        self.assertEqual(bucket["projected_savings_lost_usd"], 0.02)
+        self.assertEqual(dry_run["top_suppression_next_action"], "run-suppressed-crunch-eval")
+        self._assert_private(report)
+
     def test_active_selection_state_counts_runtime_selection(self) -> None:
         self._log_call(routing_meta=self._coordinator_meta(selected="routing"))
 

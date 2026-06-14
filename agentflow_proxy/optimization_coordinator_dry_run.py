@@ -17,6 +17,17 @@ ENTRY_SCHEMA = "agentflow.optimization_action_ledger_entry.v1"
 _ACTIONABLE_TYPES = {"apply", "canary", "promote", "review", "widen"}
 _HOLD_TYPES = {"hold", "more-samples", "request-more-samples"}
 _SAFETY_TYPES = {"disable", "retire", "rollback", "safety-stop", "suppress"}
+_SUPPRESSION_BUCKET_SCHEMA = "agentflow.optimization_coordinator_suppression_bucket.v1"
+_EXPLICIT_SAVINGS_KEYS = (
+    "projected_savings_usd",
+    "projected_saved_usd",
+    "estimated_saved_cost_usd",
+    "estimated_gross_savings_usd",
+    "gross_savings_usd",
+    "projected_holdout_savings_usd",
+    "net_savings_usd",
+)
+_SAFETY_REASON_HINTS = ("rollback", "safety", "regression", "quality")
 _RAW_PRIVACY_FLAGS = {
     "raw_payloads_returned",
     "raw_prompts_returned",
@@ -294,6 +305,130 @@ def _money_bucket(value: Any) -> str:
     return "gte_0_10"
 
 
+def _explicit_savings(entry: dict[str, Any]) -> tuple[float | None, str]:
+    for key in _EXPLICIT_SAVINGS_KEYS:
+        if key not in entry:
+            continue
+        value = entry.get(key)
+        if value in (None, ""):
+            continue
+        return _money(_as_float(value)), key
+    return None, "missing"
+
+
+def _suppressed_savings_estimate(
+    *,
+    entry: dict[str, Any],
+    family: str,
+    row_savings: float,
+) -> tuple[float, str, str]:
+    explicit, basis = _explicit_savings(entry)
+    if explicit is not None:
+        status = "positive" if explicit > 0 else "zero"
+        return explicit, status, basis
+    if family == "routing" and row_savings > 0:
+        return _money(row_savings), "positive", "row-routing-baseline-delta"
+    return 0.0, "unknown", "missing-family-specific-savings"
+
+
+def _reason_rows(counter: Counter[str]) -> list[dict[str, Any]]:
+    return [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _has_safety_reason(reasons: list[str]) -> bool:
+    haystack = " ".join(str(reason or "").lower().replace("_", "-") for reason in reasons)
+    return any(hint in haystack for hint in _SAFETY_REASON_HINTS)
+
+
+def _suppression_next_action(
+    *,
+    suppressed_family: str,
+    savings_status: str,
+    unsafe: bool,
+) -> str:
+    if unsafe:
+        return "review-suppressed-family-safety"
+    if savings_status == "unknown":
+        if suppressed_family.startswith("pattern_crunch:"):
+            return "measure-pattern-crunch-savings"
+        return "measure-suppressed-family-savings"
+    if savings_status == "zero":
+        return "keep-coordinator-priority"
+    if suppressed_family == "routing":
+        return "compare-routing-suppression-cost"
+    if suppressed_family == "cache_replay":
+        return "verify-suppressed-cache-replay"
+    if suppressed_family.startswith("pattern_crunch:") or "crunch" in suppressed_family or "compaction" in suppressed_family:
+        return "run-suppressed-crunch-eval"
+    return "inspect-coordinator-suppression"
+
+
+def _suppression_no_op_reason(*, savings_status: str, unsafe: bool) -> str | None:
+    if unsafe:
+        return "suppressed-family-unsafe"
+    if savings_status == "unknown":
+        return "unknown-suppressed-savings"
+    if savings_status == "zero":
+        return "no-positive-suppressed-savings"
+    return None
+
+
+def _entry_by_family(entries: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        family = str(entry.get("family") or "unknown")
+        grouped[family].append(entry)
+    return grouped
+
+
+def _bucket_id(parts: tuple[Any, ...]) -> str:
+    return _public_hash(parts, prefix="suppression-bucket")
+
+
+def _finalize_suppression_buckets(grouped: dict[tuple[str, str, str, str, str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: list[dict[str, Any]] = []
+    for key, bucket in grouped.items():
+        _selected_family, _suppressed_family, _source_surface, _endpoint, _category, _phase, savings_status = key
+        reason_counts = bucket.pop("_reason_counts")
+        basis_counts = bucket.pop("_estimate_basis_counts")
+        bucket["projected_savings_lost_usd"] = _money(bucket["projected_savings_lost_usd"])
+        bucket["average_projected_savings_lost_usd"] = _money(
+            bucket["projected_savings_lost_usd"] / bucket["count"] if bucket["count"] else 0.0
+        )
+        bucket["reason_code_counts"] = _reason_rows(reason_counts)
+        bucket["top_reason_codes"] = [row["reason"] for row in bucket["reason_code_counts"][:5]]
+        bucket["estimate_basis_counts"] = _reason_rows(basis_counts)
+        bucket["next_action"] = _suppression_next_action(
+            suppressed_family=bucket["suppressed_family"],
+            savings_status=savings_status,
+            unsafe=bool(bucket["unsafe_suppression"]),
+        )
+        no_op_reason = _suppression_no_op_reason(
+            savings_status=savings_status,
+            unsafe=bool(bucket["unsafe_suppression"]),
+        )
+        bucket["actionability"] = "actionable" if no_op_reason is None else "no-op"
+        if no_op_reason:
+            bucket["no_op_reason"] = no_op_reason
+        buckets.append(bucket)
+    buckets.sort(
+        key=lambda row: (
+            0 if row.get("actionability") == "actionable" else 1,
+            -_as_float(row.get("projected_savings_lost_usd")),
+            -_as_int(row.get("count")),
+            str(row.get("selected_family")),
+            str(row.get("suppressed_family")),
+            str(row.get("savings_status")),
+        )
+    )
+    for rank, bucket in enumerate(buckets, start=1):
+        bucket["rank"] = rank
+    return buckets
+
+
 def _filtered_rows(store_obj: Any, *, limit: int, provider: str | None, source_surface: str | None) -> list[dict[str, Any]]:
     capped = max(1, min(int(limit or 1), 10_000))
     if not hasattr(store_obj, "optimization_action_ledger_rows"):
@@ -331,6 +466,7 @@ def build_optimization_coordinator_dry_run(
     suppressed_counts: Counter[str] = Counter()
     reason_counts: Counter[tuple[str, str]] = Counter()
     conflict_counts: Counter[tuple[str, str, str]] = Counter()
+    suppression_bucket_groups: dict[tuple[str, str, str, str, str, str, str], dict[str, Any]] = {}
     status_counts: Counter[int] = Counter()
     error_counts: Counter[str] = Counter()
     retry_counts: Counter[str] = Counter()
@@ -407,13 +543,65 @@ def build_optimization_coordinator_dry_run(
             total_projected_savings += row_savings
             total_projected_cost += row_cost
 
+        entries_by_family = _entry_by_family(entries)
         for item in decision.get("suppressed_families", []):
             family = str(item.get("family") or "unknown")
             suppressed_counts[family] += 1
+            reasons = [str(reason) for reason in item.get("reason_codes") or ["unknown"]]
             for reason in item.get("reason_codes") or ["unknown"]:
                 reason_counts[(family, str(reason))] += 1
                 if str(reason) == "conflicts-with-selected-family":
                     conflict_counts[(selected_family, family, str(reason))] += 1
+            source_entry = (entries_by_family.get(family) or [{}])[0]
+            savings_lost, savings_status, estimate_basis = _suppressed_savings_estimate(
+                entry=source_entry,
+                family=family,
+                row_savings=row_savings,
+            )
+            unsafe = _has_safety_reason(reasons)
+            bucket_key = (
+                selected_family,
+                family,
+                str(decision.get("source_surface") or source_entry.get("source_surface") or "unknown"),
+                str(decision.get("endpoint") or source_entry.get("endpoint") or "unknown"),
+                str(decision.get("category") or source_entry.get("category") or "unknown"),
+                str(decision.get("phase") or source_entry.get("phase") or "unknown"),
+                "unsafe" if unsafe else savings_status,
+            )
+            bucket = suppression_bucket_groups.setdefault(
+                bucket_key,
+                {
+                    "schema": _SUPPRESSION_BUCKET_SCHEMA,
+                    "bucket_id": _bucket_id(bucket_key),
+                    "selected_family": selected_family,
+                    "suppressed_family": family,
+                    "source_surface": bucket_key[2],
+                    "endpoint": bucket_key[3],
+                    "category": bucket_key[4],
+                    "phase": bucket_key[5],
+                    "savings_status": "unsafe" if unsafe else savings_status,
+                    "count": 0,
+                    "projected_savings_lost_usd": 0.0,
+                    "unsafe_suppression": bool(unsafe),
+                    "_reason_counts": Counter(),
+                    "_estimate_basis_counts": Counter(),
+                    "privacy": {
+                        "metadata_only": True,
+                        "provider_bodies_included": False,
+                        "raw_prompts_included": False,
+                        "raw_responses_included": False,
+                        "cache_keys_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                    },
+                },
+            )
+            bucket["count"] += 1
+            bucket["projected_savings_lost_usd"] += savings_lost
+            bucket["unsafe_suppression"] = bool(bucket["unsafe_suppression"] or unsafe)
+            bucket["_estimate_basis_counts"][estimate_basis] += 1
+            for reason in reasons:
+                bucket["_reason_counts"][reason] += 1
 
         surface_counts[(str(decision.get("source_surface") or "unknown"), selected_family)] += 1
 
@@ -453,6 +641,8 @@ def build_optimization_coordinator_dry_run(
         }
         for family, amount in sorted(savings_by_family.items(), key=lambda item: (-item[1], item[0]))
     ]
+    suppression_buckets = _finalize_suppression_buckets(suppression_bucket_groups)
+    top_suppression_bucket = suppression_buckets[0] if suppression_buckets else None
     return {
         "schema": SCHEMA,
         "ok": True,
@@ -472,6 +662,8 @@ def build_optimization_coordinator_dry_run(
         "selected_family_counts": _counter_rows(selected_counts, "family"),
         "suppressed_family_counts": _counter_rows(suppressed_counts, "family"),
         "conflict_buckets": _counter_rows(conflict_counts, "selected_family", "suppressed_family", "reason"),
+        "suppression_opportunity_buckets": suppression_buckets,
+        "top_suppression_next_action": top_suppression_bucket.get("next_action") if top_suppression_bucket else None,
         "top_suppression_reason_codes": _counter_rows(reason_counts, "family", "reason", limit=20),
         "surface_selection_counts": _counter_rows(surface_counts, "source_surface", "selected_family"),
         "holdout_count": holdout_count,

@@ -18047,6 +18047,8 @@ async def stats_optimization_coordinator_dashboard(store_obj: Any, *, limit: int
             "selected_family_counts": dry_run.get("selected_family_counts", []),
             "suppressed_family_counts": dry_run.get("suppressed_family_counts", []),
             "top_suppression_reason_codes": dry_run.get("top_suppression_reason_codes", []),
+            "suppression_opportunity_buckets": dry_run.get("suppression_opportunity_buckets", []),
+            "top_suppression_next_action": dry_run.get("top_suppression_next_action"),
             "projected_savings_usd_est": dry_run.get("projected_savings_usd_est", 0.0),
             "projected_savings_by_family": dry_run.get("projected_savings_by_family", []),
         },
