@@ -88,6 +88,7 @@ agentflow-openai-cache-replay-readiness = "agentflow_proxy.cli:openai_cache_repl
 agentflow-local-promotion-candidates = "agentflow_proxy.cli:local_promotion_candidates_main"
 agentflow-crunch-promotion-draft-dry-run = "agentflow_proxy.cli:crunch_promotion_draft_dry_run_main"
 agentflow-cache-promotion-draft-dry-run = "agentflow_proxy.cli:cache_promotion_draft_dry_run_main"
+agentflow-routing-promotion-draft-dry-run = "agentflow_proxy.cli:routing_promotion_draft_dry_run_main"
 agentflow-openai-cache-replay-apply = "agentflow_proxy.cli:openai_cache_replay_apply_main"
 agentflow-openai-cache-replay-dry-run = "agentflow_proxy.cli:openai_cache_replay_dry_run_main"
 agentflow-openai-old-context-summary-dry-run = "agentflow_proxy.cli:openai_old_context_summary_dry_run_main"

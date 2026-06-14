@@ -271,7 +271,7 @@ def _candidate(
         "category": candidate.get("category"),
         "workflow_phase": candidate.get("workflow_phase"),
         "requested_model": candidate.get("requested_model") or candidate.get("original_model"),
-        "target_model": candidate.get("target_model"),
+        "target_model": candidate.get("target_model") or candidate.get("candidate_target_model"),
         "sample_count": sample_count,
         "applied_count": applied_count,
         "holdout_count": holdout_count,
@@ -508,8 +508,30 @@ def _routing_candidates(claude_impact: dict[str, Any], openai_routing: dict[str,
                 verdict=str(item.get("verdict") or ""),
                 next_action_fallback="collect-routing-canary-evidence",
                 extras={
+                    "policy_id": item.get("policy_id"),
+                    "workflow_phase_confidence": item.get("workflow_phase_confidence"),
+                    "stream": item.get("stream"),
+                    "canary_fraction": item.get("canary_fraction"),
+                    "holdout_fraction": item.get("holdout_fraction"),
+                    "oldest_observed_at": item.get("oldest_observed_at"),
+                    "latest_observed_at": item.get("latest_observed_at"),
+                    "last_observed_at": item.get("latest_observed_at"),
+                    "stale_evidence": item.get("stale_evidence"),
+                    "reason_codes": item.get("reason_codes"),
+                    "stripped_param_counts": item.get("stripped_param_counts"),
+                    "safety_skip_counts": item.get("safety_skip_counts"),
+                    "cohort_counts": item.get("cohort_counts"),
+                    "cohort_metrics": item.get("cohort_metrics"),
+                    "applied_vs_holdout_deltas": item.get("applied_vs_holdout_deltas"),
                     "fallback_count": _cohort_count(item, "fallback_count"),
                     "retry_count": _cohort_count(item, "retry_count"),
+                    "error_count": sum(
+                        _as_int((row or {}).get("error_count"))
+                        for row in (item.get("cohort_metrics") or {}).values()
+                        if isinstance(row, dict)
+                    )
+                    if isinstance(item.get("cohort_metrics"), dict)
+                    else 0,
                 },
             )
         )
