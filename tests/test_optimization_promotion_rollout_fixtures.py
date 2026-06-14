@@ -741,6 +741,7 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "verdict": "widen",
             "source_surface": "anthropic_messages",
             "app_family": "claude_code",
+            "projected_savings_usd": 0.012,
             "summary_model": "claude-haiku-4-5-20251001",
             "conditions": {
                 "min_request_chars": 10,
@@ -757,6 +758,13 @@ class OptimizationPromotionRolloutFixtureTests(unittest.TestCase):
             "safety_gates": {"min_outcome_samples": 6, "max_error_rate": 0.07},
             "cohort_counts": {"canary_applied": 2, "canary_holdout": 8},
             "eval_evidence": {"result_count": 4, "pass_count": 4, "fail_count": 0},
+            "crunch_lifecycle": {
+                "tokens_before_est": 20000,
+                "tokens_after_est": 12000,
+                "tokens_saved_est": 8000,
+                "observed_savings_usd": 0.006,
+                "safety_status": "ok",
+            },
             "privacy": {"metadata_only": True, "raw_prompts_included": False, "raw_provider_bodies_included": False},
         }
         built = build_optimization_promotion_actions(

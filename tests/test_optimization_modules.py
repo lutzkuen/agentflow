@@ -1145,6 +1145,124 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertIn("fix-dependency-freshness", next_actions)
         self._assert_privacy_clean(result)
 
+    def test_crunch_promotion_actions_require_positive_lifecycle_before_widening(self):
+        pattern_hash = "sha256:" + ("a" * 64)
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "crunch-positive-lifecycle",
+                    "optimization_family": "managed_pattern_candidate",
+                    "action_family": "crunch",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "category": "tool-result",
+                    "pattern_hash": pattern_hash,
+                    "projected_savings_usd": 0.06,
+                    "sample_count": 12,
+                    "cohort_counts": {"canary_applied": 7, "canary_holdout": 5, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 2, "pass_count": 2, "fail_count": 0, "blocked_count": 0},
+                    "crunch_lifecycle": {
+                        "tokens_before_est": 48000,
+                        "tokens_after_est": 36000,
+                        "tokens_saved_est": 12000,
+                        "observed_savings_usd": 0.018,
+                        "safety_status": "ok",
+                    },
+                    "conditions": {
+                        "pattern_hashes": [pattern_hash],
+                        "category": "tool-result",
+                        "min_repeated_count": 2,
+                    },
+                    "action": {"type": "shorten", "head_chars": 800, "tail_chars": 600},
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                    "prompt": "raw eval prompt secret",
+                    "request_id": "eval-request-id-secret",
+                    "session_id": "eval-session-id-secret",
+                    "file_path": "/tmp/raw-eval-secret.py",
+                },
+                {
+                    "candidate_id": "crunch-missing-measurement",
+                    "optimization_family": "managed_pattern_candidate",
+                    "action_family": "crunch",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.04,
+                    "sample_count": 6,
+                    "cohort_counts": {"canary_applied": 0, "canary_holdout": 0, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 1, "pass_count": 1, "fail_count": 0},
+                    "verdict": "widen",
+                    "reason_codes": ["missing-canary-lifecycle-evidence"],
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "crunch-safety-stop",
+                    "optimization_family": "old_context_summarization",
+                    "action_family": "crunch",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.05,
+                    "sample_count": 8,
+                    "cohort_counts": {"canary_applied": 4, "canary_holdout": 4, "bypassed_or_disabled": 0},
+                    "eval_evidence": {"result_count": 2, "pass_count": 1, "fail_count": 1},
+                    "crunch_lifecycle": {
+                        "tokens_before_est": 32000,
+                        "tokens_after_est": 26000,
+                        "tokens_saved_est": 6000,
+                        "safety_status": "safety-stopped",
+                    },
+                    "verdict": "widen",
+                    "reason_codes": ["safety-stop-observed", "summary-failure-rate"],
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+            ],
+        }
+
+        result = build_optimization_promotion_actions(report, initial_canary_fraction=0.1, holdout_fraction=0.2)
+
+        self.assertEqual(result["summary"]["action_count"], 1)
+        self.assertEqual(result["summary"]["omitted_count"], 2)
+        action = result["actions"][0]
+        self.assertEqual(action["target_candidate_id"], "crunch-positive-lifecycle")
+        self.assertEqual(action["policy_section"], "crunch")
+        self.assertEqual(action["action_type"], "widen")
+        self.assertEqual(action["holdout_fraction"], 0.2)
+        gate = action["evidence_summary"]["crunch_lifecycle_gate"]
+        self.assertEqual(gate["status"], "ready")
+        self.assertTrue(gate["positive_savings"])
+        self.assertTrue(gate["safety_clean"])
+        self.assertEqual(gate["before_after"]["tokens_before_est"], 48000)
+        self.assertEqual(gate["before_after"]["tokens_after_est"], 36000)
+        self.assertEqual(gate["before_after"]["tokens_saved_est"], 12000)
+        self.assertEqual(gate["holdout_metadata"]["canary_applied_count"], 7)
+        self.assertEqual(gate["holdout_metadata"]["canary_holdout_count"], 5)
+        self.assertFalse(gate["holdout_metadata"]["individual_candidate_ids_included"])
+        self.assertFalse(result["wrote_local_policy_files"])
+
+        omitted_reasons = {row["target_candidate_id"]: row["reason"] for row in result["omitted"]}
+        self.assertEqual(
+            omitted_reasons,
+            {
+                "crunch-missing-measurement": "crunch-canary-missing-lifecycle-measurement",
+                "crunch-safety-stop": "crunch-canary-safety-stop",
+            },
+        )
+        omitted = {row["target_candidate_id"]: row for row in result["omitted"]}
+        self.assertEqual(
+            omitted["crunch-missing-measurement"]["evidence_summary"]["crunch_lifecycle_gate"]["status"],
+            "blocked",
+        )
+        self.assertEqual(
+            omitted["crunch-safety-stop"]["evidence_summary"]["crunch_lifecycle_gate"]["reason"],
+            "crunch-canary-safety-stop",
+        )
+        next_actions = {bucket["next_action"] for bucket in result["omission_buckets"]}
+        self.assertIn("collect-canary-applied", next_actions)
+        self.assertIn("review-crunch-quality-gate", next_actions)
+        self._assert_privacy_clean(result)
+
     def test_promotion_actions_attach_family_specific_safety_stop_reasons(self):
         report = {
             "schema": "agentflow.optimization_promotion_report.v1",

@@ -49,6 +49,18 @@ CACHE_REPLAY_FEEDBACK_OUTCOMES = [
     "safety-stopped",
     "noop",
 ]
+CRUNCH_LIFECYCLE_GATE_SCHEMA = "agentflow.crunch_canary_lifecycle_widen_gate.v1"
+CRUNCH_SAFETY_REASON_MARKERS = (
+    "safety-stop",
+    "quality-gate",
+    "summary-failure",
+    "regression",
+    "eval-failed",
+    "error-rate",
+    "retry-rate",
+    "latency-regression",
+    "negative-net-savings",
+)
 LOCAL_POLICY_SECTIONS = {
     "routing": {
         "policy_section": "routing",
@@ -101,6 +113,16 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _first_number(*values: Any, default: float = 0.0) -> float:
+    for value in values:
+        if value in (None, ""):
+            continue
+        parsed = _as_float(value, default)
+        if parsed != default or str(value).strip() in {"0", "0.0"}:
+            return parsed
+    return default
 
 
 def _bounded_fraction(value: Any, default: float = 0.0) -> float:
@@ -403,6 +425,241 @@ def _cohort_counts(candidate: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _crunch_lifecycle_sources(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = [candidate]
+    for key in (
+        "crunch_lifecycle_gate",
+        "crunch_lifecycle",
+        "crunch_lifecycle_outcomes",
+        "crunch_canary_lifecycle",
+        "lifecycle_outcomes",
+        "lifecycle_feedback",
+        "impact_summary",
+        "evidence_summary",
+    ):
+        value = candidate.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    eval_evidence = candidate.get("eval_evidence") if isinstance(candidate.get("eval_evidence"), dict) else {}
+    if eval_evidence:
+        sources.append(eval_evidence)
+    return sources
+
+
+def _crunch_source_number(candidate: dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    values: list[Any] = []
+    for source in _crunch_lifecycle_sources(candidate):
+        for key in keys:
+            values.append(source.get(key))
+    return _first_number(*values, default=default)
+
+
+def _crunch_source_int(candidate: dict[str, Any], *keys: str, default: int = 0) -> int:
+    return int(_crunch_source_number(candidate, *keys, default=default))
+
+
+def _crunch_cohort_counts(candidate: dict[str, Any]) -> dict[str, int]:
+    base = _cohort_counts(candidate)
+    applied = base["canary_applied"]
+    holdout = base["canary_holdout"]
+    bypassed = base["bypassed_or_disabled"]
+    for source in _crunch_lifecycle_sources(candidate):
+        counts = source.get("cohort_counts") if isinstance(source.get("cohort_counts"), dict) else {}
+        applied = max(
+            applied,
+            _as_int(counts.get("canary_applied")),
+            _as_int(counts.get("applied")),
+            _as_int(source.get("canary_applied_count")),
+            _as_int(source.get("applied_count")),
+        )
+        holdout = max(
+            holdout,
+            _as_int(counts.get("canary_holdout")),
+            _as_int(counts.get("holdout")),
+            _as_int(source.get("canary_holdout_count")),
+            _as_int(source.get("holdout_count")),
+        )
+        bypassed = max(
+            bypassed,
+            _as_int(counts.get("bypassed_or_disabled")),
+            _as_int(source.get("bypassed_or_disabled_count")),
+            _as_int(source.get("skipped_count")),
+        )
+    return {
+        "canary_applied": applied,
+        "canary_holdout": holdout,
+        "bypassed_or_disabled": bypassed,
+    }
+
+
+def _crunch_reason_codes(candidate: dict[str, Any]) -> list[str]:
+    reasons = set(_reason_codes(candidate.get("reason_codes")))
+    for source in _crunch_lifecycle_sources(candidate):
+        reasons.update(_reason_codes(source.get("reason_codes")))
+        reasons.update(_reason_codes(source.get("blocker_reason_codes")))
+        reason = _reason(source.get("reason") or source.get("status") or source.get("verdict"))
+        if reason:
+            reasons.add(reason)
+    return sorted(reasons)
+
+
+def _crunch_before_after(candidate: dict[str, Any]) -> dict[str, Any]:
+    tokens_before = _crunch_source_int(
+        candidate,
+        "tokens_before_est",
+        "before_tokens_est",
+        "input_tokens_before_est",
+        "input_tokens_before",
+    )
+    tokens_after = _crunch_source_int(
+        candidate,
+        "tokens_after_est",
+        "after_tokens_est",
+        "input_tokens_after_est",
+        "input_tokens_after",
+    )
+    tokens_saved = _crunch_source_int(
+        candidate,
+        "tokens_saved_est",
+        "token_savings_est",
+        "input_tokens_saved_est",
+        "crunch_tokens_saved",
+    )
+    if tokens_before > 0 and tokens_after <= 0 and tokens_saved > 0:
+        tokens_after = max(0, tokens_before - tokens_saved)
+    if tokens_after > 0 and tokens_before <= 0 and tokens_saved > 0:
+        tokens_before = tokens_after + tokens_saved
+
+    chars_before = _crunch_source_int(
+        candidate,
+        "chars_before_est",
+        "before_chars_est",
+        "text_chars_before",
+        "characters_before_est",
+    )
+    chars_after = _crunch_source_int(
+        candidate,
+        "chars_after_est",
+        "after_chars_est",
+        "text_chars_after",
+        "characters_after_est",
+    )
+    chars_saved = _crunch_source_int(
+        candidate,
+        "chars_saved_est",
+        "characters_saved_est",
+        "saved_chars",
+        "crunch_chars_saved",
+    )
+    if chars_before > 0 and chars_after <= 0 and chars_saved > 0:
+        chars_after = max(0, chars_before - chars_saved)
+    if chars_after > 0 and chars_before <= 0 and chars_saved > 0:
+        chars_before = chars_after + chars_saved
+
+    return {
+        "tokens_before_est": tokens_before,
+        "tokens_after_est": tokens_after,
+        "tokens_saved_est": tokens_saved if tokens_saved > 0 else max(0, tokens_before - tokens_after),
+        "chars_before_est": chars_before,
+        "chars_after_est": chars_after,
+        "chars_saved_est": chars_saved if chars_saved > 0 else max(0, chars_before - chars_after),
+    }
+
+
+def _crunch_lifecycle_gate(candidate: dict[str, Any]) -> dict[str, Any]:
+    counts = _crunch_cohort_counts(candidate)
+    before_after = _crunch_before_after(candidate)
+    projected = _crunch_source_number(candidate, "projected_savings_usd", "projected_saved_usd")
+    observed = _crunch_source_number(
+        candidate,
+        "observed_savings_usd",
+        "actual_savings_usd",
+        "current_conservative_savings_usd",
+        "net_savings_usd",
+    )
+    reason_codes = _crunch_reason_codes(candidate)
+    eval_evidence = candidate.get("eval_evidence") if isinstance(candidate.get("eval_evidence"), dict) else {}
+    safety_statuses = {
+        str(source.get("safety_status") or source.get("safety_stop_status") or source.get("status") or "")
+        .strip()
+        .lower()
+        .replace("_", "-")
+        for source in _crunch_lifecycle_sources(candidate)
+    }
+    safety_stop = (
+        any(any(marker in reason for marker in CRUNCH_SAFETY_REASON_MARKERS) for reason in reason_codes)
+        or any(status in {"safety-stopped", "safety-stop", "tripped", "regressed", "failed"} for status in safety_statuses)
+        or _as_int(eval_evidence.get("fail_count")) > 0
+        or _as_int(eval_evidence.get("blocked_count")) > 0
+    )
+    positive_savings = any(
+        value > 0
+        for value in (
+            projected,
+            observed,
+            before_after["tokens_saved_est"],
+            before_after["chars_saved_est"],
+        )
+    )
+    applied_count = counts["canary_applied"]
+    holdout_count = counts["canary_holdout"]
+    lifecycle_observed = applied_count > 0 and holdout_count > 0
+
+    reason = "ready"
+    status = "ready"
+    if safety_stop:
+        status = "blocked"
+        reason = "crunch-canary-safety-stop"
+    elif not lifecycle_observed:
+        status = "blocked"
+        reason = "crunch-canary-missing-lifecycle-measurement"
+    elif not positive_savings:
+        status = "blocked"
+        reason = "crunch-canary-non-positive-savings"
+
+    total_cohort = applied_count + holdout_count
+    return {
+        "schema": CRUNCH_LIFECYCLE_GATE_SCHEMA,
+        "status": status,
+        "reason": reason,
+        "lifecycle_observed": lifecycle_observed,
+        "positive_savings": positive_savings,
+        "safety_clean": not safety_stop,
+        "projected_savings_usd": round(projected, 8),
+        "observed_savings_usd": round(observed, 8),
+        "before_after": before_after,
+        "holdout_metadata": {
+            "canary_applied_count": applied_count,
+            "canary_holdout_count": holdout_count,
+            "bypassed_or_disabled_count": counts["bypassed_or_disabled"],
+            "holdout_rate": round(holdout_count / total_cohort, 6) if total_cohort else 0.0,
+            "holdout_required": True,
+            "individual_candidate_ids_included": False,
+        },
+        "reason_codes": reason_codes,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "filesystem_paths_included": False,
+            "individual_candidate_ids_included": False,
+        },
+    }
+
+
+def _crunch_lifecycle_omission_reason(candidate: dict[str, Any], *, policy: dict[str, str] | None) -> str | None:
+    if policy != LOCAL_POLICY_SECTIONS["crunch"] or str(candidate.get("verdict") or "") != "widen":
+        return None
+    gate = _crunch_lifecycle_gate(candidate)
+    if gate["status"] == "ready":
+        return None
+    return str(gate["reason"])
+
+
 def _current_canary_fraction(candidate: dict[str, Any]) -> float:
     counts = _cohort_counts(candidate)
     total = counts["canary_applied"] + counts["canary_holdout"]
@@ -457,6 +714,8 @@ def _evidence_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         }
         result["cache_replay_projection"] = _projected_cache_hit_metadata(candidate)
         result["cache_replay_feedback_outcomes"] = CACHE_REPLAY_FEEDBACK_OUTCOMES
+    if _local_policy(candidate) == LOCAL_POLICY_SECTIONS["crunch"]:
+        result["crunch_lifecycle_gate"] = _crunch_lifecycle_gate(candidate)
     return result
 
 
@@ -488,6 +747,8 @@ def _omission_reason(candidate: dict[str, Any], *, policy: dict[str, str] | None
         return "insufficient-eval-evidence"
     if dependency_reason := _cache_dependency_omission_reason(candidate):
         return dependency_reason
+    if crunch_reason := _crunch_lifecycle_omission_reason(candidate, policy=policy):
+        return crunch_reason
     if verdict not in ACTIONABLE_VERDICTS:
         return "unsupported-promotion-verdict"
     return None
