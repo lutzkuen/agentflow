@@ -3451,18 +3451,87 @@ def _proposals_from_optimization_candidates(candidates: list[dict[str, Any]]) ->
     return [_proposal_from_optimization_candidate(candidate) for candidate in candidates]
 
 
+def _bounded_low_backlog_evidence(
+    stats_summary: dict[str, Any],
+    optimization_candidates: list[dict[str, Any]],
+) -> list[str]:
+    evidence: list[str] = []
+    calls = _to_int(stats_summary.get("today_calls") or stats_summary.get("calls"))
+    if calls > 0:
+        evidence.append(f"Local metadata window contains {calls} calls.")
+    if "cache_hit_rate" in stats_summary:
+        evidence.append(
+            f"Cache hit signal: {_to_int(stats_summary.get('cache_hits'))} hits, "
+            f"{_to_float(stats_summary.get('cache_hit_rate')):.4f} hit rate."
+        )
+    loop = stats_summary.get("evidence_to_activation_loop")
+    if isinstance(loop, dict):
+        summary = loop.get("summary") if isinstance(loop.get("summary"), dict) else {}
+        top_lever = summary.get("top_lever")
+        top_action = summary.get("top_next_action")
+        top_state = summary.get("top_state")
+        if top_lever or top_action or top_state:
+            evidence.append(
+                "Evidence-to-activation loop top item: "
+                f"lever={sanitize_value(top_lever or 'unknown')}, "
+                f"state={sanitize_value(top_state or 'unknown')}, "
+                f"next_action={sanitize_value(top_action or 'unknown')}."
+            )
+    ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
+    if isinstance(ledger, dict):
+        summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
+        if summary:
+            evidence.append(
+                "Next-action ledger top item: "
+                f"lever={sanitize_value(summary.get('top_lever') or 'unknown')}, "
+                f"status={sanitize_value(summary.get('top_current_status') or 'unknown')}, "
+                f"next_action={sanitize_value(summary.get('top_next_action') or 'unknown')}."
+            )
+    crunch = stats_summary.get("crunch_savings_signal")
+    if isinstance(crunch, dict):
+        top_report = crunch.get("top_report") if isinstance(crunch.get("top_report"), dict) else {}
+        if top_report:
+            evidence.append(
+                "Crunch signal: "
+                f"status={sanitize_value(crunch.get('status') or 'unknown')}, "
+                f"matched={_to_int(top_report.get('matched_count'))}, "
+                f"projected_saved_usd={_to_float(top_report.get('projected_saved_usd')):.6f}, "
+                f"next_action={sanitize_value(top_report.get('next_action') or 'unknown')}."
+            )
+    routing = stats_summary.get("pass_through_routing_report")
+    if isinstance(routing, dict):
+        summary = routing.get("summary") if isinstance(routing.get("summary"), dict) else {}
+        if summary:
+            evidence.append(
+                "Routing signal: "
+                f"top_actionability={sanitize_value(summary.get('top_actionability') or 'unknown')}, "
+                f"requested={sanitize_value(summary.get('top_requested_model') or 'unknown')}, "
+                f"target={sanitize_value(summary.get('top_candidate_target_model') or 'unknown')}."
+            )
+    if optimization_candidates:
+        top = optimization_candidates[0]
+        evidence.append(
+            "Top ranked optimization candidate: "
+            f"rank={_to_int(top.get('rank'))}, "
+            f"lever={sanitize_value(top.get('lever') or 'unknown')}, "
+            f"blocker={sanitize_value(top.get('blocker') or 'unknown')}, "
+            f"confidence={sanitize_value(top.get('confidence') or 'unknown')}."
+        )
+    return evidence[:8]
+
+
 def _proposal_from_low_backlog(
     *,
     ready_count: int,
     threshold: int,
     stats_summary: dict[str, Any],
     diagnostics: list[dict[str, Any]],
+    optimization_candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     evidence = [
         f"Actionable status:ready issue count is {ready_count}, below threshold {threshold}.",
     ]
-    if stats_summary:
-        evidence.append(f"Recent metadata summary: {json.dumps(stats_summary, sort_keys=True)}")
+    evidence.extend(_bounded_low_backlog_evidence(stats_summary, optimization_candidates))
     actionable_diagnostics = _actionable_diagnostics(diagnostics)
     if actionable_diagnostics:
         top = actionable_diagnostics[0]
@@ -3493,10 +3562,113 @@ def _proposal_from_low_backlog(
             acceptance=[
                 "A research run with a low ready backlog emits at least one targeted create_issue proposal.",
                 "The emitted issue body includes evidence, implementation approach, acceptance criteria, labels, and sequencing notes.",
+                "The research plan includes a compact next_backlog_milestone summary that ranks the generated issue proposals.",
                 "Privacy tests prove raw prompts, request bodies, file paths, request IDs, and session IDs are redacted.",
             ],
             sequencing="Use this as the first fallback issue when no more specific blocker dominates the local evidence.",
         ),
+    }
+
+
+def _proposal_priority(labels: list[str]) -> str:
+    for label in labels:
+        if label.startswith("priority:"):
+            return label
+    return "priority:unknown"
+
+
+def _proposal_lever(proposal: dict[str, Any], candidate_by_title: dict[str, dict[str, Any]]) -> str:
+    title = str(proposal.get("title") or "")
+    candidate = candidate_by_title.get(title)
+    if candidate is not None:
+        return sanitize_value(candidate.get("lever") or "optimization")
+    labels = {str(label) for label in proposal.get("labels") or []}
+    for lever in ("cache", "routing", "crunch"):
+        if lever in labels:
+            return lever
+    title_l = title.lower()
+    if "managed recommendation" in title_l:
+        return "managed-recommendation"
+    if "request-shape" in title_l or "repeated context" in title_l:
+        return "request-shape-rollups"
+    if "safety" in title_l or "feedback" in title_l:
+        return "activation-feedback"
+    if "milestone" in title_l or "backlog" in title_l:
+        return "milestone-planning"
+    return "optimization"
+
+
+def _next_action_from_summary(stats_summary: dict[str, Any], top_candidate: dict[str, Any] | None) -> str | None:
+    for key in ("evidence_to_activation_next_action_ledger", "evidence_to_activation_loop"):
+        report = stats_summary.get(key)
+        if not isinstance(report, dict):
+            continue
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        action = summary.get("top_next_action")
+        if action:
+            return sanitize_value(action)
+    if top_candidate is not None:
+        signal = top_candidate.get("projected_savings_signal")
+        if isinstance(signal, dict) and signal.get("next_action"):
+            return sanitize_value(signal.get("next_action"))
+    return None
+
+
+def _next_backlog_milestone(
+    *,
+    create_issues: list[dict[str, Any]],
+    optimization_candidates: list[dict[str, Any]],
+    stats_summary: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_by_title = {
+        _candidate_title(candidate): candidate
+        for candidate in optimization_candidates
+    }
+    top_candidate = optimization_candidates[0] if optimization_candidates else None
+    issue_rows: list[dict[str, Any]] = []
+    for rank, proposal in enumerate(create_issues, start=1):
+        labels = [str(label) for label in proposal.get("labels") or []]
+        title = str(proposal.get("title") or "")
+        candidate = candidate_by_title.get(title)
+        issue_rows.append(
+            {
+                "rank": rank,
+                "title": sanitize_value(title),
+                "repo": sanitize_value(proposal.get("repo") or "lutzkuen/agentflow"),
+                "lever": _proposal_lever(proposal, candidate_by_title),
+                "priority": _proposal_priority(labels),
+                "labels": labels,
+                "source": "ranked-optimization-candidate" if candidate is not None else "low-backlog-research",
+                "expected_savings_path": sanitize_value(
+                    (candidate or {}).get("estimated_savings_path")
+                    or "Turn metadata-only local evidence into an implementation-ready follow-up."
+                ),
+            }
+        )
+    top_lever = sanitize_value(top_candidate.get("lever")) if top_candidate is not None else None
+    top_blocker = sanitize_value(top_candidate.get("blocker")) if top_candidate is not None else None
+    return {
+        "schema": "agentflow.next_backlog_milestone.v1",
+        "status": "ready" if issue_rows else "empty",
+        "summary": {
+            "proposal_count": len(issue_rows),
+            "ranked_candidate_count": len(optimization_candidates),
+            "top_lever": top_lever,
+            "top_blocker": top_blocker,
+            "top_next_action": _next_action_from_summary(stats_summary, top_candidate),
+        },
+        "issues": issue_rows,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+        },
     }
 
 
@@ -4312,6 +4484,7 @@ def build_research_plan(
                 threshold=threshold,
                 stats_summary=summary,
                 diagnostics=diagnostics,
+                optimization_candidates=optimization_candidates,
             )
         )
         promotion_blocker_proposal = _proposal_from_promotion_blocker_next_action(summary)
@@ -4358,6 +4531,35 @@ def build_research_plan(
             max_count=10,
         )
         create_issues = [_finalize_create_issue_proposal(proposal) for proposal in create_issues]
+        next_backlog_milestone = _next_backlog_milestone(
+            create_issues=create_issues,
+            optimization_candidates=optimization_candidates,
+            stats_summary=summary,
+        )
+    else:
+        next_backlog_milestone = {
+            "schema": "agentflow.next_backlog_milestone.v1",
+            "status": "not-needed",
+            "summary": {
+                "proposal_count": 0,
+                "ranked_candidate_count": 0,
+                "top_lever": None,
+                "top_blocker": None,
+                "top_next_action": None,
+            },
+            "issues": [],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "absolute_paths_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+                "individual_candidate_ids_included": False,
+            },
+        }
 
     inspected_sources = ["github_issues"]
     if summary:
@@ -4387,6 +4589,7 @@ def build_research_plan(
             "repeated_diagnostics": diagnostics,
             "optimization_candidates": optimization_candidates if should_run else [],
             "issue_proposal_suppression": proposal_suppression,
+            "next_backlog_milestone": next_backlog_milestone,
         },
         "backlog_changes": {
             "create_issues": create_issues,

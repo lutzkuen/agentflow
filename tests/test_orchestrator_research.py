@@ -53,6 +53,23 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("## Labels", created[0]["body"])
         self.assertIn("- status:ready", created[0]["body"])
         self.assertIn("status:ready", created[0]["labels"])
+        self.assertIn("Top ranked optimization candidate:", created[0]["body"])
+        self.assertIn("next_backlog_milestone", created[0]["body"])
+        self.assertNotIn("Recent metadata summary:", created[0]["body"])
+
+        milestone = plan["evidence"]["next_backlog_milestone"]
+        self.assertEqual(milestone["schema"], "agentflow.next_backlog_milestone.v1")
+        self.assertEqual(milestone["status"], "ready")
+        self.assertEqual(milestone["summary"]["proposal_count"], len(created))
+        self.assertGreaterEqual(milestone["summary"]["ranked_candidate_count"], 1)
+        self.assertEqual(milestone["issues"][0]["title"], created[0]["title"])
+        self.assertIn("priority", milestone["issues"][0])
+        self.assertTrue(milestone["privacy"]["metadata_only"])
+        self.assertTrue(milestone["privacy"]["aggregate_only"])
+        self.assertFalse(milestone["privacy"]["raw_prompts_included"])
+        self.assertFalse(milestone["privacy"]["provider_bodies_included"])
+        self.assertFalse(milestone["privacy"]["request_ids_included"])
+        self.assertFalse(milestone["privacy"]["session_ids_included"])
 
     def test_low_backlog_emits_ranked_metadata_only_optimization_candidates(self):
         with TemporaryDirectory() as tmp:
