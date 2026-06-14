@@ -20,6 +20,7 @@ CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
+FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
@@ -1748,6 +1749,176 @@ def _candidate_work_classes(
     return sorted(classes or {"observability"})
 
 
+def _shape_next_action(classes: list[str], blockers: list[str]) -> str:
+    class_set = set(classes)
+    blocker_set = set(blockers)
+    if "repeated_context" in class_set and "replayability" in class_set:
+        return "rank-repeated-context-replayability-cohort"
+    if "repeated_context" in class_set and "crunch" in class_set:
+        return "rank-repeated-context-crunch-dry-run"
+    if "routing" in class_set:
+        return "stage-routing-lifecycle-evidence"
+    if blocker_set:
+        return "classify-request-shape-blocker"
+    return "keep-observability-only"
+
+
+def _shape_local_action_family(next_action: str, classes: list[str]) -> str:
+    if next_action == "rank-repeated-context-replayability-cohort":
+        return "cache"
+    if next_action == "rank-repeated-context-crunch-dry-run":
+        return "crunch"
+    if next_action == "stage-routing-lifecycle-evidence":
+        return "routing"
+    if "replayability" in classes:
+        return "cache"
+    if "crunch" in classes:
+        return "crunch"
+    if "routing" in classes:
+        return "routing"
+    return "cohort-ranking"
+
+
+def _shape_follow_up_privacy() -> dict[str, Any]:
+    privacy = _replayability_privacy()
+    privacy["policy_files_written"] = False
+    return privacy
+
+
+def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    classes = sorted(public_label(item, "unknown") for item in row.get("candidate_work_classes") or [])
+    families = sorted(public_label(item, "unknown") for item in row.get("candidate_families") or [])
+    blockers = sorted(public_label(item, "unknown") for item in row.get("blocker_codes") or [])
+    next_action = _shape_next_action(classes, blockers)
+    provider = public_label(row.get("provider_family"), "unknown")
+    source_surface = public_label(row.get("source_surface"), "unknown")
+    endpoint = public_label(row.get("endpoint"), "unknown")
+    row_count = _as_int(row.get("row_count") or row.get("count"))
+    cost = _as_float(row.get("cost_est_usd"))
+    observed_savings = _as_float(row.get("observed_savings_usd"))
+    error_count = _as_int(row.get("error_count"))
+    retry_count = _as_int(row.get("retry_count"))
+    projected_crunch_savings = _as_float(row.get("projected_crunch_savings_usd"))
+    projected_crunch_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+    replay_weight = 100.0 if "replayability" in classes else 0.0
+    repeated_weight = 150.0 if "repeated_context" in classes else 0.0
+    routing_weight = 75.0 if "routing" in classes else 0.0
+    crunch_weight = 75.0 if "crunch" in classes else 0.0
+    score = (
+        row_count
+        + cost * 1000.0
+        + observed_savings * 2000.0
+        + projected_crunch_savings * 2500.0
+        + repeated_weight
+        + replay_weight
+        + routing_weight
+        + crunch_weight
+        - error_count * 5.0
+        - retry_count * 0.5
+    )
+    return {
+        "schema": "agentflow.request_shape_follow_up_candidate.v1",
+        "rank": rank,
+        "provider_surface_bucket": "/".join(part for part in (provider, source_surface, endpoint) if part) or "mixed",
+        "provider_family": provider,
+        "source_surface": source_surface,
+        "endpoint": endpoint,
+        "requested_model_family": public_label(row.get("requested_model_family"), "unknown"),
+        "routed_model_family": public_label(row.get("routed_model_family"), "unknown"),
+        "category": public_label(row.get("category"), "unknown"),
+        "workflow_phase": public_label(row.get("workflow_phase"), "unknown"),
+        "stream": bool(row.get("stream")),
+        "has_tools": bool(row.get("has_tools")),
+        "text_bucket": public_label(row.get("text_bucket"), "unknown"),
+        "token_bucket": public_label(row.get("token_bucket"), "unknown"),
+        "cache_status": public_label(row.get("cache_status"), "unknown"),
+        "routing_status": public_label(row.get("routing_status"), "unknown"),
+        "row_count": row_count,
+        "error_count": error_count,
+        "retry_count": retry_count,
+        "cost_est_usd": round(cost, 6),
+        "observed_savings_usd": round(observed_savings, 6),
+        "projected_crunch_tokens_saved": projected_crunch_tokens,
+        "projected_crunch_savings_usd": round(projected_crunch_savings, 6),
+        "candidate_work_classes": classes,
+        "candidate_families": families,
+        "blocker_codes": blockers,
+        "next_action": next_action,
+        "local_action_family": _shape_local_action_family(next_action, classes),
+        "aggregate_only": True,
+        "privacy": _shape_follow_up_privacy(),
+        "_score": score,
+    }
+
+
+def build_request_shape_follow_up_candidates(
+    rollups: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    relevant_classes = {"repeated_context", "replayability", "routing", "crunch"}
+    candidates = [
+        _shape_follow_up_candidate(row, rank=index)
+        for index, row in enumerate(rollups, start=1)
+        if isinstance(row, dict)
+        and relevant_classes.intersection({str(item) for item in row.get("candidate_work_classes") or []})
+    ]
+    candidates.sort(
+        key=lambda item: (
+            _as_float(item.get("_score")),
+            _as_float(item.get("observed_savings_usd")),
+            _as_float(item.get("cost_est_usd")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+
+    class_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    clean: list[dict[str, Any]] = []
+    capped_limit = max(1, min(_as_int(limit, 10), 100))
+    for rank, candidate in enumerate(candidates[:capped_limit], start=1):
+        candidate["rank"] = rank
+        row_count = _as_int(candidate.get("row_count"))
+        for work_class in candidate.get("candidate_work_classes") or []:
+            _increment(class_counts, work_class, row_count)
+        for blocker in candidate.get("blocker_codes") or []:
+            _increment(blocker_counts, blocker, row_count)
+        _increment(action_counts, candidate.get("next_action"), row_count)
+        _increment(family_counts, candidate.get("local_action_family"), row_count)
+        item = dict(candidate)
+        item.pop("_score", None)
+        clean.append(item)
+
+    status = "candidates-ranked" if clean else "no-request-shape-follow-up-candidates"
+    top = clean[0] if clean else None
+    missing = [] if clean else ["request_shape_follow_up_candidates"]
+    return {
+        "schema": FOLLOW_UP_CANDIDATES_SCHEMA,
+        "status": status,
+        "summary": {
+            "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in rollups if isinstance(row, dict)),
+            "rollup_count": len([row for row in rollups if isinstance(row, dict)]),
+            "ranked_candidate_count": len(clean),
+            "top_next_action": top.get("next_action") if top else None,
+            "top_local_action_family": top.get("local_action_family") if top else None,
+            "class_breakdown": _breakdown(class_counts),
+            "blocker_breakdown": _breakdown(blocker_counts),
+            "next_action_breakdown": _breakdown(action_counts),
+            "local_action_family_breakdown": _breakdown(family_counts),
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "top_candidate": top,
+        "candidates": clean,
+        "missing_measurements": missing,
+        "privacy": _shape_follow_up_privacy(),
+    }
+
+
 def _persistable_row(
     *,
     run_id: str,
@@ -1983,6 +2154,10 @@ def build_request_shape_rollups_report(
             generated_at=generated_at,
             rows=persistable,
         )
+    cache_replayability_dry_run = build_request_shape_cache_replayability_dry_run(rollups, limit=25)
+    crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(rollups, limit=25)
+    crunch_canary_impact = build_request_shape_crunch_canary_impact_report(impact_rows)
+    follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
 
     return {
         "schema": SCHEMA,
@@ -2004,13 +2179,17 @@ def build_request_shape_rollups_report(
             "total_baseline_cost_usd": round(sum(_as_float(row.get("baseline_cost_usd")) for row in rollups), 6),
             "observed_savings_usd": round(sum(_as_float(row.get("observed_savings_usd")) for row in rollups), 6),
             "body_rows_read": body_rows_read,
+            "follow_up_candidate_count": follow_up_candidates["summary"]["ranked_candidate_count"],
+            "top_next_action": follow_up_candidates["summary"]["top_next_action"],
+            "top_local_action_family": follow_up_candidates["summary"]["top_local_action_family"],
         },
         "provider_breakdown": _breakdown(provider_counts),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_code_breakdown": _breakdown(blocker_counts),
-        "cache_replayability_dry_run": build_request_shape_cache_replayability_dry_run(rollups, limit=25),
-        "crunch_opportunity_dry_run": build_request_shape_crunch_opportunity_dry_run(rollups, limit=25),
-        "crunch_canary_impact": build_request_shape_crunch_canary_impact_report(impact_rows),
+        "follow_up_candidates": follow_up_candidates,
+        "cache_replayability_dry_run": cache_replayability_dry_run,
+        "crunch_opportunity_dry_run": crunch_opportunity_dry_run,
+        "crunch_canary_impact": crunch_canary_impact,
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,

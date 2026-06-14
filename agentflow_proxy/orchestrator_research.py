@@ -1738,8 +1738,18 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "privacy": _candidate_privacy(),
         }
 
-    rollups = [row for row in report.get("rollups") or report.get("candidates") or [] if isinstance(row, dict)]
-    source_schema = report.get("schema")
+    follow_up_report = report.get("follow_up_candidates") if isinstance(report.get("follow_up_candidates"), dict) else None
+    follow_up_rows = (
+        [row for row in follow_up_report.get("candidates") or [] if isinstance(row, dict)]
+        if isinstance(follow_up_report, dict)
+        else []
+    )
+    rollups = [
+        row
+        for row in (follow_up_rows or report.get("rollups") or report.get("candidates") or [])
+        if isinstance(row, dict)
+    ]
+    source_schema = follow_up_report.get("schema") if isinstance(follow_up_report, dict) else report.get("schema")
     ranked = [
         _request_shape_candidate_row(row, source_schema=source_schema, rank=index)
         for index, row in enumerate(rollups, start=1)
@@ -1759,6 +1769,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         clean.pop("_score", None)
         clean_ranked.append(clean)
     report_summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    follow_up_summary = (
+        follow_up_report.get("summary")
+        if isinstance(follow_up_report, dict) and isinstance(follow_up_report.get("summary"), dict)
+        else {}
+    )
     replay_dry_run = report.get("cache_replayability_dry_run") if isinstance(report.get("cache_replayability_dry_run"), dict) else None
     replay_summary = replay_dry_run.get("summary") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("summary"), dict) else {}
     replay_cohorts = replay_dry_run.get("cohorts") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("cohorts"), list) else []
@@ -1772,7 +1787,12 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "rows_considered": _to_int(report_summary.get("rows_considered") or report_summary.get("scanned_rows")),
             "rollup_count": _to_int(report_summary.get("rollup_count") or len(rollups)),
             "ranked_candidate_count": len(clean_ranked),
-            "top_next_action": clean_ranked[0]["next_action"] if clean_ranked else None,
+            "top_next_action": sanitize_value(follow_up_summary.get("top_next_action"))
+            if follow_up_summary
+            else (clean_ranked[0]["next_action"] if clean_ranked else None),
+            "top_local_action_family": sanitize_value(follow_up_summary.get("top_local_action_family"))
+            if follow_up_summary
+            else None,
             "cache_replayability_top_blocker": sanitize_value(replay_summary.get("top_blocker_code"))
             if replay_summary
             else None,
@@ -1816,6 +1836,16 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "blocker_breakdown": sanitize_value(replay_dry_run.get("blocker_breakdown") or []),
             "cohorts": sanitize_value(replay_cohorts[:5]),
             "privacy": sanitize_value(replay_dry_run.get("privacy") if isinstance(replay_dry_run.get("privacy"), dict) else {}),
+        }
+    if follow_up_report is not None:
+        result["follow_up_candidates"] = {
+            "schema": sanitize_value(follow_up_report.get("schema")),
+            "status": sanitize_value(follow_up_report.get("status")),
+            "summary": sanitize_value(follow_up_summary),
+            "top_candidate": sanitize_value(follow_up_report.get("top_candidate") if isinstance(follow_up_report.get("top_candidate"), dict) else None),
+            "candidates": sanitize_value(follow_up_rows[:5]),
+            "missing_measurements": sanitize_value(follow_up_report.get("missing_measurements") or []),
+            "privacy": sanitize_value(follow_up_report.get("privacy") if isinstance(follow_up_report.get("privacy"), dict) else {}),
         }
     return result
 
