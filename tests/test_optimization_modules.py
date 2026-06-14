@@ -28,6 +28,10 @@ from agentflow_proxy.optimization_promotion_canary import (
 from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
 from agentflow_proxy.optimization_promotion_impact import measure_optimization_promotion_impact
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+from agentflow_proxy.promotion_outcome_feedback import (
+    promotion_outcome_feedback_summary,
+    record_promotion_outcome_feedback,
+)
 from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
 from agentflow_proxy.optimization_rollout_review import (
     attach_optimization_rollout_provenance,
@@ -1925,6 +1929,81 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(blocked_report["status"], "privacy-blocked")
         self.assertFalse(blocked_report["privacy"]["raw_prompts_included"])
         self.assertNotIn("raw promotion impact secret", stable_json(blocked_report))
+
+    def test_promotion_outcome_feedback_records_append_only_metadata_and_rollback_status(self):
+        action = self._promotion_impact_action("routing", "routing-feedback-ledger", projected_savings=0.004)
+        bundle = self._promotion_impact_bundle(action)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                self._log_promotion_impact_call(store, action, cohort="canary_applied", status_code=500, suffix="a")
+                self._log_promotion_impact_call(store, action, cohort="canary_holdout", cost_est=0.003, cost_baseline=0.003, suffix="h")
+                impact = measure_optimization_promotion_impact(
+                    bundle,
+                    store_obj=store,
+                    limit=10,
+                    min_applied_samples=1,
+                    min_holdout_samples=1,
+                    max_evidence_age_hours=999999,
+                    now=datetime(2026, 6, 10, 1, tzinfo=timezone.utc),
+                )
+                first = record_promotion_outcome_feedback(impact, store_obj=store, recorded_at="2026-06-10T01:00:00+00:00")
+                second = record_promotion_outcome_feedback(impact, store_obj=store, recorded_at="2026-06-10T01:00:01+00:00")
+                rows = store.promotion_outcome_feedback_rows(limit=10)
+                summary = promotion_outcome_feedback_summary(store, limit=10)
+                promotion_report = build_optimization_promotion_report(
+                    store,
+                    plan={
+                        "schema": "agentflow.optimization_eval_plan.v1",
+                        "plans": [{
+                            "candidate_id": action["target_candidate_id"],
+                            "optimization_family": "phase_routing",
+                            "action_family": "routing",
+                            "source_surface": "anthropic_messages",
+                            "app_family": "claude_code",
+                            "projected_savings_usd": 0.004,
+                            "sample_count": 2,
+                            "evidence": {"verdict": "widen"},
+                        }],
+                    },
+                    limit=10,
+                    min_eval_pass_count=0,
+                    min_canary_applied_samples=1,
+                    min_canary_holdout_samples=1,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(first["wrote_store"])
+        self.assertEqual(first["summary"]["rows_written"], 1)
+        self.assertEqual(second["summary"]["rows_written"], 1)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["id"], rows[1]["id"])
+        entry = first["entries"][0]
+        self.assertEqual(entry["schema"], "agentflow.promotion_outcome_feedback_entry.v1")
+        self.assertEqual(entry["policy_id"], action["target_rule_id"])
+        self.assertEqual(entry["action_family"], "routing")
+        self.assertEqual(entry["rule_source"], "managed-recommended")
+        self.assertEqual(entry["source_evidence_schema"], "agentflow.optimization_promotion_rollout_actions.v1")
+        self.assertEqual(entry["status"], "rollback-needed")
+        self.assertTrue(entry["rollback_needed"])
+        self.assertEqual(entry["applied_count"], 1)
+        self.assertEqual(entry["holdout_count"], 1)
+        self.assertGreaterEqual(entry["error_rate_delta"], 1.0)
+        self.assertEqual(summary["summary"]["rollback_needed_count"], 2)
+        self.assertEqual(summary["candidates"][0]["verdict"], "rollback")
+        self.assertEqual(promotion_report["promotion_outcome_feedback"]["entry_count"], 2)
+        self.assertEqual(
+            promotion_report["candidates"][0]["evidence_sources"][0]["source"],
+            "promotion_outcome_feedback",
+        )
+        self.assertEqual(promotion_report["candidates"][0]["cohort_counts"]["canary_applied"], 1)
+        rendered = stable_json(summary)
+        self.assertNotIn("raw-session-secret", rendered)
+        self.assertNotIn("request_json", rendered)
+        self.assertFalse(summary["privacy"]["request_ids_included"])
+        self.assertFalse(summary["privacy"]["raw_provider_bodies_included"])
 
     def test_optimization_promotion_impact_blocks_provider_adoption_regression(self):
         action = self._promotion_impact_action("routing", "routing-adoption-regression", projected_savings=0.001)

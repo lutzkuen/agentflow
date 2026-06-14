@@ -299,6 +299,7 @@ def _observation_from_meta(row: dict[str, Any], meta: dict[str, Any], *, policy_
         "reason": reason,
         "status_code": row.get("status_code"),
         "retry_count": _as_int(row.get("retry_count")),
+        "fallback_count": _as_int(meta.get("fallback_count")),
         "latency_ms": row.get("latency_ms"),
         "source_surface": row.get("source_surface"),
         "savings_usd": _row_savings(row, meta) if cohort == "canary_applied" else 0.0,
@@ -379,7 +380,7 @@ def _matches_action(observation: dict[str, Any], action: dict[str, Any]) -> bool
 
 
 def _empty_cohort() -> dict[str, Any]:
-    return {"count": 0, "error_count": 0, "retry_count": 0, "latency_ms_total": 0, "latency_sample_count": 0, "savings_usd": 0.0}
+    return {"count": 0, "error_count": 0, "retry_count": 0, "fallback_count": 0, "latency_ms_total": 0, "latency_sample_count": 0, "savings_usd": 0.0}
 
 
 def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
@@ -389,8 +390,10 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "count": count,
         "error_count": _as_int(raw.get("error_count")),
         "retry_count": _as_int(raw.get("retry_count")),
+        "fallback_count": _as_int(raw.get("fallback_count")),
         "error_rate": round(_as_int(raw.get("error_count")) / count, 6) if count else 0.0,
         "retry_rate": round(_as_int(raw.get("retry_count")) / count, 6) if count else 0.0,
+        "fallback_rate": round(_as_int(raw.get("fallback_count")) / count, 6) if count else 0.0,
         "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
         "observed_savings_usd": round(_as_float(raw.get("savings_usd")), 8),
     }
@@ -419,6 +422,7 @@ def _actual(matched: list[dict[str, Any]]) -> dict[str, Any]:
         retried = _as_int(item.get("retry_count")) > 0
         bucket["error_count"] += int(errored)
         bucket["retry_count"] += int(retried)
+        bucket["fallback_count"] += _as_int(item.get("fallback_count"))
         latency = _as_int(item.get("latency_ms"), -1)
         if latency >= 0:
             bucket["latency_ms_total"] += latency
@@ -454,6 +458,7 @@ def _actual(matched: list[dict[str, Any]]) -> dict[str, Any]:
         "observed_savings_usd": round(savings, 8),
         "applied_minus_holdout_error_rate": round(_as_float(applied["error_rate"]) - _as_float(holdout["error_rate"]), 6),
         "applied_minus_holdout_retry_rate": round(_as_float(applied["retry_rate"]) - _as_float(holdout["retry_rate"]), 6),
+        "applied_minus_holdout_fallback_rate": round(_as_float(applied["fallback_rate"]) - _as_float(holdout["fallback_rate"]), 6),
         "applied_minus_holdout_latency_avg_ms": latency_delta,
         "latest_observed_at": latest_observed_at,
         "cohorts": finalized,
@@ -604,6 +609,7 @@ def _merge_finalized_cohort(target: dict[str, Any], source: dict[str, Any]) -> N
     target["count"] += count
     target["error_count"] += _as_int(source.get("error_count"))
     target["retry_count"] += _as_int(source.get("retry_count"))
+    target["fallback_count"] += _as_int(source.get("fallback_count"))
     target["savings_usd"] += _as_float(source.get("observed_savings_usd"))
     latency = source.get("latency_avg_ms")
     if latency is not None and count:
@@ -681,6 +687,7 @@ def _family_impacts(action_results: list[dict[str, Any]]) -> list[dict[str, Any]
             "applied_vs_holdout_deltas": {
                 "applied_minus_holdout_error_rate": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
                 "applied_minus_holdout_retry_rate": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+                "applied_minus_holdout_fallback_rate": round(_as_float(applied.get("fallback_rate")) - _as_float(holdout.get("fallback_rate")), 6),
                 "applied_minus_holdout_latency_avg_ms": latency_delta,
                 "applied_minus_holdout_observed_savings_usd": round(
                     _as_float(applied.get("observed_savings_usd")) - _as_float(holdout.get("observed_savings_usd")),
@@ -772,6 +779,8 @@ def measure_optimization_promotion_impact(
     for index, action in enumerate(actions):
         if not isinstance(action, dict):
             continue
+        local_update = action.get("local_policy_update") if isinstance(action.get("local_policy_update"), dict) else {}
+        evidence_summary = action.get("evidence_summary") if isinstance(action.get("evidence_summary"), dict) else {}
         matched = [item for item in observed if _matches_action(item, action)]
         actual = _actual(matched)
         projection = _projected(action)
@@ -804,6 +813,9 @@ def measure_optimization_promotion_impact(
             "action_type": action.get("action_type"),
             "action_family": _action_family(action),
             "policy_section": action.get("policy_section"),
+            "policy_id": action.get("policy_id") or action.get("target_rule_id") or action.get("target_candidate_id") or action.get("action_id"),
+            "rule_source": local_update.get("policy_source") or action.get("policy_source"),
+            "source_evidence_schema": action.get("source_evidence_schema") or evidence_summary.get("schema") or promotion_actions.get("schema"),
             "target_candidate_id": action.get("target_candidate_id"),
             "target_rule_id": action.get("target_rule_id"),
             "projection": projection,

@@ -507,6 +507,36 @@ class SQLiteStore:
             )
             """)
             cur.execute("""
+            create table if not exists promotion_outcome_feedback (
+              id text primary key,
+              created_at text not null,
+              impact_generated_at text,
+              policy_id text not null,
+              action_family text not null,
+              policy_section text not null,
+              rule_source text,
+              rule_id text,
+              candidate_id text,
+              action_id text,
+              source_evidence_schema text,
+              status text not null,
+              recommendation text,
+              rollback_needed integer not null default 0,
+              observed_savings_usd real,
+              projected_savings_usd real,
+              projection_realization_ratio real,
+              applied_count integer not null default 0,
+              holdout_count integer not null default 0,
+              skipped_count integer not null default 0,
+              bypassed_count integer not null default 0,
+              safety_stop_count integer not null default 0,
+              error_rate_delta real,
+              retry_rate_delta real,
+              latency_delta_ms real,
+              feedback_json text not null
+            )
+            """)
+            cur.execute("""
             create table if not exists request_shape_rollups (
               id text primary key,
               run_id text not null,
@@ -590,6 +620,14 @@ class SQLiteStore:
             cur.execute("""
             create index if not exists idx_optimization_eval_results_recent
             on optimization_eval_results(created_at, status_class)
+            """)
+            cur.execute("""
+            create index if not exists idx_promotion_outcome_feedback_recent
+            on promotion_outcome_feedback(created_at, action_family, status)
+            """)
+            cur.execute("""
+            create index if not exists idx_promotion_outcome_feedback_key
+            on promotion_outcome_feedback(policy_id, action_family, policy_section, created_at)
             """)
             cur.execute("""
             create index if not exists idx_request_shape_rollups_recent
@@ -1499,6 +1537,54 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def log_promotion_outcome_feedback(self, **kwargs: Any) -> None:
+        cols = [
+            "id", "created_at", "impact_generated_at", "policy_id", "action_family",
+            "policy_section", "rule_source", "rule_id", "candidate_id", "action_id",
+            "source_evidence_schema", "status", "recommendation", "rollback_needed",
+            "observed_savings_usd", "projected_savings_usd", "projection_realization_ratio",
+            "applied_count", "holdout_count", "skipped_count", "bypassed_count",
+            "safety_stop_count", "error_rate_delta", "retry_rate_delta",
+            "latency_delta_ms", "feedback_json",
+        ]
+        values = [kwargs.get(c) for c in cols]
+        with self._lock:
+            self.conn.execute(
+                f"insert into promotion_outcome_feedback({','.join(cols)}) values ({','.join(['?']*len(cols))})",
+                values,
+            )
+            self.conn.commit()
+
+    def promotion_outcome_feedback_rows(
+        self,
+        *,
+        action_family: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        capped = max(1, min(int(limit or 1), 10000))
+        if action_family:
+            rows = self.conn.execute(
+                """
+                select *
+                from promotion_outcome_feedback
+                where action_family = ?
+                order by created_at desc
+                limit ?
+                """,
+                (action_family, capped),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                select *
+                from promotion_outcome_feedback
+                order by created_at desc
+                limit ?
+                """,
+                (capped,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def persist_request_shape_rollups(
         self,
         *,
@@ -1770,6 +1856,36 @@ class PostgresStore(SQLiteStore):
             )
             """,
             """
+            create table if not exists promotion_outcome_feedback (
+              id text primary key,
+              created_at timestamptz not null,
+              impact_generated_at timestamptz,
+              policy_id text not null,
+              action_family text not null,
+              policy_section text not null,
+              rule_source text,
+              rule_id text,
+              candidate_id text,
+              action_id text,
+              source_evidence_schema text,
+              status text not null,
+              recommendation text,
+              rollback_needed integer not null default 0,
+              observed_savings_usd numeric,
+              projected_savings_usd numeric,
+              projection_realization_ratio numeric,
+              applied_count integer not null default 0,
+              holdout_count integer not null default 0,
+              skipped_count integer not null default 0,
+              bypassed_count integer not null default 0,
+              safety_stop_count integer not null default 0,
+              error_rate_delta numeric,
+              retry_rate_delta numeric,
+              latency_delta_ms numeric,
+              feedback_json text not null
+            )
+            """,
+            """
             create table if not exists request_shape_rollups (
               id text primary key,
               run_id text not null,
@@ -1852,6 +1968,14 @@ class PostgresStore(SQLiteStore):
         self.conn.execute("""
             create index if not exists idx_optimization_eval_results_recent
             on optimization_eval_results(created_at, status_class)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_promotion_outcome_feedback_recent
+            on promotion_outcome_feedback(created_at, action_family, status)
+        """)
+        self.conn.execute("""
+            create index if not exists idx_promotion_outcome_feedback_key
+            on promotion_outcome_feedback(policy_id, action_family, policy_section, created_at)
         """)
         self.conn.execute("""
             create index if not exists idx_request_shape_rollups_recent

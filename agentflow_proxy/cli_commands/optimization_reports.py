@@ -6329,6 +6329,11 @@ def optimization_promotion_impact_cli(
     parser.add_argument("--min-applied-samples", type=int, default=2, help="Minimum applied canary samples before widening, default: 2.")
     parser.add_argument("--min-holdout-samples", type=int, default=1, help="Minimum holdout samples before widening, default: 1.")
     parser.add_argument("--max-evidence-age-hours", type=float, default=72.0, help="Mark evidence stale after this many hours, default: 72.")
+    parser.add_argument(
+        "--no-record-outcome-feedback",
+        action="store_true",
+        help="Do not append the metadata-only local promotion outcome feedback ledger.",
+    )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
     args = parser.parse_args(argv)
 
@@ -6366,6 +6371,12 @@ def optimization_promotion_impact_cli(
             min_holdout_samples=args.min_holdout_samples,
             max_evidence_age_hours=args.max_evidence_age_hours,
         )
+        if result.get("ok") and not args.no_record_outcome_feedback:
+            from agentflow_proxy.promotion_outcome_feedback import record_promotion_outcome_feedback
+
+            feedback = record_promotion_outcome_feedback(result, store_obj=store)
+            result["promotion_outcome_feedback"] = feedback
+            result["wrote_store"] = bool(feedback.get("wrote_store"))
     finally:
         store.conn.close()
 

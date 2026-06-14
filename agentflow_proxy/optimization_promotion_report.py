@@ -524,6 +524,12 @@ def _extra_report_evidence(reports: list[dict[str, Any]]) -> dict[str, dict[str,
                     },
                 },
             }
+            if candidate.get("evidence_source"):
+                extra["__evidence_sources"] = [{
+                    "source": candidate.get("evidence_source"),
+                    "schema": report.get("schema"),
+                    "action_family": candidate.get("action_family"),
+                }]
             add(candidate_id, extra)
     return by_candidate
 
@@ -726,6 +732,14 @@ def build_optimization_promotion_report(
         reports.append(activation_lifecycle_feedback_summary(store_obj, limit=capped_limit * 20))
     except Exception:
         pass
+    outcome_feedback: dict[str, Any] | None = None
+    try:
+        from agentflow_proxy.promotion_outcome_feedback import promotion_outcome_feedback_summary
+
+        outcome_feedback = promotion_outcome_feedback_summary(store_obj, limit=capped_limit * 20)
+        reports.append(outcome_feedback)
+    except Exception:
+        outcome_feedback = None
     extras = _extra_report_evidence(reports)
     defaults = {
         "min_eval_pass_count": min_eval_pass_count,
@@ -758,7 +772,7 @@ def build_optimization_promotion_report(
         for source in item.get("evidence_sources") or []:
             if isinstance(source, dict):
                 evidence_source_counts[str(source.get("source") or "unknown")] += 1
-    return {
+    result = {
         "schema": SCHEMA,
         "generated_at": utc_now(),
         "read_only": True,
@@ -778,3 +792,11 @@ def build_optimization_promotion_report(
         "candidates": candidates,
         "privacy": _privacy_summary(),
     }
+    if outcome_feedback is not None:
+        result["promotion_outcome_feedback"] = {
+            "schema": outcome_feedback.get("schema"),
+            "entry_count": outcome_feedback.get("entry_count"),
+            "summary": outcome_feedback.get("summary"),
+            "privacy": outcome_feedback.get("privacy"),
+        }
+    return result

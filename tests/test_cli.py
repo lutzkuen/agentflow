@@ -3858,10 +3858,16 @@ class PolicyReloadCliTests(unittest.TestCase):
                 stdin=io.StringIO(json.dumps(bundle)),
                 stdout=stdout,
             )
+            store = Store(db_path)
+            try:
+                feedback_rows = store.promotion_outcome_feedback_rows(limit=10)
+            finally:
+                store.conn.close()
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema"], "agentflow.optimization_promotion_impact.v1")
+        self.assertTrue(payload["wrote_store"])
         self.assertEqual(payload["summary"]["actual_canary_applied_count"], 1)
         self.assertEqual(payload["summary"]["actual_canary_holdout_count"], 1)
         self.assertEqual(payload["actions"][0]["next_step"]["verdict"], "widen")
@@ -3871,6 +3877,11 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(payload["family_impacts"][0]["cohort_metrics"]["canary_applied"]["count"], 1)
         self.assertEqual(payload["family_impacts"][0]["cohort_metrics"]["canary_holdout"]["count"], 1)
         self.assertEqual(payload["summary"]["recommendation_counts"], [{"value": "promote", "count": 1}])
+        self.assertEqual(payload["promotion_outcome_feedback"]["schema"], "agentflow.promotion_outcome_feedback_ledger.v1")
+        self.assertEqual(payload["promotion_outcome_feedback"]["summary"]["rows_written"], 1)
+        self.assertEqual(payload["promotion_outcome_feedback"]["entries"][0]["status"], "positive")
+        self.assertEqual(len(feedback_rows), 1)
+        self.assertEqual(feedback_rows[0]["policy_id"], action["target_rule_id"])
         rendered = json.dumps(payload, sort_keys=True)
         self.assertNotIn("cli-impact-session-secret", rendered)
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
