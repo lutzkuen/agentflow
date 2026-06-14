@@ -7,11 +7,14 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from agentflow_proxy.public_metadata import public_id
 from agentflow_proxy.pricing import estimate_cost, pricing_basis
 
 
 SCHEMA = "agentflow.orchestrator_research_plan.v1"
 EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burndown.v1"
+EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger.v1"
+EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
 
 SENSITIVE_VALUE = "[REDACTED]"
 SENSITIVE_ID = "[REDACTED_ID]"
@@ -1824,6 +1827,198 @@ def _loop_progress_state(state: str) -> bool:
     return state in {"activation-ready", "replay-ready", "measured-savings", "projected-savings", "ranked-evidence"}
 
 
+def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
+    state = str(stage.get("state") or "").strip().lower().replace("_", "-")
+    blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
+    if _to_int(stage.get("safety_stopped_count")) > 0 or any("safety" in blocker for blocker in blockers):
+        return "safety-stopped"
+    if state in {"blocked", "missing-evidence"}:
+        return "blocked"
+    if _to_int(stage.get("applied_count")) > 0 and _to_int(stage.get("holdout_count")) > 0:
+        return "holdout"
+    if _to_int(stage.get("applied_count")) > 0:
+        return "applied"
+    if state in {"activation-ready", "replay-ready"}:
+        return "staged"
+    if state == "measured-savings":
+        return "measured"
+    if state in {"projected-savings", "ranked-evidence"}:
+        return "projected"
+    if state == "no-op":
+        return "superseded"
+    return "projected" if stage else "unknown"
+
+
+def _ledger_cohort_bucket(stage: dict[str, Any]) -> str:
+    requested = str(stage.get("requested_model") or "").strip()
+    target = str(stage.get("candidate_target_model") or "").strip()
+    if requested and target:
+        return sanitize_value(f"{requested}->{target}")
+    for key in ("cohort_bucket", "provider_surface_bucket", "source_surface"):
+        value = str(stage.get(key) or "").strip()
+        if value:
+            return sanitize_value(value)
+    sample_bucket = _sample_count_bucket(stage.get("sample_count"))
+    return sanitize_value(f"{stage.get('lever') or 'unknown'}:{sample_bucket}")
+
+
+def _ledger_expected_savings_path(stage: dict[str, Any]) -> str:
+    lever = str(stage.get("lever") or "optimization")
+    next_action = str(stage.get("next_action") or "inspect-local-evidence")
+    paths = {
+        "routing": "Move routing from local lifecycle evidence into the next canary, widening, or blocked-review step.",
+        "cache": "Move cache replay evidence toward a staged local replay canary or a narrower invalidation blocker.",
+        "crunch": "Move crunch opportunity evidence from projected savings into measurement, canary, or activation follow-up.",
+        "request-shape-rollups": "Move request-shape rollups into the next repeated-context replay, routing, or crunch cohort issue.",
+        "managed-recommendation": "Move managed omission evidence into a local file-backed policy handoff or explicit no-op reason.",
+    }
+    return sanitize_value(paths.get(lever, f"Advance the local {lever} evidence path through `{next_action}`."))
+
+
+def _ledger_issue_match(entry: dict[str, Any], issues: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    lever = str(entry.get("lever") or "")
+    action_family = str(entry.get("local_action_family") or "")
+    title_key_words = {word for word in _issue_title_key(entry.get("legacy_issue_title")).split() if word}
+    for issue in issues:
+        title_key = _issue_title_key(issue.get("title"))
+        if not title_key:
+            continue
+        if title_key_words and title_key_words.issubset(set(title_key.split())):
+            return _issue_ref(issue)
+        if lever and lever in title_key:
+            if action_family and action_family not in title_key:
+                continue
+            if not _is_open(issue):
+                return _issue_ref(issue)
+    return None
+
+
+def _legacy_issue_title_for_ledger_entry(entry: dict[str, Any]) -> str:
+    lever = str(entry.get("lever") or "")
+    blockers = [str(item) for item in entry.get("blocker_codes") or [] if str(item or "").strip()]
+    blocker = blockers[0] if blockers else str(entry.get("state") or "candidate")
+    if lever == "cache":
+        return f"Turn {blocker} cache candidate into local replay evidence"
+    if lever == "routing":
+        requested = str(entry.get("requested_model") or "").strip()
+        target = str(entry.get("candidate_target_model") or "").strip()
+        if requested and target:
+            return f"Stage routing evidence for {requested} to {target}"
+        return f"Collect routing lifecycle evidence for {blocker}"
+    if lever == "crunch":
+        return f"Rank crunch savings follow-up for {blocker}"
+    if lever == "request-shape-rollups":
+        return "Generate request-shape rollup candidates for repeated context work"
+    if lever == "managed-recommendation":
+        return "Rank managed recommendation omission reasons for local policy handoff"
+    return f"Convert {lever} candidate into implementation-ready savings issue"
+
+
+def build_evidence_to_activation_next_action_ledger(
+    stats_summary: dict[str, Any],
+    *,
+    existing_issues: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any] | None:
+    loop = stats_summary.get("evidence_to_activation_loop") if isinstance(stats_summary.get("evidence_to_activation_loop"), dict) else {}
+    stages = [stage for stage in loop.get("levers") or [] if isinstance(stage, dict)]
+    if not stages:
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for stage in stages:
+        lever = sanitize_value(stage.get("lever") or "unknown")
+        action_family = sanitize_value(stage.get("local_action_family") or lever)
+        evidence_schema = sanitize_value(stage.get("evidence_source") or loop.get("schema"))
+        cohort_bucket = _ledger_cohort_bucket(stage)
+        raw_policy_ref = str(stage.get("policy_id") or stage.get("policy_ref") or "").strip()
+        policy_ref = public_id(f"raw:{raw_policy_ref}", prefix="policy") if raw_policy_ref else None
+        fingerprint_material = {
+            "lever": lever,
+            "local_action_family": action_family,
+            "evidence_schema": evidence_schema,
+            "cohort_bucket": cohort_bucket,
+            "policy_ref": policy_ref,
+            "next_action": sanitize_value(stage.get("next_action") or "inspect-local-evidence"),
+        }
+        entry = {
+            "schema": EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA,
+            "fingerprint": public_id(json.dumps(fingerprint_material, sort_keys=True), prefix="activation"),
+            "lever": lever,
+            "local_action_family": action_family,
+            "evidence_schema": evidence_schema,
+            "cohort_bucket": cohort_bucket,
+            "policy_ref": policy_ref,
+            "current_status": _ledger_status_from_stage(stage),
+            "state": sanitize_value(stage.get("state") or "unknown"),
+            "next_action": sanitize_value(stage.get("next_action") or "inspect-local-evidence"),
+            "blocker_codes": sanitize_value([str(item) for item in stage.get("blocker_codes") or [] if str(item or "").strip()]),
+            "sample_count": _to_int(stage.get("sample_count")),
+            "applied_count": _to_int(stage.get("applied_count")),
+            "holdout_count": _to_int(stage.get("holdout_count")),
+            "projected_hits": _to_int(stage.get("projected_hits")),
+            "savings_per_1000_calls_usd": round(_to_float(stage.get("savings_per_1000_calls_usd")), 8),
+            "projected_saved_usd": round(_to_float(stage.get("projected_saved_usd") or stage.get("projected_saved_cost_usd")), 8),
+            "expected_savings_path": _ledger_expected_savings_path(stage),
+            "legacy_issue_title": _legacy_issue_title_for_ledger_entry(stage),
+        }
+        if stage.get("requested_model"):
+            entry["requested_model"] = sanitize_value(stage.get("requested_model"))
+        if stage.get("candidate_target_model"):
+            entry["candidate_target_model"] = sanitize_value(stage.get("candidate_target_model"))
+        matched = _ledger_issue_match(entry, existing_issues)
+        if matched is not None and str(matched.get("number") or ""):
+            entry["prior_issue"] = matched
+            if not any(_issue_number(issue) == matched.get("number") and _is_open(issue) for issue in existing_issues):
+                entry["issue_status"] = "closed-issue-seen"
+        entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in {"sample_count", "applied_count", "holdout_count"}})
+
+    entries.sort(
+        key=lambda item: (
+            _loop_state_rank(str(item.get("state") or "")),
+            -_to_float(item.get("savings_per_1000_calls_usd") or item.get("projected_saved_usd")),
+            -_to_int(item.get("sample_count")),
+            str(item.get("lever") or ""),
+        )
+    )
+    for rank, entry in enumerate(entries, start=1):
+        entry["rank"] = rank
+    top = entries[0] if entries else {}
+    status_counts = Counter(str(entry.get("current_status") or "unknown") for entry in entries)
+    issue_status_counts = Counter(str(entry.get("issue_status") or "none") for entry in entries)
+    result = {
+        "schema": EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA,
+        "status": "tracked" if entries else "empty",
+        "summary": {
+            "tracked_entry_count": len(entries),
+            "closed_issue_seen_count": sum(1 for entry in entries if entry.get("issue_status") == "closed-issue-seen"),
+            "top_lever": top.get("lever"),
+            "top_current_status": top.get("current_status"),
+            "top_next_action": top.get("next_action"),
+            "top_blocker_codes": top.get("blocker_codes") or [],
+            "top_expected_savings_path": top.get("expected_savings_path"),
+            "status_counts": [{"status": status, "count": count} for status, count in sorted(status_counts.items())],
+            "issue_status_counts": [
+                {"status": status, "count": count}
+                for status, count in sorted(issue_status_counts.items())
+                if status != "none"
+            ],
+        },
+        "entries": entries[:20],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+        },
+    }
+    return sanitize_value(result)
+
+
 def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     canary_row, source = _top_openai_routing_canary_row(stats_summary)
     if canary_row is not None:
@@ -3380,6 +3575,94 @@ def _proposal_from_promotion_blocker_next_action(stats_summary: dict[str, Any]) 
     }
 
 
+def _evidence_ledger_action_title(entry: dict[str, Any]) -> str:
+    lever = str(entry.get("lever") or "optimization").replace("_", "-")
+    action = str(entry.get("next_action") or "advance-local-evidence").lower().replace("_", "-")
+    if lever == "cache" and "stage" in action:
+        return "Stage cache replay canary from evidence-to-activation ledger"
+    if lever == "routing" and ("widen" in action or "activate" in action or "stage" in action):
+        return "Advance routing activation from evidence-to-activation ledger"
+    if lever == "crunch" and ("measure" in action or "impact" in action):
+        return "Measure crunch activation from evidence-to-activation ledger"
+    if lever == "request-shape-rollups":
+        return "Advance repeated-context cohort from evidence-to-activation ledger"
+    if lever == "managed-recommendation":
+        return "Advance managed recommendation handoff from evidence-to-activation ledger"
+    return f"Advance {lever} next action from evidence-to-activation ledger"
+
+
+def _proposal_from_evidence_to_activation_ledger(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    ledger = stats_summary.get("evidence_to_activation_next_action_ledger")
+    if not isinstance(ledger, dict):
+        return None
+    entries = [entry for entry in ledger.get("entries") or [] if isinstance(entry, dict)]
+    if not entries:
+        return None
+    advanced_statuses = {"staged", "applied", "holdout", "measured", "closed-issue-seen"}
+    advanced = [
+        entry for entry in entries
+        if str(entry.get("issue_status") or "") == "closed-issue-seen"
+        and str(entry.get("current_status") or "") in advanced_statuses
+    ]
+    if not advanced:
+        return None
+    entry = advanced[0]
+    next_action = str(entry.get("next_action") or "").strip()
+    if not next_action:
+        return None
+    lever = str(entry.get("lever") or "optimization")
+    title = _evidence_ledger_action_title(entry)
+    labels = _default_issue_labels("priority:p2")
+    lever_label = lever.replace("_", "-")
+    if lever_label in {"routing", "cache", "crunch"}:
+        labels.append(lever_label)
+    labels.append("privacy")
+    closed_note = ""
+    prior = entry.get("prior_issue") if isinstance(entry.get("prior_issue"), dict) else {}
+    if entry.get("issue_status") == "closed-issue-seen" and prior:
+        closed_note = f"Closed prior issue seen: #{prior.get('number')} {prior.get('title')}"
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": list(dict.fromkeys(labels)),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "The local evidence-to-activation ledger shows that a savings candidate has progressed past the earlier backlog title. "
+                "Research mode should create the next lifecycle action instead of recreating stale projected-evidence work."
+            ),
+            evidence=[
+                f"Ledger schema: {ledger.get('schema')}",
+                f"Fingerprint: {entry.get('fingerprint')}",
+                f"Lever: {lever}",
+                f"Local action family: {entry.get('local_action_family')}",
+                f"Evidence schema: {entry.get('evidence_schema')}",
+                f"Cohort bucket: {entry.get('cohort_bucket')}",
+                f"Current status: {entry.get('current_status')}",
+                f"Issue status: {entry.get('issue_status')}",
+                f"Top next action: {next_action}",
+                f"Blocker codes: {json.dumps(entry.get('blocker_codes') or [])}",
+                f"Expected savings path: {entry.get('expected_savings_path')}",
+                closed_note,
+            ],
+            implementation=[
+                "Start from the evidence_to_activation_next_action_ledger entry in the research plan.",
+                f"Implement or narrow the lifecycle transition `{next_action}` for the `{lever}` lever using local file-backed policy and bounded metadata reports.",
+                "Do not inspect prompts, provider bodies, request IDs, session IDs, cache keys, file paths, or individual candidate identifiers.",
+                "Write the resulting applied, holdout, measured, blocked, safety-stopped, superseded, or closed-issue-seen status back into metadata so later research runs suppress stale titles.",
+            ],
+            acceptance=[
+                f"The next research plan reports progress for ledger fingerprint {entry.get('fingerprint')} and next_action={next_action}, or records a narrower blocker.",
+                "Closed earlier issue titles for the same fingerprint are not recreated when the ledger status has advanced.",
+                "The ledger output names top next action, current status, blocker codes, expected savings path, and privacy flags for each tracked lever.",
+                "Generated and follow-up evidence remains metadata-only and excludes prompts, provider bodies, file paths, request IDs, session IDs, cache keys, and individual candidate IDs.",
+            ],
+            savings_path=str(entry.get("expected_savings_path") or "This removes duplicate backlog churn before local activation work."),
+            sequencing="Sequence before generic telemetry-derived proposals when the ledger names a later lifecycle transition for the same candidate.",
+        ),
+    }
+
+
 def _proposal_from_repeated_diagnostic(
     diagnostic: dict[str, Any],
     *,
@@ -3988,6 +4271,9 @@ def build_research_plan(
     ready_issues = [issue for issue in issue_list if _is_actionable_ready(issue, trusted_author)]
     blocked_stale = _stale_blocked_issues(issue_list, trusted_author=trusted_author, now=now, stale_days=stale_days)
     summary = _stats_summary(stats)
+    activation_ledger = build_evidence_to_activation_next_action_ledger(summary, existing_issues=issue_list)
+    if activation_ledger is not None:
+        summary["evidence_to_activation_next_action_ledger"] = activation_ledger
     diagnostics = _resolve_unclassified_diagnostics(
         _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary),
         summary,
@@ -4031,6 +4317,9 @@ def build_research_plan(
         promotion_blocker_proposal = _proposal_from_promotion_blocker_next_action(summary)
         if promotion_blocker_proposal is not None:
             create_issues.append(promotion_blocker_proposal)
+        ledger_proposal = _proposal_from_evidence_to_activation_ledger(summary)
+        if ledger_proposal is not None:
+            create_issues.append(ledger_proposal)
         cache_replay_proposal = _proposal_from_cache_replay_blocker(summary)
         if cache_replay_proposal is not None:
             create_issues.append(cache_replay_proposal)
@@ -4075,6 +4364,8 @@ def build_research_plan(
         inspected_sources.append("local_stats")
     if "promotion_blocker_next_action_status" in summary:
         inspected_sources.append("promotion_blocker_next_action_status")
+    if "evidence_to_activation_next_action_ledger" in summary:
+        inspected_sources.append("evidence_to_activation_next_action_ledger")
     if diagnostics:
         inspected_sources.append("orchestrator_logs")
 

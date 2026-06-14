@@ -7,7 +7,11 @@ import unittest
 import uuid
 
 from agentflow_proxy import cli
-from agentflow_proxy.orchestrator_research import build_evidence_to_activation_burndown, build_research_plan
+from agentflow_proxy.orchestrator_research import (
+    build_evidence_to_activation_burndown,
+    build_evidence_to_activation_next_action_ledger,
+    build_research_plan,
+)
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
 
@@ -624,6 +628,103 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(report["schema"], "agentflow.evidence_to_activation_burndown.v1")
         self.assertEqual(report["summary"]["top_lever"], "routing")
         self.assertGreaterEqual(report["summary"]["ranked_blocker_count"], 4)
+
+    def test_evidence_to_activation_ledger_tracks_metadata_only_next_actions(self):
+        summary = {
+            "evidence_to_activation_loop": {
+                "schema": "agentflow.evidence_to_activation_savings_loop.v1",
+                "status": "activation-ready",
+                "levers": [
+                    {
+                        "lever": "routing",
+                        "state": "activation-ready",
+                        "evidence_source": "agentflow.openai_canary_impact.v1",
+                        "local_action_family": "routing",
+                        "next_action": "widen_local_openai_canary",
+                        "sample_count": 8,
+                        "applied_count": 4,
+                        "holdout_count": 4,
+                        "savings_per_1000_calls_usd": 3.25,
+                        "requested_model": "gpt-5.4",
+                        "candidate_target_model": "gpt-5.4-mini",
+                        "policy_id": "raw-ledger-policy-secret",
+                    },
+                    {
+                        "lever": "cache",
+                        "state": "missing-evidence",
+                        "evidence_source": "agentflow.cache_replayability.v1",
+                        "local_action_family": "cache",
+                        "next_action": "resolve-cache-replayability-blocker",
+                        "blocker_codes": ["invalidation-evidence-missing request_id=req-ledger-secret"],
+                        "sample_count": 3,
+                    },
+                ],
+            }
+        }
+
+        ledger = build_evidence_to_activation_next_action_ledger(summary)
+
+        self.assertEqual(ledger["schema"], "agentflow.evidence_to_activation_next_action_ledger.v1")
+        self.assertEqual(ledger["summary"]["top_next_action"], "widen_local_openai_canary")
+        self.assertEqual(ledger["summary"]["top_current_status"], "holdout")
+        self.assertEqual(ledger["summary"]["top_expected_savings_path"], "Move routing from local lifecycle evidence into the next canary, widening, or blocked-review step.")
+        routing = ledger["entries"][0]
+        self.assertEqual(routing["cohort_bucket"], "gpt-5.4->gpt-5.4-mini")
+        self.assertEqual(routing["current_status"], "holdout")
+        self.assertTrue(ledger["privacy"]["metadata_only"])
+        self.assertTrue(ledger["privacy"]["aggregate_only"])
+        self.assertFalse(ledger["privacy"]["raw_prompts_included"])
+        self.assertFalse(ledger["privacy"]["provider_bodies_included"])
+        self.assertFalse(ledger["privacy"]["request_ids_included"])
+        self.assertFalse(ledger["privacy"]["session_ids_included"])
+        self.assertFalse(ledger["privacy"]["cache_keys_included"])
+        rendered = json.dumps(ledger, sort_keys=True)
+        self.assertNotIn("raw-ledger-policy-secret", rendered)
+        self.assertNotIn("req-ledger-secret", rendered)
+
+    def test_closed_prior_issue_with_advanced_ledger_status_generates_next_stage_issue(self):
+        stale_title = "Stage cache replay canary for activation-ready on openai/openai_responses/responses"
+        plan = build_research_plan(
+            issues=[issue(44, stale_title, ["backlog", "status:ready", "cache"], state="CLOSED")],
+            stats={
+                "calls": 120,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "cache_replay_cohort_ranking": {
+                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 30},
+                    "cohorts": [
+                        {
+                            "readiness": "activation-ready",
+                            "count": 31,
+                            "projected_hits": 30,
+                            "projected_saved_cost_usd": 0.42,
+                            "provider": "openai",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "cohort_id": "raw-cache-cohort-secret",
+                            "file_path": "/tmp/private-cache-ledger.py",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn("Stage cache replay canary from evidence-to-activation ledger", titles)
+        self.assertNotIn(stale_title, titles)
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        self.assertEqual(ledger["summary"]["top_current_status"], "staged")
+        self.assertEqual(ledger["summary"]["closed_issue_seen_count"], 1)
+        self.assertEqual(ledger["entries"][0]["issue_status"], "closed-issue-seen")
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["closed_prior_issue_count"], 1)
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-cache-cohort-secret", rendered)
+        self.assertNotIn("/tmp/private-cache-ledger.py", rendered)
 
     def test_evidence_to_activation_loop_reports_activation_progress(self):
         plan = build_research_plan(
