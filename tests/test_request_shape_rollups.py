@@ -482,6 +482,162 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(dry_run["cohorts"][0]["reason"], "repeated-context-crunch-canary-applied-and-holdout")
         self.assertEqual(dry_run["recommended_actions"], [])
 
+    def test_crunch_canary_impact_reports_positive_applied_against_holdout(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=80_000,
+                cost=cost,
+                baseline=cost,
+            )
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-impact-stage")
+        action = report["crunch_opportunity_dry_run"]["recommended_actions"][0]
+        features = dict(action["conditions"])
+        selected: dict[str, dict[str, object]] = {}
+        for index in range(5000):
+            lifecycle = request_shape_crunch_canary_lifecycle(action, {**features, "cohort_sample_id": f"sample-{index}"})
+            if lifecycle["status"] in {"applied", "holdout"}:
+                selected.setdefault(str(lifecycle["status"]), lifecycle)
+            if {"applied", "holdout"} <= set(selected):
+                break
+        self.assertIn("applied", selected)
+        self.assertIn("holdout", selected)
+
+        self.store.conn.execute("delete from calls")
+        self.store.conn.commit()
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.06,
+            baseline=0.08,
+            crunch_extra={
+                "changed": True,
+                "before_chars": 80_000,
+                "after_chars": 72_000,
+                "saved_chars": 8_000,
+                "tokens_saved_est": 2_000,
+                "request_shape_repeated_context_canary": selected["applied"],
+            },
+        )
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.08,
+            baseline=0.08,
+            crunch_extra={"request_shape_repeated_context_canary": selected["holdout"]},
+        )
+
+        impact_report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-impact")[
+            "crunch_canary_impact"
+        ]
+        self.assertEqual(impact_report["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(impact_report["status"], "widen-ready")
+        self.assertEqual(impact_report["summary"]["applied_count"], 1)
+        self.assertEqual(impact_report["summary"]["holdout_count"], 1)
+        self.assertEqual(impact_report["summary"]["saved_chars"], 8_000)
+        self.assertEqual(impact_report["summary"]["saved_tokens"], 2_000)
+        self.assertGreater(impact_report["summary"]["saved_usd"], 0)
+        self.assertEqual(impact_report["summary"]["error_rate_delta"], 0.0)
+        self.assertEqual(impact_report["summary"]["retry_rate_delta"], 0.0)
+        self.assertEqual(impact_report["summary"]["fallback_count"], 0)
+        self.assertEqual(impact_report["summary"]["safety_stop_count"], 0)
+        candidate = impact_report["candidates"][0]
+        self.assertEqual(candidate["verdict"], "widen-ready")
+        self.assertIsNone(candidate["top_blocker"])
+        self.assertEqual(candidate["cohorts"]["canary_applied"]["saved_chars"], 8_000)
+        self.assertEqual(candidate["cohorts"]["canary_holdout"]["saved_chars"], 0)
+        feedback = impact_report["activation_lifecycle_feedback"]
+        self.assertEqual(feedback["schema"], "agentflow.activation_staged_lifecycle_feedback_summary.v1")
+        self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["action_family"], "crunch")
+        self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["applied_count"], 1)
+        self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["holdout_count"], 1)
+
+        rendered = json.dumps(impact_report, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(impact_report["privacy"]["metadata_only"])
+        self.assertTrue(impact_report["privacy"]["aggregate_only"])
+        self.assertFalse(impact_report["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(impact_report["privacy"]["provider_bodies_included"])
+        self.assertFalse(impact_report["privacy"]["request_ids_included"])
+        self.assertFalse(impact_report["privacy"]["session_ids_included"])
+        self.assertFalse(impact_report["privacy"]["individual_candidate_ids_included"])
+
+    def test_crunch_canary_impact_blocks_widening_on_safety_stop(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=80_000,
+                cost=cost,
+                baseline=cost,
+            )
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-safety-stage")
+        action = report["crunch_opportunity_dry_run"]["recommended_actions"][0]
+        safety_lifecycle = {
+            "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+            "policy_id": action["policy_id"],
+            "cohort_id": action["cohort_id"],
+            "status": "safety-stopped",
+            "cohort": "safety_stopped",
+            "reason": "error-rate-regression",
+            "safety_stop": True,
+            "metadata_only": True,
+        }
+
+        self.store.conn.execute("delete from calls")
+        self.store.conn.commit()
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.08,
+            baseline=0.08,
+            status_code=500,
+            retry_count=2,
+            crunch_extra={"request_shape_repeated_context_canary": safety_lifecycle},
+        )
+
+        impact_report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-safety-impact")[
+            "crunch_canary_impact"
+        ]
+        self.assertEqual(impact_report["status"], "no-widen")
+        self.assertEqual(impact_report["summary"]["candidate_count"], 1)
+        self.assertEqual(impact_report["summary"]["applied_count"], 0)
+        self.assertEqual(impact_report["summary"]["holdout_count"], 0)
+        self.assertEqual(impact_report["summary"]["safety_stop_count"], 1)
+        self.assertEqual(impact_report["summary"]["top_blocker_code"], "canary-safety-stopped")
+        candidate = impact_report["candidates"][0]
+        self.assertEqual(candidate["verdict"], "no-widen")
+        self.assertIn("canary-safety-stopped", candidate["reason_codes"])
+        self.assertIn("missing-applied-coverage", candidate["reason_codes"])
+        self.assertIn("missing-holdout-coverage", candidate["reason_codes"])
+        self.assertEqual(candidate["top_blocker"], "canary-safety-stopped")
+        feedback = impact_report["activation_lifecycle_feedback"]
+        self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["safety_stop_count"], 1)
+        self.assertIn("canary-safety-stopped", feedback["cohort_lifecycle_metadata"][0]["reason_codes"])
+
     def test_cli_persists_rollups_by_default_and_dry_run_skips_write(self) -> None:
         self._log_call()
         self._log_call()

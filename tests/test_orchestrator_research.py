@@ -878,6 +878,73 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-secret", rendered)
         self.assertNotIn("/home/lutz/private/shape_secret.py", rendered)
 
+    def test_crunch_candidate_prefers_request_shape_crunch_canary_impact(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 30, "rollup_count": 1},
+                    "crunch_canary_impact": {
+                        "schema": "agentflow.request_shape_crunch_canary_impact.v1",
+                        "status": "widen-ready",
+                        "summary": {
+                            "candidate_count": 1,
+                            "observed_canary_metadata_row_count": 12,
+                            "applied_count": 6,
+                            "holdout_count": 6,
+                            "saved_chars": 24000,
+                            "saved_tokens": 6000,
+                            "saved_usd": 0.024,
+                            "top_blocker_code": None,
+                            "next_action": "widen-repeated-context-crunch-canary",
+                        },
+                        "candidates": [
+                            {
+                                "policy_id": "raw-policy-secret must not leak",
+                                "session_id": "raw-session-id-secret",
+                                "cache_key": "cache-secret",
+                                "file_path": "/home/lutz/private/shape_secret.py",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "crunch_opportunity_dry_run": {
+                        "schema": "agentflow.request_shape_crunch_opportunity_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "candidate_count": 1,
+                            "matched_count": 24,
+                            "projected_saved_chars": 48000,
+                            "projected_saved_tokens": 12000,
+                            "projected_saved_usd": 0.036,
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["top_report"]["report_key"], "request_shape_crunch_canary_impact")
+        self.assertEqual(signal["top_report"]["schema"], "agentflow.request_shape_crunch_canary_impact.v1")
+        self.assertEqual(signal["top_report"]["applied_count"], 6)
+        self.assertEqual(signal["top_report"]["matched_count"], 12)
+        self.assertEqual(signal["top_report"]["projected_saved_tokens"], 6000)
+        self.assertEqual(signal["top_report"]["next_action"], "widen-repeated-context-crunch-canary")
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-policy-secret", rendered)
+        self.assertNotIn("raw-session-id-secret", rendered)
+        self.assertNotIn("cache-secret", rendered)
+        self.assertNotIn("/home/lutz/private/shape_secret.py", rendered)
+
     def test_managed_recommendation_health_ranks_omissions_and_local_representation(self):
         plan = build_research_plan(
             issues=[],

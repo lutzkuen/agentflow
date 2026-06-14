@@ -1005,6 +1005,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "scanned_rows",
             "scanned_call_count",
             "sampled_call_count",
+            "observed_canary_metadata_row_count",
             "calls",
             "window_calls",
         ),
@@ -1016,6 +1017,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "matched_candidates",
             "scanned_call_count",
             "sampled_call_count",
+            "observed_canary_metadata_row_count",
             "turn_start_rows",
             "completed_rows",
             "applied_count",
@@ -1031,6 +1033,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "estimated_opportunity_usd",
             "estimated_savings_usd",
             "summary_model_hint_estimated_savings_usd",
+            "saved_usd",
         ),
     )
     projected_tokens = _first_int(
@@ -1040,6 +1043,7 @@ def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, 
             "estimated_opportunity_tokens",
             "total_saved_tokens_est",
             "tokens_saved_est",
+            "saved_tokens",
         ),
     )
     projected_chars = _first_int(
@@ -1178,6 +1182,11 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             reports.append(rollup)
     shape_report = _request_shape_report(stats)
     if isinstance(shape_report, dict):
+        shape_impact = shape_report.get("crunch_canary_impact")
+        if isinstance(shape_impact, dict) and _to_int((shape_impact.get("summary") or {}).get("candidate_count")) > 0:
+            rollup = _crunch_report_rollup("request_shape_crunch_canary_impact", shape_impact)
+            if rollup is not None:
+                reports.append(rollup)
         shape_crunch = shape_report.get("crunch_opportunity_dry_run")
         if isinstance(shape_crunch, dict):
             rollup = _crunch_report_rollup("request_shape_crunch_opportunity", shape_crunch)
@@ -1197,6 +1206,7 @@ def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
             reports.append(aggregate_rollup)
     reports.sort(
         key=lambda item: (
+            item.get("report_key") == "request_shape_crunch_canary_impact",
             _to_float(item.get("projected_saved_usd")),
             _to_int(item.get("projected_saved_tokens")),
             _to_int(item.get("projected_saved_chars")),

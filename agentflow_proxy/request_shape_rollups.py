@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,11 +19,13 @@ CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_
 CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
 CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
+CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
 DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION = 0.10
 DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION = 0.10
+DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS = 72.0
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -57,6 +60,18 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _increment(counter: dict[str, int], key: Any, amount: int = 1) -> None:
@@ -396,6 +411,416 @@ def _crunch_canary_lifecycle_from_meta(crunch: dict[str, Any]) -> dict[str, Any]
                 "safety_stop": bool(meta.get("safety_stop")) or status == "safety-stopped",
             }
     return None
+
+
+def _crunch_canary_cohort_name(lifecycle: dict[str, Any]) -> str:
+    status = str(lifecycle.get("status") or "").strip().lower().replace("_", "-")
+    cohort = str(lifecycle.get("cohort") or "").strip().lower().replace("-", "_")
+    if status == "applied" or cohort == "canary_applied":
+        return "canary_applied"
+    if status == "holdout" or cohort == "canary_holdout":
+        return "canary_holdout"
+    if bool(lifecycle.get("safety_stop")) or status in {"safety-stopped", "safety-stop"} or cohort in {"safety_stopped", "safety_stop"}:
+        return "safety_stopped"
+    if status in {"fallback", "fallback-applied"} or cohort in {"fallback", "fallback_applied"}:
+        return "fallback"
+    if status in {"rollback", "rollback-required"} or cohort in {"rollback", "rollback_required"}:
+        return "rollback"
+    if status in {"skipped", "disabled", "ineligible"} or cohort in {"skipped", "bypassed_or_disabled"}:
+        return "skipped"
+    return "unknown"
+
+
+def _crunch_before_chars(crunch: dict[str, Any], *, text_chars: int, input_tokens: int) -> int:
+    for key in ("before_chars", "original_chars", "input_chars", "text_chars_before"):
+        value = _as_int(crunch.get(key))
+        if value > 0:
+            return value
+    saved = _crunch_saved_chars(crunch)
+    for key in ("after_chars", "result_chars", "output_chars", "text_chars_after"):
+        value = _as_int(crunch.get(key))
+        if value > 0:
+            return value + saved
+    return max(text_chars, input_tokens * 4 if input_tokens > 0 else 0, saved)
+
+
+def _crunch_after_chars(crunch: dict[str, Any], before_chars: int) -> int:
+    for key in ("after_chars", "result_chars", "output_chars", "text_chars_after"):
+        value = _as_int(crunch.get(key))
+        if value > 0:
+            return value
+    saved = _crunch_saved_chars(crunch)
+    return max(0, before_chars - saved)
+
+
+def _crunch_savings_usd(
+    crunch: dict[str, Any],
+    *,
+    tokens_saved: int,
+    provider: str,
+    model: str,
+    fallback_cost: float,
+    fallback_tokens: int,
+) -> float:
+    for key in ("savings_usd", "saved_usd", "crunch_savings_usd", "estimated_savings_usd"):
+        value = _as_float(crunch.get(key))
+        if value > 0:
+            return value
+    return _input_savings_usd(
+        tokens_saved,
+        provider=provider,
+        model=model,
+        fallback_cost=fallback_cost,
+        fallback_tokens=fallback_tokens,
+    )
+
+
+def _empty_crunch_impact_cohort() -> dict[str, Any]:
+    return {
+        "count": 0,
+        "before_chars": 0,
+        "after_chars": 0,
+        "saved_chars": 0,
+        "saved_tokens": 0,
+        "saved_usd": 0.0,
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "safety_stop_count": 0,
+        "rollback_count": 0,
+    }
+
+
+def _empty_crunch_impact_candidate(policy_id: str, cohort_id: str, row: dict[str, Any], lifecycle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_id": policy_id,
+        "cohort_id": cohort_id,
+        "cohort_metadata": {
+            "provider_family": row.get("provider_family"),
+            "source_surface": row.get("source_surface"),
+            "endpoint": row.get("endpoint"),
+            "category": row.get("category"),
+            "workflow_phase": row.get("workflow_phase"),
+            "stream": bool(row.get("stream")),
+            "has_tools": bool(row.get("has_tools")),
+            "text_bucket": row.get("text_bucket"),
+            "token_bucket": row.get("token_bucket"),
+            "cache_status": row.get("cache_status"),
+            "routing_status": row.get("routing_status"),
+        },
+        "policy_source": public_label(lifecycle.get("policy_source") or "local-manual", "local-manual"),
+        "cohorts": {
+            "canary_applied": _empty_crunch_impact_cohort(),
+            "canary_holdout": _empty_crunch_impact_cohort(),
+            "safety_stopped": _empty_crunch_impact_cohort(),
+            "fallback": _empty_crunch_impact_cohort(),
+            "rollback": _empty_crunch_impact_cohort(),
+            "skipped": _empty_crunch_impact_cohort(),
+            "unknown": _empty_crunch_impact_cohort(),
+        },
+        "status_counts": {},
+        "reason_counts": {},
+        "first_observed_at": None,
+        "latest_observed_at": None,
+    }
+
+
+def _add_crunch_impact_row(candidate: dict[str, Any], row: dict[str, Any], crunch: dict[str, Any], lifecycle: dict[str, Any]) -> None:
+    cohort_name = _crunch_canary_cohort_name(lifecycle)
+    cohort = candidate["cohorts"].setdefault(cohort_name, _empty_crunch_impact_cohort())
+    input_tokens = _as_int(row.get("actual_input_tokens")) or _as_int(row.get("input_tokens_est"))
+    text_chars = _as_int(row.get("text_chars"))
+    before_chars = _crunch_before_chars(crunch, text_chars=text_chars, input_tokens=input_tokens)
+    after_chars = _crunch_after_chars(crunch, before_chars)
+    saved_chars = _crunch_saved_chars(crunch)
+    saved_tokens = _crunch_saved_tokens(crunch)
+    model = str(row.get("routed_model") or row.get("requested_model") or "")
+    saved_usd = _crunch_savings_usd(
+        crunch,
+        tokens_saved=saved_tokens,
+        provider=str(row.get("provider_family") or "unknown"),
+        model=model,
+        fallback_cost=_as_float(row.get("cost_est_usd")),
+        fallback_tokens=input_tokens,
+    )
+    cohort["count"] += 1
+    cohort["before_chars"] += before_chars
+    cohort["after_chars"] += after_chars
+    cohort["saved_chars"] += saved_chars
+    cohort["saved_tokens"] += saved_tokens
+    cohort["saved_usd"] += saved_usd
+    if _status_bucket(row.get("status_code")) in {"4xx", "5xx"}:
+        cohort["error_count"] += 1
+    cohort["retry_count"] += _as_int(row.get("retry_count"))
+    if cohort_name == "fallback":
+        cohort["fallback_count"] += 1
+    if cohort_name == "safety_stopped":
+        cohort["safety_stop_count"] += 1
+    if cohort_name == "rollback":
+        cohort["rollback_count"] += 1
+    _increment(candidate["status_counts"], cohort_name)
+    _increment(candidate["reason_counts"], lifecycle.get("reason") or cohort_name)
+    created_at = str(row.get("created_at") or "")
+    if created_at:
+        first = candidate.get("first_observed_at")
+        latest = candidate.get("latest_observed_at")
+        candidate["first_observed_at"] = created_at if first is None else min(str(first), created_at)
+        candidate["latest_observed_at"] = created_at if latest is None else max(str(latest), created_at)
+
+
+def _finalize_crunch_impact_cohort(raw: dict[str, Any]) -> dict[str, Any]:
+    count = _as_int(raw.get("count"))
+    errors = _as_int(raw.get("error_count"))
+    retries = _as_int(raw.get("retry_count"))
+    return {
+        "count": count,
+        "before_chars": _as_int(raw.get("before_chars")),
+        "after_chars": _as_int(raw.get("after_chars")),
+        "saved_chars": _as_int(raw.get("saved_chars")),
+        "saved_tokens": _as_int(raw.get("saved_tokens")),
+        "saved_usd": round(_as_float(raw.get("saved_usd")), 8),
+        "error_count": errors,
+        "retry_count": retries,
+        "fallback_count": _as_int(raw.get("fallback_count")),
+        "safety_stop_count": _as_int(raw.get("safety_stop_count")),
+        "rollback_count": _as_int(raw.get("rollback_count")),
+        "error_rate": round(errors / count, 6) if count else 0.0,
+        "retry_rate": round(retries / count, 6) if count else 0.0,
+        "avg_saved_tokens": round(_as_int(raw.get("saved_tokens")) / count, 2) if count else 0.0,
+        "avg_saved_usd": round(_as_float(raw.get("saved_usd")) / count, 8) if count else 0.0,
+    }
+
+
+def _crunch_impact_stale(latest_observed_at: str | None, *, max_age_hours: float) -> bool:
+    latest = _parse_utc(latest_observed_at)
+    if latest is None:
+        return False
+    age_hours = (datetime.now(timezone.utc) - latest).total_seconds() / 3600.0
+    return age_hours > max_age_hours
+
+
+def _crunch_impact_verdict(
+    *,
+    applied: dict[str, Any],
+    holdout: dict[str, Any],
+    safety: dict[str, Any],
+    fallback: dict[str, Any],
+    rollback: dict[str, Any],
+    stale: bool,
+) -> tuple[str, list[str], str]:
+    reasons: list[str] = []
+    if _as_int(rollback.get("count")) or _as_int(rollback.get("rollback_count")):
+        reasons.append("rollback-observed")
+    if _as_int(safety.get("count")) or _as_int(safety.get("safety_stop_count")):
+        reasons.append("canary-safety-stopped")
+    if stale:
+        reasons.append("stale-canary-impact-evidence")
+    if _as_int(applied.get("count")) <= 0:
+        reasons.append("missing-applied-coverage")
+    if _as_int(holdout.get("count")) <= 0:
+        reasons.append("missing-holdout-coverage")
+    if _as_int(applied.get("count")) > 0 and _as_int(applied.get("saved_tokens")) <= 0 and _as_float(applied.get("saved_usd")) <= 0:
+        reasons.append("no-applied-savings")
+    if _as_float(applied.get("error_rate")) > _as_float(holdout.get("error_rate")):
+        reasons.append("error-rate-regression")
+    if _as_float(applied.get("retry_rate")) > _as_float(holdout.get("retry_rate")):
+        reasons.append("retry-rate-regression")
+    if _as_int(fallback.get("count")) or _as_int(fallback.get("fallback_count")):
+        reasons.append("fallback-observed")
+    if reasons:
+        return "no-widen", sorted(set(reasons), key=reasons.index), reasons[0]
+    return "widen-ready", ["applied-savings-with-holdout-no-regression"], "ready-to-widen-repeated-context-crunch-canary"
+
+
+def _crunch_impact_activation_lifecycle_feedback(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    state_counts: dict[str, int] = {}
+    cohort_counts: dict[str, int] = {}
+    family_state_counts: dict[str, int] = {}
+    metadata: list[dict[str, Any]] = []
+    for candidate in candidates:
+        verdict = str(candidate.get("verdict") or "unknown")
+        state = "healthy_canary" if verdict == "widen-ready" else "suppressed"
+        _increment(state_counts, state)
+        _increment(family_state_counts, f"crunch:{state}")
+        cohorts = candidate.get("cohorts") if isinstance(candidate.get("cohorts"), dict) else {}
+        for name, cohort in cohorts.items():
+            count = _as_int(cohort.get("count")) if isinstance(cohort, dict) else 0
+            if count:
+                _increment(cohort_counts, name, count)
+        metadata.append(
+            {
+                "policy_ref": public_label(candidate.get("policy_id"), "unknown"),
+                "cohort_label": "canary",
+                "action_family": "crunch",
+                "event_count": _as_int(candidate.get("observed_count")),
+                "applied_count": _as_int(candidate.get("applied_count")),
+                "holdout_count": _as_int(candidate.get("holdout_count")),
+                "fallback_count": _as_int(candidate.get("fallback_count")),
+                "error_count": _as_int(candidate.get("applied_error_count")),
+                "retry_count": _as_int(candidate.get("applied_retry_count")),
+                "safety_stop_count": _as_int(candidate.get("safety_stop_count")),
+                "savings_estimate_usd": round(_as_float(candidate.get("saved_usd")), 8),
+                "reason_codes": candidate.get("reason_codes") or [],
+                "blocker_reason_breakdown": [
+                    {"value": reason, "count": 1}
+                    for reason in candidate.get("reason_codes") or []
+                ],
+            }
+        )
+    return {
+        "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+        "queue_rows": 0,
+        "family_event_count": sum(_as_int(item.get("observed_count")) for item in candidates),
+        "state_breakdown": _breakdown(state_counts),
+        "event_phase_breakdown": [{"value": "impact", "count": len(candidates)}] if candidates else [],
+        "cohort_breakdown": _breakdown(cohort_counts),
+        "family_state_breakdown": _breakdown(family_state_counts),
+        "candidate_id_breakdown": [],
+        "cohort_lifecycle_metadata": metadata[:50],
+        "payload_json_included": False,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def build_request_shape_crunch_canary_impact_report(
+    rows: list[dict[str, Any]],
+    *,
+    max_evidence_age_hours: float = DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS,
+) -> dict[str, Any]:
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    observed_rows = 0
+    for row in rows:
+        crunch = _json_obj(row.get("crunch_json"))
+        lifecycle = _crunch_canary_lifecycle_from_meta(crunch)
+        if lifecycle is None:
+            continue
+        policy_id = public_label(lifecycle.get("policy_id"), "unknown")
+        cohort_id = public_label(lifecycle.get("cohort_id"), "unknown")
+        key = (policy_id, cohort_id)
+        candidate = candidates.setdefault(key, _empty_crunch_impact_candidate(policy_id, cohort_id, row, lifecycle))
+        _add_crunch_impact_row(candidate, row, crunch, lifecycle)
+        observed_rows += 1
+
+    finalized: list[dict[str, Any]] = []
+    blocker_counts: dict[str, int] = {}
+    verdict_counts: dict[str, int] = {}
+    for raw in candidates.values():
+        cohorts = {
+            key: _finalize_crunch_impact_cohort(value)
+            for key, value in raw["cohorts"].items()
+        }
+        applied = cohorts["canary_applied"]
+        holdout = cohorts["canary_holdout"]
+        fallback = cohorts["fallback"]
+        safety = cohorts["safety_stopped"]
+        rollback = cohorts["rollback"]
+        stale = _crunch_impact_stale(
+            raw.get("latest_observed_at"),
+            max_age_hours=max(0.0, _as_float(max_evidence_age_hours, DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS)),
+        )
+        verdict, reasons, top_blocker = _crunch_impact_verdict(
+            applied=applied,
+            holdout=holdout,
+            safety=safety,
+            fallback=fallback,
+            rollback=rollback,
+            stale=stale,
+        )
+        _increment(verdict_counts, verdict)
+        if verdict != "widen-ready":
+            for reason in reasons:
+                _increment(blocker_counts, reason)
+        finalized.append(
+            {
+                "schema": "agentflow.request_shape_crunch_canary_impact_candidate.v1",
+                "policy_id": raw["policy_id"],
+                "cohort_id": raw["cohort_id"],
+                "cohort_metadata": raw["cohort_metadata"],
+                "policy_source": raw["policy_source"],
+                "observed_count": sum(_as_int(cohort.get("count")) for cohort in cohorts.values()),
+                "applied_count": _as_int(applied.get("count")),
+                "holdout_count": _as_int(holdout.get("count")),
+                "fallback_count": _as_int(fallback.get("count")),
+                "safety_stop_count": _as_int(safety.get("count")),
+                "rollback_count": _as_int(rollback.get("count")),
+                "saved_chars": _as_int(applied.get("saved_chars")),
+                "saved_tokens": _as_int(applied.get("saved_tokens")),
+                "saved_usd": round(_as_float(applied.get("saved_usd")), 8),
+                "applied_error_count": _as_int(applied.get("error_count")),
+                "holdout_error_count": _as_int(holdout.get("error_count")),
+                "applied_retry_count": _as_int(applied.get("retry_count")),
+                "holdout_retry_count": _as_int(holdout.get("retry_count")),
+                "error_rate_delta": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
+                "retry_rate_delta": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+                "fallback_rate_delta": round(
+                    (_as_int(fallback.get("count")) / max(1, _as_int(applied.get("count"))))
+                    - 0.0,
+                    6,
+                ),
+                "stale_evidence": {
+                    "stale": stale,
+                    "max_age_hours": round(max(0.0, _as_float(max_evidence_age_hours, DEFAULT_CRUNCH_CANARY_MAX_EVIDENCE_AGE_HOURS)), 6),
+                },
+                "first_observed_at": raw.get("first_observed_at"),
+                "latest_observed_at": raw.get("latest_observed_at"),
+                "verdict": verdict,
+                "top_blocker": top_blocker if verdict != "widen-ready" else None,
+                "reason_codes": reasons,
+                "status_breakdown": _breakdown(raw.get("status_counts", {})),
+                "reason_breakdown": _breakdown(raw.get("reason_counts", {})),
+                "cohorts": cohorts,
+                "privacy": _crunch_opportunity_privacy(),
+            }
+        )
+
+    finalized.sort(
+        key=lambda item: (
+            item.get("verdict") == "widen-ready",
+            _as_float(item.get("saved_usd")),
+            _as_int(item.get("saved_tokens")),
+            _as_int(item.get("observed_count")),
+        ),
+        reverse=True,
+    )
+    for rank, candidate in enumerate(finalized, start=1):
+        candidate["rank"] = rank
+    blocker_breakdown = _breakdown(blocker_counts)
+    status = "no-crunch-canary-impact-metadata"
+    if finalized:
+        status = "widen-ready" if any(item.get("verdict") == "widen-ready" for item in finalized) else "no-widen"
+    return {
+        "schema": CRUNCH_CANARY_IMPACT_SCHEMA,
+        "status": status,
+        "summary": {
+            "candidate_count": len(finalized),
+            "observed_canary_metadata_row_count": observed_rows,
+            "applied_count": sum(_as_int(item.get("applied_count")) for item in finalized),
+            "holdout_count": sum(_as_int(item.get("holdout_count")) for item in finalized),
+            "saved_chars": sum(_as_int(item.get("saved_chars")) for item in finalized),
+            "saved_tokens": sum(_as_int(item.get("saved_tokens")) for item in finalized),
+            "saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
+            "projected_saved_chars": sum(_as_int(item.get("saved_chars")) for item in finalized),
+            "projected_saved_tokens": sum(_as_int(item.get("saved_tokens")) for item in finalized),
+            "projected_saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
+            "error_rate_delta": round(max((_as_float(item.get("error_rate_delta")) for item in finalized), default=0.0), 6),
+            "retry_rate_delta": round(max((_as_float(item.get("retry_rate_delta")) for item in finalized), default=0.0), 6),
+            "fallback_count": sum(_as_int(item.get("fallback_count")) for item in finalized),
+            "safety_stop_count": sum(_as_int(item.get("safety_stop_count")) for item in finalized),
+            "rollback_count": sum(_as_int(item.get("rollback_count")) for item in finalized),
+            "widen_ready_count": sum(1 for item in finalized if item.get("verdict") == "widen-ready"),
+            "no_widen_count": sum(1 for item in finalized if item.get("verdict") != "widen-ready"),
+            "top_blocker_code": blocker_breakdown[0]["value"] if blocker_breakdown else None,
+            "next_action": "widen-repeated-context-crunch-canary" if status == "widen-ready" else "review-repeated-context-crunch-canary-impact-blocker",
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "policy_files_written": False,
+        },
+        "verdict_breakdown": _breakdown(verdict_counts),
+        "blocker_reason_breakdown": blocker_breakdown,
+        "candidates": finalized,
+        "activation_lifecycle_feedback": _crunch_impact_activation_lifecycle_feedback(finalized),
+        "privacy": _crunch_opportunity_privacy(),
+    }
 
 
 def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> dict[str, Any]:
@@ -1325,6 +1750,7 @@ def build_request_shape_rollups_report(
     body_rows_read = 0
     window_start: str | None = None
     window_end: str | None = None
+    impact_rows: list[dict[str, Any]] = []
 
     for row in rows:
         created_at = str(row.get("created_at") or "")
@@ -1408,6 +1834,14 @@ def build_request_shape_rollups_report(
             "cache_status": cache_status,
             "routing_status": routing_status,
         }
+        impact_rows.append(
+            {
+                **row,
+                **basis,
+                "text_chars": text_chars,
+                "input_tokens": input_tokens,
+            }
+        )
         rollup_key = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:24]
         candidate_id = _candidate_id(basis)
         group = groups.setdefault(rollup_key, _new_group(basis, candidate_id=candidate_id, rollup_key=rollup_key))
@@ -1498,6 +1932,7 @@ def build_request_shape_rollups_report(
         "blocker_code_breakdown": _breakdown(blocker_counts),
         "cache_replayability_dry_run": build_request_shape_cache_replayability_dry_run(rollups, limit=25),
         "crunch_opportunity_dry_run": build_request_shape_crunch_opportunity_dry_run(rollups, limit=25),
+        "crunch_canary_impact": build_request_shape_crunch_canary_impact_report(impact_rows),
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,
