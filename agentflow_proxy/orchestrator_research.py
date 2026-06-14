@@ -52,6 +52,24 @@ _DIAGNOSTIC_RE = re.compile(
     r"(?:skip[_ -]?reason|omitted[_ -]?reason|blocker|blocked|reason|verdict)\s*[:=]\s*[\"']?([A-Za-z0-9_.:-]+(?:[ -][A-Za-z0-9_.:-]+){0,5})",
     re.IGNORECASE,
 )
+_SUCCESS_LINE_RE = re.compile(
+    r"(?:verdict[:\s]+pass\b|quality[-_]gate[-_]passed|eval[-_]pass\b|"
+    r"canary[-_]holdout[-_]thresholds[-_]met|promotion[-_]thresholds[-_]met|"
+    r"test[-_]verdict[-_]pass|pass[-_]threshold[-_]met|offline[-_]fixture[-_]passed)",
+    re.IGNORECASE,
+)
+_MANAGED_OMISSION_LINE_RE = re.compile(
+    r"(?:server[-_]content[-_]processing|provider[-_]body[-_]rewrite|"
+    r"prompt[-_]replacement|no[-_]local[-_]representation|local[-_]representation[-_]missing|"
+    r"unsupported[-_]local[-_]executor|capability[-_]mismatch)",
+    re.IGNORECASE,
+)
+_MISSING_MEASUREMENT_LINE_RE = re.compile(
+    r"(?:missing[-_]crunch[-_]measurement|missing[-_]managed[-_]recommendation[-_]health|"
+    r"missing[-_]request[-_]shape[-_]rollup|emit[-_][a-z]+[-_](?:report|measurement)|"
+    r"need[-_]more[-_]samples\b|insufficient[-_]samples\b|missing[-_]lifecycle[-_]measurement)",
+    re.IGNORECASE,
+)
 _KNOWN_DIAGNOSTIC_TERMS = (
     "need-more-samples",
     "missing dependency evidence",
@@ -201,7 +219,7 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
         "class": "unclassified-skip-or-blocker",
         "priority": 90,
         "aliases": ("unclassified-skip-or-blocker",),
-        "backlog_action": "create-ready-issue",
+        "backlog_action": "needs-human-review",
         "unblock_path": "Trace the unclassified skip/blocker to a bounded diagnostic reason before creating activation work.",
         "acceptance_check": "The next research plan reports a classified reason or a narrow issue for the emitting report.",
     },
@@ -432,7 +450,7 @@ def _actionable_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dict[str,
             {
                 "diagnostic_class": diagnostic_class,
                 "source_lever": _diagnostic_source_lever(reason, diagnostic_class),
-                "backlog_action": taxonomy["backlog_action"],
+                "backlog_action": enriched.get("backlog_action_override") or taxonomy["backlog_action"],
                 "expected_unblock_path": taxonomy["unblock_path"],
                 "acceptance_check": taxonomy["acceptance_check"],
                 "_priority": _to_int(taxonomy["priority"], 100),
@@ -607,6 +625,61 @@ def _resolve_aggregate_only_diagnostics(
             f"source={context.get('source')}; state={context.get('lifecycle_state')}; "
             f"next_action={context.get('next_action')}"
         )
+        resolved.append(replacement)
+    return resolved
+
+
+def _classify_unclassified_diagnostic(example: str) -> dict[str, Any] | None:
+    """
+    Map an unclassified-skip-or-blocker example line to a specific class.
+    Returns None to signal the item should be dropped (ignore-success).
+    """
+    if _SUCCESS_LINE_RE.search(example):
+        return None
+    if _MANAGED_OMISSION_LINE_RE.search(example):
+        return {
+            "reason": "unsupported-provider-action",
+            "diagnostic_class": "unsupported-provider-action",
+            "backlog_action": "create-ready-issue",
+            "reclassification_source": "managed-omission-pattern",
+        }
+    if _MISSING_MEASUREMENT_LINE_RE.search(example):
+        return {
+            "reason": "missing-dependency-evidence",
+            "diagnostic_class": "missing-dependency-evidence",
+            "backlog_action": "create-ready-issue",
+            "reclassification_source": "missing-measurement-pattern",
+        }
+    return {
+        "reason": "unclassified-skip-or-blocker",
+        "diagnostic_class": "unclassified-skip-or-blocker",
+        "backlog_action": "needs-human-review",
+        "reclassification_source": "no-match",
+    }
+
+
+def _resolve_unclassified_diagnostics(
+    diagnostics: list[dict[str, Any]],
+    stats_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not diagnostics:
+        return diagnostics
+    resolved: list[dict[str, Any]] = []
+    for item in diagnostics:
+        reason = str(item.get("reason") or "")
+        if reason != "unclassified-skip-or-blocker":
+            resolved.append(item)
+            continue
+        example = str(item.get("example") or "")
+        classification = _classify_unclassified_diagnostic(example)
+        if classification is None:
+            continue
+        replacement = dict(item)
+        replacement["reason"] = classification["reason"]
+        replacement["backlog_action_override"] = classification["backlog_action"]
+        replacement["reclassification_source"] = classification["reclassification_source"]
+        if classification["reason"] != "unclassified-skip-or-blocker":
+            replacement["diagnostic_class"] = classification["diagnostic_class"]
         resolved.append(replacement)
     return resolved
 
@@ -3211,7 +3284,10 @@ def build_research_plan(
     ready_issues = [issue for issue in issue_list if _is_actionable_ready(issue, trusted_author)]
     blocked_stale = _stale_blocked_issues(issue_list, trusted_author=trusted_author, now=now, stale_days=stale_days)
     summary = _stats_summary(stats)
-    diagnostics = _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary)
+    diagnostics = _resolve_unclassified_diagnostics(
+        _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary),
+        summary,
+    )
     optimization_candidates = _optimization_candidates(stats_summary=summary, diagnostics=diagnostics)
 
     ready_count = len(ready_issues)
@@ -3238,7 +3314,10 @@ def build_research_plan(
         if openai_routing_proposal is not None:
             create_issues.append(openai_routing_proposal)
         create_issues.extend(_proposals_from_optimization_candidates(optimization_candidates))
-        repeated_actionable_diagnostics = [item for item in _actionable_diagnostics(diagnostics) if _to_int(item.get("count")) > 1]
+        repeated_actionable_diagnostics = [
+            item for item in _actionable_diagnostics(diagnostics)
+            if _to_int(item.get("count")) > 1 and item.get("backlog_action") != "needs-human-review"
+        ]
         if repeated_actionable_diagnostics:
             create_issues.append(_proposal_from_repeated_diagnostic(repeated_actionable_diagnostics[0]))
         for issue in blocked_stale[:3]:

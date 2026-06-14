@@ -1532,6 +1532,112 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-openai-canary-candidate-secret", rendered)
         self.assertNotIn("raw-policy-secret-should-redact", rendered)
 
+    def test_unclassified_success_verdict_line_is_ignored(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "VERDICT: PASS quality-gate-passed skipped remaining items",
+                        "VERDICT: PASS quality-gate-passed skipped remaining items",
+                        "eval-pass threshold-met skipped 3 observations",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("unclassified" in t for t in created_titles))
+
+    def test_unclassified_managed_omission_line_is_reclassified(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "action was blocked by server-content-processing limit session_id=sec-secret-1",
+                        "action was blocked by server-content-processing limit session_id=sec-secret-2",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        self.assertIn("unsupported-provider-action", reasons)
+        rendered = json.dumps(plan)
+        self.assertNotIn("sec-secret-1", rendered)
+        self.assertNotIn("sec-secret-2", rendered)
+
+    def test_unclassified_missing_measurement_line_is_reclassified(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "activation skipped: missing-crunch-measurement no positive projection",
+                        "activation skipped: missing-crunch-measurement no positive projection",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        self.assertIn("missing-dependency-evidence", reasons)
+
+    def test_unclassified_true_unknown_blocker_gets_needs_human_review(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "activation skipped due to xyz-unknown-blocker-type",
+                        "activation skipped due to xyz-unknown-blocker-type",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        actionable = [d for d in diagnostics if d.get("reason") == "unclassified-skip-or-blocker"]
+        self.assertTrue(actionable)
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("unclassified skip or blocker" in t for t in created_titles))
+
     def test_privacy_redacts_raw_fields_paths_and_ids(self):
         plan = build_research_plan(
             issues=[
