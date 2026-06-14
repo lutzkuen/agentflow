@@ -6782,6 +6782,162 @@ class StatsFullTest(unittest.TestCase):
         self.assertFalse(result["privacy"]["cache_keys_included"])
         self.assertFalse(result["privacy"]["pattern_hashes_included"])
 
+    def test_cache_replay_dry_run_reports_dependency_freshness_for_tool_cohorts(self):
+        hashes = {
+            "fresh": "sha256:" + "a" * 64,
+            "stale": "sha256:" + "b" * 64,
+            "unknown": "sha256:" + "c" * 64,
+        }
+        raw_path = "/tmp/private/cache-replay-secret.py"
+        raw_stat = 123456789
+
+        def audit(*, reason=None, safe=False):
+            return {
+                "schema": "agentflow.cache_file_dependency_audit.v1",
+                "file_watch_enabled": True,
+                "snapshot_root_policy": "stored-local-paths",
+                "root_path": "/tmp/private",
+                "root_path_included": False,
+                "paths": [raw_path],
+                "snapshot_count": 1 if safe else 0,
+                "snapshot_count_bucket": "1" if safe else "0",
+                "candidate_path_count_bucket": "1" if safe else "0",
+                "raw_candidate_path_count_bucket": "1" if safe else "0",
+                "distinct_candidate_path_count_bucket": "1" if safe else "0",
+                "max_paths": 16,
+                "cap_exceeded": False,
+                "cap_trimmed": False,
+                "dependency_capture_reason": "complete",
+                "present_path_count": 1 if safe else 0,
+                "missing_path_count": 0 if safe else 1,
+                "changed_path_count": 1 if reason == "dependency-changed" else 0,
+                "deleted_path_count": 0,
+                "created_path_count": 0,
+                "invalidation_reason": reason,
+                "safe_invalidation_evidence": safe,
+                "file_dependency_evidence_available": safe,
+                "mtime_ns": raw_stat,
+                "paths_included": False,
+            }
+
+        def log_tool_candidate(name, *, dependency_audit, cost, created_at):
+            server.store.log_call(
+                id=str(uuid.uuid4()),
+                created_at=created_at,
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=0,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=1,
+                input_tokens_est=100,
+                output_tokens_est=10,
+                actual_input_tokens=100,
+                actual_output_tokens=10,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({
+                    "text_chars": 4200,
+                    "category": "tool-result",
+                    "workflow_phase": "tool-result",
+                    "has_tools": True,
+                    "managed_pattern_features": {
+                        "pattern_hashes": [hashes[name]],
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude_code",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-result",
+                        "text_bucket": "2k_8k_chars",
+                        "token_bucket": "lt_1k_tokens",
+                        "requested_model": "claude-sonnet-4-6",
+                        "candidate_target_model": "claude-sonnet-4-6",
+                        "raw_pattern_strings_included": False,
+                    },
+                }),
+                cache_json=stable_json({
+                    "status": "skipped",
+                    "reason": "tools-disabled",
+                    "policy_source": "local-default",
+                    "replayability_level": "local-exact-response",
+                    "file_dependency_audit": dependency_audit,
+                    "file_dependency_evidence_available": bool(dependency_audit.get("file_dependency_evidence_available")),
+                    "safe_invalidation_evidence": bool(dependency_audit.get("safe_invalidation_evidence")),
+                }),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw tool payload must not leak"}]}),
+                response_json=None,
+                session_id=f"raw-session-{name}-must-not-leak",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        log_tool_candidate("fresh", dependency_audit=audit(safe=True), cost=0.02, created_at="2026-06-11T07:00:00+00:00")
+        log_tool_candidate("fresh", dependency_audit=audit(safe=True), cost=0.04, created_at="2026-06-11T07:01:00+00:00")
+        log_tool_candidate("stale", dependency_audit=audit(reason="dependency-changed", safe=False), cost=0.05, created_at="2026-06-11T07:02:00+00:00")
+        log_tool_candidate("unknown", dependency_audit=audit(reason="file-dependency-missing", safe=False), cost=0.06, created_at="2026-06-11T07:03:00+00:00")
+
+        proposed = {
+            "cache": {
+                "pattern_rules": [
+                    {
+                        "id": f"dry-{name}-rule",
+                        "candidate_id": f"candidate-{name}",
+                        "conditions": {
+                            "pattern_hashes": [pattern_hash],
+                            "source_surface": "anthropic_messages",
+                            "category": "tool-result",
+                            "has_tools": True,
+                            "stream": False,
+                        },
+                        "action": {
+                            "type": "exact_cache_pattern",
+                            "allow_tool_calls": True,
+                            "safe_invalidation": True,
+                        },
+                    }
+                    for name, pattern_hash in hashes.items()
+                ],
+            }
+        }
+
+        result = asyncio.run(stats_views.stats_cache_replay_dry_run(server.store, proposed, limit=20))
+
+        self.assertEqual(result["summary"]["candidate_rows"], 2)
+        self.assertEqual(result["summary"]["projected_exact_hits"], 1)
+        self.assertEqual(result["summary"]["invalidation_required_rows"], 2)
+        freshness = {row["value"]: row["count"] for row in result["dependency_freshness_breakdown"]}
+        self.assertEqual(freshness["fresh"], 2)
+        self.assertEqual(freshness["stale"], 1)
+        self.assertEqual(freshness["unknown"], 1)
+        fresh = next(row for row in result["rows"] if row["candidate_id"] == "candidate-fresh")
+        self.assertEqual(fresh["status"], "projected-exact-candidate")
+        self.assertEqual(fresh["reason"], "rule-match")
+        self.assertEqual(fresh["dependency_freshness"]["status"], "fresh")
+        self.assertTrue(fresh["dependency_freshness"]["safe_invalidation_evidence"])
+        stale = next(row for row in result["rows"] if row["candidate_id"] == "candidate-stale")
+        self.assertEqual(stale["status"], "invalidation-required")
+        self.assertEqual(stale["reason"], "dependency-changed")
+        self.assertEqual(stale["dependency_freshness"]["status"], "stale")
+        unknown = next(row for row in result["rows"] if row["candidate_id"] == "candidate-unknown")
+        self.assertEqual(unknown["status"], "invalidation-required")
+        self.assertEqual(unknown["dependency_freshness"]["status"], "unknown")
+        self.assertIn(unknown["reason"], {"file-dependency-missing", "file-dependency-evidence-absent"})
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(raw_path, rendered)
+        self.assertNotIn(str(raw_stat), rendered)
+        self.assertNotIn("raw tool payload must not leak", rendered)
+        self.assertNotIn("raw-session-fresh-must-not-leak", rendered)
+        for pattern_hash in hashes.values():
+            self.assertNotIn(pattern_hash, rendered)
+        self.assertFalse(result["privacy"]["file_paths_included"])
+        self.assertFalse(result["privacy"]["raw_file_stat_values_included"])
+
     def test_codex_effectiveness_counts_direct_derived_absent_and_unknown_model_state(self):
         rows = [
             (

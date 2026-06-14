@@ -6175,6 +6175,64 @@ def _cache_replayability_blockers(unit: dict[str, Any]) -> list[str]:
     return sorted(blockers)
 
 
+_CACHE_REPLAY_DEPENDENCY_STALE_REASONS = {
+    "dependency-cap-exceeded",
+    "dependency-changed",
+    "dependency-created",
+    "dependency-deleted",
+    "dependency-missing",
+    "file-dependency-missing",
+    "file-watch-disabled",
+}
+
+
+def _cache_replay_dependency_freshness(unit: dict[str, Any]) -> dict[str, Any]:
+    """Classify stored dependency metadata without exposing paths or file stats."""
+    has_tools = bool(unit.get("has_tools")) or str(unit.get("category") or "").startswith("tool")
+    audit = unit.get("file_dependency_audit") if isinstance(unit.get("file_dependency_audit"), dict) else {}
+    reason = str(audit.get("invalidation_reason") or "")
+    safe = bool(unit.get("safe_invalidation_evidence") or audit.get("safe_invalidation_evidence"))
+    evidence = bool(unit.get("file_dependency_evidence_available") or audit.get("file_dependency_evidence_available") or safe)
+
+    if not has_tools:
+        status = "not-required"
+        freshness_reason = "not-required"
+    elif audit.get("cap_exceeded"):
+        status = "stale"
+        freshness_reason = "dependency-cap-exceeded"
+    elif reason in _CACHE_REPLAY_DEPENDENCY_STALE_REASONS:
+        status = "stale" if reason in {"dependency-changed", "dependency-created", "dependency-deleted", "dependency-cap-exceeded"} else "unknown"
+        freshness_reason = reason
+    elif safe:
+        status = "fresh"
+        freshness_reason = "dependency-fresh"
+    elif evidence:
+        status = "unknown"
+        freshness_reason = "dependency-freshness-unknown"
+    else:
+        status = "unknown"
+        freshness_reason = "file-dependency-evidence-absent"
+
+    return {
+        "schema": "agentflow.cache_replay_dependency_freshness.v1",
+        "status": status,
+        "reason": freshness_reason,
+        "tool_call_cohort": has_tools,
+        "evidence_available": evidence,
+        "safe_invalidation_evidence": safe,
+        "snapshot_count_bucket": str(audit.get("snapshot_count_bucket") or "unknown"),
+        "candidate_path_count_bucket": str(audit.get("candidate_path_count_bucket") or "unknown"),
+        "raw_candidate_path_count_bucket": str(audit.get("raw_candidate_path_count_bucket") or "unknown"),
+        "distinct_candidate_path_count_bucket": str(audit.get("distinct_candidate_path_count_bucket") or "unknown"),
+        "cap_exceeded": bool(audit.get("cap_exceeded")),
+        "cap_trimmed": bool(audit.get("cap_trimmed")),
+        "dependency_capture_reason": public_label(audit.get("dependency_capture_reason") or "unknown", "unknown"),
+        "paths_included": False,
+        "root_path_included": False,
+        "raw_stat_values_included": False,
+    }
+
+
 def _cache_replay_cost_bucket(cost: Any) -> str:
     value = _as_float(cost)
     if value <= 0:
@@ -6606,6 +6664,7 @@ def _cache_replayability_unit(row: dict[str, Any], *, source_surface: str, granu
         "text_chars": text_chars,
         "cache": cache,
     }
+    unit["dependency_freshness"] = _cache_replay_dependency_freshness(unit)
     unit["pattern_features"] = _cache_pattern_features_from_row(
         source_surface=source_surface,
         routing=routing,
@@ -7137,6 +7196,14 @@ _CACHE_REPLAY_ACTIVATION_SETUP_BLOCKERS = {
 
 
 def _cache_replay_dependency_state(unit: dict[str, Any]) -> str:
+    freshness = unit.get("dependency_freshness") if isinstance(unit.get("dependency_freshness"), dict) else {}
+    freshness_status = str(freshness.get("status") or "")
+    if freshness_status == "fresh":
+        return "stable"
+    if freshness_status == "stale":
+        return "invalidated"
+    if freshness_status == "not-required":
+        return "not-required"
     if not bool(unit.get("has_tools")):
         return "not-required"
     blockers = {str(item) for item in unit.get("blockers") or []}
@@ -7611,6 +7678,11 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
             "matched_pattern_hashes_included": False,
             "rollout": pattern_rollout_public_meta(rule.get("rollout")),
         }
+        dependency_freshness = (
+            unit.get("dependency_freshness")
+            if isinstance(unit.get("dependency_freshness"), dict)
+            else _cache_replay_dependency_freshness(unit)
+        )
         if action.get("type") not in {"exact_cache", "exact_cache_pattern"}:
             return {**base, "status": "blocked", "reason": "unsupported-action", "blockers": ["unsupported-action"]}
         if bool(unit.get("stream")) and not bool(action.get("streaming")):
@@ -7623,6 +7695,7 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
                 "blockers": ["tool-call-disabled", "safe-invalidation-required"],
                 "requires_file_dependency_evidence": True,
                 "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+                "dependency_freshness": dependency_freshness,
             }
         if bool(unit.get("has_tools")) and not bool(action.get("safe_invalidation")):
             return {
@@ -7632,24 +7705,15 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
                 "blockers": ["safe-invalidation-required"],
                 "requires_file_dependency_evidence": True,
                 "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+                "dependency_freshness": dependency_freshness,
             }
         if bool(unit.get("has_tools")):
-            audit = unit.get("file_dependency_audit") if isinstance(unit.get("file_dependency_audit"), dict) else {}
-            audit_reason = str(audit.get("invalidation_reason") or "")
             audit_blocker = None
-            if audit.get("cap_exceeded"):
-                audit_blocker = "dependency-cap-exceeded"
-            elif audit_reason in {
-                "file-dependency-missing",
-                "dependency-missing",
-                "dependency-changed",
-                "dependency-deleted",
-                "dependency-created",
-                "file-watch-disabled",
-            }:
-                audit_blocker = audit_reason
-            elif not bool(unit.get("safe_invalidation_evidence")):
-                audit_blocker = "file-dependency-missing"
+            freshness_status = str(dependency_freshness.get("status") or "unknown")
+            if freshness_status == "stale":
+                audit_blocker = str(dependency_freshness.get("reason") or "dependency-stale")
+            elif freshness_status == "unknown":
+                audit_blocker = str(dependency_freshness.get("reason") or "dependency-freshness-unknown")
             if audit_blocker:
                 return {
                     **base,
@@ -7659,7 +7723,8 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
                     "requires_file_dependency_evidence": True,
                     "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
                     "safe_invalidation_evidence": bool(unit.get("safe_invalidation_evidence")),
-                    "file_dependency_audit": audit,
+                    "file_dependency_audit": unit.get("file_dependency_audit"),
+                    "dependency_freshness": dependency_freshness,
                 }
         if bool(unit.get("has_tools")) and not bool(unit.get("file_dependency_evidence_available")):
             return {
@@ -7669,6 +7734,7 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
                 "blockers": ["file-dependency-evidence-absent"],
                 "requires_file_dependency_evidence": True,
                 "file_dependency_evidence_available": False,
+                "dependency_freshness": dependency_freshness,
             }
         stale_blockers = [
             blocker
@@ -7706,6 +7772,7 @@ def _cache_replay_dry_run_decision(unit: dict[str, Any], rules: list[dict[str, A
             "canary": _cache_dry_run_public_canary(canary) if canary.get("enabled") else None,
             "requires_file_dependency_evidence": bool(unit.get("has_tools")),
             "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
+            "dependency_freshness": dependency_freshness,
         }
 
     if saw_source_surface_mismatch:
@@ -7727,12 +7794,23 @@ def _cache_replay_dry_run_from_units(
     status_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
     blocker_counts: dict[str, int] = {}
+    freshness_counts: dict[str, int] = {}
     session_memory_proposals = _session_memory_replay_proposal_rows(units, limit=limit)
     for unit in units:
         decision = _cache_replay_dry_run_decision(unit, rules)
         status = str(decision.get("status") or "unknown")
         reason = str(decision.get("reason") or "unknown")
         fingerprint, basis = _cache_replayability_fingerprint(unit)
+        dependency_freshness = (
+            decision.get("dependency_freshness")
+            if isinstance(decision.get("dependency_freshness"), dict)
+            else (
+                unit.get("dependency_freshness")
+                if isinstance(unit.get("dependency_freshness"), dict)
+                else _cache_replay_dependency_freshness(unit)
+            )
+        )
+        freshness_status = str(dependency_freshness.get("status") or "unknown")
         key = (status, str(decision.get("rule_id") or ""), fingerprint)
         bucket = grouped.setdefault(
             key,
@@ -7755,6 +7833,8 @@ def _cache_replay_dry_run_from_units(
                 "file_dependency_evidence_available": bool(unit.get("file_dependency_evidence_available")),
                 "safe_invalidation_evidence": bool(unit.get("safe_invalidation_evidence")),
                 "file_dependency_audit": unit.get("file_dependency_audit"),
+                "dependency_freshness": dependency_freshness,
+                "dependency_freshness_status": freshness_status,
                 "requires_file_dependency_evidence": bool(decision.get("requires_file_dependency_evidence")),
                 "matched_pattern_hash_count": _as_int(decision.get("matched_pattern_hash_count")),
                 "matched_pattern_hashes_included": False,
@@ -7778,12 +7858,17 @@ def _cache_replay_dry_run_from_units(
             bucket["canary"] = decision.get("canary")
         if decision.get("rollout") and not bucket.get("rollout"):
             bucket["rollout"] = decision.get("rollout")
+        bucket_freshness = bucket.get("dependency_freshness") if isinstance(bucket.get("dependency_freshness"), dict) else {}
+        if bucket_freshness.get("status") in {None, "", "not-required"} and freshness_status != "not-required":
+            bucket["dependency_freshness"] = dependency_freshness
+            bucket["dependency_freshness_status"] = freshness_status
         for blocker in decision.get("blockers") or []:
             bucket["_blockers"].add(str(blocker))
         for blocker in decision.get("stale_risk_blockers") or []:
             bucket["_stale"].add(str(blocker))
         status_counts[status] = status_counts.get(status, 0) + 1
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        freshness_counts[freshness_status] = freshness_counts.get(freshness_status, 0) + 1
         for blocker in decision.get("blockers") or []:
             label = str(blocker)
             blocker_counts[label] = blocker_counts.get(label, 0) + 1
@@ -7868,6 +7953,7 @@ def _cache_replay_dry_run_from_units(
         "status_breakdown": _breakdown_from_counts(status_counts),
         "reason_breakdown": _breakdown_from_counts(reason_counts),
         "blocker_breakdown": _breakdown_from_counts(blocker_counts),
+        "dependency_freshness_breakdown": _breakdown_from_counts(freshness_counts),
         "session_memory_replay_proposals": session_memory_proposals,
         "rows": rows[: max(1, int(limit or 50))],
         "privacy": {
@@ -7882,6 +7968,8 @@ def _cache_replay_dry_run_from_units(
             "cache_keys_included": False,
             "raw_session_ids_included": False,
             "pattern_hashes_included": False,
+            "file_paths_included": False,
+            "raw_file_stat_values_included": False,
             "basis": "proposed cache pattern rules evaluated against metadata-derived replay fingerprints only",
         },
     }
