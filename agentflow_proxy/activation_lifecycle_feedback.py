@@ -341,6 +341,7 @@ def lifecycle_feedback_state_from_events(events: list[dict[str, Any]]) -> str:
 def _empty_lifecycle_group(policy_ref: str, cohort: str, family: str) -> dict[str, Any]:
     return {
         "policy_ref": policy_ref,
+        "candidate_id": None,
         "cohort_label": cohort,
         "action_family": family,
         "event_count": 0,
@@ -348,6 +349,8 @@ def _empty_lifecycle_group(policy_ref: str, cohort: str, family: str) -> dict[st
         "holdout_count": 0,
         "fallback_count": 0,
         "error_count": 0,
+        "retry_count": 0,
+        "safety_stop_count": 0,
         "savings_estimate_usd": 0.0,
     }
 
@@ -368,6 +371,11 @@ def _payload_error_observed(payload: dict[str, Any]) -> bool:
     return status in {"4xx", "5xx", "blocked", "error", "failed", "retryable-error"}
 
 
+def _payload_retry_observed(payload: dict[str, Any]) -> bool:
+    retry = str(payload.get("retry_bucket") or "").strip().lower()
+    return retry not in {"", "none", "0", "zero"}
+
+
 def _add_lifecycle_group_event(
     groups: dict[tuple[str, str, str], dict[str, Any]],
     *,
@@ -378,6 +386,8 @@ def _add_lifecycle_group_event(
     cohort = _safe_label(event.get("cohort") or event.get("status"), "unknown")
     policy_ref = _event_policy_ref(event)
     group = groups.setdefault((policy_ref, cohort, family), _empty_lifecycle_group(policy_ref, cohort, family))
+    if not group.get("candidate_id") and event.get("candidate_id"):
+        group["candidate_id"] = _safe_id(event.get("candidate_id"), prefix="candidate")
     group["event_count"] += 1
     if cohort in {"applied", "canary_applied"}:
         group["applied_count"] += 1
@@ -387,6 +397,10 @@ def _add_lifecycle_group_event(
         group["fallback_count"] += 1
     if _payload_error_observed(payload):
         group["error_count"] += 1
+    if _payload_retry_observed(payload):
+        group["retry_count"] += 1
+    if cohort in {"safety_stop", "safety_stopped"}:
+        group["safety_stop_count"] += 1
     group["savings_estimate_usd"] += _savings_estimate(event)
 
 
@@ -395,12 +409,16 @@ def _finalize_lifecycle_group(group: dict[str, Any]) -> dict[str, Any]:
     errors = _as_int(group.get("error_count"))
     return {
         "policy_ref": group["policy_ref"],
+        "candidate_id": group.get("candidate_id"),
         "cohort_label": group["cohort_label"],
         "action_family": group["action_family"],
         "event_count": count,
         "applied_count": _as_int(group.get("applied_count")),
         "holdout_count": _as_int(group.get("holdout_count")),
         "fallback_count": _as_int(group.get("fallback_count")),
+        "error_count": errors,
+        "retry_count": _as_int(group.get("retry_count")),
+        "safety_stop_count": _as_int(group.get("safety_stop_count")),
         "error_rate": round(errors / count, 6) if count > 0 else 0.0,
         "savings_estimate_usd": round(_as_float(group.get("savings_estimate_usd")), 8),
     }

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import yaml
 
+from agentflow_proxy.activation_lifecycle_feedback import LIFECYCLE_SOURCE_SURFACE, build_activation_staged_lifecycle_feedback
 from agentflow_proxy import recommendations
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
@@ -382,6 +383,146 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertEqual(candidate["cohort_counts"]["canary_applied"], 2)
         self.assertFalse(report["privacy"]["raw_prompts_included"])
         self.assertFalse(report["privacy"]["request_ids_included"])
+        self._assert_privacy_clean(report)
+
+    def test_promotion_report_uses_activation_lifecycle_evidence_to_clear_canary_blockers(self):
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "candidate_id": "activation-routing-candidate",
+                    "optimization_family": "openai_local_routing",
+                    "action_family": "routing",
+                    "source_surface": "openai_provider_request",
+                    "app_family": "generic_openai",
+                    "granularity": "provider_request",
+                    "replayability_level": "features_only",
+                    "candidate_target_model": "gpt-5-mini",
+                    "current_canary_count": 0,
+                    "holdout_count": 0,
+                    "sample_count": 3,
+                    "projected_savings_usd": 0.03,
+                    "blocker_reason_codes": [
+                        "insufficient-canary-applied-samples",
+                        "insufficient-canary-holdout-samples",
+                    ],
+                    "evidence": self._dangerous_metadata(),
+                },
+                {
+                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "candidate_id": "activation-cache-candidate",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "current_canary_count": 0,
+                    "holdout_count": 0,
+                    "sample_count": 3,
+                    "projected_savings_usd": 0.02,
+                    "blocker_reason_codes": [
+                        "insufficient-canary-applied-samples",
+                        "insufficient-canary-holdout-samples",
+                    ],
+                    "evidence": self._dangerous_metadata(),
+                },
+            ],
+        }
+
+        def lifecycle_payload(candidate_id: str, family: str, section: str, savings: float) -> dict:
+            result = {
+                "schema": "agentflow.optimization_promotion_rollout_actions.v1",
+                "ok": True,
+                "generated_at": "2026-06-10T03:00:00+00:00",
+                "summary": {"projected_savings_usd": savings},
+                "actions": [
+                    {
+                        "action_family": family,
+                        "policy_section": section,
+                        "status": "applied",
+                        "target_candidate_id": candidate_id,
+                        "target_rule_id": f"{candidate_id}-rule",
+                        "projected_savings_usd": savings,
+                        "reason_codes": ["activation-fixture-applied"],
+                    },
+                    {
+                        "action_family": family,
+                        "policy_section": section,
+                        "status": "applied",
+                        "target_candidate_id": candidate_id,
+                        "target_rule_id": f"{candidate_id}-rule",
+                        "projected_savings_usd": savings,
+                        "reason_codes": ["activation-fixture-applied"],
+                    },
+                    {
+                        "action_family": family,
+                        "policy_section": section,
+                        "status": "holdout",
+                        "target_candidate_id": candidate_id,
+                        "target_rule_id": f"{candidate_id}-rule",
+                        "projected_savings_usd": 0,
+                        "reason_codes": ["activation-fixture-holdout"],
+                    },
+                ],
+            }
+            payload = build_activation_staged_lifecycle_feedback(
+                result,
+                event_phase="apply",
+                command="fixture-activation-apply",
+            )
+            assert payload is not None
+            return payload
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                for candidate_id, family, section, savings in (
+                    ("activation-routing-candidate", "routing", "routing", 0.03),
+                    ("activation-cache-candidate", "cache", "cache", 0.02),
+                ):
+                    store.enqueue_managed_outcome_feedback(
+                        id=f"activation-lifecycle-{candidate_id}",
+                        source_surface=LIFECYCLE_SOURCE_SURFACE,
+                        endpoint="/v1/policy-feedback",
+                        optimization_unit_id=0,
+                        payload_json=stable_json(lifecycle_payload(candidate_id, family, section, savings)),
+                        status="queued",
+                    )
+                    store.log_optimization_eval_result(
+                        id=f"activation-eval-{candidate_id}",
+                        run_id="activation-eval-run",
+                        created_at="2026-06-10T03:30:00+00:00",
+                        candidate_id=candidate_id,
+                        source_surface="openai_provider_request" if family == "routing" else "anthropic_messages",
+                        optimization_family="openai_local_routing" if family == "routing" else "cache_replayability",
+                        action_family=family,
+                        status_class="pass",
+                        reason_codes_json=stable_json(["offline-fixture-passed"]),
+                        score_json=stable_json({"output_similarity": 0.98, "quality_score": 0.97}),
+                        cost_json=stable_json({"projected_savings_usd": savings}),
+                        result_json=stable_json(self._dangerous_metadata()),
+                    )
+                report = build_optimization_promotion_report(store, plan=plan)
+            finally:
+                store.conn.close()
+
+        by_candidate = {row["candidate_id"]: row for row in report["candidates"]}
+        for candidate_id in ("activation-routing-candidate", "activation-cache-candidate"):
+            candidate = by_candidate[candidate_id]
+            self.assertEqual(candidate["verdict"], "widen")
+            self.assertEqual(candidate["cohort_counts"]["canary_applied"], 2)
+            self.assertEqual(candidate["cohort_counts"]["canary_holdout"], 1)
+            self.assertNotIn("insufficient-canary-applied-samples", candidate["reason_codes"])
+            self.assertNotIn("insufficient-canary-holdout-samples", candidate["reason_codes"])
+            self.assertEqual(candidate["evidence_sources"][0]["source"], "activation_lifecycle_feedback")
+
+        source_counts = {row["value"]: row["count"] for row in report["summary"]["evidence_source_counts"]}
+        self.assertEqual(source_counts["activation_lifecycle_feedback"], 2)
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
         self._assert_privacy_clean(report)
 
     def _log_openai_canary_call(

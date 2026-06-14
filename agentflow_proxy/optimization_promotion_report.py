@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
+from agentflow_proxy.public_metadata import public_id
 from agentflow_proxy.store import utc_now
 
 
@@ -129,12 +130,14 @@ def _cohort_from_mapping(value: Any, *, fallback_count: int = 0) -> dict[str, An
     errors = _as_int(value.get("error_count"))
     retries = _as_int(value.get("retry_count"))
     safety_stops = _as_int(value.get("safety_stop_count"))
+    fallbacks = _as_int(value.get("fallback_count"))
     latency = value.get("latency_avg_ms")
     savings = value.get("net_savings_usd", value.get("savings_usd"))
     return {
         "count": count,
         "error_count": errors,
         "retry_count": retries,
+        "fallback_count": fallbacks,
         "safety_stop_count": safety_stops,
         "error_rate": _round(value.get("error_rate"), 6) if "error_rate" in value else (round(errors / count, 6) if count else 0.0),
         "retry_rate": _round(value.get("retry_rate"), 6) if "retry_rate" in value else (round(retries / count, 6) if count else 0.0),
@@ -142,6 +145,49 @@ def _cohort_from_mapping(value: Any, *, fallback_count: int = 0) -> dict[str, An
         "latency_avg_ms": None if latency is None else _round(latency, 2),
         "net_savings_usd": _round(savings, 8),
     }
+
+
+def _merge_cohort_evidence(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    result = dict(existing)
+    existing_count = _as_int(result.get("count"))
+    incoming_count = _as_int(incoming.get("count"))
+    if incoming_count > existing_count:
+        result.update(incoming)
+    else:
+        for key in ("error_count", "retry_count", "safety_stop_count"):
+            result[key] = max(_as_int(result.get(key)), _as_int(incoming.get(key)))
+        result["fallback_count"] = max(_as_int(result.get("fallback_count")), _as_int(incoming.get("fallback_count")))
+        for key in ("error_rate", "retry_rate", "latency_avg_ms", "net_savings_usd", "savings_usd"):
+            if result.get(key) in (None, "", 0, 0.0) and incoming.get(key) not in (None, ""):
+                result[key] = incoming.get(key)
+    return result
+
+
+def _merge_extra_evidence(existing: dict[str, Any] | None, incoming: dict[str, Any]) -> dict[str, Any]:
+    if not existing:
+        return dict(incoming)
+    result = dict(existing)
+    current = result.get("canary_evidence") if isinstance(result.get("canary_evidence"), dict) else {}
+    new = incoming.get("canary_evidence") if isinstance(incoming.get("canary_evidence"), dict) else {}
+    if new:
+        merged = dict(current)
+        for key in ("applied", "canary_applied", "holdout", "canary_holdout", "bypassed", "bypassed_or_disabled"):
+            value = new.get(key)
+            if not isinstance(value, dict):
+                continue
+            old = merged.get(key) if isinstance(merged.get(key), dict) else {}
+            merged[key] = _merge_cohort_evidence(old, value)
+        result["canary_evidence"] = merged
+    for key, value in incoming.items():
+        if key == "canary_evidence":
+            continue
+        if key == "__evidence_sources":
+            sources = list(result.get("__evidence_sources") or [])
+            sources.extend(item for item in value if isinstance(item, dict))
+            result[key] = sources
+        else:
+            result.setdefault(key, value)
+    return result
 
 
 def _cohort_evidence(plan_row: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -296,6 +342,28 @@ def _old_context_quality_gate(plan_row: dict[str, Any]) -> tuple[str | None, lis
     return None, []
 
 
+def _active_plan_blockers(
+    plan_blockers: list[str],
+    *,
+    evals: dict[str, Any],
+    applied: dict[str, Any],
+    holdout: dict[str, Any],
+    thresholds: dict[str, Any],
+) -> list[str]:
+    active: list[str] = []
+    for blocker in plan_blockers:
+        if blocker == "insufficient-canary-applied-samples" and _as_int(applied.get("count")) >= _as_int(thresholds["min_canary_applied_samples"]):
+            continue
+        if blocker == "insufficient-canary-holdout-samples" and _as_int(holdout.get("count")) >= _as_int(thresholds["min_canary_holdout_samples"]):
+            continue
+        if blocker == "insufficient-eval-pass-results" and _as_int(evals.get("pass_count")) >= _as_int(thresholds["min_eval_pass_count"]):
+            continue
+        if blocker == "eval-results-missing" and _as_int(evals.get("result_count")) > 0:
+            continue
+        active.append(blocker)
+    return active
+
+
 def _decide_verdict(
     plan_row: dict[str, Any],
     *,
@@ -305,11 +373,18 @@ def _decide_verdict(
 ) -> tuple[str, list[str], str]:
     reasons: list[str] = []
     plan_blockers = _reason_codes(plan_row.get("blocker_reason_codes"))
-    reasons.extend(plan_blockers)
     applied = cohorts["cohorts"]["canary_applied"]
     holdout = cohorts["cohorts"]["canary_holdout"]
     bypassed = cohorts["cohorts"]["bypassed_or_disabled"]
     deltas = cohorts["deltas"]
+    active_plan_blockers = _active_plan_blockers(
+        plan_blockers,
+        evals=evals,
+        applied=applied,
+        holdout=holdout,
+        thresholds=thresholds,
+    )
+    reasons.extend(active_plan_blockers)
 
     gate_verdict, gate_reasons = _old_context_quality_gate(plan_row)
     reasons.extend(gate_reasons)
@@ -338,7 +413,7 @@ def _decide_verdict(
         reasons.append("insufficient-eval-pass-results")
     if evals["result_count"] == 0:
         reasons.append("eval-results-missing")
-    if plan_blockers:
+    if active_plan_blockers:
         reasons.append("plan-blockers-present")
 
     insufficient = any(code.startswith("insufficient-") for code in reasons) or "eval-results-missing" in reasons
@@ -369,18 +444,27 @@ def _decide_verdict(
 
 def _extra_report_evidence(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     by_candidate: dict[str, dict[str, Any]] = {}
+
+    def add(candidate_id: Any, extra: dict[str, Any]) -> None:
+        if not candidate_id:
+            return
+        key = str(candidate_id)
+        by_candidate[key] = _merge_extra_evidence(by_candidate.get(key), extra)
+
     for report in reports:
         if not isinstance(report, dict):
             continue
+        for candidate_id, extra in _activation_lifecycle_report_evidence(report).items():
+            add(candidate_id, extra)
         quality_gate = report.get("quality_gate") if isinstance(report.get("quality_gate"), dict) else {}
         summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
         policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
         candidate_id = policy.get("candidate_id") or quality_gate.get("candidate_id") or summary.get("candidate_id")
         if candidate_id and quality_gate:
-            by_candidate[str(candidate_id)] = {
+            add(candidate_id, {
                 "quality_gate_verdict": quality_gate.get("verdict"),
                 "quality_gate_reason_codes": _reason_codes(quality_gate.get("reason_codes")),
-            }
+            })
         for action in report.get("actions") or []:
             if not isinstance(action, dict):
                 continue
@@ -389,13 +473,13 @@ def _extra_report_evidence(reports: list[dict[str, Any]]) -> dict[str, dict[str,
             if not candidate_id:
                 continue
             actual = action.get("actual") if isinstance(action.get("actual"), dict) else {}
-            by_candidate[str(candidate_id)] = {
+            add(candidate_id, {
                 "canary_evidence": {
                     "applied": {"count": actual.get("actual_canary_applied_count")},
                     "holdout": {"count": actual.get("actual_canary_holdout_count")},
                     "bypassed": {"count": actual.get("actual_bypassed_or_disabled_count")},
                 }
-            }
+            })
         for candidate in report.get("candidates") or []:
             if not isinstance(candidate, dict):
                 continue
@@ -437,8 +521,127 @@ def _extra_report_evidence(reports: list[dict[str, Any]]) -> dict[str, dict[str,
                     },
                 },
             }
-            by_candidate[str(candidate_id)] = extra
+            add(candidate_id, extra)
     return by_candidate
+
+
+def _public_ref(value: Any, *, prefix: str = "policy") -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}:{digest}"
+
+
+def _promotion_action_family(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"cache", "cache_replay"}:
+        return "cache"
+    if text in {"crunch", "old_context_summary", "old_context_summarization", "repeated_scaffold_crunch", "terminal_output_compaction", "anthropic_thinking_history_compaction"}:
+        return "crunch"
+    if text == "routing":
+        return "routing"
+    return text or "unknown"
+
+
+def _activation_lifecycle_report_evidence(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    lifecycle = report
+    if report.get("schema") != "agentflow.activation_staged_lifecycle_feedback_summary.v1":
+        nested = report.get("activation_lifecycle_feedback")
+        lifecycle = nested if isinstance(nested, dict) else {}
+    if lifecycle.get("schema") != "agentflow.activation_staged_lifecycle_feedback_summary.v1":
+        return {}
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    rows = lifecycle.get("cohort_lifecycle_metadata") if isinstance(lifecycle.get("cohort_lifecycle_metadata"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        family = _promotion_action_family(row.get("action_family"))
+        cohort = str(row.get("cohort_label") or "").strip().lower().replace("-", "_")
+        keys = {
+            str(value)
+            for value in (row.get("candidate_id"), row.get("policy_ref"))
+            if value not in (None, "")
+        }
+        if not keys:
+            continue
+        cohort_key = "applied" if cohort in {"applied", "canary_applied"} else "holdout" if cohort in {"holdout", "canary_holdout"} else "bypassed"
+        evidence = {
+            "count": _as_int(row.get("applied_count") if cohort_key == "applied" else row.get("holdout_count") if cohort_key == "holdout" else row.get("event_count")),
+            "error_count": _as_int(row.get("error_count")),
+            "retry_count": _as_int(row.get("retry_count")),
+            "safety_stop_count": _as_int(row.get("safety_stop_count")),
+            "fallback_count": _as_int(row.get("fallback_count")),
+            "error_rate": _round(row.get("error_rate"), 6),
+            "net_savings_usd": _round(row.get("savings_estimate_usd"), 8),
+        }
+        if evidence["count"] <= 0:
+            evidence["count"] = _as_int(row.get("event_count"))
+        for key in keys:
+            group = grouped.setdefault((key, family), {
+                "canary_evidence": {},
+                "__evidence_sources": [{
+                    "source": "activation_lifecycle_feedback",
+                    "schema": lifecycle.get("schema"),
+                    "action_family": family,
+                    "queue_rows": _as_int(lifecycle.get("queue_rows")),
+                    "family_event_count": _as_int(lifecycle.get("family_event_count")),
+                }],
+            })
+            canary = group["canary_evidence"]
+            current = canary.get(cohort_key) if isinstance(canary.get(cohort_key), dict) else {}
+            canary[cohort_key] = _merge_cohort_evidence(current, evidence)
+
+    result: dict[str, dict[str, Any]] = {}
+    for (key, _family), extra in grouped.items():
+        result[key] = _merge_extra_evidence(result.get(key), extra)
+    return result
+
+
+def _candidate_extra_keys(plan_row: dict[str, Any], candidate_id: str) -> list[str]:
+    evidence = plan_row.get("evidence") if isinstance(plan_row.get("evidence"), dict) else {}
+    values = [
+        candidate_id,
+        plan_row.get("candidate_id"),
+        plan_row.get("target_candidate_id"),
+        plan_row.get("rule_id"),
+        plan_row.get("policy_id"),
+        evidence.get("candidate_id"),
+        evidence.get("target_candidate_id"),
+        evidence.get("rule_id"),
+        evidence.get("policy_id"),
+    ]
+    keys: list[str] = []
+    for value in values:
+        if value in (None, ""):
+            continue
+        text = str(value)
+        keys.append(text)
+        safe_candidate = public_id(text, prefix="candidate")
+        if safe_candidate:
+            keys.append(safe_candidate)
+            ref = _public_ref(safe_candidate)
+            if ref:
+                keys.append(ref)
+        ref = _public_ref(text)
+        if ref:
+            keys.append(ref)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in keys:
+        if key not in seen:
+            unique.append(key)
+            seen.add(key)
+    return unique
+
+
+def _candidate_extra(extras: dict[str, dict[str, Any]], plan_row: dict[str, Any], candidate_id: str) -> dict[str, Any] | None:
+    merged: dict[str, Any] | None = None
+    for key in _candidate_extra_keys(plan_row, candidate_id):
+        if key in extras:
+            merged = _merge_extra_evidence(merged, extras[key])
+    return merged
 
 
 def _candidate_row(
@@ -462,7 +665,7 @@ def _candidate_row(
     extra_canary = extra.get("canary_evidence") if isinstance(extra, dict) and isinstance(extra.get("canary_evidence"), dict) else None
     cohorts = _cohort_evidence(plan_row, extra=extra_canary)
     verdict, reasons, next_action = _decide_verdict(plan_row, evals=evals, cohorts=cohorts, thresholds=thresholds)
-    return {
+    result = {
         "schema": VERDICT_SCHEMA,
         "candidate_id": candidate_id,
         "optimization_family": str(plan_row.get("optimization_family") or "unknown"),
@@ -487,6 +690,10 @@ def _candidate_row(
         "next_action": next_action,
         "privacy": _privacy_summary(),
     }
+    sources = extra.get("__evidence_sources") if isinstance(extra, dict) and isinstance(extra.get("__evidence_sources"), list) else []
+    if sources:
+        result["evidence_sources"] = sources
+    return result
 
 
 def build_optimization_promotion_report(
@@ -509,7 +716,14 @@ def build_optimization_promotion_report(
         rows = []
     now = datetime.now(timezone.utc)
     evals_by_candidate = _read_eval_results(store_obj, limit=capped_limit * 5)
-    extras = _extra_report_evidence(evidence_reports or [])
+    reports = list(evidence_reports or [])
+    try:
+        from agentflow_proxy.activation_lifecycle_feedback import activation_lifecycle_feedback_summary
+
+        reports.append(activation_lifecycle_feedback_summary(store_obj, limit=capped_limit * 20))
+    except Exception:
+        pass
+    extras = _extra_report_evidence(reports)
     defaults = {
         "min_eval_pass_count": min_eval_pass_count,
         "min_canary_applied_samples": min_canary_applied_samples,
@@ -527,16 +741,20 @@ def build_optimization_promotion_report(
                 eval_results=evals_by_candidate.get(candidate_id, []),
                 now=now,
                 defaults=defaults,
-                extra=extras.get(candidate_id),
+                extra=_candidate_extra(extras, row, candidate_id),
             )
         )
     candidates.sort(key=lambda item: (str(item.get("action_family")), str(item.get("optimization_family")), str(item.get("candidate_id"))))
     verdict_counts: Counter[str] = Counter(str(item.get("verdict") or "unknown") for item in candidates)
     action_counts: Counter[str] = Counter(str(item.get("action_family") or "unknown") for item in candidates)
     reason_counts: Counter[str] = Counter()
+    evidence_source_counts: Counter[str] = Counter()
     for item in candidates:
         for reason in item.get("reason_codes") or []:
             reason_counts[str(reason)] += 1
+        for source in item.get("evidence_sources") or []:
+            if isinstance(source, dict):
+                evidence_source_counts[str(source.get("source") or "unknown")] += 1
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -551,6 +769,7 @@ def build_optimization_promotion_report(
             "verdict_counts": _count_rows(verdict_counts),
             "action_family_counts": _count_rows(action_counts),
             "reason_code_counts": _count_rows(reason_counts),
+            "evidence_source_counts": _count_rows(evidence_source_counts),
             "projected_savings_usd": _round(sum(_as_float(item.get("projected_savings_usd")) for item in candidates), 8),
         },
         "candidates": candidates,
