@@ -315,6 +315,7 @@ def _eval_evidence(results: list[dict[str, Any]], *, now: datetime, thresholds: 
         "pass_count": counts.get("pass", 0),
         "fail_count": counts.get("fail", 0),
         "blocked_count": counts.get("blocked", 0),
+        "queued_count": counts.get("queued", 0),
         "unknown_count": counts.get("unknown", 0),
         "top_reason_codes": _count_rows(reason_counts),
         "latest_result_at": latest.isoformat() if latest else None,
@@ -358,7 +359,7 @@ def _active_plan_blockers(
             continue
         if blocker == "insufficient-eval-pass-results" and _as_int(evals.get("pass_count")) >= _as_int(thresholds["min_eval_pass_count"]):
             continue
-        if blocker == "eval-results-missing" and _as_int(evals.get("result_count")) > 0:
+        if blocker == "eval-results-missing" and (_as_int(evals.get("result_count")) > 0 or _as_int(evals.get("queued_count")) > 0):
             continue
         active.append(blocker)
     return active
@@ -411,7 +412,9 @@ def _decide_verdict(
         reasons.append("insufficient-canary-holdout-samples")
     if evals["pass_count"] < _as_int(thresholds["min_eval_pass_count"]):
         reasons.append("insufficient-eval-pass-results")
-    if evals["result_count"] == 0:
+        if _as_int(evals.get("queued_count")) > 0:
+            reasons.append("eval-queued")
+    if evals["result_count"] == 0 and _as_int(evals.get("queued_count")) == 0:
         reasons.append("eval-results-missing")
     if active_plan_blockers:
         reasons.append("plan-blockers-present")

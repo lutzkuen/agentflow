@@ -2168,7 +2168,7 @@ class DashboardImportTests(unittest.TestCase):
         def log_call(call_id, *, suffix, status="applied", cohort="canary_applied", cost=0.01, baseline=0.03):
             store.log_call(
                 id=call_id,
-                created_at=f"2026-06-11T05:00:0{suffix}+00:00",
+                created_at=f"2099-06-11T05:00:0{suffix}+00:00",
                 path="/v1/messages",
                 requested_model="claude-sonnet-4-6",
                 routed_model="claude-haiku-4-5-20251001" if status == "applied" else "claude-sonnet-4-6",
@@ -2220,7 +2220,7 @@ class DashboardImportTests(unittest.TestCase):
         try:
             store.log_call(
                 id="claude-eligible-unsampled",
-                created_at="2026-06-11T04:59:00+00:00",
+                created_at="2099-06-11T04:59:00+00:00",
                 path="/v1/messages",
                 requested_model="claude-sonnet-4-6",
                 routed_model="claude-sonnet-4-6",
@@ -2263,7 +2263,7 @@ class DashboardImportTests(unittest.TestCase):
                 store.log_routing_experiment(
                     id=f"claude-shadow-{idx}",
                     call_id=f"claude-shadow-call-secret-{idx}",
-                    created_at=f"2026-06-11T05:01:0{idx}+00:00",
+                    created_at=f"2099-06-11T05:01:0{idx}+00:00",
                     provider="anthropic",
                     source_surface="anthropic_messages",
                     stream=1,

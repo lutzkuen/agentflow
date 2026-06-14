@@ -5062,6 +5062,7 @@ def optimization_shadow_eval_cli(
 def optimization_eval_queue_cli(
     argv: Sequence[str] | None = None,
     *,
+    stdin: Any = None,
     stdout: Any = None,
     stderr: Any = None,
 ) -> int:
@@ -5120,6 +5121,15 @@ def optimization_eval_queue_cli(
         help="Minimum offline fixture output similarity/quality score required for a pass verdict, default: 0.9",
     )
     parser.add_argument(
+        "--promotion-report",
+        help="Optimization promotion report JSON path, or '-' for stdin. When set, backfill eval tasks from needs_eval promotion blockers.",
+    )
+    parser.add_argument(
+        "--apply-backfill",
+        action="store_true",
+        help="With --promotion-report, write metadata-only queued eval task rows. Without this flag, emit a dry-run only.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON instead of emitting one compact line.",
@@ -5128,6 +5138,7 @@ def optimization_eval_queue_cli(
 
     stdout = stdout if stdout is not None else sys.stdout
     stderr = stderr if stderr is not None else sys.stderr
+    stdin = stdin if stdin is not None else sys.stdin
 
     if args.execute and args.budget_usd <= 0:
         _write_json(
@@ -5144,6 +5155,43 @@ def optimization_eval_queue_cli(
             },
         )
         return 2
+
+    if args.promotion_report:
+        from agentflow_proxy.optimization_eval_queue import backfill_promotion_eval_tasks
+
+        try:
+            promotion_report = _read_json_input(str(args.promotion_report), stdin=stdin)
+        except (OSError, json.JSONDecodeError) as exc:
+            _write_json(
+                stderr,
+                {
+                    "ok": False,
+                    "schema": "agentflow.optimization_promotion_eval_backfill_error.v1",
+                    "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                    "provider_calls_made": False,
+                    "wrote_local_policy_files": False,
+                    "wrote_eval_queue_rows": False,
+                },
+            )
+            return 1
+
+        store = _open_store_for_db(str(args.db))
+        try:
+            result = backfill_promotion_eval_tasks(
+                store,
+                promotion_report,
+                family=args.family,
+                limit=int(args.limit or 25),
+                apply=bool(args.apply_backfill),
+            )
+        finally:
+            store.conn.close()
+
+        if args.pretty:
+            stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        else:
+            _write_json(stdout, result)
+        return 0
 
     from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
 

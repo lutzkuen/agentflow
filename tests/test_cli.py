@@ -2886,6 +2886,90 @@ class PolicyReloadCliTests(unittest.TestCase):
         self.assertEqual(stored_count, 1)
         self.assertNotIn("raw queue cli prompt", stdout.getvalue())
 
+    def test_optimization_eval_queue_cli_backfills_promotion_report_dry_run_and_apply(self):
+        from agentflow_proxy.store import Store
+
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "queue-promotion-high",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.10,
+                    "sample_count": 8,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing", "insufficient-eval-pass-results"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                    "prompt": "raw queue promotion prompt must stay local",
+                    "session_id": "queue-promotion-session-secret",
+                },
+                {
+                    "candidate_id": "queue-promotion-widen",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "projected_savings_usd": 1.0,
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            Store(db_path).conn.close()
+            report_path = Path(tmp) / "promotion-report.json"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            stdout = io.StringIO()
+            code = cli.optimization_eval_queue_cli(
+                ["--db", db_path, "--promotion-report", str(report_path), "--limit", "5"],
+                stdout=stdout,
+            )
+            dry_payload = json.loads(stdout.getvalue())
+            conn = sqlite3.connect(db_path)
+            try:
+                dry_count = conn.execute("select count(*) from optimization_eval_results").fetchone()[0]
+            finally:
+                conn.close()
+
+            stdout = io.StringIO()
+            code_apply = cli.optimization_eval_queue_cli(
+                ["--db", db_path, "--promotion-report", "-", "--apply-backfill", "--limit", "5"],
+                stdin=io.StringIO(json.dumps(report)),
+                stdout=stdout,
+            )
+            applied_payload = json.loads(stdout.getvalue())
+            conn = sqlite3.connect(db_path)
+            try:
+                stored = conn.execute(
+                    "select candidate_id, status_class, reason_codes_json, result_json from optimization_eval_results"
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(code_apply, 0)
+        self.assertEqual(dry_payload["schema"], "agentflow.optimization_promotion_eval_backfill.v1")
+        self.assertTrue(dry_payload["dry_run"])
+        self.assertFalse(dry_payload["wrote_eval_queue_rows"])
+        self.assertEqual(dry_count, 0)
+        self.assertEqual(dry_payload["tasks"][0]["candidate_id"], "queue-promotion-high")
+        self.assertFalse(applied_payload["dry_run"])
+        self.assertTrue(applied_payload["wrote_eval_queue_rows"])
+        self.assertEqual(stored[0], "queue-promotion-high")
+        self.assertEqual(stored[1], "queued")
+        self.assertIn("eval-queued", json.loads(stored[2]))
+        rendered = json.dumps(dry_payload, sort_keys=True) + json.dumps(applied_payload, sort_keys=True) + stored[3]
+        self.assertNotIn("raw queue promotion prompt", rendered)
+        self.assertNotIn("queue-promotion-session-secret", rendered)
+        self.assertNotIn('"prompt"', rendered)
+        self.assertNotIn('"session_id"', rendered)
+
     def _promotion_plan_row(
         self,
         candidate_id: str,

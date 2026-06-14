@@ -14,7 +14,7 @@ from agentflow_proxy import recommendations
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
-from agentflow_proxy.optimization_eval_queue import run_optimization_eval_queue
+from agentflow_proxy.optimization_eval_queue import backfill_promotion_eval_tasks, run_optimization_eval_queue
 from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
 from agentflow_proxy.optimization_promotion_canary import (
     apply_optimization_promotion_canaries,
@@ -312,6 +312,117 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertIn("candidate-stale", json.loads(stored_stale["reason_codes_json"]))
         self._assert_privacy_clean(result)
         self._assert_privacy_clean(json.loads(stored_stale["result_json"]))
+
+    def test_promotion_eval_backfill_queues_needs_eval_candidates_and_updates_report_status(self):
+        promotion_report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "promotion-eval-high",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.25,
+                    "sample_count": 12,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing", "insufficient-eval-pass-results"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "thresholds": {"min_eval_pass_count": 1},
+                    "prompt": "raw eval prompt secret",
+                    "request_id": "eval-request-id-secret",
+                    "session_id": "eval-session-id-secret",
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "promotion-eval-low",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.05,
+                    "sample_count": 3,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["eval-results-missing"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "promotion-already-widen",
+                    "optimization_family": "phase_routing",
+                    "action_family": "routing",
+                    "projected_savings_usd": 1.0,
+                    "verdict": "widen",
+                    "reason_codes": ["promotion-thresholds-met"],
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+            ],
+        }
+        plan = {
+            "schema": "agentflow.optimization_eval_plan.v1",
+            "plans": [
+                {
+                    "schema": "agentflow.optimization_eval_plan_row.v1",
+                    "candidate_id": "promotion-eval-high",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "granularity": "provider_request",
+                    "replayability_level": "local-exact-response",
+                    "current_canary_count": 2,
+                    "holdout_count": 1,
+                    "sample_count": 3,
+                    "projected_savings_usd": 0.25,
+                    "evidence": {
+                        "canary_evidence": {
+                            "applied": {"count": 2, "error_rate": 0.0, "retry_rate": 0.0, "latency_avg_ms": 100, "net_savings_usd": 0.25},
+                            "holdout": {"count": 1, "error_rate": 0.0, "retry_rate": 0.0, "latency_avg_ms": 100},
+                        }
+                    },
+                }
+            ],
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                dry_run = backfill_promotion_eval_tasks(store, promotion_report, limit=1, apply=False)
+                dry_count = store.conn.execute("select count(*) from optimization_eval_results").fetchone()[0]
+                applied = backfill_promotion_eval_tasks(store, promotion_report, limit=1, apply=True)
+                stored = store.conn.execute(
+                    "select candidate_id, status_class, reason_codes_json, result_json from optimization_eval_results"
+                ).fetchall()
+                updated_report = build_optimization_promotion_report(
+                    store,
+                    plan=plan,
+                    min_canary_applied_samples=2,
+                    min_canary_holdout_samples=1,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(dry_run["schema"], "agentflow.optimization_promotion_eval_backfill.v1")
+        self.assertTrue(dry_run["dry_run"])
+        self.assertFalse(dry_run["wrote_eval_queue_rows"])
+        self.assertEqual(dry_count, 0)
+        self.assertEqual([task["candidate_id"] for task in dry_run["tasks"]], ["promotion-eval-high"])
+        self.assertTrue(any(row["candidate_id"] == "promotion-eval-low" and row["reason"] == "limit-exceeded" for row in dry_run["skipped"]))
+        self.assertFalse(applied["dry_run"])
+        self.assertTrue(applied["wrote_eval_queue_rows"])
+        self.assertEqual(applied["summary"]["written_task_count"], 1)
+        self.assertEqual(stored[0]["candidate_id"], "promotion-eval-high")
+        self.assertEqual(stored[0]["status_class"], "queued")
+        self.assertIn("eval-queued", json.loads(stored[0]["reason_codes_json"]))
+        candidate = updated_report["candidates"][0]
+        self.assertEqual(candidate["eval_evidence"]["queued_count"], 1)
+        self.assertEqual(candidate["verdict"], "needs_eval")
+        self.assertIn("eval-queued", candidate["reason_codes"])
+        self.assertIn("insufficient-eval-pass-results", candidate["reason_codes"])
+        self.assertNotIn("eval-results-missing", candidate["reason_codes"])
+        self._assert_privacy_clean(dry_run)
+        self._assert_privacy_clean(applied)
+        self._assert_privacy_clean(json.loads(stored[0]["result_json"]))
 
     def test_promotion_report_omits_raw_like_plan_and_eval_result_fields(self):
         plan = {
