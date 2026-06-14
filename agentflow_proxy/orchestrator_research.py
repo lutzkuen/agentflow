@@ -2380,6 +2380,28 @@ def _burndown_row_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] 
     }
 
 
+def _burndown_row_from_safety_stop_group(group: dict[str, Any]) -> dict[str, Any] | None:
+    blocker = str(group.get("keep_blocked_reason") or group.get("blocker_code") or group.get("safety_stop_reason") or "").strip()
+    count = _to_int(group.get("safety_stop_count") or group.get("event_count"))
+    if not blocker or count <= 0:
+        return None
+    needed = [str(item) for item in group.get("needed_resolution") or [] if str(item or "").strip()]
+    return {
+        "lever": "activation-feedback",
+        "local_action_family": sanitize_value(group.get("action_family") or "activation-feedback"),
+        "state": "blocked",
+        "next_action": sanitize_value(group.get("next_action") or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason"),
+        "blocker_codes": sanitize_value([blocker]),
+        "needed_resolution": sanitize_value(needed),
+        "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
+        "sample_count": count,
+        "savings_per_1000_calls_usd": 0.0,
+        "projected_saved_usd": round(_to_float(group.get("savings_estimate_usd")), 8),
+        "owner": "local-policy",
+        "_score": -10.0 + min(count, 10000) / 100.0,
+    }
+
+
 def build_evidence_to_activation_burndown(
     plan: dict[str, Any],
     *,
@@ -2402,6 +2424,14 @@ def build_evidence_to_activation_burndown(
         row = _burndown_row_from_managed_health(managed)
         if row is not None:
             rows.append(row)
+
+    safety_stop_burndown = evidence.get("activation_safety_stop_burndown")
+    if isinstance(safety_stop_burndown, dict):
+        for group in safety_stop_burndown.get("groups") or []:
+            if isinstance(group, dict):
+                row = _burndown_row_from_safety_stop_group(group)
+                if row is not None:
+                    rows.append(row)
 
     diagnostics = evidence.get("repeated_diagnostics") if isinstance(evidence.get("repeated_diagnostics"), list) else []
     for diagnostic in diagnostics:
@@ -4675,6 +4705,18 @@ def build_research_plan(
         _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary),
         summary,
     )
+    activation_safety_stop_burndown = None
+    if diagnostics:
+        from agentflow_proxy.activation_lifecycle_feedback import build_activation_safety_stop_burndown
+
+        activation_safety_stop_burndown = build_activation_safety_stop_burndown(
+            research_plan={
+                "schema": SCHEMA,
+                "evidence": {
+                    "repeated_diagnostics": diagnostics,
+                },
+            }
+        )
     optimization_candidates = _optimization_candidates(stats_summary=summary, diagnostics=diagnostics)
 
     ready_count = len(ready_issues)
@@ -4795,6 +4837,8 @@ def build_research_plan(
         inspected_sources.append("evidence_to_activation_next_action_ledger")
     if diagnostics:
         inspected_sources.append("orchestrator_logs")
+    if isinstance(activation_safety_stop_burndown, dict) and activation_safety_stop_burndown.get("status") == "ranked":
+        inspected_sources.append("activation_safety_stop_burndown")
 
     result = {
         "schema": SCHEMA,
@@ -4812,6 +4856,7 @@ def build_research_plan(
             "ready_issues": [_issue_ref(issue) for issue in ready_issues],
             "stale_blocked_issues": blocked_stale,
             "repeated_diagnostics": diagnostics,
+            "activation_safety_stop_burndown": activation_safety_stop_burndown,
             "optimization_candidates": optimization_candidates if should_run else [],
             "issue_proposal_suppression": proposal_suppression,
             "next_backlog_milestone": next_backlog_milestone,

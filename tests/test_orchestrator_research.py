@@ -2501,9 +2501,45 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         reasons = [d["reason"] for d in diagnostics]
         self.assertNotIn("unclassified-skip-or-blocker", reasons)
         self.assertIn("safety-stop", reasons)
+        safety_burndown = plan["evidence"]["activation_safety_stop_burndown"]
+        self.assertEqual(safety_burndown["schema"], "agentflow.activation_safety_stop_burndown.v1")
+        self.assertEqual(safety_burndown["summary"]["top_blocker_code"], "safety-stop")
+        self.assertEqual(
+            safety_burndown["summary"]["top_keep_blocked_reason"],
+            "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
+        )
+        self.assertIn("activation_safety_stop_burndown", plan["evidence"]["inspected_sources"])
         rendered = json.dumps(plan)
         self.assertNotIn("sec-secret-a", rendered)
         self.assertNotIn("sec-secret-b", rendered)
+
+    def test_evidence_to_activation_burndown_uses_safety_stop_keep_blocked_reason(self):
+        plan = build_research_plan(
+            issues=[],
+            log_sources=[
+                "routing blocker=safety-stop request_id=req-secret-stop-a",
+                "routing blocker=safety-stop request_id=req-secret-stop-b",
+            ],
+            threshold=1,
+            now=NOW,
+        )
+
+        report = build_evidence_to_activation_burndown(plan, now=NOW)
+
+        safety_rows = [
+            row
+            for row in report["blockers"]
+            if row.get("evidence_source") == "agentflow.activation_safety_stop_burndown.v1"
+        ]
+        self.assertTrue(safety_rows)
+        self.assertEqual(
+            safety_rows[0]["blocker_codes"],
+            ["activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof"],
+        )
+        self.assertIn("rollback_proof", safety_rows[0]["needed_resolution"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("req-secret-stop-a", rendered)
+        self.assertNotIn("req-secret-stop-b", rendered)
 
     def test_repeated_safety_stop_creates_issue_when_no_existing_match(self):
         with TemporaryDirectory() as tmp:

@@ -65,6 +65,7 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
         group = report["groups"][0]
         self.assertEqual(group["action_family"], "routing")
         self.assertEqual(group["blocker_code"], "error-rate-regression")
+        self.assertEqual(group["keep_blocked_reason"], "routing-safety-stop-needs-rollback-proof")
         self.assertIn("rollback_proof", group["needed_resolution"])
         self.assertEqual(group["next_action"], "record-routing-rollback-proof-before-reactivation")
         self.assertTrue(report["privacy"]["metadata_only"])
@@ -92,7 +93,15 @@ class ActivationSafetyStopBurndownTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "ranked")
         self.assertEqual(report["summary"]["top_next_action"], "review-activation-feedback-safety-stop-and-record-keep-blocked-reason")
+        self.assertEqual(
+            report["summary"]["top_keep_blocked_reason"],
+            "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
+        )
         self.assertEqual(report["groups"][0]["repeated_noop_status"], "repeated")
+        self.assertEqual(
+            report["groups"][0]["keep_blocked_reason"],
+            "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
+        )
         self.assertIn("human_review", report["groups"][0]["needed_resolution"])
         rendered = json.dumps(report, sort_keys=True)
         self.assertNotIn("req-secret", rendered)

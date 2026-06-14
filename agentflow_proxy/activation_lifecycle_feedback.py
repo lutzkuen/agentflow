@@ -590,6 +590,23 @@ def _safety_stop_next_action(
     return f"review-{action_family}-safety-stop-and-record-keep-blocked-reason", needed
 
 
+def _keep_blocked_reason(action_family: str, needed_resolution: list[str], reasons: list[str]) -> str:
+    reason_set = {str(item or "") for item in needed_resolution}
+    if "file_backed_representation" in reason_set:
+        return f"{action_family}-safety-stop-missing-file-backed-representation"
+    if "rollback_proof" in reason_set:
+        return f"{action_family}-safety-stop-needs-rollback-proof"
+    if "safer_threshold" in reason_set:
+        return f"{action_family}-safety-stop-needs-safer-threshold"
+    if "holdout_coverage" in reason_set:
+        return f"{action_family}-safety-stop-needs-holdout-coverage"
+    if "lifecycle_evidence" in reason_set:
+        return f"{action_family}-safety-stop-needs-lifecycle-evidence"
+    if _contains_reason(reasons, "safety-stop"):
+        return f"{action_family}-safety-stop-needs-human-review"
+    return f"{action_family}-safety-stop-keep-blocked"
+
+
 def _file_backed_status(reasons: list[str]) -> str:
     if _contains_reason(reasons, "file-backed", "no-local-representation", "unknown-local-action-family"):
         return "missing"
@@ -648,6 +665,7 @@ def _safety_group_from_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | No
         "action_family": action_family,
         "blocker_code": primary_reason,
         "safety_stop_reason": primary_reason,
+        "keep_blocked_reason": _keep_blocked_reason(action_family, needed, reasons),
         "stale_status": _stale_status(reasons),
         "repeated_noop_status": _repeated_noop_status(reasons, event_count),
         "file_backed_representation_status": _file_backed_status(reasons),
@@ -683,6 +701,7 @@ def _safety_group_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] 
         "action_family": _safe_label(diagnostic.get("source_lever") or "activation-feedback", "activation-feedback"),
         "blocker_code": reason or "safety-stop",
         "safety_stop_reason": reason or "safety-stop",
+        "keep_blocked_reason": "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
         "stale_status": _stale_status(reasons),
         "repeated_noop_status": _repeated_noop_status(reasons, count),
         "file_backed_representation_status": _file_backed_status(reasons),
@@ -761,6 +780,7 @@ def build_activation_safety_stop_burndown(
             ),
             "top_action_family": top.get("action_family"),
             "top_blocker_code": top.get("blocker_code"),
+            "top_keep_blocked_reason": top.get("keep_blocked_reason"),
             "top_next_action": top.get("next_action"),
             "next_actions": next_actions,
         },
