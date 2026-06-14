@@ -13,6 +13,7 @@ from agentflow_proxy.store import utc_now
 
 QUEUE_META_SCHEMA = "agentflow.activation_staged_lifecycle_feedback_queue_meta.v1"
 SUMMARY_SCHEMA = "agentflow.activation_staged_lifecycle_feedback_summary.v1"
+SAFETY_STOP_BURNDOWN_SCHEMA = "agentflow.activation_safety_stop_burndown.v1"
 
 RAW_REASON_HINTS = {
     "api",
@@ -159,7 +160,9 @@ def _status_bucket(status: Any) -> str:
         return "holdout"
     if text in {"rollback", "rollback-required", "rollback_required"}:
         return "rollback_required"
-    if text in {"suppressed", "blocked", "rejected", "omitted", "safety-stopped", "safety_stop", "safety-stopped"}:
+    if text in {"safety-stopped", "safety-stop", "safety-stop-tripped", "safety_stop", "safety_stopped"}:
+        return "safety_stopped"
+    if text in {"suppressed", "blocked", "rejected", "omitted"}:
         return "suppressed"
     if text in {"not-selected", "not_selected", "skipped", "bypassed", "disabled"}:
         return "suppressed"
@@ -352,6 +355,7 @@ def _empty_lifecycle_group(policy_ref: str, cohort: str, family: str) -> dict[st
         "retry_count": 0,
         "safety_stop_count": 0,
         "savings_estimate_usd": 0.0,
+        "reason_counts": Counter(),
     }
 
 
@@ -402,11 +406,16 @@ def _add_lifecycle_group_event(
     if cohort in {"safety_stop", "safety_stopped"}:
         group["safety_stop_count"] += 1
     group["savings_estimate_usd"] += _savings_estimate(event)
+    for reason in event.get("reason_codes") or []:
+        code = _reason_code(reason)
+        if code:
+            group["reason_counts"][code] += 1
 
 
 def _finalize_lifecycle_group(group: dict[str, Any]) -> dict[str, Any]:
     count = _as_int(group.get("event_count"))
     errors = _as_int(group.get("error_count"))
+    reason_counts = group.get("reason_counts") if isinstance(group.get("reason_counts"), Counter) else Counter()
     return {
         "policy_ref": group["policy_ref"],
         "candidate_id": group.get("candidate_id"),
@@ -421,6 +430,8 @@ def _finalize_lifecycle_group(group: dict[str, Any]) -> dict[str, Any]:
         "safety_stop_count": _as_int(group.get("safety_stop_count")),
         "error_rate": round(errors / count, 6) if count > 0 else 0.0,
         "savings_estimate_usd": round(_as_float(group.get("savings_estimate_usd")), 8),
+        "reason_codes": [key for key, _value in reason_counts.most_common()],
+        "blocker_reason_breakdown": [{"value": key, "count": value} for key, value in reason_counts.most_common()],
     }
 
 
@@ -529,3 +540,240 @@ def activation_lifecycle_feedback_summary(store_obj: Any, *, limit: int = 10000)
         "payload_json_included": False,
         "privacy": _privacy_summary(),
     }
+
+
+def _safety_privacy_summary() -> dict[str, Any]:
+    privacy = _privacy_summary()
+    privacy["aggregate_only"] = True
+    privacy["individual_candidate_ids_included"] = False
+    return privacy
+
+
+def _contains_reason(reasons: list[str], *needles: str) -> bool:
+    reason_text = " ".join(str(item or "").lower() for item in reasons)
+    return any(needle in reason_text for needle in needles)
+
+
+def _safety_stop_next_action(
+    *,
+    action_family: str,
+    reasons: list[str],
+    applied_count: int,
+    holdout_count: int,
+    error_count: int,
+    retry_count: int,
+) -> tuple[str, list[str]]:
+    needed: list[str] = []
+    if holdout_count <= 0 or _contains_reason(reasons, "missing-holdout", "holdout"):
+        needed.append("holdout_coverage")
+    if applied_count <= 0 or _contains_reason(reasons, "missing-applied", "missing-canary", "stale"):
+        needed.append("lifecycle_evidence")
+    if error_count > 0 or retry_count > 0 or _contains_reason(reasons, "error-rate", "retry-rate", "regression"):
+        needed.append("safer_threshold")
+        needed.append("rollback_proof")
+    if _contains_reason(reasons, "file-backed", "no-local-representation", "unknown-local-action-family"):
+        needed.append("file_backed_representation")
+    if not needed or _contains_reason(reasons, "safety-stop"):
+        needed.append("human_review")
+    needed = sorted(set(needed), key=needed.index)
+
+    if "file_backed_representation" in needed:
+        return f"add-file-backed-{action_family}-representation", needed
+    if "rollback_proof" in needed:
+        return f"record-{action_family}-rollback-proof-before-reactivation", needed
+    if "safer_threshold" in needed:
+        return f"narrow-{action_family}-canary-threshold-and-restage", needed
+    if "holdout_coverage" in needed:
+        return f"collect-{action_family}-holdout-coverage", needed
+    if "lifecycle_evidence" in needed:
+        return f"collect-{action_family}-lifecycle-evidence", needed
+    return f"review-{action_family}-safety-stop-and-record-keep-blocked-reason", needed
+
+
+def _file_backed_status(reasons: list[str]) -> str:
+    if _contains_reason(reasons, "file-backed", "no-local-representation", "unknown-local-action-family"):
+        return "missing"
+    return "unknown"
+
+
+def _stale_status(reasons: list[str]) -> str:
+    return "stale" if _contains_reason(reasons, "stale") else "unknown"
+
+
+def _repeated_noop_status(reasons: list[str], count: int) -> str:
+    if count > 1 or _contains_reason(reasons, "repeated", "no-op", "noop"):
+        return "repeated"
+    return "unknown"
+
+
+def _primary_safety_reason(reasons: list[str]) -> str:
+    for reason in reasons:
+        text = str(reason or "").lower()
+        if any(token in text for token in ("error-rate", "retry-rate", "regression", "rollback", "stale", "holdout")):
+            return str(reason)
+    for reason in reasons:
+        text = str(reason or "").lower()
+        if "safety-stop" in text:
+            return str(reason)
+    for reason in reasons:
+        text = str(reason or "").lower()
+        if not text.startswith("activation-"):
+            return str(reason)
+    return str(reasons[0]) if reasons else "local-canary-safety-stop"
+
+
+def _safety_group_from_lifecycle_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    reasons = [str(item) for item in row.get("reason_codes") or [] if str(item or "").strip()]
+    cohort = str(row.get("cohort_label") or "").strip()
+    safety_count = _as_int(row.get("safety_stop_count"))
+    if safety_count <= 0 and cohort not in {"safety_stop", "safety_stopped"} and not _contains_reason(reasons, "safety-stop"):
+        return None
+    action_family = _safe_label(row.get("action_family"), "unknown")
+    event_count = _as_int(row.get("event_count"))
+    applied_count = _as_int(row.get("applied_count"))
+    holdout_count = _as_int(row.get("holdout_count"))
+    error_count = _as_int(row.get("error_count"))
+    retry_count = _as_int(row.get("retry_count"))
+    next_action, needed = _safety_stop_next_action(
+        action_family=action_family,
+        reasons=reasons,
+        applied_count=applied_count,
+        holdout_count=holdout_count,
+        error_count=error_count,
+        retry_count=retry_count,
+    )
+    primary_reason = _primary_safety_reason(reasons)
+    return {
+        "source": "activation_lifecycle_feedback",
+        "action_family": action_family,
+        "blocker_code": primary_reason,
+        "safety_stop_reason": primary_reason,
+        "stale_status": _stale_status(reasons),
+        "repeated_noop_status": _repeated_noop_status(reasons, event_count),
+        "file_backed_representation_status": _file_backed_status(reasons),
+        "needed_resolution": needed,
+        "next_action": next_action,
+        "event_count": event_count,
+        "safety_stop_count": safety_count or event_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "error_count": error_count,
+        "retry_count": retry_count,
+        "fallback_count": _as_int(row.get("fallback_count")),
+        "savings_estimate_usd": round(_as_float(row.get("savings_estimate_usd")), 8),
+        "reason_breakdown": row.get("blocker_reason_breakdown") or [{"value": primary_reason, "count": max(1, event_count)}],
+        "policy_ref": row.get("policy_ref") if str(row.get("policy_ref") or "").startswith("policy:") else "unknown",
+    }
+
+
+def _safety_group_from_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any] | None:
+    reason = _reason_code(diagnostic.get("reason") or diagnostic.get("diagnostic_class"))
+    if reason not in {"safety-stop", "safety-stopped", "safety_stop"} and not str(reason or "").startswith("safety-stop"):
+        return None
+    count = _as_int(diagnostic.get("count") or diagnostic.get("observations"))
+    reasons = [reason or "safety-stop"]
+    next_action = _safe_label(
+        diagnostic.get("unblock_path"),
+        "review-activation-feedback-safety-stop-and-record-keep-blocked-reason",
+    )
+    if next_action in {"review-the-safety-stop-and-either-resolve-the-safe-bypass-condition-or-keep-the-affected-activation-blocked-with-a-narrow-reason"}:
+        next_action = "review-activation-feedback-safety-stop-and-record-keep-blocked-reason"
+    return {
+        "source": "orchestrator_repeated_diagnostic",
+        "action_family": _safe_label(diagnostic.get("source_lever") or "activation-feedback", "activation-feedback"),
+        "blocker_code": reason or "safety-stop",
+        "safety_stop_reason": reason or "safety-stop",
+        "stale_status": _stale_status(reasons),
+        "repeated_noop_status": _repeated_noop_status(reasons, count),
+        "file_backed_representation_status": _file_backed_status(reasons),
+        "needed_resolution": ["human_review", "safer_threshold", "rollback_proof"],
+        "next_action": next_action,
+        "event_count": count,
+        "safety_stop_count": count,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "error_count": 0,
+        "retry_count": 0,
+        "fallback_count": 0,
+        "savings_estimate_usd": 0.0,
+        "reason_breakdown": [{"value": reason or "safety-stop", "count": max(1, count)}],
+        "policy_ref": "unknown",
+    }
+
+
+def _safety_group_sort_key(group: dict[str, Any]) -> tuple[float, int, int, str]:
+    score = (
+        _as_int(group.get("safety_stop_count")) * 10.0
+        + _as_int(group.get("error_count")) * 3.0
+        + _as_int(group.get("retry_count")) * 2.0
+        + _as_float(group.get("savings_estimate_usd")) * 100.0
+    )
+    return (
+        score,
+        _as_int(group.get("event_count")),
+        _as_int(group.get("holdout_count")),
+        str(group.get("action_family") or ""),
+    )
+
+
+def build_activation_safety_stop_burndown(
+    lifecycle_feedback: dict[str, Any] | None = None,
+    *,
+    research_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an aggregate-only burn-down report for activation safety stops."""
+    lifecycle_feedback = lifecycle_feedback if isinstance(lifecycle_feedback, dict) else {}
+    groups: list[dict[str, Any]] = []
+    for row in lifecycle_feedback.get("cohort_lifecycle_metadata") or []:
+        if isinstance(row, dict):
+            group = _safety_group_from_lifecycle_row(row)
+            if group is not None:
+                groups.append(group)
+
+    plan = research_plan if isinstance(research_plan, dict) else {}
+    evidence = plan.get("evidence") if isinstance(plan.get("evidence"), dict) else {}
+    for diagnostic in evidence.get("repeated_diagnostics") or []:
+        if isinstance(diagnostic, dict):
+            group = _safety_group_from_diagnostic(diagnostic)
+            if group is not None:
+                groups.append(group)
+
+    groups.sort(key=_safety_group_sort_key, reverse=True)
+    ranked: list[dict[str, Any]] = []
+    for rank, group in enumerate(groups, start=1):
+        clean = dict(group)
+        clean["rank"] = rank
+        ranked.append(clean)
+
+    next_actions = sorted({str(group.get("next_action")) for group in ranked if group.get("next_action")})
+    top = ranked[0] if ranked else {}
+    return {
+        "schema": SAFETY_STOP_BURNDOWN_SCHEMA,
+        "generated_at": utc_now(),
+        "status": "ranked" if ranked else "no-safety-stop-evidence",
+        "source_schema": lifecycle_feedback.get("schema") or plan.get("schema"),
+        "summary": {
+            "ranked_group_count": len(ranked),
+            "safety_stop_count": sum(_as_int(group.get("safety_stop_count")) for group in ranked),
+            "repeated_group_count": sum(1 for group in ranked if group.get("repeated_noop_status") == "repeated"),
+            "missing_file_backed_representation_count": sum(
+                1 for group in ranked if group.get("file_backed_representation_status") == "missing"
+            ),
+            "top_action_family": top.get("action_family"),
+            "top_blocker_code": top.get("blocker_code"),
+            "top_next_action": top.get("next_action"),
+            "next_actions": next_actions,
+        },
+        "groups": ranked,
+        "privacy": _safety_privacy_summary(),
+    }
+
+
+def activation_safety_stop_burndown_report(
+    store_obj: Any | None = None,
+    *,
+    research_plan: dict[str, Any] | None = None,
+    limit: int = 10000,
+) -> dict[str, Any]:
+    lifecycle_feedback = activation_lifecycle_feedback_summary(store_obj, limit=limit) if store_obj is not None else None
+    return build_activation_safety_stop_burndown(lifecycle_feedback, research_plan=research_plan)

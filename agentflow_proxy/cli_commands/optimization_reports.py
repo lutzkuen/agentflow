@@ -2473,6 +2473,55 @@ def crunch_blocker_outcomes_cli(argv: Sequence[str] | None = None, *, stdout: An
     return 0
 
 
+def activation_safety_stop_burndown_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Export aggregate activation safety-stop burn-down groups from local metadata")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--plan-json",
+        help="Optional AgentFlow orchestrator research plan JSON to include repeated safety-stop diagnostics.",
+    )
+    parser.add_argument("--limit", type=int, default=10000, help="Queued lifecycle feedback rows to scan, default: 10000.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    from agentflow_proxy.activation_lifecycle_feedback import activation_safety_stop_burndown_report
+
+    research_plan = None
+    if args.plan_json:
+        try:
+            with Path(args.plan_json).expanduser().open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (OSError, ValueError, TypeError) as exc:
+            _write_json(stderr, {"ok": False, "error": {"type": exc.__class__.__name__, "message": str(exc)}})
+            return 1
+        if not isinstance(loaded, dict):
+            _write_json(stderr, {"ok": False, "error": {"type": "invalid_plan_json", "message": "plan JSON must be an object"}})
+            return 1
+        research_plan = loaded
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = activation_safety_stop_burndown_report(
+            store,
+            research_plan=research_plan,
+            limit=args.limit,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def optimization_action_ledger_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Summarize cross-family optimization eligibility from local call metadata")
     parser.add_argument(
