@@ -57,7 +57,9 @@ class DashboardImportTests(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
         event_tmp = tempfile.TemporaryDirectory()
         old_event_log = os.environ.get("AGENTFLOW_POLICY_EVENTS_LOG")
+        old_promotion_blocker_review = os.environ.get("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
         os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = str(Path(event_tmp.name) / "policy_events.jsonl")
+        os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(Path(event_tmp.name) / "missing_promotion_blocker_review.json")
         store = Store(tmp.name)
         try:
             from agentflow_proxy.policy_events import log_policy_event
@@ -104,6 +106,7 @@ class DashboardImportTests(unittest.TestCase):
             optimization_eval_queue = client.get("/agentflow/stats/optimization-eval-queue")
             optimization_coordinator = client.get("/agentflow/stats/optimization-coordinator")
             optimization_promotion_funnel = client.get("/agentflow/stats/optimization-promotion-funnel")
+            promotion_blocker_next_actions = client.get("/agentflow/stats/promotion-blocker-next-actions")
             rollout_readiness = client.get("/agentflow/stats/rollout-actions/readiness")
             local_pattern_coverage = client.get("/agentflow/stats/local-pattern-coverage")
             phase_routing = client.get("/agentflow/stats/phase-routing")
@@ -272,6 +275,11 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(optimization_promotion_funnel.status_code, 200)
             self.assertEqual(optimization_promotion_funnel.json()["schema"], "agentflow.optimization_promotion_funnel.v1")
             self.assertFalse(optimization_promotion_funnel.json()["privacy"]["provider_calls_made"])
+            self.assertEqual(promotion_blocker_next_actions.status_code, 200)
+            self.assertEqual(promotion_blocker_next_actions.json()["schema"], "agentflow.promotion_blocker_next_actions_dashboard.v1")
+            self.assertEqual(promotion_blocker_next_actions.json()["status"], "no-data")
+            self.assertFalse(promotion_blocker_next_actions.json()["privacy"]["provider_calls_made"])
+            self.assertFalse(promotion_blocker_next_actions.json()["privacy"]["managed_server_calls_made"])
             self.assertEqual(rollout_readiness.status_code, 200)
             self.assertEqual(rollout_readiness.json()["schema"], "agentflow.rollout_actions_readiness.v1")
             self.assertFalse(rollout_readiness.json()["privacy"]["raw_action_payloads_included"])
@@ -365,6 +373,10 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("/agentflow/stats/optimization-promotion-funnel", dashboard.text)
             self.assertIn("Optimization promotion canary impact", dashboard.text)
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/promotion-blocker-next-actions", dashboard.text)
+            self.assertIn("Promotion blocker next actions", dashboard.text)
+            self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
+            self.assertIn("promotion-blocker-groups-tbody", dashboard.text)
             self.assertIn("/agentflow/stats/claude-routing-promotion-funnel", dashboard.text)
             self.assertIn("Claude routing promotion funnel", dashboard.text)
             self.assertIn("claude-routing-funnel-candidates-tbody", dashboard.text)
@@ -423,9 +435,136 @@ class DashboardImportTests(unittest.TestCase):
                 os.environ.pop("AGENTFLOW_POLICY_EVENTS_LOG", None)
             else:
                 os.environ["AGENTFLOW_POLICY_EVENTS_LOG"] = old_event_log
+            if old_promotion_blocker_review is None:
+                os.environ.pop("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH", None)
+            else:
+                os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_promotion_blocker_review
             store.conn.close()
             tmp.close()
             event_tmp.cleanup()
+
+    def test_promotion_blocker_next_actions_dashboard_endpoint_uses_local_review_fixture(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+        work_tmp = tempfile.TemporaryDirectory()
+        old_review_path = os.environ.get("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
+        review_path = Path(work_tmp.name) / "promotion_blocker_review.json"
+        os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = str(review_path)
+        store = Store(tmp.name)
+        try:
+            from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
+
+            payload = {
+                "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+                "recommendations": [
+                    {
+                        "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-missing",
+                        "rank": 1,
+                        "status": "recommended",
+                        "local_action_family": "routing",
+                        "candidate_family": "provider-routing-rule",
+                        "source_surface": "openai_provider_request",
+                        "provider_family": "openai",
+                        "provider_endpoint": "responses",
+                        "blocker_family": "eval-missing",
+                        "blocker_reason_codes": ["missing-eval-evidence", "stale-eval-evidence"],
+                        "blocker_count": 120,
+                        "recommendation_type": "collect-eval-evidence",
+                        "next_action": "backfill-local-eval-evidence",
+                        "expected_local_executor": "optimization-shadow-eval",
+                        "file_backed_policy_representation": {
+                            "exists": True,
+                            "policy_section": "routing",
+                            "policy_source": "local-manual",
+                            "rule_file": "routing_rules.yaml",
+                        },
+                        "projected_savings_usd": 12.5,
+                        "evidence_summary": {
+                            "record_count": 120,
+                            "raw_request": {"prompt": "raw promotion blocker prompt must stay local"},
+                            "request_id": "promotion-blocker-request-secret",
+                            "session_id": "promotion-blocker-session-secret",
+                            "cache_key": "promotion-blocker-cache-secret",
+                        },
+                        "messages": [{"content": "raw promotion blocker provider body must stay local"}],
+                        "file_path": "/home/lutz/private/promotion_blocker_secret.py",
+                    },
+                    {
+                        "recommendation_id": "promotion-blocker-next-action:openai:cache:no-op",
+                        "rank": 2,
+                        "status": "noop",
+                        "local_action_family": "cache",
+                        "candidate_family": "exact-cache-rule",
+                        "source_surface": "openai_provider_request",
+                        "blocker_family": "cache-replay",
+                        "blocker_reason_codes": ["dependency-freshness-missing"],
+                        "blocker_count": 8,
+                        "recommendation_type": "noop",
+                        "next_action": "keep-blocked",
+                        "expected_local_executor": "openai-cache-replay-dry-run",
+                        "projected_savings_usd": 2.0,
+                        "no_op_reasons": ["stale-dependency-evidence"],
+                    },
+                ],
+            }
+            review = build_promotion_blocker_recommendation_review(payload, limit=20)
+            review_path.write_text(json.dumps(review, sort_keys=True), encoding="utf-8")
+            app = create_dashboard_app(
+                store_obj=lambda: store,
+                default_db=tmp.name,
+                upstream="https://anthropic.test",
+                limiter_status=lambda: [],
+                limiter_config={},
+                full_stats_ttl_s=0,
+            )
+            client = TestClient(app)
+
+            response = client.get("/agentflow/stats/promotion-blocker-next-actions?limit=20")
+            dashboard = client.get("/agentflow/dashboard")
+
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data["schema"], "agentflow.promotion_blocker_next_actions_dashboard.v1")
+            self.assertEqual(data["status"], "available")
+            self.assertEqual(data["summary"]["review_candidate_count"], 2)
+            self.assertEqual(data["summary"]["recommended_count"], 1)
+            self.assertEqual(data["summary"]["noop_count"], 1)
+            self.assertEqual(data["summary"]["stale_evidence_count"], 2)
+            self.assertEqual(data["summary"]["top_expected_local_executor"], "optimization-shadow-eval")
+            self.assertEqual(data["top_blocker_reasons"][0]["value"], "dependency-freshness-missing")
+            self.assertEqual(data["family_counts"][0]["value"], "cache")
+            self.assertEqual(data["groups"][0]["local_action_family"], "routing")
+            self.assertFalse(data["source"]["path_included"])
+            self.assertFalse(data["privacy"]["provider_calls_made"])
+            self.assertFalse(data["privacy"]["managed_server_calls_made"])
+            rendered = json.dumps(data, sort_keys=True)
+            for forbidden in (
+                "raw promotion blocker prompt",
+                "raw promotion blocker provider body",
+                "promotion-blocker-request-secret",
+                "promotion-blocker-session-secret",
+                "promotion-blocker-cache-secret",
+                "/home/lutz/private/promotion_blocker_secret.py",
+                '"messages"',
+                '"raw_request"',
+                '"request_id"',
+                '"session_id"',
+                '"cache_key"',
+                '"file_path"',
+            ):
+                self.assertNotIn(forbidden, rendered)
+
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Promotion blocker next actions", dashboard.text)
+            self.assertIn("promotion-blocker-summary-tbody", dashboard.text)
+            self.assertIn("promotion-blocker-commands-tbody", dashboard.text)
+        finally:
+            if old_review_path is None:
+                os.environ.pop("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH", None)
+            else:
+                os.environ["AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH"] = old_review_path
+            store.conn.close()
+            tmp.close()
+            work_tmp.cleanup()
 
     def test_dashboard_inline_javascript_syntax_checks_with_node(self):
         node = shutil.which("node")

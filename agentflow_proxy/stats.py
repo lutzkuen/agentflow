@@ -202,6 +202,13 @@ def _policy_events_path_class() -> str:
     return "local-path"
 
 
+def _promotion_blocker_review_path() -> Path:
+    raw = os.getenv("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")
+    if raw:
+        return Path(raw).expanduser()
+    return agentflow_config_path("promotion_blocker_recommendation_review.json")
+
+
 def _local_path_class(raw: str | os.PathLike[str] | None) -> str:
     expanded = os.path.abspath(os.path.expanduser(str(raw or ""))) if raw else ""
     home = os.path.abspath(os.path.expanduser("~"))
@@ -946,6 +953,233 @@ async def stats_policy_events(limit: int = 50) -> dict[str, Any]:
     from agentflow_proxy.policy_events import recent_policy_events
 
     return recent_policy_events(limit=limit)
+
+
+def _promotion_blocker_dashboard_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "feature_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "raw_responses_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "absolute_paths_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "wrote_local_policy_files": False,
+    }
+
+
+def _promotion_blocker_no_data(reason: str, *, source_path: Path | None = None) -> dict[str, Any]:
+    path = source_path or _promotion_blocker_review_path()
+    return {
+        "schema": "agentflow.promotion_blocker_next_actions_dashboard.v1",
+        "ok": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "status": "no-data",
+        "status_reason": reason,
+        "source": {
+            "kind": "local-review-report",
+            "configured": bool(os.getenv("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")),
+            "available": False,
+            "path_class": _local_path_class(path),
+            "path_included": False,
+        },
+        "summary": {
+            "source_recommendation_count": 0,
+            "review_candidate_count": 0,
+            "group_count": 0,
+            "recommended_count": 0,
+            "noop_count": 0,
+            "stale_evidence_count": 0,
+            "projected_savings_usd": 0.0,
+            "top_local_action_family": None,
+            "top_blocker_reason": None,
+            "top_next_action": None,
+            "top_expected_local_executor": None,
+        },
+        "family_counts": [],
+        "top_blocker_reasons": [],
+        "expected_local_executors": [],
+        "next_actions": [],
+        "groups": [],
+        "commands": [
+            {
+                "label": "review local promotion blocker recommendations",
+                "command": "agentflow-optimization-promotion-blocker-review recommendations.json --pretty",
+                "read_only": True,
+            }
+        ],
+        "privacy": _promotion_blocker_dashboard_privacy(),
+    }
+
+
+def _promotion_blocker_reason_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        reasons = candidate.get("blocker_reason_codes") if isinstance(candidate.get("blocker_reason_codes"), list) else []
+        for reason in reasons:
+            key = public_label(reason, "unknown")
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _promotion_blocker_stale_count(candidates: list[dict[str, Any]]) -> int:
+    total = 0
+    for candidate in candidates:
+        reasons = candidate.get("blocker_reason_codes") if isinstance(candidate.get("blocker_reason_codes"), list) else []
+        noops = candidate.get("no_op_reasons") if isinstance(candidate.get("no_op_reasons"), list) else []
+        values = [str(item).lower() for item in [*reasons, *noops]]
+        if any("stale" in value for value in values):
+            total += 1
+    return total
+
+
+def _promotion_blocker_public_group(group: dict[str, Any], *, candidate_limit: int = 3) -> dict[str, Any]:
+    recommendations = group.get("recommendations") if isinstance(group.get("recommendations"), list) else []
+    public_candidates: list[dict[str, Any]] = []
+    for candidate in recommendations[: max(0, candidate_limit)]:
+        if not isinstance(candidate, dict):
+            continue
+        file_backed = candidate.get("file_backed_policy_representation")
+        public_candidates.append(
+            {
+                "rank": _as_int(candidate.get("rank")),
+                "status": public_label(candidate.get("status"), "unknown"),
+                "recommendation_type": public_label(candidate.get("recommendation_type"), "unknown"),
+                "candidate_family": public_label(candidate.get("candidate_family"), "unknown"),
+                "blocker_family": public_label(candidate.get("blocker_family"), "unknown"),
+                "blocker_reason_codes": [
+                    public_label(reason, "unknown")
+                    for reason in (candidate.get("blocker_reason_codes") if isinstance(candidate.get("blocker_reason_codes"), list) else [])[:5]
+                ],
+                "next_action": public_label(candidate.get("next_action"), "unknown"),
+                "expected_local_executor": public_label(candidate.get("expected_local_executor"), "none"),
+                "projected_savings_usd": _money(candidate.get("projected_savings_usd")),
+                "file_backed_policy_exists": bool(file_backed.get("exists")) if isinstance(file_backed, dict) else False,
+                "required_local_review": True,
+            }
+        )
+    reason_counts = group.get("blocker_reason_code_counts") if isinstance(group.get("blocker_reason_code_counts"), list) else []
+    top_reason = reason_counts[0].get("value") if reason_counts and isinstance(reason_counts[0], dict) else None
+    return {
+        "rank": _as_int(group.get("rank")),
+        "local_action_family": public_label(group.get("local_action_family"), "unknown"),
+        "candidate_count": _as_int(group.get("candidate_count")),
+        "recommended_count": _as_int(group.get("recommended_count")),
+        "noop_count": _as_int(group.get("noop_count")),
+        "projected_savings_usd": _money(group.get("projected_savings_usd")),
+        "top_next_action": public_label(group.get("top_next_action"), "unknown"),
+        "top_blocker_reason": public_label(top_reason, "none") if top_reason else None,
+        "blocker_reason_code_counts": [
+            {"value": public_label(row.get("value"), "unknown"), "count": _as_int(row.get("count"))}
+            for row in reason_counts[:5]
+            if isinstance(row, dict)
+        ],
+        "sample_recommendations": public_candidates,
+    }
+
+
+async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any]:
+    path = _promotion_blocker_review_path()
+    if not path.exists():
+        return _promotion_blocker_no_data("local promotion blocker review report not found", source_path=path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        result = _promotion_blocker_no_data(f"local promotion blocker review report unreadable: {exc.__class__.__name__}", source_path=path)
+        result["status"] = "unavailable"
+        return result
+    if not isinstance(payload, dict) or payload.get("schema") != "agentflow.promotion_blocker_recommendation_review.v1":
+        result = _promotion_blocker_no_data("local report is not a promotion blocker recommendation review", source_path=path)
+        result["status"] = "unavailable"
+        return result
+
+    bounded_limit = max(0, min(_as_int(limit), 50))
+    source_summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    candidates = [item for item in candidates if isinstance(item, dict)]
+    groups = payload.get("groups") if isinstance(payload.get("groups"), list) else []
+    public_groups = [
+        _promotion_blocker_public_group(group)
+        for group in groups[:bounded_limit]
+        if isinstance(group, dict)
+    ]
+    reason_counts = _promotion_blocker_reason_counts(candidates)
+    family_counts: dict[str, int] = {}
+    executor_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    for candidate in candidates:
+        family = public_label(candidate.get("local_action_family"), "unknown")
+        executor = public_label(candidate.get("expected_local_executor"), "none")
+        action = public_label(candidate.get("next_action"), "unknown")
+        family_counts[family] = family_counts.get(family, 0) + 1
+        executor_counts[executor] = executor_counts.get(executor, 0) + 1
+        next_action_counts[action] = next_action_counts.get(action, 0) + 1
+    top_reasons = _breakdown_from_counts(reason_counts)[:10]
+    top_reason = top_reasons[0]["value"] if top_reasons else None
+    top_executors = _breakdown_from_counts(executor_counts)[:10]
+    top_actions = _breakdown_from_counts(next_action_counts)[:10]
+    top_candidate = candidates[0] if candidates else {}
+    generated_at = payload.get("generated_at") if isinstance(payload.get("generated_at"), str) else None
+    return {
+        "schema": "agentflow.promotion_blocker_next_actions_dashboard.v1",
+        "ok": True,
+        "read_only": True,
+        "generated_at": utc_now(),
+        "status": "available" if candidates else "no-data",
+        "status_reason": "loaded local promotion blocker review report" if candidates else "local review report has no candidates",
+        "source": {
+            "kind": "local-review-report",
+            "configured": bool(os.getenv("AGENTFLOW_PROMOTION_BLOCKER_REVIEW_PATH")),
+            "available": True,
+            "generated_at": generated_at,
+            "source_schema": payload.get("source_schema"),
+            "path_class": _local_path_class(path),
+            "path_included": False,
+        },
+        "summary": {
+            "source_recommendation_count": _as_int(source_summary.get("source_recommendation_count")),
+            "review_candidate_count": _as_int(source_summary.get("review_candidate_count")),
+            "group_count": _as_int(source_summary.get("group_count")),
+            "recommended_count": _as_int(source_summary.get("recommended_count")),
+            "noop_count": _as_int(source_summary.get("noop_count")),
+            "stale_evidence_count": _promotion_blocker_stale_count(candidates),
+            "projected_savings_usd": _money(source_summary.get("projected_savings_usd")),
+            "top_local_action_family": public_label(source_summary.get("top_local_action_family"), "none"),
+            "top_blocker_reason": top_reason,
+            "top_next_action": public_label(source_summary.get("top_next_action"), "none"),
+            "top_expected_local_executor": public_label(top_candidate.get("expected_local_executor"), "none") if top_candidate else None,
+        },
+        "family_counts": _breakdown_from_counts(family_counts)[:10],
+        "top_blocker_reasons": top_reasons,
+        "expected_local_executors": top_executors,
+        "next_actions": top_actions,
+        "groups": public_groups,
+        "commands": [
+            {
+                "label": "review local promotion blocker recommendations",
+                "command": "agentflow-optimization-promotion-blocker-review recommendations.json --pretty",
+                "read_only": True,
+            },
+            {
+                "label": "queue local shadow eval tasks",
+                "command": "agentflow-optimization-eval-next --promotion-blocker-review review.json --dry-run --pretty",
+                "read_only": True,
+            },
+            {
+                "label": "inspect promotion funnel",
+                "command": "agentflow-optimization-promotion-report --pretty",
+                "read_only": True,
+            },
+        ],
+        "privacy": _promotion_blocker_dashboard_privacy(),
+    }
 
 
 async def stats_sqlite_maintenance(store_obj: Any) -> dict[str, Any]:
@@ -18272,6 +18506,7 @@ def dashboard_html() -> str:
   <button class="panel-btn" onclick="showTab('openai')">OpenAI optimization</button>
   <button class="panel-btn" onclick="showTab('evalqueue')">Eval queue</button>
   <button class="panel-btn" onclick="showTab('coordinator')">Coordinator</button>
+  <button class="panel-btn" onclick="showTab('promotionblockers')">Promotion blockers</button>
   <button class="panel-btn" onclick="showTab('managed')">Managed optimizer</button>
   <button class="panel-btn" onclick="showTab('phaserouting')">Phase routing</button>
   <button class="panel-btn" onclick="showTab('phasememory')">Phase memory</button>
@@ -19103,6 +19338,36 @@ def dashboard_html() -> str:
 </div>
 </div>
 
+<div class="tab-panel" id="tab-promotionblockers">
+<div class="section">
+  <h2>Promotion blocker next actions</h2>
+  <table data-table-id="promotion-blocker-summary" data-filter-label="Filter promotion blocker summary">
+    <thead><tr>
+      <th data-sort-type="text">Status</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Recommended</th><th data-sort-type="number">No-op</th><th data-sort-type="number">Stale evidence</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Top action</th><th data-sort-type="text">Top blocker</th><th data-sort-type="text">Executor</th><th data-sort-type="text">Source</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="promotion-blocker-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Next actions by local family</h2>
+  <table class="activity-table" data-table-id="promotion-blocker-groups" data-filter-label="Filter promotion blocker groups">
+    <thead><tr>
+      <th data-sort-type="text">Family</th><th data-sort-type="number">Candidates</th><th data-sort-type="number">Recommended</th><th data-sort-type="number">No-op</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Top action</th><th data-sort-type="text">Top blocker</th><th data-sort-type="text">Sample recommendations</th>
+    </tr></thead>
+    <tbody id="promotion-blocker-groups-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Review commands</h2>
+  <table data-table-id="promotion-blocker-commands" data-filter-label="Filter promotion blocker commands">
+    <thead><tr>
+      <th data-sort-type="text">Command</th><th data-sort-type="text">Mode</th>
+    </tr></thead>
+    <tbody id="promotion-blocker-commands-tbody"></tbody>
+  </table>
+</div>
+</div>
+
 <div class="tab-panel" id="tab-managed">
 <div class="section">
   <h2>Managed recommendation status</h2>
@@ -19704,7 +19969,7 @@ async function loadFullStats(){
 
 let activeTabName='activity';
 const operationalTabs=['safety','activity','usage','codex','weekly','categories','cache','errors','limiter','policies','sessions','research'];
-const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','managed','phaserouting','phasememory','oldcontext'];
+const researchTabs=['adoption','terminal','thinking','scaffold','openai','evalqueue','coordinator','promotionblockers','managed','phaserouting','phasememory','oldcontext'];
 const tabs=[...operationalTabs,...researchTabs];
 function isResearchTab(name){
   return researchTabs.includes(name);
@@ -22051,6 +22316,70 @@ async function refreshOptimizationCoordinator(){
     applyAllDataTables();
   }catch(e){}
 }
+function promotionBlockerStatusBadge(status){
+  if(status==='available')return'hit';
+  if(status==='unavailable')return'err';
+  return'miss';
+}
+function promotionBlockerReasonBadges(rows){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge hit">none</span>';
+  return rows.slice(0,5).map(row=>`<span class="badge miss">${esc(row.value||row)}${row.count!=null?' '+Number(row.count||0).toLocaleString():''}</span>`).join(' ');
+}
+function promotionBlockerCandidateBadges(rows){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge miss">none</span>';
+  return rows.slice(0,3).map(row=>{
+    const reasons=(row.blocker_reason_codes||[]).slice(0,2).join(', ')||row.blocker_family||'blocked';
+    const executor=row.expected_local_executor&&row.expected_local_executor!=='none'?` · ${row.expected_local_executor}`:'';
+    return `<span class="badge provider">${esc(row.recommendation_type||'recommendation')} → ${esc(row.next_action||'next-action')}${executor}: ${esc(reasons)}</span>`;
+  }).join(' ');
+}
+async function refreshPromotionBlockerNextActions(){
+  try{
+    const r=await fetch('/agentflow/stats/promotion-blocker-next-actions?limit=20');
+    const d=await r.json();
+    const s=d.summary||{};
+    const source=d.source||{};
+    const privacy=d.privacy||{};
+    const sourceBadges=[
+      source.available?'<span class="badge hit">local report</span>':'<span class="badge miss">no local report</span>',
+      source.configured?'<span class="badge provider">configured path</span>':'<span class="badge miss">default path</span>',
+      `<span class="badge miss">${esc(source.path_class||'unknown')}</span>`,
+      source.generated_at?`<span class="badge provider">${esc(ago(source.generated_at))}</span>`:''
+    ].filter(Boolean).join(' ');
+    document.getElementById('promotion-blocker-summary-tbody').innerHTML=`<tr>
+      <td><span class="badge ${promotionBlockerStatusBadge(d.status)}">${esc(d.status||'unknown')}</span><div class="sub">${esc(d.status_reason||'')}</div></td>
+      <td class="tokens">${(s.review_candidate_count||0).toLocaleString()}<div class="sub">${(s.source_recommendation_count||0).toLocaleString()} source</div></td>
+      <td class="tokens">${(s.recommended_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.noop_count||0).toLocaleString()}</td>
+      <td class="${(s.stale_evidence_count||0)>0?'cost':'tokens'}">${(s.stale_evidence_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.projected_savings_usd||0,6)}</td>
+      <td class="flags"><span class="badge provider">${esc(s.top_next_action||'none')}</span> ${promotionBlockerReasonBadges(d.next_actions)}</td>
+      <td class="flags">${promotionBlockerReasonBadges(d.top_blocker_reasons)}</td>
+      <td class="flags">${promotionBlockerReasonBadges(d.expected_local_executors)}</td>
+      <td class="flags">${sourceBadges}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${privacy.provider_calls_made?'<span class="badge err">provider calls</span>':'<span class="badge hit">offline</span>'} ${privacy.managed_server_calls_made?'<span class="badge err">managed call</span>':'<span class="badge hit">no managed call</span>'} ${privacy.request_ids_included||privacy.session_ids_included?'<span class="badge err">IDs</span>':'<span class="badge hit">IDs omitted</span>'}</td>
+    </tr>`;
+    const groups=d.groups||[];
+    document.getElementById('promotion-blocker-groups-tbody').innerHTML=groups.map(row=>`<tr>
+      <td><span class="badge provider">${esc(row.local_action_family||'unknown')}</span></td>
+      <td class="tokens">${(row.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.recommended_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.noop_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td class="flags"><span class="badge provider">${esc(row.top_next_action||'unknown')}</span></td>
+      <td class="flags">${promotionBlockerReasonBadges(row.blocker_reason_code_counts)}</td>
+      <td class="flags">${promotionBlockerCandidateBadges(row.sample_recommendations)}</td>
+    </tr>`).join('')||`<tr><td colspan="8" style="color:#8b949e">${esc(d.status_reason||'No promotion blocker review data available yet')}</td></tr>`;
+    const commands=d.commands||[];
+    document.getElementById('promotion-blocker-commands-tbody').innerHTML=commands.map(row=>`<tr>
+      <td class="model">${esc(row.command||'—')}</td>
+      <td>${row.read_only?'<span class="badge hit">read-only</span>':'<span class="badge routed">check command</span>'}</td>
+    </tr>`).join('')||'<tr><td colspan="2" style="color:#8b949e">No local review command hints available</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 async function refreshManaged(){
   try{
     const [managedResponse,safetyResponse,rolloutResponse,coverageResponse]=await Promise.all([
@@ -22655,6 +22984,7 @@ const tabRefreshers={
   openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
   evalqueue:[refreshOptimizationEvalQueue],
   coordinator:[refreshOptimizationCoordinator],
+  promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],
   phaserouting:[refreshClaudeRoutingPromotionFunnel,refreshShadowRoutingPromotionReadiness,refreshOptimizationPromotionFunnel,refreshPhaseRouting],
   phasememory:[refreshSessionPhaseMemory],
