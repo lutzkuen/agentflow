@@ -369,6 +369,85 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("req-secret-should-not-leak", rendered)
         self.assertNotIn("session-secret-should-not-leak", rendered)
 
+    def test_crunch_candidate_ranks_projected_savings_report(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "old_context_summary_opportunity": {
+                    "schema": "agentflow.old_context_summary_opportunity.v1",
+                    "summary": {
+                        "scanned_call_count": 500,
+                        "candidate_count": 4,
+                        "projected_saved_chars": 24000,
+                        "projected_saved_tokens": 6000,
+                        "projected_saved_usd": 0.42,
+                    },
+                    "blocker_reason_breakdown": [
+                        {"value": "needs-dry-run candidate_id=crunch-secret-candidate", "count": 4}
+                    ],
+                    "candidates": [
+                        {
+                            "candidate_id": "raw-crunch-candidate-secret",
+                            "session_id": "raw-crunch-session-secret",
+                            "file_path": "/home/lutz/private/crunch_secret.py",
+                        }
+                    ],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["schema"], "agentflow.crunch_savings_signal.v1")
+        self.assertEqual(signal["status"], "projected-savings-ranked")
+        self.assertEqual(signal["top_report"]["report_key"], "old_context_summary_opportunity")
+        self.assertEqual(signal["top_report"]["projected_saved_usd"], 0.42)
+        self.assertEqual(signal["top_report"]["candidate_count"], 4)
+        self.assertTrue(signal["privacy"]["metadata_only"])
+        self.assertTrue(signal["privacy"]["aggregate_only"])
+
+        crunch_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "crunch")
+        self.assertEqual(crunch_candidate["blocker"], "crunch-projected-savings-ranked")
+        self.assertEqual(crunch_candidate["provider_surface_bucket"], "old_context_summary_opportunity")
+        self.assertEqual(crunch_candidate["projected_savings_signal"]["status"], "projected-savings-ranked")
+
+        created_titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn("Rank crunch savings follow-up for crunch-projected-savings-ranked", created_titles)
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-crunch-candidate-secret", rendered)
+        self.assertNotIn("raw-crunch-session-secret", rendered)
+        self.assertNotIn("/home/lutz/private/crunch_secret.py", rendered)
+        self.assertNotIn("crunch-secret-candidate", rendered)
+
+    def test_crunch_candidate_records_missing_measurement_when_no_savings_signal_exists(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["crunch_savings_signal"]
+        self.assertEqual(signal["status"], "missing-crunch-measurement")
+        self.assertIn("crunch-opportunity-report", signal["missing_measurements"])
+        self.assertIn("positive-observed-or-projected-savings", signal["missing_measurements"])
+
+        crunch_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "crunch")
+        self.assertEqual(crunch_candidate["blocker"], "missing-crunch-savings-signal")
+        self.assertEqual(crunch_candidate["projected_savings_signal"]["status"], "missing-crunch-measurement")
+
     def test_zero_hit_cache_ladder_generates_cache_replay_issue(self):
         plan = build_research_plan(
             issues=[],

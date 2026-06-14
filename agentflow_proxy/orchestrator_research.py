@@ -203,6 +203,15 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
     },
 )
 
+_CRUNCH_OPPORTUNITY_REPORT_KEYS = (
+    "old_context_summary_opportunity",
+    "terminal_output_compaction_opportunity",
+    "instruction_dedup_opportunity",
+    "anthropic_thinking_compaction_opportunity",
+    "codex_terminal_transcript_opportunity",
+    "repeated_scaffold_opportunity",
+)
+
 
 def redact_text(value: str) -> str:
     text = _SECRET_RE.sub(SENSITIVE_SECRET, value)
@@ -433,7 +442,12 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
         "error_rate",
         "today_prompt_cache_savings_usd",
         "today_routing_savings_usd",
+        "crunched_count",
+        "crunch_chars_saved",
+        "crunch_tokens_saved",
+        "crunch_savings_usd",
         "today_crunch_savings_usd",
+        "avg_crunch_ratio",
     )
     summary = {key: stats[key] for key in keys if key in stats}
     routing = stats.get("routing")
@@ -496,6 +510,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             "activation_lifecycle_feedback": lifecycle_feedback,
             "privacy": openai_canary.get("privacy") if isinstance(openai_canary.get("privacy"), dict) else {},
         }
+    crunch_signal = _crunch_savings_signal(stats)
+    if crunch_signal is not None:
+        summary["crunch_savings_signal"] = crunch_signal
     return summary
 
 
@@ -511,6 +528,189 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _first_numeric(summary: dict[str, Any], keys: tuple[str, ...]) -> float:
+    for key in keys:
+        value = summary.get(key)
+        if value is not None:
+            return _to_float(value)
+    return 0.0
+
+
+def _first_int(summary: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        value = summary.get(key)
+        if value is not None:
+            return _to_int(value)
+    return 0
+
+
+def _top_breakdown_item(report: dict[str, Any], *keys: str) -> dict[str, Any] | None:
+    for key in keys:
+        rows = report.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                return row
+    return None
+
+
+def _crunch_report_rollup(report_key: str, report: dict[str, Any]) -> dict[str, Any] | None:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    if not summary and not report.get("schema"):
+        return None
+    top_blocker = _top_breakdown_item(report, "blocker_reason_breakdown", "reason_breakdown")
+    blocker_value = top_blocker.get("value") if isinstance(top_blocker, dict) else None
+    blocker_count = _to_int(top_blocker.get("count")) if isinstance(top_blocker, dict) else 0
+    candidate_count = _first_int(
+        summary,
+        (
+            "candidate_count",
+            "metadata_candidate_count",
+            "recommended_count",
+            "planned_count",
+            "summary_model_hint_rows",
+        ),
+    )
+    matched_count = _first_int(
+        summary,
+        (
+            "matched_count",
+            "scanned_call_count",
+            "sampled_call_count",
+            "turn_start_rows",
+            "completed_rows",
+        ),
+    )
+    projected_usd = _first_numeric(
+        summary,
+        (
+            "projected_saved_usd",
+            "estimated_opportunity_usd",
+            "estimated_savings_usd",
+            "summary_model_hint_estimated_savings_usd",
+        ),
+    )
+    projected_tokens = _first_int(
+        summary,
+        (
+            "projected_saved_tokens",
+            "estimated_opportunity_tokens",
+            "total_saved_tokens_est",
+            "tokens_saved_est",
+        ),
+    )
+    projected_chars = _first_int(
+        summary,
+        (
+            "projected_saved_chars",
+            "estimated_opportunity_saved_chars",
+            "total_saved_chars",
+            "saved_chars",
+        ),
+    )
+    status = "projected-savings-ranked" if projected_usd > 0 or projected_tokens > 0 or projected_chars > 0 else "no-positive-projection"
+    return {
+        "report_key": report_key,
+        "schema": sanitize_value(report.get("schema")),
+        "status": status,
+        "candidate_count": candidate_count,
+        "matched_count": matched_count,
+        "projected_saved_usd": round(projected_usd, 6),
+        "projected_saved_tokens": projected_tokens,
+        "projected_saved_chars": projected_chars,
+        "top_blocker": sanitize_value(blocker_value),
+        "top_blocker_count": blocker_count,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
+def _crunch_savings_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
+    calls = _to_int(stats.get("today_calls") or stats.get("calls"))
+    today_savings = _to_float(stats.get("today_crunch_savings_usd"))
+    total_savings = _to_float(stats.get("crunch_savings_usd"))
+    tokens_saved = _to_int(stats.get("crunch_tokens_saved"))
+    chars_saved = _to_int(stats.get("crunch_chars_saved"))
+    crunched_count = _to_int(stats.get("crunched_count"))
+
+    reports: list[dict[str, Any]] = []
+    for key in _CRUNCH_OPPORTUNITY_REPORT_KEYS:
+        report = stats.get(key)
+        if not isinstance(report, dict):
+            continue
+        rollup = _crunch_report_rollup(key, report)
+        if rollup is not None:
+            reports.append(rollup)
+    reports.sort(
+        key=lambda item: (
+            _to_float(item.get("projected_saved_usd")),
+            _to_int(item.get("projected_saved_tokens")),
+            _to_int(item.get("projected_saved_chars")),
+            _to_int(item.get("candidate_count")),
+        ),
+        reverse=True,
+    )
+    top_report = reports[0] if reports else None
+    positive_projection = top_report is not None and (
+        _to_float(top_report.get("projected_saved_usd")) > 0
+        or _to_int(top_report.get("projected_saved_tokens")) > 0
+        or _to_int(top_report.get("projected_saved_chars")) > 0
+    )
+    observed_positive = today_savings > 0 or total_savings > 0 or tokens_saved > 0 or chars_saved > 0
+
+    if positive_projection:
+        status = "projected-savings-ranked"
+        missing: list[str] = []
+    elif observed_positive:
+        status = "observed-savings-ranked"
+        missing = []
+    elif reports:
+        status = "non-positive-projection"
+        missing = ["positive-projected-savings"]
+    elif calls > 0:
+        status = "missing-crunch-measurement"
+        missing = ["crunch-opportunity-report", "positive-observed-or-projected-savings"]
+    else:
+        return None
+
+    return {
+        "schema": "agentflow.crunch_savings_signal.v1",
+        "status": status,
+        "calls": calls,
+        "observed": {
+            "crunched_count": crunched_count,
+            "crunch_chars_saved": chars_saved,
+            "crunch_tokens_saved": tokens_saved,
+            "crunch_savings_usd": round(total_savings, 6),
+            "today_crunch_savings_usd": round(today_savings, 6),
+            "avg_crunch_ratio": round(_to_float(stats.get("avg_crunch_ratio")), 6),
+        },
+        "top_report": top_report,
+        "report_count": len(reports),
+        "reports": reports[:5],
+        "missing_measurements": missing,
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
 
 
 def _candidate_privacy() -> dict[str, Any]:
@@ -1036,26 +1236,57 @@ def _cache_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _crunch_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
-    today_savings = _to_float(stats_summary.get("today_crunch_savings_usd"))
-    calls = _to_int(stats_summary.get("today_calls") or stats_summary.get("calls"))
-    if calls <= 0 and today_savings <= 0:
+    signal = stats_summary.get("crunch_savings_signal") if isinstance(stats_summary.get("crunch_savings_signal"), dict) else {}
+    observed = signal.get("observed") if isinstance(signal.get("observed"), dict) else {}
+    top_report = signal.get("top_report") if isinstance(signal.get("top_report"), dict) else {}
+    today_savings = _to_float(observed.get("today_crunch_savings_usd") if observed else stats_summary.get("today_crunch_savings_usd"))
+    total_savings = _to_float(observed.get("crunch_savings_usd") if observed else stats_summary.get("crunch_savings_usd"))
+    tokens_saved = _to_int(observed.get("crunch_tokens_saved") if observed else stats_summary.get("crunch_tokens_saved"))
+    chars_saved = _to_int(observed.get("crunch_chars_saved") if observed else stats_summary.get("crunch_chars_saved"))
+    projected_usd = _to_float(top_report.get("projected_saved_usd"))
+    projected_tokens = _to_int(top_report.get("projected_saved_tokens"))
+    projected_chars = _to_int(top_report.get("projected_saved_chars"))
+    calls = _to_int(signal.get("calls") or stats_summary.get("today_calls") or stats_summary.get("calls"))
+    if calls <= 0 and today_savings <= 0 and total_savings <= 0 and projected_usd <= 0 and projected_tokens <= 0 and projected_chars <= 0:
         return None
-    if today_savings > 0:
-        blocker = "crunch-savings-not-ranked-into-backlog"
+    status = str(signal.get("status") or "")
+    signal_payload = dict(signal) if signal else {
+        "schema": "agentflow.crunch_savings_signal.v1",
+        "status": "observed-savings-ranked" if today_savings > 0 else "missing-crunch-measurement",
+        "calls": calls,
+        "observed": {
+            "today_crunch_savings_usd": today_savings,
+            "crunch_savings_usd": total_savings,
+            "crunch_tokens_saved": tokens_saved,
+            "crunch_chars_saved": chars_saved,
+        },
+        "missing_measurements": [] if today_savings > 0 else ["crunch-opportunity-report", "positive-observed-or-projected-savings"],
+        "privacy": _candidate_privacy(),
+    }
+    if projected_usd > 0 or projected_tokens > 0 or projected_chars > 0:
+        blocker = "crunch-projected-savings-ranked"
+        path = "Convert the highest projected crunch opportunity report into a dry-run, activation, or rollout-safety follow-up."
+        confidence = "medium"
+        score = max(projected_usd * 2000.0, projected_tokens / 10.0, projected_chars / 100.0, 1.0) + 500.0
+        bucket = str(top_report.get("report_key") or "mixed")
+    elif today_savings > 0 or total_savings > 0 or tokens_saved > 0 or chars_saved > 0:
+        blocker = "crunch-observed-savings-ranked"
         path = "Convert observed crunch savings into the next compaction activation or rollout-safety issue."
         confidence = "medium"
-        score = max(today_savings * 1000.0, 1.0)
+        score = max(today_savings * 1000.0, total_savings * 250.0, tokens_saved / 10.0, chars_saved / 100.0, 1.0)
+        bucket = "observed-crunch"
     else:
-        blocker = "missing-crunch-savings-signal"
+        blocker = "missing-crunch-savings-signal" if status != "non-positive-projection" else "crunch-non-positive-projection"
         path = "Add or inspect crunch opportunity rollups before selecting more aggressive compaction work."
         confidence = "low"
         score = float(calls) * 0.1
+        bucket = "missing-measurement"
     return _candidate(
         lever="crunch",
-        provider_surface_bucket="mixed",
+        provider_surface_bucket=bucket,
         blocker=blocker,
         estimated_savings_path=path,
-        projected_savings_signal={"today_crunch_savings_usd": today_savings, "calls": calls},
+        projected_savings_signal=signal_payload,
         confidence=confidence,
         sequencing="Sequence behind routing/cache blockers unless crunch savings is already the strongest positive dollar signal.",
         score=score,
