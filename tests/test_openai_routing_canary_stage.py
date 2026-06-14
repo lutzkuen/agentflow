@@ -200,6 +200,139 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         self.assertNotIn("raw prompt must not appear", rendered)
         self.assertNotIn("secret-openai-session-id", rendered)
 
+    def test_stages_ranked_gpt54_pass_through_bucket_with_projected_cohort_coverage(self) -> None:
+        report = {
+            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "generated_at": utc_now(),
+            "summary": {
+                "pass_through_rows": 223,
+                "top_actionability": "actionable",
+                "top_requested_model": "gpt-5.4",
+                "top_candidate_target_model": "gpt-5.4-mini",
+            },
+            "buckets": [{
+                "rank": 1,
+                "provider": "openai",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4",
+                "category": "unknown",
+                "workflow_phase": "unknown",
+                "sample_count": 223,
+                "actionability": "actionable",
+                "candidate_target_model": "gpt-5.4-mini",
+                "required_local_executor": "openai-routing-canary",
+                "candidate_reason": "gpt-5.4 canary can evaluate gpt-5.4-mini on local metadata cohorts",
+                "estimated_savings_per_1000_calls_usd": 4.375,
+                "openai_canary_lifecycle_evidence": {
+                    "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                    "status": "no-openai-canary-metadata",
+                    "observed_count": 0,
+                    "cohort_counts": {
+                        "canary_applied": 0,
+                        "canary_holdout": 0,
+                        "safety_stopped": 0,
+                    },
+                    "blocker_codes": [
+                        "missing-applied-coverage",
+                        "missing-canary-lifecycle-evidence",
+                        "missing-holdout-coverage",
+                    ],
+                },
+            }],
+            "privacy": {
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+            },
+        }
+
+        result = asyncio.run(stage_openai_routing_canary_drafts(
+            report,
+            workspace=str(Path(self.tmpdir.name) / "drafts"),
+            canary_fraction=0.05,
+            holdout_fraction=0.10,
+        ))
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2, sort_keys=True))
+        self.assertEqual(result["summary"]["staged_count"], 1)
+        self.assertEqual(result["summary"]["projected_canary_applied_count"], 12)
+        self.assertEqual(result["summary"]["projected_canary_holdout_count"], 23)
+        staged = result["staged_drafts"][0]
+        self.assertEqual(staged["source_surface"], "openai_provider_request")
+        self.assertEqual(staged["endpoint"], "responses")
+        self.assertEqual(staged["requested_model"], "gpt-5.4")
+        self.assertEqual(staged["target_model"], "gpt-5.4-mini")
+        self.assertEqual(staged["projected_cohort_counts"]["matched"], 223)
+        self.assertEqual(staged["projected_cohort_counts"]["canary_applied"], 12)
+        self.assertEqual(staged["projected_cohort_counts"]["canary_holdout"], 23)
+        lifecycle = staged["projected_openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["schema"], "agentflow.openai_routing_canary_projected_lifecycle_coverage.v1")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 12)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 23)
+        self.assertGreater(lifecycle["coverage"]["applied_rate"], 0)
+        self.assertGreater(lifecycle["coverage"]["holdout_rate"], 0)
+        inference = staged["aggregate_inference"]
+        self.assertTrue(inference["source_surface_inferred"])
+        self.assertTrue(inference["endpoint_inferred"])
+        self.assertTrue(inference["category_inferred"])
+        self.assertEqual(inference["inference_reason"], "aggregate-openai-canary-bucket")
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn("raw prompt", rendered)
+        self.assertNotIn("secret-openai-session-id", rendered)
+
+    def test_pass_through_bucket_with_safety_stop_is_omitted_with_counts(self) -> None:
+        report = {
+            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "generated_at": utc_now(),
+            "buckets": [{
+                "rank": 1,
+                "provider": "openai",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4",
+                "category": "unknown",
+                "sample_count": 20,
+                "actionability": "actionable",
+                "candidate_target_model": "gpt-5.4-mini",
+                "required_local_executor": "openai-routing-canary",
+                "estimated_savings_per_1000_calls_usd": 4.375,
+                "openai_canary_lifecycle_evidence": {
+                    "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                    "status": "matched",
+                    "observed_count": 6,
+                    "cohort_counts": {
+                        "canary_applied": 4,
+                        "canary_holdout": 1,
+                        "safety_stopped": 1,
+                    },
+                    "error_count": 1,
+                    "retry_count": 0,
+                    "fallback_count": 0,
+                    "blocker_codes": ["safety-stop-observed", "error-observed"],
+                },
+            }],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+
+        result = asyncio.run(stage_openai_routing_canary_drafts(
+            report,
+            workspace=str(Path(self.tmpdir.name) / "drafts"),
+        ))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["summary"]["staged_count"], 0)
+        self.assertEqual(result["summary"]["omission_reason_counts"], [{"value": "safety-stop-observed", "count": 1}])
+        self.assertEqual(result["omitted"][0]["reason"], "safety-stop-observed")
+        self.assertIn("safety-stop-observed", result["omitted"][0]["blocker_codes"])
+        self.assertIn("error-observed", result["omitted"][0]["blocker_codes"])
+        self.assertFalse(result["provider_calls_made"])
+
     def test_unsafe_candidates_are_omitted_with_machine_readable_reasons(self) -> None:
         base = {
             "source_surface": "openai_responses",
