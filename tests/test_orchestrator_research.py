@@ -2030,5 +2030,152 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertNotIn("raw-session-id-must-not-leak", rendered)
 
 
+class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
+    def test_unclassified_safety_stop_example_is_reclassified(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "activation skipped: safety-stopped by canary gate session_id=sec-secret-a",
+                        "activation skipped: safety-stopped by canary gate session_id=sec-secret-b",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostics = plan["evidence"]["repeated_diagnostics"]
+        reasons = [d["reason"] for d in diagnostics]
+        self.assertNotIn("unclassified-skip-or-blocker", reasons)
+        self.assertIn("safety-stop", reasons)
+        rendered = json.dumps(plan)
+        self.assertNotIn("sec-secret-a", rendered)
+        self.assertNotIn("sec-secret-b", rendered)
+
+    def test_repeated_safety_stop_creates_issue_when_no_existing_match(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "routing blocker=safety-stop request_id=req-secret-new",
+                        "routing blocker=safety-stop request_id=req-secret-new2",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        repeated_diag_proposals = [
+            item for item in plan["backlog_changes"]["create_issues"]
+            if "repeated" in item["title"].lower() and "safety stop" in item["title"].lower()
+        ]
+        self.assertTrue(repeated_diag_proposals, "expected a repeated-diagnostic create proposal for safety-stop")
+        comment_issues = [
+            c for c in plan["backlog_changes"]["comment_issues"]
+            if "safety" in (c.get("body") or "").lower() and c.get("action") == "comment"
+        ]
+        self.assertFalse(any(c.get("number") for c in comment_issues), "should not comment when no existing issue")
+
+        body = repeated_diag_proposals[0]["body"]
+        self.assertIn("agentflow.repeated-diagnostic.safety-stop.v1", body)
+        self.assertIn("Evidence count:", body)
+        self.assertIn("Proposed owner:", body)
+        self.assertIn("Action: create", body)
+
+    def test_repeated_safety_stop_comments_on_existing_open_issue_not_duplicate_create(self):
+        existing_issue = issue(
+            444,
+            "Turn repeated safety stop diagnostics into an actionable optimization issue",
+            ["status:ready", "priority:p2", "backlog", "core-feature", "correctness"],
+        )
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "routing blocker=safety-stop request_id=req-secret-dup1",
+                        "routing blocker=safety-stop request_id=req-secret-dup2",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[existing_issue],
+                log_sources=[log_path],
+                threshold=2,
+                now=NOW,
+            )
+
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(
+            any("repeated" in t and "safety stop" in t for t in created_titles),
+            "should not create a new issue when fingerprint matches open issue #444",
+        )
+
+        comment_issues = plan["backlog_changes"]["comment_issues"]
+        safety_stop_comments = [c for c in comment_issues if c.get("number") == 444]
+        self.assertTrue(safety_stop_comments, "expected a comment action on issue #444")
+        comment_body = safety_stop_comments[0]["body"]
+        self.assertIn("agentflow.repeated-diagnostic.safety-stop.v1", comment_body)
+        self.assertIn("Action: update", comment_body)
+        self.assertIn("Duplicate of open issue: #444", comment_body)
+        rendered = json.dumps(plan)
+        self.assertNotIn("req-secret-dup1", rendered)
+        self.assertNotIn("req-secret-dup2", rendered)
+
+    def test_diagnostic_fingerprint_is_stable(self):
+        from agentflow_proxy.orchestrator_research import _diagnostic_fingerprint
+        self.assertEqual(
+            _diagnostic_fingerprint("safety-stop"),
+            _diagnostic_fingerprint("safety-stop"),
+        )
+        self.assertEqual(
+            _diagnostic_fingerprint("safety-stop"),
+            "agentflow.repeated-diagnostic.safety-stop.v1",
+        )
+        self.assertNotEqual(
+            _diagnostic_fingerprint("safety-stop"),
+            _diagnostic_fingerprint("missing-dependency-evidence"),
+        )
+
+    def test_repeated_diagnostic_proposal_includes_required_fields(self):
+        plan = build_research_plan(
+            issues=[],
+            log_sources=[
+                "routing blocker=safety-stop x",
+                "routing blocker=safety-stop y",
+            ],
+            threshold=1,
+            now=NOW,
+        )
+        created = plan["backlog_changes"]["create_issues"]
+        repeated_proposals = [
+            p for p in created
+            if "repeated" in p.get("title", "").lower() and "safety stop" in p.get("title", "").lower()
+        ]
+        self.assertTrue(repeated_proposals, "expected a repeated-diagnostic proposal with safety-stop")
+        body = repeated_proposals[0]["body"]
+        self.assertIn("Evidence count:", body)
+        self.assertIn("Example excerpt:", body)
+        self.assertIn("Proposed owner:", body)
+        self.assertIn("Fingerprint:", body)
+        self.assertIn("Action:", body)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,10 @@ _MISSING_MEASUREMENT_LINE_RE = re.compile(
     r"need[-_]more[-_]samples\b|insufficient[-_]samples\b|missing[-_]lifecycle[-_]measurement)",
     re.IGNORECASE,
 )
+_SAFETY_STOP_UNCLASSIFIED_RE = re.compile(
+    r"(?:safety[-_]stop(?:ped)?|stopped[-_]by[-_]safety|canary[-_]safety[-_]stop|safety[-_]gate[-_]block(?:ed)?)",
+    re.IGNORECASE,
+)
 _KNOWN_DIAGNOSTIC_TERMS = (
     "need-more-samples",
     "missing dependency evidence",
@@ -466,6 +470,11 @@ def _actionable_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dict[str,
     return actionable
 
 
+def _diagnostic_fingerprint(diagnostic_class: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", diagnostic_class.lower().strip()).strip("-")
+    return f"agentflow.repeated-diagnostic.{normalized}.v1"
+
+
 def _sample_count_bucket(value: Any) -> str:
     count = _to_int(value)
     if count <= 0:
@@ -650,6 +659,13 @@ def _classify_unclassified_diagnostic(example: str) -> dict[str, Any] | None:
             "diagnostic_class": "missing-dependency-evidence",
             "backlog_action": "create-ready-issue",
             "reclassification_source": "missing-measurement-pattern",
+        }
+    if _SAFETY_STOP_UNCLASSIFIED_RE.search(example):
+        return {
+            "reason": "safety-stop",
+            "diagnostic_class": "safety-stop",
+            "backlog_action": "create-ready-issue",
+            "reclassification_source": "safety-stop-unclassified-pattern",
         }
     return {
         "reason": "unclassified-skip-or-blocker",
@@ -3354,7 +3370,11 @@ def _proposal_from_promotion_blocker_next_action(stats_summary: dict[str, Any]) 
     }
 
 
-def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, Any]:
+def _proposal_from_repeated_diagnostic(
+    diagnostic: dict[str, Any],
+    *,
+    fingerprint: str = "",
+) -> dict[str, Any]:
     reason = str(diagnostic.get("reason") or "unknown-diagnostic")
     diagnostic_class = str(diagnostic.get("diagnostic_class") or reason)
     source_lever = str(diagnostic.get("source_lever") or _diagnostic_source_lever(reason, diagnostic_class))
@@ -3368,14 +3388,20 @@ def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, 
         or "The repeated diagnostic is represented by a concrete GitHub issue or an updated blocked issue comment."
     )
     lifecycle_context = diagnostic.get("lifecycle_context") if isinstance(diagnostic.get("lifecycle_context"), dict) else {}
+    fingerprint = fingerprint or _diagnostic_fingerprint(diagnostic_class)
     title_reason = diagnostic_class.replace("-", " ")
+    evidence_count = _to_int(diagnostic.get("count", 0))
+    example_excerpt = str(diagnostic.get("example") or "")[:120]
     evidence = [
         f"Diagnostic reason: {reason}",
         f"Diagnostic class: {diagnostic_class}",
         f"Source lever: {source_lever}",
         f"Backlog action: {backlog_action}",
-        f"Observed count: {diagnostic.get('count', 0)}",
-        f"Sanitized example: {diagnostic.get('example', '')}",
+        f"Evidence count: {evidence_count}",
+        f"Example excerpt: {example_excerpt}",
+        f"Proposed owner: local-policy",
+        f"Fingerprint: {fingerprint}",
+        f"Action: create",
         f"Expected unblock path: {expected_unblock_path}",
     ]
     if lifecycle_context:
@@ -3416,6 +3442,51 @@ def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, 
             ],
             sequencing="File after the low-backlog milestone proposal only when this diagnostic appears more than once.",
         ),
+    }
+
+
+def _repeated_diagnostic_comment_for_issue(
+    diagnostic: dict[str, Any],
+    fingerprint: str,
+    issue: dict[str, Any],
+) -> dict[str, Any]:
+    reason = str(diagnostic.get("reason") or "unknown-diagnostic")
+    diagnostic_class = str(diagnostic.get("diagnostic_class") or reason)
+    source_lever = str(diagnostic.get("source_lever") or _diagnostic_source_lever(reason, diagnostic_class))
+    evidence_count = _to_int(diagnostic.get("count", 0))
+    example_excerpt = str(diagnostic.get("example") or "")[:120]
+    body = _issue_body(
+        title=str(issue.get("title") or ""),
+        rationale=(
+            "Research mode found the same repeated diagnostic again. "
+            "The open issue already tracks this pattern; this comment adds current evidence."
+        ),
+        evidence=[
+            f"Diagnostic class: {diagnostic_class}",
+            f"Source lever: {source_lever}",
+            f"Evidence count: {evidence_count}",
+            f"Example excerpt: {example_excerpt}",
+            f"Proposed owner: local-policy",
+            f"Fingerprint: {fingerprint}",
+            f"Action: update",
+            f"Duplicate of open issue: #{_issue_number(issue)}",
+        ],
+        implementation=[
+            "Check whether the original blocker is still present in the current reports or stats.",
+            "If still blocked, keep the issue open and add the missing evidence or dependency as a narrower issue.",
+            "If resolved, remove status:blocked, add status:ready, and record the concrete next acceptance metric.",
+        ],
+        acceptance=[
+            "The open issue has a current evidence comment with sanitized diagnostic metadata.",
+            "Generated text remains metadata-only and contains no raw prompts, provider bodies, file paths, or request/session IDs.",
+        ],
+        sequencing="Use before creating duplicate replacement issues for the same diagnostic pattern.",
+    )
+    return {
+        "repo": issue.get("repo") or "lutzkuen/agentflow",
+        "number": _issue_number(issue),
+        "action": "comment",
+        "body": body,
     }
 
 
@@ -3962,7 +4033,24 @@ def build_research_plan(
             if _to_int(item.get("count")) > 1 and item.get("backlog_action") != "needs-human-review"
         ]
         if repeated_actionable_diagnostics:
-            create_issues.append(_proposal_from_repeated_diagnostic(repeated_actionable_diagnostics[0]))
+            top_diag = repeated_actionable_diagnostics[0]
+            diag_class = str(top_diag.get("diagnostic_class") or top_diag.get("reason") or "")
+            fingerprint = _diagnostic_fingerprint(diag_class)
+            proposal = _proposal_from_repeated_diagnostic(top_diag, fingerprint=fingerprint)
+            proposal_key = _issue_title_key(proposal.get("title"))
+            matching_open = next(
+                (
+                    iss for iss in issue_list
+                    if _is_open(iss) and proposal_key and _issue_title_key(iss.get("title")) == proposal_key
+                ),
+                None,
+            )
+            if matching_open is not None:
+                comment_issues.append(
+                    _repeated_diagnostic_comment_for_issue(top_diag, fingerprint, matching_open)
+                )
+            else:
+                create_issues.append(proposal)
         for issue in blocked_stale[:3]:
             comment_issues.append(_blocked_comment(issue, diagnostics, summary))
         create_issues, proposal_suppression = _dedupe_create_issue_proposals_with_metadata(
