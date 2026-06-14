@@ -415,6 +415,7 @@ def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     if stats is not None and not isinstance(stats, dict):
         _write_json(stderr, {"ok": False, "error": {"type": "invalid_stats_json", "message": "stats JSON must be an object"}})
         return 1
+    stats = _attach_request_shape_rollups_for_research(stats)
 
     plan = build_research_plan(
         issues=issues,
@@ -426,6 +427,48 @@ def orchestrator_research_cli(argv: Sequence[str] | None = None, *, stdout: Any 
     )
     write_json(stdout, plan, pretty=args.pretty)
     return 0
+
+
+def _attach_request_shape_rollups_for_research(stats: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(stats, dict):
+        return stats
+    if any(
+        isinstance(stats.get(key), dict)
+        for key in ("request_shape_rollups", "request_shape_rollup_report", "request_shape_rollup_candidates_report")
+    ):
+        return stats
+
+    db = stats.get("db")
+    if not isinstance(db, str) or not db.strip():
+        return stats
+    db_arg = db.strip()
+    if not db_arg.startswith(("postgresql://", "postgres://")) and not Path(db_arg).expanduser().exists():
+        return stats
+
+    try:
+        limit = max(1, min(int(os.getenv("AGENTFLOW_RESEARCH_REQUEST_SHAPE_LIMIT", "1000")), 10_000))
+    except ValueError:
+        limit = 1000
+
+    from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
+
+    store = _open_store_for_db(db_arg)
+    try:
+        report = build_request_shape_rollups_report(
+            store,
+            limit=limit,
+            persist=False,
+            run_id="orchestrator-research-dry-run",
+        )
+    finally:
+        try:
+            store.conn.close()
+        except Exception:
+            pass
+
+    enriched = dict(stats)
+    enriched["request_shape_rollups"] = report
+    return enriched
 
 
 def evidence_to_activation_burndown_cli(argv: Sequence[str] | None = None, *, stdout: Any = None, stderr: Any = None) -> int:
