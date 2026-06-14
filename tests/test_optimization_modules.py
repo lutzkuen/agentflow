@@ -14,7 +14,11 @@ from agentflow_proxy import recommendations
 from agentflow_proxy.managed_egress import managed_egress_violations
 from agentflow_proxy.optimization import feedback, openai_outcomes
 from agentflow_proxy.optimization_eval_plan import _add_common
-from agentflow_proxy.optimization_eval_queue import backfill_promotion_eval_tasks, run_optimization_eval_queue
+from agentflow_proxy.optimization_eval_queue import (
+    backfill_promotion_eval_tasks,
+    queue_promotion_recommendation_eval_tasks,
+    run_optimization_eval_queue,
+)
 from agentflow_proxy.openai_canary_impact import build_openai_canary_impact_report
 from agentflow_proxy.optimization_promotion_canary import (
     apply_optimization_promotion_canaries,
@@ -1132,6 +1136,107 @@ class OptimizationModuleTests(unittest.TestCase):
             '"file_path"',
         ):
             self.assertNotIn(forbidden, encoded)
+
+    def test_promotion_blocker_recommendations_queue_shadow_eval_rows_and_noops_idempotently(self):
+        payload = {
+            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "recommendations": [
+                {
+                    "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-missing",
+                    "rank": 1,
+                    "status": "recommended",
+                    "local_action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "source_surface": "openai_provider_request",
+                    "provider_family": "openai",
+                    "provider_endpoint": "responses",
+                    "blocker_family": "eval-missing",
+                    "blocker_reason_codes": ["missing-eval-evidence", "eval-results-missing"],
+                    "blocker_count": 120,
+                    "recommendation_type": "collect-eval-evidence",
+                    "next_action": "backfill-local-eval-evidence",
+                    "expected_local_executor": "optimization-shadow-eval",
+                    "file_backed_policy_representation": {
+                        "exists": True,
+                        "policy_section": "routing",
+                        "policy_source": "local-manual",
+                        "rule_file": "routing_rules.yaml",
+                    },
+                    "local_executor_compatibility": {"status": "compatible", "local_action_family": "routing"},
+                    "confidence": 0.97,
+                    "projected_savings_usd": 72.25,
+                    "evidence_summary": {
+                        "record_count": 120,
+                        "promotion_status": "needs-eval",
+                        "raw_request": {"prompt": "raw eval prompt secret"},
+                        "request_id": "eval-request-id-secret",
+                        "session_id": "eval-session-id-secret",
+                        "cache_key": "eval-cache-key-secret",
+                    },
+                    "messages": [{"content": "raw eval message secret"}],
+                    "provider_body": {"input": "raw eval content secret"},
+                    "file_path": "/tmp/raw-eval-secret.py",
+                },
+                {
+                    "recommendation_id": "promotion-blocker-next-action:openai:unknown:eval-missing",
+                    "rank": 2,
+                    "status": "recommended",
+                    "local_action_family": "unknown-family",
+                    "candidate_family": "unknown-policy",
+                    "source_surface": "openai_provider_request",
+                    "blocker_family": "eval-missing",
+                    "blocker_reason_codes": ["eval-results-missing"],
+                    "recommendation_type": "collect-eval-evidence",
+                    "next_action": "backfill-local-eval-evidence",
+                    "expected_local_executor": "optimization-shadow-eval",
+                    "projected_savings_usd": 10.0,
+                    "evidence_summary": {"record_count": 12, "promotion_status": "needs-eval"},
+                },
+            ],
+        }
+        review = build_promotion_blocker_recommendation_review(payload, limit=10)
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3") as tmp:
+            store = Store(tmp.name)
+            try:
+                dry_run = queue_promotion_recommendation_eval_tasks(store, review, apply=False)
+                dry_count = store.conn.execute("select count(*) from optimization_eval_results").fetchone()[0]
+                applied = queue_promotion_recommendation_eval_tasks(store, review, apply=True, now="2026-06-14T09:30:00+00:00")
+                second = queue_promotion_recommendation_eval_tasks(store, review, apply=True, now="2026-06-14T09:31:00+00:00")
+                stored = store.conn.execute(
+                    "select id, candidate_id, status_class, reason_codes_json, result_json "
+                    "from optimization_eval_results order by status_class desc"
+                ).fetchall()
+            finally:
+                store.conn.close()
+
+        self.assertEqual(dry_run["schema"], "agentflow.promotion_recommendation_eval_queue.v1")
+        self.assertTrue(dry_run["dry_run"])
+        self.assertEqual(dry_count, 0)
+        self.assertEqual(dry_run["summary"]["selected_task_count"], 1)
+        self.assertEqual(dry_run["summary"]["noop_count"], 1)
+        self.assertFalse(applied["dry_run"])
+        self.assertTrue(applied["wrote_eval_queue_rows"])
+        self.assertTrue(applied["wrote_noop_records"])
+        self.assertEqual(applied["summary"]["written_task_count"], 1)
+        self.assertEqual(applied["summary"]["written_noop_count"], 1)
+        self.assertEqual(second["summary"]["written_task_count"], 0)
+        self.assertEqual(second["summary"]["written_noop_count"], 0)
+        self.assertEqual(second["summary"]["already_recorded_count"], 2)
+        self.assertEqual(len(stored), 2)
+        by_status = {row["status_class"]: row for row in stored}
+        self.assertIn("eval-queued", json.loads(by_status["queued"]["reason_codes_json"]))
+        self.assertIn("unsupported-local-action-family", json.loads(by_status["noop"]["reason_codes_json"]))
+        queued_result = json.loads(by_status["queued"]["result_json"])
+        self.assertEqual(queued_result["task"]["recommendation_id"], "promotion-blocker-next-action:openai:routing:eval-missing")
+        self.assertEqual(queued_result["task"]["recommended_eval_mode"], "local-shadow-eval")
+        self.assertFalse(applied["provider_calls_made"])
+        self.assertFalse(applied["managed_server_calls_made"])
+        self._assert_privacy_clean(dry_run)
+        self._assert_privacy_clean(applied)
+        self._assert_privacy_clean(second)
+        for row in stored:
+            self._assert_privacy_clean(json.loads(row["result_json"]))
 
     def test_promotion_funnel_stats_include_aggregate_omission_buckets(self):
         plan = {

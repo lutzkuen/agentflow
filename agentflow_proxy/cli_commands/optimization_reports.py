@@ -5126,6 +5126,10 @@ def optimization_eval_queue_cli(
         help="Optimization promotion report JSON path, or '-' for stdin. When set, backfill eval tasks from needs_eval promotion blockers.",
     )
     parser.add_argument(
+        "--promotion-blocker-review",
+        help="Promotion blocker review/recommendation JSON path, or '-' for stdin. When set, queue local shadow eval tasks from managed needs-eval recommendations.",
+    )
+    parser.add_argument(
         "--apply-backfill",
         action="store_true",
         help="With --promotion-report, write metadata-only queued eval task rows. Without this flag, emit a dry-run only.",
@@ -5157,6 +5161,23 @@ def optimization_eval_queue_cli(
         )
         return 2
 
+    if args.promotion_report and args.promotion_blocker_review:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.optimization_eval_queue_error.v1",
+                "error": {
+                    "type": "conflicting_inputs",
+                    "message": "--promotion-report and --promotion-blocker-review are mutually exclusive",
+                },
+                "provider_calls_made": False,
+                "wrote_local_policy_files": False,
+                "wrote_eval_queue_rows": False,
+            },
+        )
+        return 2
+
     if args.promotion_report:
         from agentflow_proxy.optimization_eval_queue import backfill_promotion_eval_tasks
 
@@ -5181,6 +5202,47 @@ def optimization_eval_queue_cli(
             result = backfill_promotion_eval_tasks(
                 store,
                 promotion_report,
+                family=args.family,
+                limit=int(args.limit or 25),
+                apply=bool(args.apply_backfill),
+            )
+        finally:
+            store.conn.close()
+
+        if args.pretty:
+            stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        else:
+            _write_json(stdout, result)
+        return 0
+
+    if args.promotion_blocker_review:
+        from agentflow_proxy.optimization_eval_queue import queue_promotion_recommendation_eval_tasks
+        from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
+
+        try:
+            recommendation_payload = _read_json_input(str(args.promotion_blocker_review), stdin=stdin)
+        except (OSError, json.JSONDecodeError) as exc:
+            _write_json(
+                stderr,
+                {
+                    "ok": False,
+                    "schema": "agentflow.promotion_recommendation_eval_queue_error.v1",
+                    "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                    "provider_calls_made": False,
+                    "wrote_local_policy_files": False,
+                    "wrote_eval_queue_rows": False,
+                },
+            )
+            return 1
+
+        if recommendation_payload.get("schema") != "agentflow.promotion_blocker_recommendation_review.v1":
+            recommendation_payload = build_promotion_blocker_recommendation_review(recommendation_payload, limit=int(args.limit or 25))
+
+        store = _open_store_for_db(str(args.db))
+        try:
+            result = queue_promotion_recommendation_eval_tasks(
+                store,
+                recommendation_payload,
                 family=args.family,
                 limit=int(args.limit or 25),
                 apply=bool(args.apply_backfill),

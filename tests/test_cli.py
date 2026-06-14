@@ -3393,6 +3393,89 @@ class PolicyReloadCliTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, encoded)
 
+    def test_optimization_eval_queue_cli_queues_promotion_blocker_review_recommendations(self):
+        from agentflow_proxy.store import Store
+
+        recommendations = {
+            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "recommendations": [
+                {
+                    "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-cli",
+                    "rank": 1,
+                    "status": "recommended",
+                    "local_action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "source_surface": "openai_provider_request",
+                    "provider_family": "openai",
+                    "provider_endpoint": "responses",
+                    "blocker_family": "eval-missing",
+                    "blocker_reason_codes": ["missing-eval-evidence", "eval-results-missing"],
+                    "blocker_count": 30,
+                    "recommendation_type": "collect-eval-evidence",
+                    "next_action": "backfill-local-eval-evidence",
+                    "expected_local_executor": "optimization-shadow-eval",
+                    "file_backed_policy_representation": {
+                        "exists": True,
+                        "policy_section": "routing",
+                        "policy_source": "local-manual",
+                        "rule_file": "/tmp/routing-secret.yaml",
+                    },
+                    "confidence": 0.91,
+                    "projected_savings_usd": 4.5,
+                    "prompt": "raw queue blocker prompt secret",
+                    "provider_body": {"body": "raw queue provider body secret"},
+                    "request_id": "queue-blocker-request-id-secret",
+                    "session_id": "queue-blocker-session-id-secret",
+                    "cache_key": "queue-blocker-cache-key-secret",
+                    "file_path": "/tmp/queue-blocker-secret.py",
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            Store(db_path).conn.close()
+            stdout = io.StringIO()
+            code = cli.optimization_eval_queue_cli(
+                ["--db", db_path, "--promotion-blocker-review", "-", "--apply-backfill"],
+                stdin=io.StringIO(json.dumps(recommendations)),
+                stdout=stdout,
+            )
+            payload = json.loads(stdout.getvalue())
+            conn = sqlite3.connect(db_path)
+            try:
+                stored = conn.execute(
+                    "select candidate_id, status_class, reason_codes_json, result_json from optimization_eval_results"
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema"], "agentflow.promotion_recommendation_eval_queue.v1")
+        self.assertFalse(payload["dry_run"])
+        self.assertEqual(payload["summary"]["written_task_count"], 1)
+        self.assertEqual(stored[1], "queued")
+        self.assertIn("eval-queued", json.loads(stored[2]))
+        stored_result = json.loads(stored[3])
+        self.assertEqual(stored_result["task"]["recommendation_id"], "promotion-blocker-next-action:openai:routing:eval-cli")
+        rendered = json.dumps(payload, sort_keys=True) + stored[3]
+        for forbidden in (
+            "raw queue blocker prompt secret",
+            "raw queue provider body secret",
+            "queue-blocker-request-id-secret",
+            "queue-blocker-session-id-secret",
+            "queue-blocker-cache-key-secret",
+            "/tmp/queue-blocker-secret.py",
+            "/tmp/routing-secret.yaml",
+            '"prompt"',
+            '"provider_body"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_optimization_promotion_canary_apply_cli_dry_run_and_apply_routing_yaml(self):
         bundle = {
             "schema": "agentflow.optimization_promotion_rollout_actions.v1",
