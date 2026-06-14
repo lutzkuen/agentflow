@@ -89,6 +89,7 @@ class AgentflowActivationCliTests(unittest.TestCase):
             "openai_cache_replay_report_cli",
             "optimization_eval_plan_cli",
             "optimization_promotion_report_cli",
+            "optimization_promotion_blocker_review_cli",
             "repeated_scaffold_opportunity_cli",
             "instruction_dedup_opportunity_cli",
             "terminal_output_compaction_opportunity_cli",
@@ -3300,6 +3301,97 @@ class PolicyReloadCliTests(unittest.TestCase):
             self.assertNotIn(forbidden, encoded)
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
         self.assertFalse(payload["privacy"]["request_ids_included"])
+
+    def test_optimization_promotion_blocker_review_cli_reads_fixture_and_scrubs_raw_fields(self):
+        fixture = {
+            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "recommendations": [
+                {
+                    "recommendation_id": "promotion-blocker-next-action:openai:routing:eval",
+                    "rank": 1,
+                    "status": "recommended",
+                    "local_action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "source_surface": "openai_provider_request",
+                    "provider_family": "openai",
+                    "provider_endpoint": "responses",
+                    "blocker_family": "eval-missing",
+                    "blocker_reason_codes": ["missing-eval-evidence"],
+                    "blocker_count": 30,
+                    "recommendation_type": "collect-eval-evidence",
+                    "next_action": "backfill-local-eval-evidence",
+                    "expected_local_executor": "optimization-shadow-eval",
+                    "file_backed_policy_representation": {
+                        "exists": True,
+                        "policy_section": "routing",
+                        "policy_source": "local-manual",
+                        "rule_file": "routing_rules.yaml",
+                    },
+                    "confidence": 0.91,
+                    "projected_savings_usd": 4.5,
+                    "prompt": "raw blocker prompt secret",
+                    "provider_body": {"body": "raw provider body secret"},
+                    "request_id": "blocker-request-id-secret",
+                    "session_id": "blocker-session-id-secret",
+                    "cache_key": "blocker-cache-key-secret",
+                    "file_path": "/tmp/blocker-secret.py",
+                },
+                {
+                    "recommendation_id": "promotion-blocker-next-action:codex:routing:canary",
+                    "rank": 2,
+                    "status": "noop",
+                    "local_action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "source_surface": "codex_turn",
+                    "blocker_family": "canary-missing",
+                    "blocker_reason_codes": ["missing-canary-evidence"],
+                    "blocker_count": 3,
+                    "recommendation_type": "noop",
+                    "next_action": "keep-blocked",
+                    "confidence": 0.5,
+                    "no_op_reasons": ["provider-capability-canary_holdout-unavailable"],
+                    "file_backed_policy_representation": {"exists": False},
+                },
+            ],
+        }
+        stdout = io.StringIO()
+
+        code = cli.optimization_promotion_blocker_review_cli(
+            ["-", "--pretty"],
+            stdin=io.StringIO(json.dumps(fixture)),
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema"], "agentflow.promotion_blocker_recommendation_review.v1")
+        self.assertEqual(payload["summary"]["review_candidate_count"], 2)
+        self.assertEqual(payload["summary"]["recommended_count"], 1)
+        self.assertEqual(payload["summary"]["noop_count"], 1)
+        candidate = payload["groups"][0]["recommendations"][0]
+        self.assertEqual(candidate["recommendation_type"], "collect-eval-evidence")
+        self.assertEqual(candidate["expected_local_executor"], "optimization-shadow-eval")
+        self.assertEqual(candidate["blocker_reason_codes"], ["missing-eval-evidence"])
+        self.assertEqual(candidate["file_backed_policy_representation"]["rule_file"], "routing_rules.yaml")
+        self.assertEqual(candidate["confidence"], 0.91)
+        self.assertEqual(payload["omitted_actions"][0]["no_op_reasons"], ["provider-capability-canary-holdout-unavailable"])
+
+        encoded = json.dumps(payload, sort_keys=True)
+        for forbidden in (
+            "raw blocker prompt secret",
+            "raw provider body secret",
+            "blocker-request-id-secret",
+            "blocker-session-id-secret",
+            "blocker-cache-key-secret",
+            "/tmp/blocker-secret.py",
+            '"prompt"',
+            '"provider_body"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, encoded)
 
     def test_optimization_promotion_canary_apply_cli_dry_run_and_apply_routing_yaml(self):
         bundle = {

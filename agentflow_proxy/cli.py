@@ -151,6 +151,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     optimization_eval_queue_cli,
     optimization_promotion_report_cli,
     optimization_promotion_actions_cli,
+    optimization_promotion_blocker_review_cli,
     optimization_promotion_canary_apply_cli,
     optimization_promotion_impact_cli,
 )
@@ -753,6 +754,10 @@ def optimization_promotion_report_main() -> None:
 
 def optimization_promotion_actions_main() -> None:
     raise SystemExit(optimization_promotion_actions_cli())
+
+
+def optimization_promotion_blocker_review_main() -> None:
+    raise SystemExit(optimization_promotion_blocker_review_cli())
 
 
 def optimization_promotion_canary_apply_main() -> None:

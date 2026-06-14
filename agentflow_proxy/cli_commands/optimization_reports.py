@@ -36,6 +36,7 @@ from agentflow_proxy.cli_commands.policy_workbench import (
 PATTERN_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_PATTERN_ROLLOUT_ACTIONS_URL"
 OPTIMIZATION_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_OPTIMIZATION_ROLLOUT_ACTIONS_URL"
 SCAFFOLD_ROLLOUT_ACTIONS_URL_ENV = "AGENTFLOW_SCAFFOLD_ROLLOUT_ACTIONS_URL"
+PROMOTION_BLOCKER_RECOMMENDATIONS_URL_ENV = "AGENTFLOW_PROMOTION_BLOCKER_RECOMMENDATIONS_URL"
 
 
 def openai_optimization_draft_dry_run_cli(
@@ -5416,6 +5417,177 @@ def optimization_promotion_actions_cli(
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stdout, result)
+    return 0
+
+
+def _fetch_promotion_blocker_recommendations(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+    safe_url = _redact_url(args.url)
+    headers, auth_configured, auth_source = _managed_policy_auth(args)
+    secret = args.api_key or (os.getenv(args.api_key_env) if args.api_key_env else None)
+    if not auth_configured and not args.allow_unauthenticated:
+        return {}, {
+            "status": "skipped",
+            "reason": "missing-auth",
+            "url": safe_url,
+            "auth_configured": False,
+            "auth_source": "",
+            "error": {
+                "type": "missing_auth",
+                "message": f"set --api-key, --api-key-env, {MANAGED_POLICY_API_KEY_ENV}, or --allow-unauthenticated",
+            },
+        }
+
+    started = time.time()
+    try:
+        response = httpx.get(
+            args.url,
+            headers=headers,
+            params={
+                key: value
+                for key, value in {
+                    "limit": args.source_limit,
+                    "max_recommendations": args.limit,
+                }.items()
+                if value is not None
+            },
+            timeout=args.timeout,
+        )
+        latency_ms = int((time.time() - started) * 1000)
+    except httpx.HTTPError as exc:
+        return {}, {
+            "status": "unavailable",
+            "reason": "request-failed",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "latency_ms": int((time.time() - started) * 1000),
+            "error": {"type": exc.__class__.__name__, "message": _redact_secret(str(exc), secret)},
+        }
+    if response.status_code >= 400:
+        return {}, {
+            "status": "unavailable",
+            "reason": "server-error",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "body": _redact_secret(response.text[:500], secret),
+            "error": {"type": "server_error", "message": "managed server returned an error response"},
+        }
+    try:
+        return response.json(), {
+            "status": "received",
+            "reason": "ok",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+        }
+    except ValueError as exc:
+        return {}, {
+            "status": "unavailable",
+            "reason": "invalid-json",
+            "url": safe_url,
+            "auth_configured": auth_configured,
+            "auth_source": auth_source,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "error": {"type": "invalid_json", "message": f"managed server response was not valid JSON: {exc}"},
+        }
+
+
+def optimization_promotion_blocker_review_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Review managed promotion blocker next-action recommendations as local candidates")
+    parser.add_argument(
+        "recommendations",
+        nargs="?",
+        help="Promotion blocker recommendation JSON path, or '-' to read from stdin. If omitted, --url or AGENTFLOW_PROMOTION_BLOCKER_RECOMMENDATIONS_URL is used when configured.",
+    )
+    parser.add_argument(
+        "--url",
+        default=os.getenv(PROMOTION_BLOCKER_RECOMMENDATIONS_URL_ENV),
+        help=f"Managed promotion blocker recommendations URL. May also be set with {PROMOTION_BLOCKER_RECOMMENDATIONS_URL_ENV}.",
+    )
+    parser.add_argument("--api-key", help="Managed optimizer API key. Prefer --api-key-env for shell history safety.")
+    parser.add_argument(
+        "--api-key-env",
+        default=MANAGED_POLICY_API_KEY_ENV,
+        help=f"Environment variable containing the managed optimizer API key, default: {MANAGED_POLICY_API_KEY_ENV}.",
+    )
+    parser.add_argument("--allow-unauthenticated", action="store_true", help="Fetch without an API key for local/dev managed servers.")
+    parser.add_argument("--tenant", help="Optional x-agentflow-tenant header for tenant-bound managed keys.")
+    parser.add_argument("--account", help="Optional x-agentflow-account header for account metadata.")
+    parser.add_argument("--limit", type=int, default=20, help="Maximum recommendations to include in the local review, default: 20.")
+    parser.add_argument("--source-limit", type=int, default=500, help="Maximum managed rollups to scan when fetching, default: 500.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=float(os.getenv("AGENTFLOW_MANAGED_POLICY_TIMEOUT_SECONDS", "10")),
+        help="HTTP timeout in seconds, default: 10.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print review JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    fetch = None
+    try:
+        if args.recommendations:
+            payload = _read_json_input(str(args.recommendations), stdin=stdin)
+            fetch = {"status": "skipped", "reason": "local-input"}
+        elif args.url:
+            payload, fetch = _fetch_promotion_blocker_recommendations(args)
+        else:
+            payload = {}
+            fetch = {"status": "skipped", "reason": "no-managed-url-configured"}
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.promotion_blocker_recommendation_review_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
+
+    result = build_promotion_blocker_recommendation_review(payload, limit=args.limit, fetch=fetch)
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "promotion-blocker-recommendations-review",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.recommendations,
+            "url": _redact_url(args.url),
+            "fetch_status": fetch.get("status") if isinstance(fetch, dict) else None,
+            "review_candidate_count": summary.get("review_candidate_count"),
+            "group_count": summary.get("group_count"),
+            "recommended_count": summary.get("recommended_count"),
+            "noop_count": summary.get("noop_count"),
+            "wrote_local_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": result.get("managed_server_calls_made"),
+            "exit_code": 0,
+        },
+    )
+    _write_rollout_actions_result(stdout, result, pretty=args.pretty)
     return 0
 
 

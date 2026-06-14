@@ -24,6 +24,7 @@ from agentflow_proxy.optimization_promotion_canary import (
 from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
 from agentflow_proxy.optimization_promotion_impact import measure_optimization_promotion_impact
 from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+from agentflow_proxy.promotion_blocker_review import build_promotion_blocker_recommendation_review
 from agentflow_proxy.optimization_rollout_review import (
     attach_optimization_rollout_provenance,
     review_optimization_rollout_actions,
@@ -1013,6 +1014,124 @@ class OptimizationModuleTests(unittest.TestCase):
             self.assertNotIn(candidate_id, encoded_buckets)
         self.assertTrue(all(bucket["privacy"]["metadata_only"] for bucket in buckets))
         self._assert_privacy_clean(result)
+
+    def test_promotion_blocker_recommendation_review_groups_sanitized_local_candidates(self):
+        payload = {
+            "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",
+            "recommendations": [
+                {
+                    "schema": "agentflow.promotion_blocker_next_action_recommendation.v1",
+                    "recommendation_id": "promotion-blocker-next-action:openai:routing:eval-missing",
+                    "rank": 1,
+                    "status": "recommended",
+                    "local_action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "source_surface": "openai_provider_request",
+                    "provider_family": "openai",
+                    "provider_endpoint": "responses",
+                    "blocker_family": "eval-missing",
+                    "blocker_reason_codes": ["missing-eval-evidence", "eval-results-missing"],
+                    "blocker_count": 120,
+                    "recommendation_type": "collect-eval-evidence",
+                    "next_action": "backfill-local-eval-evidence",
+                    "expected_local_executor": "optimization-shadow-eval",
+                    "file_backed_policy_representation": {
+                        "exists": True,
+                        "policy_section": "routing",
+                        "policy_source": "local-manual",
+                        "rule_file": "routing_rules.yaml",
+                        "reason": "known-file-backed-local-policy",
+                    },
+                    "local_executor_compatibility": {
+                        "status": "compatible",
+                        "local_action_family": "routing",
+                        "file_path": "/tmp/promotion-blocker-local-secret.py",
+                    },
+                    "confidence": 0.97,
+                    "projected_savings_usd": 72.25,
+                    "evidence_summary": {
+                        "record_count": 120,
+                        "candidate_count": 120,
+                        "promotion_status": "needs-eval",
+                        "rank_score": 0.97,
+                        "raw_request": {"prompt": "raw promotion blocker prompt must stay local"},
+                        "request_id": "promotion-blocker-request-secret",
+                        "session_id": "promotion-blocker-session-secret",
+                        "cache_key": "promotion-blocker-cache-secret",
+                    },
+                    "prompt": "raw promotion blocker prompt must stay local",
+                    "messages": [{"content": "raw promotion blocker provider body must stay local"}],
+                    "provider_body": {"input": "raw promotion blocker provider body must stay local"},
+                    "request_id": "promotion-blocker-request-secret",
+                    "session_id": "promotion-blocker-session-secret",
+                    "cache_key": "promotion-blocker-cache-secret",
+                    "file_path": "/tmp/promotion-blocker-local-secret.py",
+                },
+                {
+                    "recommendation_id": "promotion-blocker-next-action:codex:routing:canary-missing",
+                    "rank": 2,
+                    "status": "noop",
+                    "local_action_family": "routing",
+                    "candidate_family": "provider-routing-rule",
+                    "source_surface": "codex_turn",
+                    "provider_family": "codex",
+                    "blocker_family": "canary-missing",
+                    "blocker_reason_codes": ["missing-canary-evidence"],
+                    "blocker_count": 20,
+                    "recommendation_type": "noop",
+                    "next_action": "keep-blocked",
+                    "confidence": 0.5,
+                    "projected_savings_usd": 50.0,
+                    "no_op_reasons": ["provider-capability-canary_holdout-unavailable"],
+                    "file_backed_policy_representation": {"exists": False, "rule_file": "/private/routing_rules.yaml"},
+                },
+            ],
+        }
+
+        result = build_promotion_blocker_recommendation_review(payload, limit=10)
+
+        self.assertEqual(result["schema"], "agentflow.promotion_blocker_recommendation_review.v1")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["read_only"])
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertEqual(result["summary"]["review_candidate_count"], 2)
+        self.assertEqual(result["summary"]["recommended_count"], 1)
+        self.assertEqual(result["summary"]["noop_count"], 1)
+        self.assertEqual(result["summary"]["group_count"], 1)
+
+        group = result["groups"][0]
+        self.assertEqual(group["local_action_family"], "routing")
+        candidate = group["recommendations"][0]
+        self.assertEqual(candidate["recommendation_type"], "collect-eval-evidence")
+        self.assertEqual(candidate["expected_local_executor"], "optimization-shadow-eval")
+        self.assertEqual(candidate["blocker_reason_codes"], ["eval-results-missing", "missing-eval-evidence"])
+        self.assertEqual(candidate["file_backed_policy_representation"]["rule_file"], "routing_rules.yaml")
+        self.assertEqual(candidate["confidence"], 0.97)
+
+        noop = result["omitted_actions"][0]
+        self.assertEqual(noop["next_action"], "keep-blocked")
+        self.assertEqual(noop["no_op_reasons"], ["provider-capability-canary-holdout-unavailable"])
+
+        encoded = json.dumps(result, sort_keys=True)
+        for forbidden in (
+            "raw promotion blocker prompt",
+            "raw promotion blocker provider body",
+            "promotion-blocker-request-secret",
+            "promotion-blocker-session-secret",
+            "promotion-blocker-cache-secret",
+            "/tmp/promotion-blocker-local-secret.py",
+            "/private/routing_rules.yaml",
+            '"prompt"',
+            '"messages"',
+            '"provider_body"',
+            '"raw_request"',
+            '"request_id"',
+            '"session_id"',
+            '"cache_key"',
+            '"file_path"',
+        ):
+            self.assertNotIn(forbidden, encoded)
 
     def test_promotion_funnel_stats_include_aggregate_omission_buckets(self):
         plan = {
