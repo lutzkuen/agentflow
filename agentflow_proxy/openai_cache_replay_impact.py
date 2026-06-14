@@ -263,6 +263,21 @@ def _candidate_projected_hits(rule: dict[str, Any]) -> int:
     return 0
 
 
+def _candidate_projected_savings(rule: dict[str, Any]) -> float:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+    for source in (graduation, rule):
+        for key in (
+            "projected_savings_usd",
+            "projected_saved_cost_usd",
+            "expected_savings_usd",
+            "expected_saved_cost_usd",
+        ):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value is not None:
+                return _as_float(value)
+    return 0.0
+
+
 def _candidate_projected_cohort_rows(rule: dict[str, Any]) -> int:
     graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
     for key in ("sample_count", "row_count", "matched_count"):
@@ -294,6 +309,7 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
             "safety_stop": _empty_cohort(),
         },
         "projected_hit_count": _candidate_projected_hits(rule),
+        "dry_run_projected_savings_usd": _candidate_projected_savings(rule),
         "projected_cohort_row_count": _candidate_projected_cohort_rows(rule),
         "replay_source_schema": _replay_source_schema(rule),
         "status_buckets": Counter(),
@@ -488,6 +504,86 @@ def _stale_evidence(latest_observed_at: str | None, *, now: datetime, max_age_ho
     return {"stale": age_hours > max_age_hours, "age_hours": round(age_hours, 3), "max_age_hours": round(float(max_age_hours), 3)}
 
 
+def _ratio(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator, 6)
+
+
+def _canary_hit_measurement(
+    *,
+    candidate: dict[str, Any],
+    cohorts: dict[str, dict[str, Any]],
+    observed_savings_usd: float,
+    legacy_projected_savings_usd: float,
+) -> dict[str, Any]:
+    applied = cohorts["applied"]
+    holdout = cohorts["holdout"]
+    projected_hits = _as_int(candidate.get("projected_hit_count"))
+    dry_run_projected_savings = _as_float(candidate.get("dry_run_projected_savings_usd"))
+    projected_saved_usd = dry_run_projected_savings if dry_run_projected_savings > 0 else legacy_projected_savings_usd
+    observed_hits = _as_int(applied.get("cache_hit_count"))
+    observed_misses = _as_int(applied.get("miss_count"))
+    holdout_forwards = _as_int(holdout.get("bypass_skipped_count")) + _as_int(holdout.get("miss_count"))
+    return {
+        "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
+        "replay_source_schema": candidate.get("replay_source_schema"),
+        "projected_hits": projected_hits,
+        "projected_saved_usd": round(projected_saved_usd, 8),
+        "dry_run_projected_savings_usd": round(dry_run_projected_savings, 8),
+        "observed_hits": observed_hits,
+        "observed_saved_usd": round(observed_savings_usd, 8),
+        "hit_realization_rate": _ratio(float(observed_hits), float(projected_hits)),
+        "savings_realization_rate": _ratio(float(observed_savings_usd), float(projected_saved_usd)),
+        "applied_count": _as_int(applied.get("count")),
+        "holdout_count": _as_int(holdout.get("count")),
+        "applied_hit_count": observed_hits,
+        "applied_miss_count": observed_misses,
+        "applied_bypass_skipped_count": _as_int(applied.get("bypass_skipped_count")),
+        "holdout_cache_hit_count": _as_int(holdout.get("cache_hit_count")),
+        "holdout_forwarded_count": holdout_forwards,
+        "safety_stop_count": _as_int(cohorts["safety_stop"].get("count")),
+        "invalidated_count": _as_int(cohorts["invalidated"].get("count")),
+        "privacy": _privacy_summary(),
+    }
+
+
+def _aggregate_canary_hit_measurements(quality_gates: list[dict[str, Any]]) -> dict[str, Any]:
+    measurements = [
+        item.get("canary_hit_measurement")
+        for item in quality_gates
+        if isinstance(item.get("canary_hit_measurement"), dict)
+    ]
+    projected_hits = sum(_as_int(item.get("projected_hits")) for item in measurements)
+    projected_saved_usd = sum(_as_float(item.get("projected_saved_usd")) for item in measurements)
+    observed_hits = sum(_as_int(item.get("observed_hits")) for item in measurements)
+    observed_saved_usd = sum(_as_float(item.get("observed_saved_usd")) for item in measurements)
+    return {
+        "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
+        "candidate_count": len(measurements),
+        "projected_hits": projected_hits,
+        "projected_saved_usd": round(projected_saved_usd, 8),
+        "dry_run_projected_savings_usd": round(
+            sum(_as_float(item.get("dry_run_projected_savings_usd")) for item in measurements),
+            8,
+        ),
+        "observed_hits": observed_hits,
+        "observed_saved_usd": round(observed_saved_usd, 8),
+        "hit_realization_rate": _ratio(float(observed_hits), float(projected_hits)),
+        "savings_realization_rate": _ratio(float(observed_saved_usd), float(projected_saved_usd)),
+        "applied_count": sum(_as_int(item.get("applied_count")) for item in measurements),
+        "holdout_count": sum(_as_int(item.get("holdout_count")) for item in measurements),
+        "applied_hit_count": sum(_as_int(item.get("applied_hit_count")) for item in measurements),
+        "applied_miss_count": sum(_as_int(item.get("applied_miss_count")) for item in measurements),
+        "applied_bypass_skipped_count": sum(_as_int(item.get("applied_bypass_skipped_count")) for item in measurements),
+        "holdout_cache_hit_count": sum(_as_int(item.get("holdout_cache_hit_count")) for item in measurements),
+        "holdout_forwarded_count": sum(_as_int(item.get("holdout_forwarded_count")) for item in measurements),
+        "safety_stop_count": sum(_as_int(item.get("safety_stop_count")) for item in measurements),
+        "invalidated_count": sum(_as_int(item.get("invalidated_count")) for item in measurements),
+        "privacy": _privacy_summary(),
+    }
+
+
 def _decide_gate(
     *,
     cohorts: dict[str, dict[str, Any]],
@@ -602,6 +698,12 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
     actual_hit_count = sum(_as_int(value.get("cache_hit_count")) for value in cohorts.values())
     miss_count = sum(_as_int(value.get("miss_count")) for value in cohorts.values())
     projected_hits = _as_int(candidate.get("projected_hit_count"))
+    canary_hit_measurement = _canary_hit_measurement(
+        candidate=candidate,
+        cohorts=cohorts,
+        observed_savings_usd=observed,
+        legacy_projected_savings_usd=projected,
+    )
     return {
         "schema": QUALITY_GATE_SCHEMA,
         "candidate_id": candidate["candidate_id"],
@@ -617,6 +719,8 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "replay_source_schema": candidate.get("replay_source_schema"),
         "projected_hit_count": projected_hits,
         "projected_hits": projected_hits,
+        "projected_saved_usd": canary_hit_measurement["projected_saved_usd"],
+        "dry_run_projected_savings_usd": canary_hit_measurement["dry_run_projected_savings_usd"],
         "projected_cohort_row_count": _as_int(candidate.get("projected_cohort_row_count")),
         "actual_hit_count": actual_hit_count,
         "actual_hits": actual_hit_count,
@@ -634,6 +738,7 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "applied_vs_holdout_deltas": deltas,
         "observed_savings_usd": round(observed, 8),
         "projected_savings_usd": round(projected, 8),
+        "canary_hit_measurement": canary_hit_measurement,
         "status_code_breakdown": _counter_rows(candidate["status_buckets"]),
         "endpoint_breakdown": _counter_rows(candidate["endpoint_buckets"]),
         "category_breakdown": _counter_rows(candidate["category_buckets"]),
@@ -748,6 +853,7 @@ def build_openai_cache_replay_impact_report(
                 "reason_codes": item.get("reason_codes") or [],
                 "cohort_counts": item.get("cohort_counts") or {},
                 "projected_hits": item.get("projected_hits") or 0,
+                "projected_saved_usd": item.get("projected_saved_usd") or 0.0,
                 "actual_hits": item.get("actual_hits") or 0,
                 "actual_saved_cost_usd": item.get("actual_saved_cost_usd") or 0.0,
                 "miss_count": item.get("miss_count") or 0,
@@ -755,6 +861,7 @@ def build_openai_cache_replay_impact_report(
                 "top_remaining_blocker": item.get("top_remaining_blocker"),
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
+                "canary_hit_measurement": item.get("canary_hit_measurement") or {},
             }
             for item in quality_gates
         ],
@@ -785,6 +892,11 @@ def build_openai_cache_replay_impact_report(
             "replay_ready_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "replay-ready"),
             "skipped_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "skipped"),
             "projected_hits": sum(_as_int(item.get("projected_hits")) for item in quality_gates),
+            "projected_saved_usd": round(sum(_as_float(item.get("projected_saved_usd")) for item in quality_gates), 8),
+            "dry_run_projected_savings_usd": round(
+                sum(_as_float(item.get("dry_run_projected_savings_usd")) for item in quality_gates),
+                8,
+            ),
             "actual_hits": sum(_as_int(item.get("actual_hits")) for item in quality_gates),
             "actual_saved_cost_usd": round(sum(_as_float(item.get("actual_saved_cost_usd")) for item in quality_gates), 8),
             "miss_count": sum(_as_int(item.get("miss_count")) for item in quality_gates),
@@ -792,6 +904,7 @@ def build_openai_cache_replay_impact_report(
             "top_remaining_blocker": _top_counter_value(remaining_blocker_counts),
             "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
             "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
+            "canary_hit_measurement": _aggregate_canary_hit_measurements(quality_gates),
         },
         "cohort_breakdown": _counter_rows(cohort_counts),
         "remaining_blocker_breakdown": _counter_rows(remaining_blocker_counts),
@@ -826,6 +939,7 @@ def build_openai_cache_replay_lifecycle_feedback(result: dict[str, Any]) -> dict
                 "cohort_counts": item.get("cohort_counts") or {},
                 "readiness": item.get("readiness"),
                 "projected_hits": item.get("projected_hits") or 0,
+                "projected_saved_usd": item.get("projected_saved_usd") or 0.0,
                 "actual_hits": item.get("actual_hits") or 0,
                 "actual_saved_cost_usd": item.get("actual_saved_cost_usd") or 0.0,
                 "miss_count": item.get("miss_count") or 0,
@@ -835,6 +949,7 @@ def build_openai_cache_replay_lifecycle_feedback(result: dict[str, Any]) -> dict
                 "top_remaining_blocker": item.get("top_remaining_blocker"),
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
+                "canary_hit_measurement": item.get("canary_hit_measurement") or {},
                 "endpoint": item.get("endpoint"),
                 "category": item.get("category"),
                 "workflow_phase": item.get("workflow_phase"),
