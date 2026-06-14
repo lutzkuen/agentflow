@@ -1386,6 +1386,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
             plan = build_research_plan(
                 issues=[],
+                stats={
+                    "calls": 50,
+                    "routing": [
+                        {
+                            "provider": "openai",
+                            "requested_model": "gpt-5.4",
+                            "routed_model": "gpt-5.4",
+                            "c": 12,
+                        }
+                    ],
+                },
                 log_sources=[log_path],
                 threshold=1,
                 now=NOW,
@@ -1396,24 +1407,130 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertGreaterEqual(diagnostics[0]["count"], 2)
 
         created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
-        self.assertTrue(any("aggregate only diagnostics" in title for title in created_titles))
+        self.assertTrue(any("missing lifecycle feedback diagnostics" in title for title in created_titles))
+        self.assertFalse(any("aggregate only diagnostics" in title for title in created_titles))
         self.assertFalse(any("pass diagnostics" in title for title in created_titles))
 
-        repeated_issue = [item for item in plan["backlog_changes"]["create_issues"] if "aggregate only diagnostics" in item["title"].lower()][0]
+        repeated_issue = [item for item in plan["backlog_changes"]["create_issues"] if "missing lifecycle feedback diagnostics" in item["title"].lower()][0]
         self.assertIn("Source lever:", repeated_issue["body"])
+        self.assertIn("Lifecycle action family: routing", repeated_issue["body"])
+        self.assertIn("Lifecycle blocker code: missing-applied-coverage", repeated_issue["body"])
+        self.assertIn("Lifecycle sample count bucket: 10_99", repeated_issue["body"])
         self.assertIn("Expected unblock path:", repeated_issue["body"])
-        self.assertIn("metadata-only privacy", repeated_issue["body"])
+        self.assertIn("metadata-only", repeated_issue["body"])
+        self.assertIn("no raw prompts", repeated_issue["body"])
 
         candidates = plan["evidence"]["optimization_candidates"]
         diagnostic_candidates = [item for item in candidates if item["lever"] == "activation-feedback"]
         self.assertTrue(diagnostic_candidates)
-        self.assertEqual(diagnostic_candidates[0]["blocker"], "repeated-aggregate-only")
+        self.assertEqual(diagnostic_candidates[0]["blocker"], "repeated-missing-lifecycle-feedback")
+        lifecycle_context = diagnostic_candidates[0]["projected_savings_signal"]["lifecycle_context"]
+        self.assertEqual(lifecycle_context["action_family"], "routing")
+        self.assertEqual(lifecycle_context["blocker_code"], "missing-applied-coverage")
         self.assertNotEqual(diagnostic_candidates[0]["projected_savings_signal"]["diagnostic_reason"], "pass")
 
         rendered = json.dumps(plan)
         self.assertNotIn("cache-candidate-secret", rendered)
         self.assertNotIn("req-secret-12345", rendered)
         self.assertNotIn("session-secret-67890", rendered)
+
+    def test_healthy_lifecycle_metadata_suppresses_repeated_aggregate_only_diagnostic(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "activation feedback omitted reason=aggregate-only candidate_id=secret-candidate-one",
+                        "routing candidate skipped blocker=aggregate-only request_id=req-secret-12345",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                stats={
+                    "calls": 50,
+                    "openai_canary_impact": {
+                        "schema": "agentflow.openai_canary_impact.v1",
+                        "status": "matched",
+                        "candidates": [
+                            {
+                                "candidate_id": "raw-openai-canary-candidate-secret",
+                                "source_surface": "openai_responses",
+                                "original_model": "gpt-5.4",
+                                "candidate_target_model": "gpt-5.4-mini",
+                                "verdict": "widen",
+                                "next_action": "widen_local_openai_canary",
+                                "aggregate_only_feedback": True,
+                                "sample_count": 3,
+                                "cohort_counts": {
+                                    "canary_applied": 2,
+                                    "canary_holdout": 1,
+                                    "safety_stopped": 0,
+                                },
+                                "observed_savings_usd": 0.02,
+                                "projected_savings_usd": 0.03,
+                            }
+                        ],
+                        "activation_lifecycle_feedback": {
+                            "schema": "agentflow.activation_staged_lifecycle_feedback_summary.v1",
+                            "queue_rows": 1,
+                            "family_event_count": 3,
+                            "state_breakdown": [{"value": "healthy_canary", "count": 1}],
+                            "cohort_breakdown": [
+                                {"value": "canary_applied", "count": 2},
+                                {"value": "canary_holdout", "count": 1},
+                            ],
+                            "cohort_lifecycle_metadata": [
+                                {
+                                    "policy_ref": "policy:public-cohort-ref",
+                                    "policy_id": "raw-policy-secret-should-redact",
+                                    "cohort_label": "canary_applied",
+                                    "action_family": "routing",
+                                    "event_count": 2,
+                                    "applied_count": 2,
+                                    "holdout_count": 0,
+                                    "fallback_count": 0,
+                                },
+                                {
+                                    "policy_ref": "policy:public-cohort-ref",
+                                    "policy_id": "raw-policy-secret-should-redact",
+                                    "cohort_label": "canary_holdout",
+                                    "action_family": "routing",
+                                    "event_count": 1,
+                                    "applied_count": 0,
+                                    "holdout_count": 1,
+                                    "fallback_count": 0,
+                                },
+                            ],
+                            "payload_json_included": False,
+                            "privacy": {
+                                "metadata_only": True,
+                                "aggregate_only": True,
+                                "raw_prompts_included": False,
+                                "request_ids_included": False,
+                                "raw_session_ids_included": False,
+                            },
+                        },
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                },
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        diagnostic_reasons = [item["reason"] for item in plan["evidence"]["repeated_diagnostics"]]
+        self.assertNotIn("aggregate-only", diagnostic_reasons)
+        created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
+        self.assertFalse(any("aggregate only diagnostics" in title for title in created_titles))
+        self.assertFalse(any("missing lifecycle feedback diagnostics" in title for title in created_titles))
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret-candidate-one", rendered)
+        self.assertNotIn("req-secret-12345", rendered)
+        self.assertNotIn("raw-openai-canary-candidate-secret", rendered)
+        self.assertNotIn("raw-policy-secret-should-redact", rendered)
 
     def test_privacy_redacts_raw_fields_paths_and_ids(self):
         plan = build_research_plan(

@@ -126,6 +126,10 @@ _DIAGNOSTIC_TAXONOMY: tuple[dict[str, Any], ...] = (
             "lifecycle-feedback-missing",
             "missing-feedback",
             "missing-canary-lifecycle",
+            "missing-canary-lifecycle-evidence",
+            "missing-applied-coverage",
+            "missing-holdout-coverage",
+            "insufficient-cohort-coverage",
         ),
         "backlog_action": "create-ready-issue",
         "unblock_path": "Emit applied, holdout, fallback, retry, error, and savings lifecycle feedback for the affected activation path.",
@@ -441,6 +445,170 @@ def _actionable_diagnostics(diagnostics: list[dict[str, Any]]) -> list[dict[str,
         row.pop("_priority", None)
         row.pop("_index", None)
     return actionable
+
+
+def _sample_count_bucket(value: Any) -> str:
+    count = _to_int(value)
+    if count <= 0:
+        return "none"
+    if count < 10:
+        return "lt_10"
+    if count < 100:
+        return "10_99"
+    if count < 1000:
+        return "100_999"
+    return "gte_1000"
+
+
+def _activation_loop_lifecycle_context(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    loop = stats_summary.get("evidence_to_activation_loop")
+    if not isinstance(loop, dict):
+        return None
+    levers = [row for row in loop.get("levers") or [] if isinstance(row, dict)]
+    if not levers:
+        return None
+    blocked = [
+        row
+        for row in levers
+        if str(row.get("state") or "") in {"missing-evidence", "blocked"}
+        and any(str(item or "").strip() for item in row.get("blocker_codes") or [])
+    ]
+    row = (blocked or levers)[0]
+    blockers = [str(item) for item in row.get("blocker_codes") or [] if str(item or "").strip()]
+    blocker = blockers[0] if blockers else ""
+    state = str(row.get("state") or "unknown")
+    status = "specific-blocker" if blocker else "lifecycle-state-known"
+    return {
+        "status": status,
+        "source": "evidence_to_activation_loop",
+        "report_schema": sanitize_value(row.get("evidence_source") or loop.get("schema")),
+        "action_family": sanitize_value(row.get("local_action_family") or row.get("lever") or "unknown"),
+        "lifecycle_state": sanitize_value(state),
+        "blocker_code": sanitize_value(blocker or state),
+        "sample_count_bucket": _sample_count_bucket(row.get("sample_count")),
+        "next_action": sanitize_value(row.get("next_action") or loop.get("summary", {}).get("top_next_action")),
+        "aggregate_only_replaced": bool(blocker),
+        "aggregate_only_cleared": status == "lifecycle-state-known" and state not in {"missing-evidence", "blocked"},
+        "privacy": _candidate_privacy(),
+    }
+
+
+def _pass_through_lifecycle_context(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    report = stats_summary.get("pass_through_routing_report")
+    if not isinstance(report, dict):
+        return None
+    for bucket in report.get("buckets") or []:
+        if not isinstance(bucket, dict):
+            continue
+        lifecycle = bucket.get("openai_canary_lifecycle_evidence")
+        if not isinstance(lifecycle, dict):
+            continue
+        blockers = [str(item) for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()]
+        if not blockers:
+            continue
+        return {
+            "status": "specific-blocker",
+            "source": "pass_through_routing_report",
+            "report_schema": sanitize_value(lifecycle.get("schema") or report.get("schema")),
+            "action_family": "routing",
+            "lifecycle_state": sanitize_value(lifecycle.get("status") or "missing-evidence"),
+            "blocker_code": sanitize_value(blockers[0]),
+            "sample_count_bucket": _sample_count_bucket(bucket.get("sample_count")),
+            "next_action": "activate-openai-routing-canary-cohorts",
+            "aggregate_only_replaced": True,
+            "aggregate_only_cleared": False,
+            "privacy": _candidate_privacy(),
+        }
+    return None
+
+
+def _openai_feedback_lifecycle_context(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    impact = stats_summary.get("openai_canary_impact")
+    if not isinstance(impact, dict):
+        return None
+    feedback = impact.get("activation_lifecycle_feedback")
+    if not isinstance(feedback, dict):
+        return None
+    state_counts = _breakdown_counts(feedback.get("state_breakdown"))
+    top_state = next(iter(state_counts), "unknown")
+    blocker = _openai_lifecycle_omission_reason(feedback)
+    row, _ = _top_openai_routing_canary_row(stats_summary)
+    action = _openai_routing_candidate_action(row, stats_summary) if row is not None else {"omission_reason": blocker or "none"}
+    blocker = blocker or (None if action.get("omission_reason") == "none" else str(action.get("omission_reason") or ""))
+    return {
+        "status": "specific-blocker" if blocker else "lifecycle-state-known",
+        "source": "openai_canary_impact.activation_lifecycle_feedback",
+        "report_schema": sanitize_value(feedback.get("schema") or impact.get("schema")),
+        "action_family": "routing",
+        "lifecycle_state": sanitize_value(top_state),
+        "blocker_code": sanitize_value(blocker or top_state),
+        "sample_count_bucket": _sample_count_bucket(row.get("sample_count") if isinstance(row, dict) else feedback.get("family_event_count")),
+        "next_action": sanitize_value(row.get("next_action") if isinstance(row, dict) else "inspect_openai_canary_lifecycle_evidence"),
+        "cohort_lifecycle_metadata": _cohort_lifecycle_metadata(feedback, limit=5),
+        "aggregate_only_replaced": bool(blocker),
+        "aggregate_only_cleared": not blocker,
+        "privacy": _candidate_privacy(),
+    }
+
+
+def _aggregate_only_lifecycle_context(stats_summary: dict[str, Any]) -> dict[str, Any]:
+    for context in (
+        _activation_loop_lifecycle_context(stats_summary),
+        _openai_feedback_lifecycle_context(stats_summary),
+        _pass_through_lifecycle_context(stats_summary),
+    ):
+        if context is not None and context.get("status") == "specific-blocker":
+            return context
+    for context in (
+        _activation_loop_lifecycle_context(stats_summary),
+        _openai_feedback_lifecycle_context(stats_summary),
+        _pass_through_lifecycle_context(stats_summary),
+    ):
+        if context is not None:
+            return context
+    return {
+        "status": "specific-blocker",
+        "source": "diagnostic-log",
+        "report_schema": None,
+        "action_family": "activation-feedback",
+        "lifecycle_state": "missing_feedback",
+        "blocker_code": "missing-lifecycle-feedback",
+        "sample_count_bucket": "unknown",
+        "next_action": "emit-activation-lifecycle-feedback",
+        "aggregate_only_replaced": True,
+        "aggregate_only_cleared": False,
+        "privacy": _candidate_privacy(),
+    }
+
+
+def _resolve_aggregate_only_diagnostics(
+    diagnostics: list[dict[str, Any]],
+    stats_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not diagnostics:
+        return diagnostics
+    context = _aggregate_only_lifecycle_context(stats_summary)
+    resolved: list[dict[str, Any]] = []
+    for item in diagnostics:
+        reason = str(item.get("reason") or "")
+        taxonomy = _diagnostic_taxonomy(reason)
+        if taxonomy is None or taxonomy.get("class") != "aggregate-only":
+            resolved.append(item)
+            continue
+        if context.get("aggregate_only_cleared"):
+            continue
+        replacement_reason = str(context.get("blocker_code") or "missing-lifecycle-feedback")
+        replacement = dict(item)
+        replacement["reason"] = replacement_reason
+        replacement["diagnostic_class"] = "missing-lifecycle-feedback"
+        replacement["lifecycle_context"] = context
+        replacement["example"] = (
+            f"aggregate-only diagnostic replaced by {replacement_reason}; "
+            f"source={context.get('source')}; state={context.get('lifecycle_state')}; "
+            f"next_action={context.get('next_action')}"
+        )
+        resolved.append(replacement)
+    return resolved
 
 
 def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
@@ -2055,6 +2223,7 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
     top = actionable[0]
     reason = str(top.get("reason") or "unknown-diagnostic")
     count = _to_int(top.get("count"))
+    lifecycle_context = top.get("lifecycle_context") if isinstance(top.get("lifecycle_context"), dict) else {}
     return _candidate(
         lever=str(top.get("source_lever") or "activation-feedback"),
         provider_surface_bucket="mixed",
@@ -2069,6 +2238,7 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
             "observations": count,
             "backlog_action": top.get("backlog_action"),
             "acceptance_check": top.get("acceptance_check"),
+            "lifecycle_context": lifecycle_context,
         },
         confidence="medium" if count > 1 else "low",
         sequencing="File after direct cache/routing/crunch candidates unless the diagnostic is a safety stop or privacy blocker.",
@@ -2501,7 +2671,29 @@ def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, 
         diagnostic.get("acceptance_check")
         or "The repeated diagnostic is represented by a concrete GitHub issue or an updated blocked issue comment."
     )
+    lifecycle_context = diagnostic.get("lifecycle_context") if isinstance(diagnostic.get("lifecycle_context"), dict) else {}
     title_reason = diagnostic_class.replace("-", " ")
+    evidence = [
+        f"Diagnostic reason: {reason}",
+        f"Diagnostic class: {diagnostic_class}",
+        f"Source lever: {source_lever}",
+        f"Backlog action: {backlog_action}",
+        f"Observed count: {diagnostic.get('count', 0)}",
+        f"Sanitized example: {diagnostic.get('example', '')}",
+        f"Expected unblock path: {expected_unblock_path}",
+    ]
+    if lifecycle_context:
+        evidence.extend(
+            [
+                f"Lifecycle source: {lifecycle_context.get('source')}",
+                f"Lifecycle report schema: {lifecycle_context.get('report_schema')}",
+                f"Lifecycle action family: {lifecycle_context.get('action_family')}",
+                f"Lifecycle state: {lifecycle_context.get('lifecycle_state')}",
+                f"Lifecycle blocker code: {lifecycle_context.get('blocker_code')}",
+                f"Lifecycle sample count bucket: {lifecycle_context.get('sample_count_bucket')}",
+                f"Lifecycle next action: {lifecycle_context.get('next_action')}",
+            ]
+        )
     return {
         "repo": "lutzkuen/agentflow",
         "title": f"Turn repeated {title_reason} diagnostics into an actionable optimization issue",
@@ -2513,13 +2705,7 @@ def _proposal_from_repeated_diagnostic(diagnostic: dict[str, Any]) -> dict[str, 
                 "narrow follow-up issue instead of disappearing into run prose."
             ),
             evidence=[
-                f"Diagnostic reason: {reason}",
-                f"Diagnostic class: {diagnostic_class}",
-                f"Source lever: {source_lever}",
-                f"Backlog action: {backlog_action}",
-                f"Observed count: {diagnostic.get('count', 0)}",
-                f"Sanitized example: {diagnostic.get('example', '')}",
-                f"Expected unblock path: {expected_unblock_path}",
+                *evidence,
             ],
             implementation=[
                 "Trace the diagnostic to the local report, rollout, or canary gate that emits it.",
@@ -3024,8 +3210,8 @@ def build_research_plan(
     issue_list = [sanitize_value(issue) for issue in issues]
     ready_issues = [issue for issue in issue_list if _is_actionable_ready(issue, trusted_author)]
     blocked_stale = _stale_blocked_issues(issue_list, trusted_author=trusted_author, now=now, stale_days=stale_days)
-    diagnostics = _diagnostics_from_logs(log_sources)
     summary = _stats_summary(stats)
+    diagnostics = _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary)
     optimization_candidates = _optimization_candidates(stats_summary=summary, diagnostics=diagnostics)
 
     ready_count = len(ready_issues)
