@@ -156,13 +156,21 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["rollup_count"], 2)
         self.assertEqual(report["summary"]["collapsed_rows"], 2)
         self.assertEqual(report["summary"]["follow_up_candidate_count"], 2)
-        self.assertEqual(report["summary"]["top_next_action"], "rank-repeated-context-replayability-cohort")
+        self.assertEqual(report["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
         follow_up = report["follow_up_candidates"]
         self.assertEqual(follow_up["schema"], "agentflow.request_shape_follow_up_candidates.v1")
         self.assertEqual(follow_up["status"], "candidates-ranked")
         self.assertEqual(follow_up["summary"]["ranked_candidate_count"], 2)
-        self.assertEqual(follow_up["summary"]["top_next_action"], "rank-repeated-context-replayability-cohort")
-        self.assertEqual(follow_up["top_candidate"]["local_action_family"], "cache")
+        self.assertEqual(follow_up["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(follow_up["summary"]["top_readiness_state"], "activation-ready")
+        self.assertEqual(follow_up["summary"]["activation_ready_count"], 1)
+        self.assertEqual(follow_up["top_candidate"]["local_action_family"], "crunch")
+        self.assertEqual(follow_up["top_candidate"]["readiness_state"], "activation-ready")
+        self.assertEqual(follow_up["top_candidate"]["sample_count"], 3)
+        self.assertEqual(follow_up["top_candidate"]["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertGreater(follow_up["top_candidate"]["projected_saved_tokens"], 0)
+        self.assertGreater(follow_up["top_candidate"]["projected_savings_usd"], 0)
+        self.assertEqual(follow_up["blocker_cohorts"][0]["next_action"], "stage-repeated-context-crunch-canary")
         self.assertIn("repeated_context", follow_up["top_candidate"]["candidate_work_classes"])
         self.assertIn("replayability", follow_up["top_candidate"]["candidate_work_classes"])
         self.assertTrue(follow_up["privacy"]["metadata_only"])
@@ -208,6 +216,97 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(report["privacy"]["session_ids_included"])
         self.assertFalse(report["privacy"]["cache_keys_included"])
         self.assertFalse(report["privacy"]["request_fingerprints_included"])
+
+    def test_follow_up_candidates_rank_concrete_blocker_cohorts(self) -> None:
+        for _ in range(3):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                text_chars=132_000,
+                cost=0.09,
+                baseline=0.09,
+            )
+        for _ in range(2):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=4_000,
+                cost=0.01,
+                baseline=0.01,
+            )
+        self._log_call(
+            provider="openai",
+            path="/v1/responses",
+            source_surface="openai_responses",
+            endpoint="responses",
+            requested_model="gpt-5.4",
+            routed_model="gpt-5.4",
+            requested_model_family="gpt-5",
+            routed_model_family="gpt-5",
+            category="tool-light",
+            workflow_phase="tool-light",
+            stream=0,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="tools-disabled",
+            routing_reason="keep requested model",
+            text_chars=3_000,
+            cost=0.02,
+            baseline=0.02,
+        )
+
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="blocker-cohorts")
+        follow_up = report["follow_up_candidates"]
+        top = follow_up["top_blocker_cohort"]
+
+        self.assertEqual(top["schema"], "agentflow.request_shape_blocker_cohort.v1")
+        self.assertEqual(top["rank"], 1)
+        self.assertEqual(top["readiness_state"], "activation-ready")
+        self.assertEqual(top["local_action_family"], "crunch")
+        self.assertEqual(top["next_action"], "stage-repeated-context-crunch-canary")
+        self.assertEqual(top["sample_count"], 3)
+        self.assertIn("thinking-routing-guard", top["blocker_codes"])
+        self.assertIn("tool-call-cache-disabled", top["blocker_codes"])
+        self.assertIn("unsupported-streaming-shape", top["blocker_codes"])
+        self.assertGreater(top["projected_saved_tokens"], 0)
+        self.assertGreater(top["projected_savings_usd"], 0)
+        self.assertTrue(top["privacy"]["metadata_only"])
+        self.assertTrue(top["privacy"]["aggregate_only"])
+
+        replay_ready = next(item for item in follow_up["blocker_cohorts"] if item["next_action"] == "stage-cache-replay-canary")
+        self.assertEqual(replay_ready["readiness_state"], "activation-ready")
+        self.assertEqual(replay_ready["local_action_family"], "cache")
+        self.assertEqual(replay_ready["projected_hits"], 1)
+
+        tool_blocked = next(item for item in follow_up["blocker_cohorts"] if item["next_action"] == "collect-tool-call-cache-invalidation-evidence")
+        self.assertEqual(tool_blocked["readiness_state"], "blocked")
+        self.assertEqual(tool_blocked["local_action_family"], "cache")
+        rendered = json.dumps(follow_up, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered)
 
     def test_prompt_like_labels_are_rejected_to_unknown(self) -> None:
         self._log_call(

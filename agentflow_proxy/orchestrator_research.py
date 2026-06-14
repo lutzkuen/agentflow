@@ -1679,10 +1679,16 @@ def _shape_row_classes(row: dict[str, Any]) -> list[str]:
 def _request_shape_next_action(classes: list[str], blockers: list[str]) -> str:
     class_set = set(classes)
     blocker_set = set(blockers)
-    if "repeated_context" in class_set and "replayability" in class_set:
-        return "rank-repeated-context-replayability-cohort"
     if "repeated_context" in class_set and "crunch" in class_set:
-        return "rank-repeated-context-crunch-dry-run"
+        return "stage-repeated-context-crunch-canary"
+    if "tool-call-cache-disabled" in blocker_set:
+        return "collect-tool-call-cache-invalidation-evidence"
+    if "unsupported-streaming-shape" in blocker_set and "replayability" in class_set:
+        return "add-streaming-cache-replay-support"
+    if "thinking-routing-guard" in blocker_set:
+        return "collect-thinking-routing-lifecycle-evidence"
+    if "repeated_context" in class_set and "replayability" in class_set:
+        return "stage-cache-replay-canary"
     if "routing" in class_set:
         return "stage-routing-lifecycle-evidence"
     if blocker_set:
@@ -1767,7 +1773,7 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
 
     follow_up_report = report.get("follow_up_candidates") if isinstance(report.get("follow_up_candidates"), dict) else None
     follow_up_rows = (
-        [row for row in follow_up_report.get("candidates") or [] if isinstance(row, dict)]
+        [row for row in follow_up_report.get("blocker_cohorts") or follow_up_report.get("candidates") or [] if isinstance(row, dict)]
         if isinstance(follow_up_report, dict)
         else []
     )
@@ -1871,6 +1877,7 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "summary": sanitize_value(follow_up_summary),
             "top_candidate": sanitize_value(follow_up_report.get("top_candidate") if isinstance(follow_up_report.get("top_candidate"), dict) else None),
             "candidates": sanitize_value(follow_up_rows[:5]),
+            "blocker_cohorts": sanitize_value((follow_up_report.get("blocker_cohorts") or [])[:5]),
             "missing_measurements": sanitize_value(follow_up_report.get("missing_measurements") or []),
             "privacy": sanitize_value(follow_up_report.get("privacy") if isinstance(follow_up_report.get("privacy"), dict) else {}),
         }
@@ -1985,7 +1992,14 @@ def _legacy_issue_title_for_ledger_entry(entry: dict[str, Any]) -> str:
     if lever == "crunch":
         return f"Rank crunch savings follow-up for {blocker}"
     if lever == "request-shape-rollups":
-        return "Generate request-shape rollup candidates for repeated context work"
+        next_action = str(entry.get("next_action") or "")
+        if "crunch" in next_action:
+            return "Stage request-shape repeated-context crunch canary"
+        if "cache" in next_action or "replay" in next_action:
+            return "Stage request-shape cache replay cohort"
+        if "routing" in next_action:
+            return "Collect request-shape routing lifecycle evidence"
+        return "Rank request-shape blockers into local action cohorts"
     if lever == "managed-recommendation":
         return "Rank managed recommendation omission reasons for local policy handoff"
     return f"Convert {lever} candidate into implementation-ready savings issue"
@@ -3359,9 +3373,13 @@ def _request_shape_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | 
     if top:
         next_action = str(top.get("next_action") or "rank-request-shape-cohort")
         blocker = f"request-shape-{next_action}"
-        path = "Use the top aggregate request-shape cohort to choose the next repeated-context, replayability, routing, or crunch follow-up."
-        confidence = "medium" if "repeated_context" in (top.get("candidate_work_classes") or []) else "low"
-        safety_status = "review-required"
+        readiness = str(top.get("readiness_state") or "")
+        family = str(top.get("local_action_family") or "")
+        path = (
+            f"Use the top aggregate request-shape cohort to advance `{next_action}` for the local `{family or 'policy'}` path."
+        )
+        confidence = "medium" if readiness in {"activation-ready", "measurement-required"} or "repeated_context" in (top.get("candidate_work_classes") or []) else "low"
+        safety_status = "ready" if readiness == "activation-ready" else "review-required"
         score = float(_to_int(top.get("row_count"))) + _to_float(top.get("cost_est_usd")) * 1000.0 + 300.0
         bucket = str(top.get("provider_surface_bucket") or "mixed")
     elif status == "missing-request-shape-rollups":
@@ -3624,7 +3642,18 @@ def _candidate_title(candidate: dict[str, Any]) -> str:
     if lever == "managed-recommendation":
         return "Rank managed recommendation omission reasons for local policy handoff"
     if lever == "request-shape-rollups":
-        return "Generate request-shape rollup candidates for repeated context work"
+        blocker_text = blocker.replace("request-shape-", "")
+        if "crunch" in blocker_text:
+            return "Stage request-shape repeated-context crunch canary"
+        if "tool-call-cache-invalidation" in blocker_text:
+            return "Collect request-shape tool-cache invalidation evidence"
+        if "streaming-cache-replay" in blocker_text:
+            return "Add request-shape streaming cache replay support"
+        if "cache-replay" in blocker_text:
+            return "Stage request-shape cache replay cohort"
+        if "routing" in blocker_text:
+            return "Collect request-shape routing lifecycle evidence"
+        return "Rank request-shape blockers into local action cohorts"
     return f"Convert {lever} candidate into implementation-ready savings issue"
 
 
@@ -3659,7 +3688,10 @@ def _candidate_issue_acceptance(candidate: dict[str, Any]) -> list[str]:
     elif lever == "managed-recommendation":
         first = "Managed recommendation health reports the omitted local-action reason and whether a local file-backed representation exists."
     elif lever == "request-shape-rollups":
-        first = "Request-shape rollups produce at least one repeated-context, replayability, routing, or crunch cohort with bounded aggregate evidence."
+        first = (
+            "Request-shape rollups report ranked blocker cohorts with rank, blocker codes, local action family, readiness state, "
+            "next action, sample count, projected savings when known, and metadata-only privacy flags."
+        )
     else:
         first = f"The {blocker} candidate is either converted into a safe local action or kept blocked with a machine-readable reason."
     return [first, *common]

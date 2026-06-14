@@ -21,6 +21,7 @@ CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
+FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "agentflow.request_shape_blocker_cohort.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
@@ -1764,6 +1765,12 @@ def _shape_next_action(classes: list[str], blockers: list[str]) -> str:
 
 
 def _shape_local_action_family(next_action: str, classes: list[str]) -> str:
+    if next_action in {"stage-repeated-context-crunch-canary", "measure-repeated-context-crunch-canary-impact"}:
+        return "crunch"
+    if next_action == "stage-cache-replay-canary":
+        return "cache"
+    if next_action in {"collect-thinking-routing-lifecycle-evidence", "stage-routing-lifecycle-evidence"}:
+        return "routing"
     if next_action == "rank-repeated-context-replayability-cohort":
         return "cache"
     if next_action == "rank-repeated-context-crunch-dry-run":
@@ -1785,11 +1792,139 @@ def _shape_follow_up_privacy() -> dict[str, Any]:
     return privacy
 
 
+def _estimated_cache_replay_savings(row: dict[str, Any], row_count: int) -> tuple[int, float]:
+    projected_hits = max(0, row_count - 1)
+    if projected_hits <= 0:
+        return 0, 0.0
+    cost = _as_float(row.get("cost_est_usd"))
+    return projected_hits, cost * (projected_hits / float(row_count)) if row_count > 0 else 0.0
+
+
+def _shape_activation_decision(row: dict[str, Any], classes: list[str], blockers: list[str]) -> dict[str, Any]:
+    class_set = set(classes)
+    blocker_set = set(blockers)
+    row_count = _as_int(row.get("row_count") or row.get("count"))
+    projected_hits = 0
+    projected_savings = 0.0
+    projected_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+    projected_crunch_savings = _as_float(row.get("projected_crunch_savings_usd"))
+
+    if "crunch" in class_set or "repeated_context" in class_set:
+        crunch_decision = _shape_crunch_decision(row)
+        crunch_readiness = str(crunch_decision.get("readiness") or "unknown")
+        if crunch_readiness == "measurement-ready":
+            return {
+                "readiness_state": "activation-ready",
+                "next_action": "stage-repeated-context-crunch-canary",
+                "local_action_family": "crunch",
+                "actionability_reason": str(crunch_decision.get("reason") or "repeated-context-crunch-opportunity"),
+                "projected_hits": 0,
+                "projected_saved_tokens": projected_tokens,
+                "projected_savings_usd": projected_crunch_savings,
+                "blocker_codes": blockers,
+            }
+        if crunch_readiness in {"canary-staged", "canary-applied", "canary-holdout"}:
+            return {
+                "readiness_state": "measurement-required",
+                "next_action": "measure-repeated-context-crunch-canary-impact",
+                "local_action_family": "crunch",
+                "actionability_reason": str(crunch_decision.get("reason") or "missing-crunch-canary-impact-measurement"),
+                "projected_hits": 0,
+                "projected_saved_tokens": projected_tokens,
+                "projected_savings_usd": projected_crunch_savings,
+                "blocker_codes": list(crunch_decision.get("blockers") or blockers),
+            }
+        if crunch_readiness == "canary-safety-stopped":
+            return {
+                "readiness_state": "blocked",
+                "next_action": "review-repeated-context-crunch-canary-safety-stop",
+                "local_action_family": "crunch",
+                "actionability_reason": str(crunch_decision.get("reason") or "canary-safety-stopped"),
+                "projected_hits": 0,
+                "projected_saved_tokens": projected_tokens,
+                "projected_savings_usd": projected_crunch_savings,
+                "blocker_codes": list(crunch_decision.get("blockers") or blockers),
+            }
+
+    cache_status = public_label(row.get("cache_status"), "unknown")
+    stream = bool(row.get("stream"))
+    has_tools = bool(row.get("has_tools"))
+    if "replayability" in class_set and not stream and not has_tools and cache_status in {"miss", "missing"} and row_count >= 2:
+        projected_hits, projected_savings = _estimated_cache_replay_savings(row, row_count)
+        return {
+            "readiness_state": "activation-ready",
+            "next_action": "stage-cache-replay-canary",
+            "local_action_family": "cache",
+            "actionability_reason": "replay-ready-exact-non-tool-shape",
+            "projected_hits": projected_hits,
+            "projected_saved_tokens": 0,
+            "projected_savings_usd": projected_savings,
+            "blocker_codes": [blocker for blocker in blockers if blocker != "exact-cache-miss"],
+        }
+    if "tool-call-cache-disabled" in blocker_set:
+        return {
+            "readiness_state": "blocked",
+            "next_action": "collect-tool-call-cache-invalidation-evidence",
+            "local_action_family": "cache",
+            "actionability_reason": "tool-call-cache-needs-invalidation-evidence",
+            "projected_hits": 0,
+            "projected_saved_tokens": 0,
+            "projected_savings_usd": 0.0,
+            "blocker_codes": blockers,
+        }
+    if "unsupported-streaming-shape" in blocker_set and "replayability" in class_set:
+        return {
+            "readiness_state": "blocked",
+            "next_action": "add-streaming-cache-replay-support",
+            "local_action_family": "cache",
+            "actionability_reason": "streaming-cache-replay-not-supported",
+            "projected_hits": 0,
+            "projected_saved_tokens": 0,
+            "projected_savings_usd": 0.0,
+            "blocker_codes": blockers,
+        }
+    if "thinking-routing-guard" in blocker_set:
+        return {
+            "readiness_state": "needs-lifecycle-evidence",
+            "next_action": "collect-thinking-routing-lifecycle-evidence",
+            "local_action_family": "routing",
+            "actionability_reason": "thinking-routing-guard-needs-lifecycle-evidence",
+            "projected_hits": 0,
+            "projected_saved_tokens": 0,
+            "projected_savings_usd": 0.0,
+            "blocker_codes": blockers,
+        }
+    if "routing" in class_set:
+        return {
+            "readiness_state": "needs-lifecycle-evidence",
+            "next_action": "stage-routing-lifecycle-evidence",
+            "local_action_family": "routing",
+            "actionability_reason": "routing-candidate-needs-lifecycle-evidence",
+            "projected_hits": 0,
+            "projected_saved_tokens": 0,
+            "projected_savings_usd": 0.0,
+            "blocker_codes": blockers,
+        }
+
+    next_action = _shape_next_action(classes, blockers)
+    return {
+        "readiness_state": "needs-classification" if blockers else "observability-only",
+        "next_action": next_action,
+        "local_action_family": _shape_local_action_family(next_action, classes),
+        "actionability_reason": blockers[0] if blockers else "no-actionable-blocker",
+        "projected_hits": 0,
+        "projected_saved_tokens": projected_tokens,
+        "projected_savings_usd": projected_crunch_savings,
+        "blocker_codes": blockers,
+    }
+
+
 def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, Any]:
     classes = sorted(public_label(item, "unknown") for item in row.get("candidate_work_classes") or [])
     families = sorted(public_label(item, "unknown") for item in row.get("candidate_families") or [])
     blockers = sorted(public_label(item, "unknown") for item in row.get("blocker_codes") or [])
-    next_action = _shape_next_action(classes, blockers)
+    decision = _shape_activation_decision(row, classes, blockers)
+    next_action = str(decision["next_action"])
     provider = public_label(row.get("provider_family"), "unknown")
     source_surface = public_label(row.get("source_surface"), "unknown")
     endpoint = public_label(row.get("endpoint"), "unknown")
@@ -1800,6 +1935,13 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
     retry_count = _as_int(row.get("retry_count"))
     projected_crunch_savings = _as_float(row.get("projected_crunch_savings_usd"))
     projected_crunch_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
+    readiness = str(decision.get("readiness_state") or "unknown")
+    readiness_weight = {
+        "activation-ready": 500.0,
+        "measurement-required": 350.0,
+        "needs-lifecycle-evidence": 150.0,
+        "blocked": 50.0,
+    }.get(readiness, 0.0)
     replay_weight = 100.0 if "replayability" in classes else 0.0
     repeated_weight = 150.0 if "repeated_context" in classes else 0.0
     routing_weight = 75.0 if "routing" in classes else 0.0
@@ -1813,11 +1955,12 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
         + replay_weight
         + routing_weight
         + crunch_weight
+        + readiness_weight
         - error_count * 5.0
         - retry_count * 0.5
     )
     return {
-        "schema": "agentflow.request_shape_follow_up_candidate.v1",
+        "schema": FOLLOW_UP_BLOCKER_COHORT_SCHEMA,
         "rank": rank,
         "provider_surface_bucket": "/".join(part for part in (provider, source_surface, endpoint) if part) or "mixed",
         "provider_family": provider,
@@ -1834,17 +1977,23 @@ def _shape_follow_up_candidate(row: dict[str, Any], *, rank: int) -> dict[str, A
         "cache_status": public_label(row.get("cache_status"), "unknown"),
         "routing_status": public_label(row.get("routing_status"), "unknown"),
         "row_count": row_count,
+        "sample_count": row_count,
         "error_count": error_count,
         "retry_count": retry_count,
         "cost_est_usd": round(cost, 6),
         "observed_savings_usd": round(observed_savings, 6),
+        "projected_hits": _as_int(decision.get("projected_hits")),
         "projected_crunch_tokens_saved": projected_crunch_tokens,
         "projected_crunch_savings_usd": round(projected_crunch_savings, 6),
+        "projected_saved_tokens": _as_int(decision.get("projected_saved_tokens")),
+        "projected_savings_usd": round(_as_float(decision.get("projected_savings_usd")), 6),
         "candidate_work_classes": classes,
         "candidate_families": families,
-        "blocker_codes": blockers,
+        "blocker_codes": sorted(public_label(item, "unknown") for item in decision.get("blocker_codes") or []),
+        "readiness_state": readiness,
+        "actionability_reason": public_label(decision.get("actionability_reason"), "unknown"),
         "next_action": next_action,
-        "local_action_family": _shape_local_action_family(next_action, classes),
+        "local_action_family": public_label(decision.get("local_action_family"), "cohort-ranking"),
         "aggregate_only": True,
         "privacy": _shape_follow_up_privacy(),
         "_score": score,
@@ -1877,6 +2026,7 @@ def build_request_shape_follow_up_candidates(
     blocker_counts: dict[str, int] = {}
     action_counts: dict[str, int] = {}
     family_counts: dict[str, int] = {}
+    readiness_counts: dict[str, int] = {}
     clean: list[dict[str, Any]] = []
     capped_limit = max(1, min(_as_int(limit, 10), 100))
     for rank, candidate in enumerate(candidates[:capped_limit], start=1):
@@ -1888,6 +2038,7 @@ def build_request_shape_follow_up_candidates(
             _increment(blocker_counts, blocker, row_count)
         _increment(action_counts, candidate.get("next_action"), row_count)
         _increment(family_counts, candidate.get("local_action_family"), row_count)
+        _increment(readiness_counts, candidate.get("readiness_state"), row_count)
         item = dict(candidate)
         item.pop("_score", None)
         clean.append(item)
@@ -1904,8 +2055,11 @@ def build_request_shape_follow_up_candidates(
             "ranked_candidate_count": len(clean),
             "top_next_action": top.get("next_action") if top else None,
             "top_local_action_family": top.get("local_action_family") if top else None,
+            "top_readiness_state": top.get("readiness_state") if top else None,
+            "activation_ready_count": sum(1 for item in clean if item.get("readiness_state") == "activation-ready"),
             "class_breakdown": _breakdown(class_counts),
             "blocker_breakdown": _breakdown(blocker_counts),
+            "readiness_breakdown": _breakdown(readiness_counts),
             "next_action_breakdown": _breakdown(action_counts),
             "local_action_family_breakdown": _breakdown(family_counts),
             "provider_calls_made": 0,
@@ -1913,7 +2067,9 @@ def build_request_shape_follow_up_candidates(
             "policy_files_written": False,
         },
         "top_candidate": top,
+        "top_blocker_cohort": top,
         "candidates": clean,
+        "blocker_cohorts": clean,
         "missing_measurements": missing,
         "privacy": _shape_follow_up_privacy(),
     }

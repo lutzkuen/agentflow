@@ -1443,7 +1443,7 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(signal["schema"], "agentflow.request_shape_rollup_candidate_signal.v1")
         self.assertEqual(signal["status"], "candidates-ranked")
         self.assertEqual(signal["summary"]["ranked_candidate_count"], 2)
-        self.assertEqual(signal["summary"]["top_next_action"], "rank-repeated-context-replayability-cohort")
+        self.assertEqual(signal["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
         top = signal["top_candidate"]
         self.assertEqual(top["provider_surface_bucket"], "anthropic/anthropic_messages/messages")
         self.assertEqual(top["row_count"], 24)
@@ -1452,15 +1452,15 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("unsupported-streaming-shape", top["blocker_codes"])
 
         shape_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "request-shape-rollups")
-        self.assertEqual(shape_candidate["blocker"], "request-shape-rank-repeated-context-replayability-cohort")
+        self.assertEqual(shape_candidate["blocker"], "request-shape-stage-repeated-context-crunch-canary")
         self.assertEqual(shape_candidate["provider_surface_bucket"], "anthropic/anthropic_messages/messages")
         self.assertEqual(shape_candidate["projected_savings_signal"]["top_candidate"]["row_count"], 24)
         self.assertTrue(shape_candidate["privacy"]["metadata_only"])
 
         created = plan["backlog_changes"]["create_issues"]
-        shape_issues = [item for item in created if item["title"] == "Generate request-shape rollup candidates for repeated context work"]
+        shape_issues = [item for item in created if item["title"] == "Stage request-shape repeated-context crunch canary"]
         self.assertEqual(len(shape_issues), 1)
-        self.assertIn("rank-repeated-context-replayability-cohort", shape_issues[0]["body"])
+        self.assertIn("stage-repeated-context-crunch-canary", shape_issues[0]["body"])
         rendered = json.dumps(plan)
         self.assertNotIn("secret-candidate-id", rendered)
         self.assertNotIn("smaller-secret", rendered)
@@ -2515,7 +2515,7 @@ class OrchestratorResearchCliTests(unittest.TestCase):
         self.assertEqual(signal["status"], "candidates-ranked")
         self.assertEqual(signal["summary"]["rows_considered"], 2)
         self.assertGreaterEqual(signal["summary"]["ranked_candidate_count"], 1)
-        self.assertEqual(signal["summary"]["top_next_action"], "rank-repeated-context-replayability-cohort")
+        self.assertEqual(signal["summary"]["top_next_action"], "stage-repeated-context-crunch-canary")
         self.assertEqual(signal["top_candidate"]["row_count"], 2)
         self.assertIn("request_shape_crunch_opportunity", payload["evidence"]["stats_summary"]["crunch_savings_signal"]["top_report"]["report_key"])
         rendered = json.dumps(payload)
