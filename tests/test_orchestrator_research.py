@@ -500,6 +500,84 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("req-secret-should-not-leak", rendered)
         self.assertNotIn("session-secret-should-not-leak", rendered)
 
+    def test_pass_through_routing_report_merges_openai_canary_lifecycle_counts(self):
+        observed_at = datetime.now(timezone.utc).isoformat()
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 40,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "chat",
+                        "c": 20,
+                        "openai_canary_holdout_count": 3,
+                        "openai_canary_latest_observed_at": observed_at,
+                        "session_id": "secret-holdout-session-id",
+                    },
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4-mini",
+                        "category": "chat",
+                        "c": 2,
+                        "openai_canary_applied_count": 2,
+                        "openai_canary_error_count": 1,
+                        "openai_canary_retry_count": 1,
+                        "openai_canary_fallback_count": 1,
+                        "openai_canary_latest_observed_at": observed_at,
+                        "request_id": "secret-applied-request-id",
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        report = plan["evidence"]["stats_summary"]["pass_through_routing_report"]
+        self.assertEqual(report["summary"]["pass_through_rows"], 20)
+        self.assertEqual(report["summary"]["routed_down_rows"], 2)
+        self.assertEqual(report["summary"]["openai_canary_applied_count"], 2)
+        self.assertEqual(report["summary"]["openai_canary_holdout_count"], 3)
+        self.assertEqual(report["summary"]["openai_canary_error_count"], 1)
+        self.assertEqual(report["summary"]["openai_canary_retry_count"], 1)
+        self.assertEqual(report["summary"]["openai_canary_fallback_count"], 1)
+
+        candidate = report["buckets"][0]
+        self.assertEqual(candidate["requested_model"], "gpt-5.4")
+        self.assertEqual(candidate["candidate_target_model"], "gpt-5.4-mini")
+        self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 3)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 20)
+        self.assertGreater(lifecycle["coverage"]["applied_rate"], 0)
+        self.assertGreater(lifecycle["coverage"]["holdout_rate"], 0)
+        self.assertEqual(lifecycle["error_count"], 1)
+        self.assertEqual(lifecycle["retry_count"], 1)
+        self.assertEqual(lifecycle["fallback_count"], 1)
+        self.assertFalse(lifecycle["stale_evidence"]["stale"])
+        self.assertIn("error-observed", lifecycle["blocker_codes"])
+        self.assertIn("retry-observed", lifecycle["blocker_codes"])
+        self.assertIn("fallback-observed", lifecycle["blocker_codes"])
+        self.assertNotIn("missing-applied-coverage", lifecycle["blocker_codes"])
+        self.assertNotIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+        self.assertFalse(lifecycle["privacy"]["raw_prompts_included"])
+        self.assertFalse(lifecycle["privacy"]["request_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["session_ids_included"])
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret-holdout-session-id", rendered)
+        self.assertNotIn("secret-applied-request-id", rendered)
+
     def test_evidence_to_activation_loop_tracks_missing_local_cohort_evidence(self):
         plan = build_research_plan(
             issues=[],

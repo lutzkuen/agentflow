@@ -15727,7 +15727,43 @@ async def stats(store_obj: Any, default_db: str) -> dict[str, Any]:
     conn = store_obj.conn
     calls = conn.execute("select count(*) c from calls").fetchone()["c"]
     cache_hits = conn.execute("select count(*) c from calls where cache_hit = 1").fetchone()["c"]
-    routed = conn.execute("select coalesce(provider, 'anthropic') as provider, requested_model, routed_model, count(*) c from calls group by coalesce(provider, 'anthropic'), requested_model, routed_model order by c desc limit 20").fetchall()
+    routed = conn.execute("""
+        select coalesce(provider, 'anthropic') as provider,
+               coalesce(source_surface, 'unknown') as source_surface,
+               coalesce(endpoint, 'unknown') as endpoint,
+               requested_model,
+               routed_model,
+               coalesce(category, json_extract(routing_json, '$.category'), 'unknown') as category,
+               count(*) c,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') = 'canary_applied' then 1 else 0 end) as openai_canary_applied_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') = 'canary_holdout' then 1 else 0 end) as openai_canary_holdout_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') = 'safety_stopped'
+                         or json_extract(routing_json, '$.openai_canary.status') = 'safety_stopped'
+                        then 1 else 0 end) as openai_canary_safety_stopped_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') = 'skipped' then 1 else 0 end) as openai_canary_skipped_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') = 'bypassed_or_disabled' then 1 else 0 end) as openai_canary_bypassed_or_disabled_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') is not null
+                          and json_extract(routing_json, '$.openai_canary.cohort') not in (
+                              'canary_applied',
+                              'canary_holdout',
+                              'safety_stopped',
+                              'skipped',
+                              'bypassed_or_disabled'
+                          )
+                        then 1 else 0 end) as openai_canary_unknown_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') is not null and status_code >= 400 then 1 else 0 end) as openai_canary_error_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.cohort') is not null and coalesce(retry_count, 0) > 0 then 1 else 0 end) as openai_canary_retry_count,
+               sum(case when json_extract(routing_json, '$.openai_canary.fallback_reason') is not null
+                          or json_extract(routing_json, '$.fallback_reason') is not null
+                        then 1 else 0 end) as openai_canary_fallback_count,
+               max(case when json_extract(routing_json, '$.openai_canary.cohort') is not null then created_at else null end) as openai_canary_latest_observed_at
+        from calls
+        group by coalesce(provider, 'anthropic'), coalesce(source_surface, 'unknown'),
+                 coalesce(endpoint, 'unknown'), requested_model, routed_model,
+                 coalesce(category, json_extract(routing_json, '$.category'), 'unknown')
+        order by c desc
+        limit 20
+    """).fetchall()
     recent = conn.execute("select coalesce(provider, 'anthropic') as provider, created_at, requested_model, routed_model, cache_hit, status_code, latency_ms, cost_est_usd from calls order by created_at desc limit 20").fetchall()
     return {
         "calls": calls,

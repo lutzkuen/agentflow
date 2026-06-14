@@ -2552,13 +2552,28 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
     holdout = _to_int(row.get("openai_canary_holdout_count") or row.get("canary_holdout_count"))
     safety_stopped = _to_int(row.get("openai_canary_safety_stopped_count") or row.get("safety_stopped_count"))
     skipped = _to_int(row.get("openai_canary_skipped_count") or row.get("canary_skipped_count"))
-    bypassed = _to_int(row.get("openai_canary_bypassed_count") or row.get("canary_bypassed_count"))
+    bypassed = _to_int(
+        row.get("openai_canary_bypassed_or_disabled_count")
+        or row.get("openai_canary_bypassed_count")
+        or row.get("canary_bypassed_or_disabled_count")
+        or row.get("canary_bypassed_count")
+    )
     unknown = _to_int(row.get("openai_canary_unknown_count") or row.get("canary_unknown_count"))
     error_count = _to_int(row.get("openai_canary_error_count") or row.get("canary_error_count"))
     retry_count = _to_int(row.get("openai_canary_retry_count") or row.get("canary_retry_count"))
     fallback_count = _to_int(row.get("openai_canary_fallback_count") or row.get("canary_fallback_count"))
     observed = applied + holdout + safety_stopped + skipped + bypassed + unknown
-    stale = bool(row.get("openai_canary_stale_evidence") or row.get("stale_evidence"))
+    stale_raw = row.get("openai_canary_stale_evidence") if row.get("openai_canary_stale_evidence") is not None else row.get("stale_evidence")
+    if isinstance(stale_raw, str):
+        stale = stale_raw.strip().lower() in {"1", "true", "yes", "stale"}
+    else:
+        stale = bool(stale_raw)
+    latest_observed = row.get("openai_canary_latest_observed_at") or row.get("canary_latest_observed_at")
+    latest_dt = _parse_time(latest_observed)
+    age_hours = None
+    if latest_dt is not None:
+        age_hours = round((datetime.now(timezone.utc) - latest_dt).total_seconds() / 3600.0, 3)
+        stale = stale or age_hours > 72.0
 
     blockers: Counter[str] = Counter()
     if observed == 0:
@@ -2599,9 +2614,10 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
         "error_count": error_count,
         "retry_count": retry_count,
         "fallback_count": fallback_count,
-        "latest_observed_at": sanitize_value(row.get("openai_canary_latest_observed_at") or row.get("canary_latest_observed_at")),
+        "latest_observed_at": sanitize_value(latest_observed),
         "stale_evidence": {
             "stale": stale,
+            "age_hours": age_hours,
             "max_age_hours": 72.0,
         },
         "blocker_codes": sorted(blockers),
@@ -2620,6 +2636,43 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
             "absolute_paths_included": False,
         },
     }
+
+
+_OPENAI_CANARY_COUNTER_FIELDS = (
+    "openai_canary_applied_count",
+    "openai_canary_holdout_count",
+    "openai_canary_safety_stopped_count",
+    "openai_canary_skipped_count",
+    "openai_canary_bypassed_or_disabled_count",
+    "openai_canary_unknown_count",
+    "openai_canary_error_count",
+    "openai_canary_retry_count",
+    "openai_canary_fallback_count",
+)
+
+
+def _pass_through_lifecycle_key(row: dict[str, Any], target_model: str | None = None) -> tuple[str, str, str]:
+    provider = _routing_lower(row.get("provider")) or "unknown"
+    requested = _routing_text(row.get("requested_model")) or "unknown"
+    target = _routing_text(target_model or row.get("candidate_target_model") or row.get("target_model") or row.get("routed_model")) or "unknown"
+    return provider, requested, target
+
+
+def _merge_openai_canary_lifecycle_counts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key in _OPENAI_CANARY_COUNTER_FIELDS:
+        merged[key] = _to_int(base.get(key)) + _to_int(extra.get(key))
+    base_latest = _routing_text(base.get("openai_canary_latest_observed_at") or base.get("canary_latest_observed_at"))
+    extra_latest = _routing_text(extra.get("openai_canary_latest_observed_at") or extra.get("canary_latest_observed_at"))
+    if extra_latest and (not base_latest or extra_latest > base_latest):
+        merged["openai_canary_latest_observed_at"] = extra_latest
+    elif base_latest:
+        merged["openai_canary_latest_observed_at"] = base_latest
+    stale = base.get("openai_canary_stale_evidence") if base.get("openai_canary_stale_evidence") is not None else base.get("stale_evidence")
+    extra_stale = extra.get("openai_canary_stale_evidence") if extra.get("openai_canary_stale_evidence") is not None else extra.get("stale_evidence")
+    if stale or extra_stale:
+        merged["openai_canary_stale_evidence"] = bool(stale or extra_stale)
+    return merged
 
 
 def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
@@ -2714,6 +2767,36 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
     if not isinstance(routing_rows, list):
         return None
     buckets: list[dict[str, Any]] = []
+    routed_lifecycle_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for raw in routing_rows:
+        if not isinstance(raw, dict):
+            continue
+        count = _to_int(raw.get("c") or raw.get("count"))
+        if count <= 0:
+            continue
+        provider = _routing_lower(raw.get("provider")) or "unknown"
+        requested = _routing_text(raw.get("requested_model")) or "unknown"
+        routed = raw.get("routed_model")
+        routed_text = _routing_text(routed)
+        if not routed_text or requested == routed_text:
+            continue
+        target_model, _, _ = _routing_candidate_target(
+            provider,
+            requested,
+            _routing_text(raw.get("category")) or "unknown",
+            _routing_text(raw.get("phase") or raw.get("workflow_phase")) or "unknown",
+        )
+        if target_model != routed_text:
+            continue
+        lifecycle_row = dict(raw)
+        if _to_int(lifecycle_row.get("openai_canary_applied_count")) <= 0 and provider == "openai":
+            lifecycle_row["openai_canary_applied_count"] = count
+        key = _pass_through_lifecycle_key(raw, target_model=target_model)
+        routed_lifecycle_by_key[key] = _merge_openai_canary_lifecycle_counts(
+            routed_lifecycle_by_key.get(key, {}),
+            lifecycle_row,
+        )
+
     total_rows = 0
     pass_through_rows = 0
     routed_down_rows = 0
@@ -2730,7 +2813,17 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             routed_down_rows += count
             continue
         pass_through_rows += count
-        buckets.append(_classify_pass_through_bucket(raw))
+        classified_input = dict(raw)
+        target_model, _, _ = _routing_candidate_target(
+            _routing_lower(raw.get("provider")) or "unknown",
+            _routing_text(raw.get("requested_model")) or "unknown",
+            _routing_text(raw.get("category")) or "unknown",
+            _routing_text(raw.get("phase") or raw.get("workflow_phase")) or "unknown",
+        )
+        lifecycle_extra = routed_lifecycle_by_key.get(_pass_through_lifecycle_key(raw, target_model=target_model))
+        if lifecycle_extra:
+            classified_input = _merge_openai_canary_lifecycle_counts(classified_input, lifecycle_extra)
+        buckets.append(_classify_pass_through_bucket(classified_input))
 
     if pass_through_rows <= 0:
         return None
