@@ -255,6 +255,51 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         self.assertTrue(all(plan["status"] == "blocked" for plan in payload["plans"]))
         self.assertNotIn("raw-active-thinking-secret", json.dumps(payload, sort_keys=True))
 
+    def test_holdout_eligible_rows_preserve_projected_savings_without_mutation(self):
+        secret = "raw-holdout-thinking-secret"
+        duplicate = _thinking_text(secret)
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "holdout-eligible",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    request_json=_safe_tool_result_body(duplicate, duplicate),
+                )
+                payload = build_anthropic_thinking_compaction_dry_run(
+                    store,
+                    limit=10,
+                    canary_fraction=0.0,
+                    holdout_fraction=1.0,
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(payload["summary"]["planned_candidate_count"], 0)
+        self.assertEqual(payload["summary"]["holdout_candidate_count"], 1)
+        self.assertEqual(payload["summary"]["eligible_candidate_count"], 1)
+        self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
+        self.assertGreater(payload["summary"]["holdout_projected_saved_tokens"], 0)
+        self.assertGreater(payload["summary"]["holdout_projected_saved_usd"], 0)
+        holdout_plans = [plan for plan in payload["plans"] if plan["status"] == "holdout"]
+        self.assertEqual(len(holdout_plans), 1)
+        plan = holdout_plans[0]
+        self.assertEqual(plan["reason"], "thinking-compaction-holdout")
+        self.assertEqual(plan["no_op_reason"], "canary-holdout-forward-original")
+        self.assertEqual(plan["blockers"], [])
+        self.assertFalse(plan["mutation"]["request_body_changed"])
+        self.assertTrue(plan["mutation"]["eligible_for_apply"])
+        self.assertTrue(plan["mutation"]["would_change_request_body_if_applied"])
+        self.assertEqual(plan["counts"]["saved_tokens_est"], 0)
+        self.assertGreater(plan["counts"]["projected_saved_tokens_est"], 0)
+        self.assertGreater(plan["counts"]["projected_saved_usd"], 0)
+        rendered = json.dumps(payload, sort_keys=True)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("private thinking", rendered)
+        self.assertNotIn("raw-tool-use-id-must-not-leak", rendered)
+        self.assertNotIn("/workspace/private", rendered)
+
     def test_dry_run_blocks_unsupported_shapes_and_unresolved_tool_dependencies_privately(self):
         with TemporaryDirectory() as tmp:
             store = Store(str(Path(tmp) / "agentflow.sqlite3"))

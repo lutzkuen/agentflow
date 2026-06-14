@@ -447,11 +447,11 @@ def _plan_for_block(
         fraction=canary_fraction,
         holdout_fraction=holdout_fraction,
     )
-    saved_chars = max(0, _as_int(block.get("chars")) - len("[thinking history compacted by AgentFlow dry-run]"))
-    saved_tokens = saved_chars // TOKEN_CHARS
+    projected_saved_chars = max(0, _as_int(block.get("chars")) - len("[thinking history compacted by AgentFlow dry-run]"))
+    projected_saved_tokens = projected_saved_chars // TOKEN_CHARS
     projected_saved_usd = estimate_blended_input_savings(
         str(basis.get("routed_model") or basis.get("requested_model") or ""),
-        tokens_saved=saved_tokens,
+        tokens_saved=projected_saved_tokens,
         input_tokens=_as_int(basis.get("actual_input_tokens")),
         cache_read_tokens=_as_int(basis.get("cache_read_tokens")),
         provider="anthropic",
@@ -460,17 +460,45 @@ def _plan_for_block(
     blockers.update(str(item) for item in block.get("blockers") or [])
     if block.get("duplicate_kind") not in {"exact", "near"}:
         blockers.add("no-newer-duplicate-thinking-block")
-    if saved_chars <= 0:
+    if projected_saved_chars <= 0:
         blockers.add("no-thinking-compaction-savings-projected")
-    if cohort["cohort"] == "holdout":
-        blockers.add("thinking-compaction-holdout")
-    elif not cohort["selected"]:
-        blockers.add("thinking-compaction-canary-not-selected")
-    status = "planned" if not blockers and cohort["selected"] else "blocked"
-    if status != "planned":
+    if blockers:
+        status = "blocked"
+        reason = sorted(blockers)[0]
         saved_chars = 0
         saved_tokens = 0
-        projected_saved_usd = 0.0
+        emitted_projected_chars = 0
+        emitted_projected_tokens = 0
+        emitted_projected_usd = 0.0
+        no_op_reason = reason
+    elif cohort["cohort"] == "holdout":
+        status = "holdout"
+        reason = "thinking-compaction-holdout"
+        saved_chars = 0
+        saved_tokens = 0
+        emitted_projected_chars = projected_saved_chars
+        emitted_projected_tokens = projected_saved_tokens
+        emitted_projected_usd = projected_saved_usd
+        no_op_reason = "canary-holdout-forward-original"
+    elif not cohort["selected"]:
+        status = "blocked"
+        reason = "thinking-compaction-canary-not-selected"
+        blockers.add(reason)
+        saved_chars = 0
+        saved_tokens = 0
+        emitted_projected_chars = 0
+        emitted_projected_tokens = 0
+        emitted_projected_usd = 0.0
+        no_op_reason = reason
+    else:
+        status = "planned"
+        reason = "planned-thinking-history-compaction"
+        saved_chars = projected_saved_chars
+        saved_tokens = projected_saved_tokens
+        emitted_projected_chars = projected_saved_chars
+        emitted_projected_tokens = projected_saved_tokens
+        emitted_projected_usd = projected_saved_usd
+        no_op_reason = None
     return {
         "schema": PLAN_SCHEMA,
         "plan_id": candidate_id,
@@ -483,7 +511,8 @@ def _plan_for_block(
             "replacement_notice_included": False,
             "fallback_behavior": "forward_original_request_body",
         },
-        "reason": "planned-thinking-history-compaction" if status == "planned" else sorted(blockers)[0],
+        "reason": reason,
+        "no_op_reason": no_op_reason,
         "blockers": sorted(blockers),
         "provider": public_label(basis["provider"], "unknown"),
         "source_surface": public_label(basis["source_surface"], "unknown"),
@@ -511,7 +540,11 @@ def _plan_for_block(
             "after_chars": max(0, _as_int(block.get("chars")) - saved_chars),
             "saved_chars": saved_chars,
             "saved_tokens_est": saved_tokens,
-            "projected_saved_usd": round(float(projected_saved_usd), 8),
+            "projected_before_chars": _as_int(block.get("chars")),
+            "projected_after_chars": max(0, _as_int(block.get("chars")) - projected_saved_chars),
+            "projected_saved_chars": emitted_projected_chars,
+            "projected_saved_tokens_est": emitted_projected_tokens,
+            "projected_saved_usd": round(float(emitted_projected_usd), 8),
         },
         "cohort": cohort,
         "fallback": {
@@ -527,6 +560,8 @@ def _plan_for_block(
             "provider_call_made": False,
             "managed_server_call_made": False,
             "policy_file_changed": False,
+            "eligible_for_apply": status in {"planned", "holdout"},
+            "would_change_request_body_if_applied": status in {"planned", "holdout"},
         },
         "privacy": {
             "metadata_only_output": True,
@@ -713,9 +748,9 @@ def build_anthropic_thinking_compaction_dry_run(
 
     plans.sort(
         key=lambda item: (
-            1 if item.get("status") == "planned" else 0,
+            {"planned": 2, "holdout": 1}.get(str(item.get("status") or ""), 0),
             _as_float((item.get("counts") or {}).get("projected_saved_usd")),
-            _as_int((item.get("counts") or {}).get("saved_chars")),
+            _as_int((item.get("counts") or {}).get("projected_saved_chars")),
         ),
         reverse=True,
     )
@@ -744,6 +779,8 @@ def build_anthropic_thinking_compaction_dry_run(
         for blocker in plan.get("blockers") or []:
             blocker_counts[str(blocker)] = blocker_counts.get(str(blocker), 0) + 1
     planned = [plan for plan in plans if plan.get("status") == "planned"]
+    holdout = [plan for plan in plans if plan.get("status") == "holdout"]
+    eligible = planned + holdout
     return {
         "schema": SCHEMA,
         "ok": True,
@@ -757,10 +794,24 @@ def build_anthropic_thinking_compaction_dry_run(
             "body_off_row_count": bodyless_rows,
             "plan_count": len(plans),
             "planned_candidate_count": len(planned),
-            "blocked_candidate_count": len(plans) - len(planned),
-            "projected_saved_chars": sum(_as_int((plan.get("counts") or {}).get("saved_chars")) for plan in planned),
-            "projected_saved_tokens": sum(_as_int((plan.get("counts") or {}).get("saved_tokens_est")) for plan in planned),
-            "projected_saved_usd": round(sum(_as_float((plan.get("counts") or {}).get("projected_saved_usd")) for plan in planned), 8),
+            "holdout_candidate_count": len(holdout),
+            "eligible_candidate_count": len(eligible),
+            "blocked_candidate_count": len(plans) - len(eligible),
+            "applied_projected_saved_chars": sum(_as_int((plan.get("counts") or {}).get("saved_chars")) for plan in planned),
+            "applied_projected_saved_tokens": sum(_as_int((plan.get("counts") or {}).get("saved_tokens_est")) for plan in planned),
+            "applied_projected_saved_usd": round(
+                sum(_as_float((plan.get("counts") or {}).get("projected_saved_usd")) for plan in planned),
+                8,
+            ),
+            "holdout_projected_saved_chars": sum(_as_int((plan.get("counts") or {}).get("projected_saved_chars")) for plan in holdout),
+            "holdout_projected_saved_tokens": sum(_as_int((plan.get("counts") or {}).get("projected_saved_tokens_est")) for plan in holdout),
+            "holdout_projected_saved_usd": round(
+                sum(_as_float((plan.get("counts") or {}).get("projected_saved_usd")) for plan in holdout),
+                8,
+            ),
+            "projected_saved_chars": sum(_as_int((plan.get("counts") or {}).get("projected_saved_chars")) for plan in eligible),
+            "projected_saved_tokens": sum(_as_int((plan.get("counts") or {}).get("projected_saved_tokens_est")) for plan in eligible),
+            "projected_saved_usd": round(sum(_as_float((plan.get("counts") or {}).get("projected_saved_usd")) for plan in eligible), 8),
             "provider_calls_made": False,
             "managed_server_calls_made": False,
             "request_bodies_modified": False,
