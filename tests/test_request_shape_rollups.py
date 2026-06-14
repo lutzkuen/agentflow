@@ -7,8 +7,14 @@ import unittest
 import uuid
 from pathlib import Path
 
+import yaml
+
 from agentflow_proxy import cli
-from agentflow_proxy.request_shape_rollups import build_request_shape_rollups_report
+from agentflow_proxy.request_shape_rollups import (
+    apply_request_shape_crunch_canary_action,
+    build_request_shape_rollups_report,
+    request_shape_crunch_canary_lifecycle,
+)
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
 
 
@@ -48,6 +54,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         routing_reason: str = "keep requested model",
         routing_extra: dict[str, object] | None = None,
         cache_extra: dict[str, object] | None = None,
+        crunch_extra: dict[str, object] | None = None,
     ) -> str:
         call_id = str(uuid.uuid4())
         routing_json: dict[str, object] = {
@@ -72,6 +79,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         if cache_extra:
             cache_json.update(cache_extra)
         input_tokens = max(1, text_chars // 4)
+        crunch_json: dict[str, object] = {"changed": False, "tokens_saved_est": 0}
+        if crunch_extra:
+            crunch_json.update(crunch_extra)
         self.store.log_call(
             id=call_id,
             created_at=utc_now(),
@@ -88,7 +98,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             actual_output_tokens=50,
             cost_est_usd=cost,
             cost_baseline_usd=baseline,
-            crunch_json=stable_json({"changed": False, "tokens_saved_est": 0}),
+            crunch_json=stable_json(crunch_json),
             routing_json=stable_json(routing_json),
             cache_json=stable_json(cache_json),
             error="request-id-secret must not leak" if status_code >= 400 else None,
@@ -354,6 +364,18 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("repeated_context", top["work_classes"])
         self.assertIn("crunch", top["work_classes"])
         self.assertEqual(top["candidate_rule"], "repeated-context-conservative-dry-run")
+        self.assertEqual(dry_run["summary"]["recommended_action_count"], 1)
+        action = dry_run["recommended_actions"][0]
+        self.assertEqual(action["schema"], "agentflow.request_shape_crunch_canary_action.v1")
+        self.assertEqual(action["target_local_policy"], "crunch_rules")
+        self.assertEqual(action["rollout_fraction"], 0.1)
+        self.assertEqual(action["holdout_fraction"], 0.1)
+        self.assertEqual(action["candidate_count"], dry_run["summary"]["candidate_count"])
+        self.assertEqual(action["projected_saved_chars"], top["projected_saved_chars"])
+        self.assertEqual(action["projected_saved_tokens"], top["projected_saved_tokens"])
+        self.assertEqual(action["projected_saved_usd"], top["projected_saved_usd"])
+        self.assertTrue(action["safety_gates"]["metadata_only"])
+        self.assertTrue(action["safety_gates"]["holdout_required"])
         class_counts = {item["value"]: item["count"] for item in dry_run["work_class_breakdown"]}
         self.assertEqual(class_counts["repeated_context"], 3)
         rendered = json.dumps(dry_run, sort_keys=True)
@@ -373,6 +395,92 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["provider_bodies_included"])
         self.assertFalse(dry_run["privacy"]["session_ids_included"])
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
+
+    def test_request_shape_crunch_canary_apply_writes_local_rule_and_lifecycle_metadata(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=80_000,
+                cost=cost,
+                baseline=cost,
+            )
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-canary-stage")
+        action = report["crunch_opportunity_dry_run"]["recommended_actions"][0]
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        rules_path.parent.mkdir()
+        rules_path.write_text(
+            yaml.safe_dump({"enabled": True, "unrelated_section": {"keep": True}}),
+            encoding="utf-8",
+        )
+
+        dry_apply = apply_request_shape_crunch_canary_action(action, rules_path=rules_path, dry_run=True)
+        self.assertTrue(dry_apply["ok"])
+        self.assertFalse(dry_apply["wrote_policy_files"])
+        self.assertNotIn("request_shape_repeated_context_canaries", yaml.safe_load(rules_path.read_text(encoding="utf-8")))
+
+        applied = apply_request_shape_crunch_canary_action(action, rules_path=rules_path)
+        self.assertTrue(applied["ok"])
+        self.assertTrue(applied["wrote_policy_files"])
+        rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        self.assertEqual(rules["unrelated_section"], {"keep": True})
+        canaries = rules["request_shape_repeated_context_canaries"]
+        self.assertTrue(canaries["enabled"])
+        self.assertEqual(canaries["rules"][0]["id"], action["policy_id"])
+        self.assertEqual(canaries["rules"][0]["rollout"]["canary_fraction"], 0.1)
+        self.assertEqual(canaries["rules"][0]["rollout"]["holdout_fraction"], 0.1)
+
+        selected: dict[str, dict[str, object]] = {}
+        features = dict(action["conditions"])
+        for index in range(5000):
+            lifecycle = request_shape_crunch_canary_lifecycle(action, {**features, "cohort_sample_id": f"sample-{index}"})
+            if lifecycle["status"] in {"applied", "holdout"}:
+                selected.setdefault(str(lifecycle["status"]), lifecycle)
+            if {"applied", "holdout"} <= set(selected):
+                break
+        self.assertIn("applied", selected)
+        self.assertIn("holdout", selected)
+        self.assertEqual(selected["applied"]["cohort"], "canary_applied")
+        self.assertEqual(selected["holdout"]["cohort"], "canary_holdout")
+
+        unrelated = request_shape_crunch_canary_lifecycle(action, {**features, "category": "chat", "cohort_sample_id": "unrelated"})
+        self.assertEqual(unrelated["status"], "skipped")
+        self.assertEqual(unrelated["reason"], "cohort-mismatch")
+
+        self.store.conn.execute("delete from calls")
+        self.store.conn.commit()
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.08,
+            baseline=0.08,
+            crunch_extra={"request_shape_repeated_context_canary": selected["applied"]},
+        )
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.07,
+            baseline=0.07,
+            crunch_extra={"request_shape_repeated_context_canary": selected["holdout"]},
+        )
+        lifecycle_report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-canary-lifecycle")
+        dry_run = lifecycle_report["crunch_opportunity_dry_run"]
+        self.assertEqual(dry_run["status"], "canary-staged")
+        self.assertEqual(dry_run["summary"]["canary_staged_cohort_count"], 1)
+        self.assertEqual(dry_run["summary"]["canary_applied_rows"], 1)
+        self.assertEqual(dry_run["summary"]["canary_holdout_rows"], 1)
+        self.assertEqual(dry_run["cohorts"][0]["readiness"], "canary-staged")
+        self.assertEqual(dry_run["cohorts"][0]["reason"], "repeated-context-crunch-canary-applied-and-holdout")
+        self.assertEqual(dry_run["recommended_actions"], [])
 
     def test_cli_persists_rollups_by_default_and_dry_run_skips_write(self) -> None:
         self._log_call()

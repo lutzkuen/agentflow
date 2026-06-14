@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -14,9 +15,14 @@ SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
+CRUNCH_CANARY_ACTION_SCHEMA = "agentflow.request_shape_crunch_canary_action.v1"
+CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
+CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
 REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 REPEATED_CONTEXT_CRUNCH_PROJECTION_RATE = 0.05
+DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION = 0.10
+DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION = 0.10
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -337,6 +343,61 @@ def _candidate_id(basis: dict[str, Any]) -> str:
     return f"request-shape:{provider}:{endpoint}:{category}:{digest}"
 
 
+def _crunch_canary_cohort_id(row: dict[str, Any]) -> str:
+    basis = {
+        "provider_family": row.get("provider_family"),
+        "source_surface": row.get("source_surface"),
+        "endpoint": row.get("endpoint"),
+        "category": row.get("category"),
+        "workflow_phase": row.get("workflow_phase"),
+        "stream": bool(row.get("stream")),
+        "has_tools": bool(row.get("has_tools")),
+        "text_bucket": row.get("text_bucket"),
+        "token_bucket": row.get("token_bucket"),
+        "cache_status": row.get("cache_status"),
+        "routing_status": row.get("routing_status"),
+    }
+    digest = hashlib.sha256(stable_json(basis).encode("utf-8")).hexdigest()[:16]
+    provider = str(row.get("provider_family") or "unknown").replace("_", "-")
+    endpoint = str(row.get("endpoint") or "unknown").replace("_", "-")
+    category = str(row.get("category") or "unknown").replace("_", "-")
+    return f"request-shape-crunch:{provider}:{endpoint}:{category}:{digest}"
+
+
+def _crunch_canary_policy_id(cohort_id: str) -> str:
+    digest = hashlib.sha256(cohort_id.encode("utf-8")).hexdigest()[:12]
+    return f"local-repeated-context-crunch-canary-{digest}"
+
+
+def _crunch_canary_lifecycle_from_meta(crunch: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "request_shape_repeated_context_canary",
+        "repeated_context_crunch_canary",
+        "request_shape_crunch_canary",
+        "crunch_canary",
+    ):
+        meta = crunch.get(key)
+        if isinstance(meta, dict):
+            status = public_label(meta.get("status") or meta.get("lifecycle") or meta.get("cohort"), "unknown")
+            cohort = public_label(meta.get("cohort") or status, "unknown")
+            if status in {"canary-applied", "canary_applied"}:
+                status = "applied"
+            elif status in {"canary-holdout", "canary_holdout"}:
+                status = "holdout"
+            if cohort == "canary-applied":
+                cohort = "canary_applied"
+            elif cohort == "canary-holdout":
+                cohort = "canary_holdout"
+            return {
+                "status": status,
+                "cohort": cohort,
+                "policy_id": public_label(meta.get("policy_id"), "unknown"),
+                "cohort_id": public_label(meta.get("cohort_id"), "unknown"),
+                "safety_stop": bool(meta.get("safety_stop")) or status == "safety-stopped",
+            }
+    return None
+
+
 def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> dict[str, Any]:
     return {
         "schema": ROLLUP_ROW_SCHEMA,
@@ -364,12 +425,16 @@ def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> 
         "cost_bucket_counts": {},
         "savings_bucket_counts": {},
         "cache_reason_counts": {},
+        "crunch_canary_lifecycle_counts": {},
+        "crunch_canary_policy_counts": {},
     }
 
 
 def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     candidate_family_counts = group.pop("candidate_family_counts", {})
     blocker_counts = group.pop("blocker_counts", {})
+    crunch_canary_lifecycle_counts = group.pop("crunch_canary_lifecycle_counts", {})
+    crunch_canary_policy_counts = group.pop("crunch_canary_policy_counts", {})
     candidate_families = sorted(candidate_family_counts)
     blocker_codes = sorted(blocker_counts)
     candidate_classes = _candidate_work_classes(
@@ -390,6 +455,8 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
         "cache_reason_breakdown": _breakdown(group.pop("cache_reason_counts", {})),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_breakdown": _breakdown(blocker_counts),
+        "crunch_canary_lifecycle_breakdown": _breakdown(crunch_canary_lifecycle_counts),
+        "crunch_canary_policy_breakdown": _breakdown(crunch_canary_policy_counts),
         "candidate_class_breakdown": [{"value": value, "count": _as_int(group.get("row_count"))} for value in candidate_classes],
         "raw_body_required": False,
         "aggregate_only": True,
@@ -423,6 +490,24 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     group["projected_crunch_tokens_saved"] = max(0, projected_tokens)
     group["projected_crunch_chars_saved"] = max(0, projected_tokens * 4)
     group["projected_crunch_savings_usd"] = round(max(0.0, projected_savings), 6)
+    group["crunch_canary_lifecycle"] = {
+        "schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
+        "cohort_id": _crunch_canary_cohort_id(group),
+        "policy_id": _crunch_canary_policy_id(_crunch_canary_cohort_id(group)),
+        "applied_count": _as_int(crunch_canary_lifecycle_counts.get("applied"))
+        + _as_int(crunch_canary_lifecycle_counts.get("canary_applied")),
+        "holdout_count": _as_int(crunch_canary_lifecycle_counts.get("holdout"))
+        + _as_int(crunch_canary_lifecycle_counts.get("canary_holdout")),
+        "skipped_count": _as_int(crunch_canary_lifecycle_counts.get("skipped")),
+        "safety_stopped_count": _as_int(crunch_canary_lifecycle_counts.get("safety-stopped"))
+        + _as_int(crunch_canary_lifecycle_counts.get("safety_stop")),
+        "fallback_count": _as_int(crunch_canary_lifecycle_counts.get("fallback")),
+        "rollback_count": _as_int(crunch_canary_lifecycle_counts.get("rollback")),
+        "status_breakdown": _breakdown(crunch_canary_lifecycle_counts),
+        "policy_breakdown": _breakdown(crunch_canary_policy_counts),
+        "metadata_only": True,
+        "aggregate_only": True,
+    }
     group["metadata"] = metadata
     group["privacy"] = {
         "metadata_only": True,
@@ -495,7 +580,36 @@ def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
     token_bucket = str(row.get("token_bucket") or "unknown")
     projected_tokens = _as_int(row.get("projected_crunch_tokens_saved"))
     observed_tokens = _as_int(row.get("current_crunch_tokens_saved"))
+    lifecycle = row.get("crunch_canary_lifecycle") if isinstance(row.get("crunch_canary_lifecycle"), dict) else {}
+    applied_count = _as_int(lifecycle.get("applied_count"))
+    holdout_count = _as_int(lifecycle.get("holdout_count"))
+    safety_stopped_count = _as_int(lifecycle.get("safety_stopped_count"))
     blockers: set[str] = set()
+
+    if safety_stopped_count > 0:
+        return {
+            "readiness": "canary-safety-stopped",
+            "reason": "repeated-context-crunch-canary-safety-stopped",
+            "blockers": ["canary-safety-stopped"],
+        }
+    if applied_count > 0 and holdout_count > 0:
+        return {
+            "readiness": "canary-staged",
+            "reason": "repeated-context-crunch-canary-applied-and-holdout",
+            "blockers": [],
+        }
+    if applied_count > 0:
+        return {
+            "readiness": "canary-applied",
+            "reason": "repeated-context-crunch-canary-applied",
+            "blockers": [],
+        }
+    if holdout_count > 0:
+        return {
+            "readiness": "canary-holdout",
+            "reason": "repeated-context-crunch-canary-holdout",
+            "blockers": [],
+        }
 
     if row_count < 2:
         blockers.add("insufficient-repeat-evidence")
@@ -529,10 +643,240 @@ def _shape_crunch_decision(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bounded_fraction(value: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(0.0, min(1.0, number))
+
+
+def _request_shape_crunch_canary_action(
+    cohort: dict[str, Any],
+    *,
+    candidate_count: int,
+    rollout_fraction: float,
+    holdout_fraction: float,
+) -> dict[str, Any]:
+    cohort_id = str(cohort.get("cohort_id") or _crunch_canary_cohort_id(cohort))
+    policy_id = _crunch_canary_policy_id(cohort_id)
+    rollout = _bounded_fraction(rollout_fraction, DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(holdout_fraction, DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
+    if rollout + holdout > 1.0:
+        holdout = max(0.0, 1.0 - rollout)
+    return {
+        "schema": CRUNCH_CANARY_ACTION_SCHEMA,
+        "action_type": "stage-local-repeated-context-crunch-canary",
+        "target_local_policy": "crunch_rules",
+        "policy_section": "crunch",
+        "policy_id": policy_id,
+        "cohort_id": cohort_id,
+        "candidate_rule": cohort.get("candidate_rule"),
+        "candidate_count": candidate_count,
+        "cohort_row_count": _as_int(cohort.get("row_count")),
+        "rollout_fraction": round(rollout, 6),
+        "holdout_fraction": round(holdout, 6),
+        "canary_fraction": round(rollout, 6),
+        "policy_source": "local-manual",
+        "conditions": {
+            "provider_family": cohort.get("provider_family"),
+            "source_surface": cohort.get("source_surface"),
+            "endpoint": cohort.get("endpoint"),
+            "category": cohort.get("category"),
+            "workflow_phase": cohort.get("workflow_phase"),
+            "stream": bool(cohort.get("stream")),
+            "has_tools": bool(cohort.get("has_tools")),
+            "text_bucket": cohort.get("text_bucket"),
+            "token_bucket": cohort.get("token_bucket"),
+            "cache_status": cohort.get("cache_status"),
+            "routing_status": cohort.get("routing_status"),
+        },
+        "projected_saved_chars": _as_int(cohort.get("projected_saved_chars")),
+        "projected_saved_tokens": _as_int(cohort.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(cohort.get("projected_saved_usd")), 6),
+        "safety_gates": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "local_file_backed": True,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "holdout_required": holdout > 0,
+            "max_rollout_fraction": DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION,
+            "records_applied_holdout_skipped_safety_stopped_fallback_rollback": True,
+        },
+        "next_action": "apply-local-crunch-canary-after-review",
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def request_shape_crunch_canary_lifecycle(action: dict[str, Any], features: dict[str, Any]) -> dict[str, Any]:
+    conditions = action.get("conditions") if isinstance(action.get("conditions"), dict) else {}
+    cohort_id = str(action.get("cohort_id") or _crunch_canary_cohort_id(conditions))
+    policy_id = str(action.get("policy_id") or _crunch_canary_policy_id(cohort_id))
+    mismatch = [
+        key
+        for key, expected in conditions.items()
+        if expected is not None and features.get(key) is not None and features.get(key) != expected
+    ]
+    base = {
+        "schema": CRUNCH_CANARY_LIFECYCLE_SCHEMA,
+        "policy_id": policy_id,
+        "cohort_id": cohort_id,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "metadata_only": True,
+    }
+    if mismatch:
+        return {
+            **base,
+            "status": "skipped",
+            "cohort": "skipped",
+            "reason": "cohort-mismatch",
+            "mismatched_conditions": sorted(public_label(item, "unknown") for item in mismatch),
+        }
+
+    rollout = _bounded_fraction(action.get("rollout_fraction", action.get("canary_fraction")), DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(action.get("holdout_fraction"), DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION)
+    if rollout + holdout > 1.0:
+        holdout = max(0.0, 1.0 - rollout)
+    unit = str(features.get("request_fingerprint") or features.get("cohort_sample_id") or stable_json({
+        key: features.get(key)
+        for key in sorted(conditions)
+        if features.get(key) is not None
+    }))
+    material = stable_json({"policy_id": policy_id, "cohort_id": cohort_id, "unit": unit})
+    bucket = int(hashlib.sha256(material.encode("utf-8")).hexdigest()[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+    if bucket < rollout:
+        status = "applied"
+        cohort = "canary_applied"
+        reason = "selected-canary"
+    elif bucket < rollout + holdout:
+        status = "holdout"
+        cohort = "canary_holdout"
+        reason = "selected-holdout"
+    else:
+        status = "skipped"
+        cohort = "skipped"
+        reason = "outside-canary-and-holdout"
+    return {
+        **base,
+        "status": status,
+        "cohort": cohort,
+        "reason": reason,
+        "rollout_fraction": round(rollout, 6),
+        "holdout_fraction": round(holdout, 6),
+        "bucket": round(bucket, 8),
+        "cohort_key_hash": "sha256:" + hashlib.sha256(stable_json({
+            "policy_id": policy_id,
+            "cohort_id": cohort_id,
+            "unit": unit,
+        }).encode("utf-8")).hexdigest(),
+    }
+
+
+def apply_request_shape_crunch_canary_action(
+    action: dict[str, Any],
+    *,
+    rules_path: str | Path,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    if action.get("schema") != CRUNCH_CANARY_ACTION_SCHEMA:
+        errors.append({"path": "$.schema", "message": "unsupported request-shape crunch canary action schema"})
+    if action.get("action_type") != "stage-local-repeated-context-crunch-canary":
+        errors.append({"path": "$.action_type", "message": "unsupported request-shape crunch canary action type"})
+    if action.get("target_local_policy") != "crunch_rules":
+        errors.append({"path": "$.target_local_policy", "message": "request-shape crunch canary must target crunch_rules"})
+    privacy = action.get("privacy") if isinstance(action.get("privacy"), dict) else {}
+    safety = action.get("safety_gates") if isinstance(action.get("safety_gates"), dict) else {}
+    for key in ("raw_prompts_included", "provider_bodies_included", "request_ids_included", "session_ids_included"):
+        if privacy.get(key) or safety.get(key):
+            errors.append({"path": f"$.privacy.{key}", "message": "request-shape crunch canary action is not metadata-only"})
+    if _as_float(action.get("projected_saved_tokens")) <= 0 and _as_float(action.get("projected_saved_chars")) <= 0:
+        errors.append({"path": "$.projected_saved_tokens", "message": "request-shape crunch canary needs positive projected savings"})
+
+    path = Path(rules_path)
+    existing: dict[str, Any] = {}
+    if path.exists():
+        import yaml
+
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        existing = loaded if isinstance(loaded, dict) else {}
+    if errors:
+        return {
+            "schema": CRUNCH_CANARY_APPLY_SCHEMA,
+            "ok": False,
+            "dry_run": bool(dry_run),
+            "wrote_policy_files": False,
+            "rules_path_included": False,
+            "errors": errors,
+            "privacy": _crunch_opportunity_privacy(),
+        }
+
+    policy_id = str(action.get("policy_id") or _crunch_canary_policy_id(str(action.get("cohort_id") or "")))
+    canary_rule = {
+        "id": policy_id,
+        "enabled": True,
+        "policy_source": "local-manual",
+        "cohort_id": action.get("cohort_id"),
+        "conditions": action.get("conditions") if isinstance(action.get("conditions"), dict) else {},
+        "rollout": {
+            "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+            "canary_enabled": True,
+            "canary_fraction": _bounded_fraction(action.get("rollout_fraction"), DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION),
+            "holdout_fraction": _bounded_fraction(action.get("holdout_fraction"), DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION),
+            "canary_salt": policy_id,
+            "canary_unit": "request_shape_cohort",
+        },
+        "projected_saved_chars": _as_int(action.get("projected_saved_chars")),
+        "projected_saved_tokens": _as_int(action.get("projected_saved_tokens")),
+        "projected_saved_usd": round(_as_float(action.get("projected_saved_usd")), 6),
+        "safety_gates": action.get("safety_gates") if isinstance(action.get("safety_gates"), dict) else {},
+        "staged_at": utc_now(),
+    }
+    updated = dict(existing)
+    section = updated.get("request_shape_repeated_context_canaries")
+    if not isinstance(section, dict):
+        section = {}
+    rules = section.get("rules") if isinstance(section.get("rules"), list) else []
+    kept = [rule for rule in rules if not (isinstance(rule, dict) and rule.get("id") == policy_id)]
+    section.update({
+        "enabled": True,
+        "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+        "rules": kept + [canary_rule],
+    })
+    updated["request_shape_repeated_context_canaries"] = section
+    if not dry_run:
+        import yaml
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(updated, sort_keys=False), encoding="utf-8")
+
+    return {
+        "schema": CRUNCH_CANARY_APPLY_SCHEMA,
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "wrote_policy_files": not dry_run,
+        "target_local_policy": "crunch_rules",
+        "policy_id": policy_id,
+        "cohort_id": action.get("cohort_id"),
+        "canary_fraction": canary_rule["rollout"]["canary_fraction"],
+        "holdout_fraction": canary_rule["rollout"]["holdout_fraction"],
+        "rules_path_included": False,
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
 def build_request_shape_crunch_opportunity_dry_run(
     rollups: list[dict[str, Any]],
     *,
     limit: int = 25,
+    rollout_fraction: float = DEFAULT_CRUNCH_CANARY_ROLLOUT_FRACTION,
+    holdout_fraction: float = DEFAULT_CRUNCH_CANARY_HOLDOUT_FRACTION,
 ) -> dict[str, Any]:
     crunch_rows = [
         row
@@ -554,6 +898,9 @@ def build_request_shape_crunch_opportunity_dry_run(
     observed_tokens = 0
     observed_chars = 0
     observed_savings = 0.0
+    canary_applied_rows = 0
+    canary_holdout_rows = 0
+    canary_safety_stopped_rows = 0
 
     for row in crunch_rows:
         decision = _shape_crunch_decision(row)
@@ -567,6 +914,12 @@ def build_request_shape_crunch_opportunity_dry_run(
         row_observed_tokens = _as_int(row.get("current_crunch_tokens_saved"))
         row_observed_chars = _as_int(row.get("current_crunch_chars_saved"))
         row_observed_savings = _as_float(row.get("current_crunch_savings_usd"))
+        lifecycle = row.get("crunch_canary_lifecycle") if isinstance(row.get("crunch_canary_lifecycle"), dict) else {}
+        cohort_id = str(lifecycle.get("cohort_id") or _crunch_canary_cohort_id(row))
+        policy_id = str(lifecycle.get("policy_id") or _crunch_canary_policy_id(cohort_id))
+        applied_count = _as_int(lifecycle.get("applied_count"))
+        holdout_count = _as_int(lifecycle.get("holdout_count"))
+        safety_stopped_count = _as_int(lifecycle.get("safety_stopped_count"))
 
         _increment(readiness_counts, readiness)
         _increment(reason_counts, reason)
@@ -574,17 +927,22 @@ def build_request_shape_crunch_opportunity_dry_run(
             _increment(blocker_counts, blocker)
         for work_class in classes:
             _increment(work_class_counts, work_class, row_count)
-        if readiness == "measurement-ready":
+        if readiness in {"measurement-ready", "canary-staged", "canary-applied", "canary-holdout"}:
             projected_tokens += row_projected_tokens
             projected_chars += row_projected_chars
             projected_savings += row_projected_savings
             observed_tokens += row_observed_tokens
             observed_chars += row_observed_chars
             observed_savings += row_observed_savings
+        canary_applied_rows += applied_count
+        canary_holdout_rows += holdout_count
+        canary_safety_stopped_rows += safety_stopped_count
 
         cohorts.append(
             {
                 "schema": "agentflow.request_shape_crunch_opportunity_cohort.v1",
+                "cohort_id": cohort_id,
+                "policy_id": policy_id,
                 "readiness": readiness,
                 "reason": reason,
                 "blockers": decision.get("blockers") or [],
@@ -607,6 +965,7 @@ def build_request_shape_crunch_opportunity_dry_run(
                 "projected_saved_tokens": row_projected_tokens,
                 "projected_saved_chars": row_projected_chars,
                 "projected_saved_usd": round(row_projected_savings, 6),
+                "crunch_canary_lifecycle": lifecycle,
                 "candidate_rule": "repeated-context-conservative-dry-run",
                 "estimate_basis": (
                     "metadata-only projection using aggregate input tokens, repeated-shape row count, "
@@ -629,9 +988,23 @@ def build_request_shape_crunch_opportunity_dry_run(
     for rank, row in enumerate(cohorts, start=1):
         row["rank"] = rank
 
+    recommended_actions = [
+        _request_shape_crunch_canary_action(
+            cohort,
+            candidate_count=len(cohorts),
+            rollout_fraction=rollout_fraction,
+            holdout_fraction=holdout_fraction,
+        )
+        for cohort in cohorts[:1]
+        if cohort.get("readiness") == "measurement-ready"
+    ]
     blocker_breakdown = _breakdown(blocker_counts)
     top_blocker = blocker_breakdown[0]["value"] if blocker_breakdown else None
     status = "ranked" if projected_tokens > 0 or observed_tokens > 0 or projected_savings > 0 or observed_savings > 0 else "no-positive-crunch-opportunity"
+    if canary_safety_stopped_rows:
+        status = "canary-safety-stopped"
+    elif canary_applied_rows or canary_holdout_rows:
+        status = "canary-staged"
     if not cohorts:
         status = "no-repeated-context-crunch-cohorts"
     missing = []
@@ -648,6 +1021,14 @@ def build_request_shape_crunch_opportunity_dry_run(
             "matched_count": sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows),
             "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in crunch_rows),
             "measurement_ready_cohort_count": readiness_counts.get("measurement-ready", 0),
+            "canary_staged_cohort_count": readiness_counts.get("canary-staged", 0),
+            "canary_applied_cohort_count": readiness_counts.get("canary-applied", 0),
+            "canary_holdout_cohort_count": readiness_counts.get("canary-holdout", 0),
+            "canary_safety_stopped_cohort_count": readiness_counts.get("canary-safety-stopped", 0),
+            "canary_applied_rows": canary_applied_rows,
+            "canary_holdout_rows": canary_holdout_rows,
+            "canary_safety_stopped_rows": canary_safety_stopped_rows,
+            "recommended_action_count": len(recommended_actions),
             "skipped_cohort_count": readiness_counts.get("skipped", 0),
             "current_conservative_tokens_saved": observed_tokens,
             "current_conservative_chars_saved": observed_chars,
@@ -660,6 +1041,7 @@ def build_request_shape_crunch_opportunity_dry_run(
             "cache_entries_written": 0,
             "policy_files_written": False,
         },
+        "recommended_actions": recommended_actions,
         "readiness_breakdown": _breakdown(readiness_counts),
         "reason_breakdown": _breakdown(reason_counts),
         "blocker_reason_breakdown": blocker_breakdown,
@@ -976,6 +1358,7 @@ def build_request_shape_rollups_report(
         status_bucket = _status_bucket(row.get("status_code"))
         current_crunch_tokens = _crunch_saved_tokens(crunch)
         current_crunch_chars = _crunch_saved_chars(crunch)
+        crunch_canary_lifecycle = _crunch_canary_lifecycle_from_meta(crunch)
         crunch_model = str(row.get("routed_model") or row.get("requested_model") or "")
         current_crunch_savings = _input_savings_usd(
             current_crunch_tokens,
@@ -1055,6 +1438,11 @@ def build_request_shape_rollups_report(
         for blocker in blockers:
             _increment(blocker_counts, blocker)
             _increment(group["blocker_counts"], blocker)
+        if crunch_canary_lifecycle:
+            status = str(crunch_canary_lifecycle.get("status") or "unknown")
+            _increment(group["crunch_canary_lifecycle_counts"], status)
+            policy_id = str(crunch_canary_lifecycle.get("policy_id") or "unknown")
+            _increment(group["crunch_canary_policy_counts"], policy_id)
 
     rollups = [_finalize_group(group) for group in groups.values()]
     rollups.sort(
