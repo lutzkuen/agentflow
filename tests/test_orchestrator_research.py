@@ -369,6 +369,157 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("req-secret-should-not-leak", rendered)
         self.assertNotIn("session-secret-should-not-leak", rendered)
 
+    def test_evidence_to_activation_loop_tracks_missing_local_cohort_evidence(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2483,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "unknown",
+                        "c": 223,
+                        "request_id": "req-secret-loop",
+                    }
+                ],
+                "crunch_savings_usd": 0.0,
+                "today_crunch_savings_usd": 0.0,
+                "crunch_tokens_saved": 0,
+                "crunch_chars_saved": 0,
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        self.assertEqual(loop["schema"], "agentflow.evidence_to_activation_savings_loop.v1")
+        self.assertEqual(loop["status"], "missing-evidence")
+        self.assertEqual(loop["summary"]["top_lever"], "routing")
+        self.assertEqual(loop["summary"]["top_next_action"], "activate-openai-routing-canary-cohorts")
+        routing = next(row for row in loop["levers"] if row["lever"] == "routing")
+        self.assertEqual(routing["state"], "missing-evidence")
+        self.assertEqual(routing["requested_model"], "gpt-5.4")
+        self.assertEqual(routing["candidate_target_model"], "gpt-5.4-mini")
+        self.assertIn("missing-applied-coverage", routing["blocker_codes"])
+        self.assertIn("missing-holdout-coverage", routing["blocker_codes"])
+        self.assertTrue(loop["privacy"]["metadata_only"])
+        self.assertTrue(loop["privacy"]["aggregate_only"])
+        self.assertFalse(loop["privacy"]["raw_prompts_included"])
+        self.assertFalse(loop["privacy"]["provider_bodies_included"])
+        self.assertFalse(loop["privacy"]["request_ids_included"])
+        self.assertFalse(loop["privacy"]["session_ids_included"])
+        self.assertFalse(loop["privacy"]["cache_keys_included"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("req-secret-loop", rendered)
+
+    def test_evidence_to_activation_loop_reports_activation_progress(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "openai_canary_impact": {
+                    "schema": "agentflow.openai_canary_impact.v1",
+                    "summary": {
+                        "candidate_count": 1,
+                        "canary_applied_count": 2,
+                        "canary_holdout_count": 1,
+                    },
+                    "candidates": [
+                        {
+                            "candidate_id": "raw-loop-routing-candidate",
+                            "source_surface": "openai_responses",
+                            "original_model": "gpt-5.4",
+                            "candidate_target_model": "gpt-5.4-mini",
+                            "verdict": "widen",
+                            "next_action": "widen_local_openai_canary",
+                            "reason_codes": ["target-savings-met"],
+                            "sample_count": 3,
+                            "cohort_counts": {
+                                "canary_applied": 2,
+                                "canary_holdout": 1,
+                                "safety_stopped": 0,
+                            },
+                            "observed_savings_usd": 0.02,
+                            "projected_savings_usd": 0.03,
+                            "stale_evidence": {"stale": False},
+                        }
+                    ],
+                    "activation_lifecycle_feedback": {
+                        "queue_rows": 1,
+                        "state_breakdown": [{"value": "healthy_canary", "count": 1}],
+                        "cohort_lifecycle_metadata": [
+                            {
+                                "policy_ref": "policy:public",
+                                "cohort_label": "canary_applied",
+                                "action_family": "routing",
+                                "event_count": 2,
+                                "applied_count": 2,
+                                "policy_id": "raw-loop-policy-secret",
+                            },
+                            {
+                                "policy_ref": "policy:public",
+                                "cohort_label": "canary_holdout",
+                                "action_family": "routing",
+                                "event_count": 1,
+                                "holdout_count": 1,
+                                "policy_id": "raw-loop-policy-secret",
+                            },
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                },
+                "cache_replay_cohort_ranking": {
+                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 2},
+                    "cohorts": [
+                        {
+                            "readiness": "activation-ready",
+                            "count": 3,
+                            "projected_hits": 2,
+                            "projected_saved_cost_usd": 0.04,
+                            "cohort_id": "raw-loop-cache-cohort",
+                        }
+                    ],
+                },
+                "old_context_summary_opportunity": {
+                    "schema": "agentflow.old_context_summary_opportunity.v1",
+                    "summary": {
+                        "candidate_count": 1,
+                        "projected_saved_tokens": 5000,
+                        "projected_saved_usd": 0.25,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        self.assertEqual(loop["status"], "activation-ready")
+        self.assertGreaterEqual(loop["summary"]["progressed_count"], 3)
+        self.assertEqual(loop["summary"]["activation_ready_count"], 2)
+        self.assertEqual(loop["summary"]["top_lever"], "routing")
+        routing = next(row for row in loop["levers"] if row["lever"] == "routing")
+        cache = next(row for row in loop["levers"] if row["lever"] == "cache")
+        crunch = next(row for row in loop["levers"] if row["lever"] == "crunch")
+        self.assertEqual(routing["state"], "activation-ready")
+        self.assertEqual(routing["applied_count"], 2)
+        self.assertEqual(routing["holdout_count"], 1)
+        self.assertEqual(cache["state"], "replay-ready")
+        self.assertEqual(cache["projected_hits"], 2)
+        self.assertEqual(crunch["state"], "projected-savings")
+        self.assertEqual(crunch["projected_saved_usd"], 0.25)
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-loop-routing-candidate", rendered)
+        self.assertNotIn("raw-loop-policy-secret", rendered)
+        self.assertNotIn("raw-loop-cache-cohort", rendered)
+
     def test_crunch_candidate_ranks_projected_savings_report(self):
         plan = build_research_plan(
             issues=[],

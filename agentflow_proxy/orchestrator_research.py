@@ -533,6 +533,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     shape_signal = _request_shape_rollup_signal(stats)
     if shape_signal is not None:
         summary["request_shape_rollup_candidates"] = shape_signal
+    activation_loop = _evidence_to_activation_loop(summary)
+    if activation_loop is not None:
+        summary["evidence_to_activation_loop"] = activation_loop
     return summary
 
 
@@ -1170,6 +1173,242 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "individual_candidate_ids_included": False,
             "absolute_paths_included": False,
         },
+    }
+
+
+def _loop_privacy() -> dict[str, Any]:
+    privacy = _candidate_privacy()
+    privacy["cache_keys_included"] = False
+    return privacy
+
+
+def _loop_state_rank(state: str) -> int:
+    return {
+        "activation-ready": 0,
+        "replay-ready": 1,
+        "measured-savings": 2,
+        "projected-savings": 3,
+        "ranked-evidence": 4,
+        "missing-evidence": 5,
+        "blocked": 6,
+        "no-op": 7,
+    }.get(state, 9)
+
+
+def _loop_missing_state(state: str) -> bool:
+    return state in {"missing-evidence", "blocked"}
+
+
+def _loop_progress_state(state: str) -> bool:
+    return state in {"activation-ready", "replay-ready", "measured-savings", "projected-savings", "ranked-evidence"}
+
+
+def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    canary_row, source = _top_openai_routing_canary_row(stats_summary)
+    if canary_row is not None:
+        action = _openai_routing_candidate_action(canary_row, stats_summary)
+        counts = canary_row.get("cohort_counts") if isinstance(canary_row.get("cohort_counts"), dict) else {}
+        state = "activation-ready" if action["activation_ready"] else "blocked"
+        next_action = str(canary_row.get("next_action") or "inspect-openai-routing-canary")
+        return {
+            "lever": "routing",
+            "state": state,
+            "evidence_source": source,
+            "local_action_family": "routing",
+            "next_action": next_action if state == "activation-ready" else "resolve-openai-routing-canary-blocker",
+            "blocker_codes": [] if state == "activation-ready" else [action["omission_reason"]],
+            "sample_count": _to_int(canary_row.get("sample_count")) or sum(_to_int(value) for value in counts.values()),
+            "applied_count": _to_int(counts.get("canary_applied")),
+            "holdout_count": _to_int(counts.get("canary_holdout")),
+            "savings_per_1000_calls_usd": action["savings_per_1000_calls_usd"],
+        }
+
+    report = stats_summary.get("pass_through_routing_report")
+    if not isinstance(report, dict):
+        return None
+    buckets = [row for row in report.get("buckets") or [] if isinstance(row, dict)]
+    actionable = [row for row in buckets if row.get("actionability") == "actionable"]
+    top = (actionable or buckets or [None])[0]
+    if top is None:
+        return None
+    lifecycle = top.get("openai_canary_lifecycle_evidence") if isinstance(top.get("openai_canary_lifecycle_evidence"), dict) else {}
+    blockers = [str(item) for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()]
+    actionability = str(top.get("actionability") or "unknown")
+    if actionability == "actionable" and blockers:
+        state = "missing-evidence"
+        next_action = "activate-openai-routing-canary-cohorts"
+    elif actionability == "actionable":
+        state = "ranked-evidence"
+        next_action = "stage-openai-routing-canary"
+    else:
+        state = "no-op" if actionability == "already-cheapest" else "blocked"
+        next_action = "keep-routing-no-op-reason"
+    return {
+        "lever": "routing",
+        "state": state,
+        "evidence_source": report.get("schema"),
+        "local_action_family": "routing",
+        "next_action": next_action,
+        "actionability": actionability,
+        "blocker_codes": blockers or ([str(top.get("no_op_reason"))] if top.get("no_op_reason") else []),
+        "sample_count": _to_int(top.get("sample_count")),
+        "requested_model": top.get("requested_model"),
+        "candidate_target_model": top.get("candidate_target_model"),
+        "savings_per_1000_calls_usd": _to_float(top.get("estimated_savings_per_1000_calls_usd")),
+    }
+
+
+def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    cohorts = stats_summary.get("cache_replay_cohort_ranking")
+    if isinstance(cohorts, dict):
+        summary = cohorts.get("summary") if isinstance(cohorts.get("summary"), dict) else {}
+        rows = [row for row in cohorts.get("cohorts") or [] if isinstance(row, dict)]
+        top = rows[0] if rows else {}
+        readiness = str(top.get("readiness") or "")
+        activation_ready = _to_int(summary.get("activation_ready_count")) > 0 or readiness == "activation-ready"
+        state = "replay-ready" if activation_ready else "missing-evidence"
+        blockers = [str(item) for item in top.get("blocker_reasons") or [] if str(item or "").strip()]
+        return {
+            "lever": "cache",
+            "state": state,
+            "evidence_source": cohorts.get("schema"),
+            "local_action_family": "cache",
+            "next_action": "stage-cache-replay-canary" if activation_ready else "dry-run-cache-replayability",
+            "blocker_codes": [] if activation_ready else blockers or [str(top.get("readiness") or "cache-replay-evidence-missing")],
+            "sample_count": _to_int(top.get("count") or summary.get("candidate_rows")),
+            "projected_hits": _to_int(top.get("projected_hits") or summary.get("projected_ready_hits")),
+            "projected_saved_cost_usd": round(_to_float(top.get("projected_saved_cost_usd")), 8),
+        }
+
+    ladder = stats_summary.get("cache_zero_hit_blocker_ladder")
+    if isinstance(ladder, dict):
+        summary = ladder.get("summary") if isinstance(ladder.get("summary"), dict) else {}
+        rows = [row for row in ladder.get("ladder") or [] if isinstance(row, dict)]
+        top = rows[0] if rows else {}
+        blocker = str(top.get("blocker_code") or summary.get("top_blocker_code") or "zero-cache-hits")
+        return {
+            "lever": "cache",
+            "state": "missing-evidence",
+            "evidence_source": ladder.get("schema"),
+            "local_action_family": "cache",
+            "next_action": str(top.get("next_action_family") or summary.get("top_next_action_family") or "dry-run-cache-replayability"),
+            "blocker_codes": [blocker],
+            "sample_count": _to_int(top.get("count") or summary.get("scanned_rows")),
+            "cache_hits": _to_int(summary.get("cache_hits")),
+        }
+
+    calls = _to_int(stats_summary.get("calls") or stats_summary.get("today_calls"))
+    if calls <= 0:
+        return None
+    cache_hits = _to_int(stats_summary.get("cache_hits"))
+    return {
+        "lever": "cache",
+        "state": "ranked-evidence" if cache_hits > 0 else "missing-evidence",
+        "evidence_source": "stats_summary",
+        "local_action_family": "cache",
+        "next_action": "inspect-cache-hit-cohorts" if cache_hits > 0 else "dry-run-cache-replayability",
+        "blocker_codes": [] if cache_hits > 0 else ["zero-cache-hits"],
+        "sample_count": calls,
+        "cache_hits": cache_hits,
+    }
+
+
+def _crunch_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    signal = stats_summary.get("crunch_savings_signal")
+    if not isinstance(signal, dict):
+        return None
+    status = str(signal.get("status") or "")
+    observed = signal.get("observed") if isinstance(signal.get("observed"), dict) else {}
+    top_report = signal.get("top_report") if isinstance(signal.get("top_report"), dict) else {}
+    if status == "observed-savings-ranked":
+        state = "measured-savings"
+        next_action = "produce-crunch-activation-follow-up"
+    elif status == "projected-savings-ranked":
+        state = "projected-savings"
+        next_action = "produce-crunch-opportunity-measurements"
+    else:
+        state = "missing-evidence"
+        next_action = "emit-crunch-opportunity-report"
+    return {
+        "lever": "crunch",
+        "state": state,
+        "evidence_source": signal.get("schema"),
+        "local_action_family": "crunch",
+        "next_action": next_action,
+        "blocker_codes": [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()],
+        "sample_count": _to_int(signal.get("calls")),
+        "crunch_savings_usd": round(_to_float(observed.get("crunch_savings_usd")), 8),
+        "today_crunch_savings_usd": round(_to_float(observed.get("today_crunch_savings_usd")), 8),
+        "projected_saved_usd": round(_to_float(top_report.get("projected_saved_usd")), 8),
+    }
+
+
+def _request_shape_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    signal = stats_summary.get("request_shape_rollup_candidates")
+    if not isinstance(signal, dict):
+        return None
+    summary = signal.get("summary") if isinstance(signal.get("summary"), dict) else {}
+    top = signal.get("top_candidate") if isinstance(signal.get("top_candidate"), dict) else {}
+    state = "ranked-evidence" if str(signal.get("status") or "") == "candidates-ranked" and top else "missing-evidence"
+    return {
+        "lever": "request-shape-rollups",
+        "state": state,
+        "evidence_source": signal.get("source_schema") or signal.get("schema"),
+        "local_action_family": "cohort-ranking",
+        "next_action": str(summary.get("top_next_action") or "emit-request-shape-rollups"),
+        "blocker_codes": [str(item) for item in signal.get("missing_measurements") or [] if str(item or "").strip()]
+        or [str(item) for item in top.get("blocker_codes") or [] if str(item or "").strip()],
+        "sample_count": _to_int(top.get("row_count") or summary.get("rows_considered")),
+        "ranked_candidate_count": _to_int(summary.get("ranked_candidate_count")),
+    }
+
+
+def _evidence_to_activation_loop(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    stages = [
+        stage
+        for stage in (
+            _routing_loop_stage(stats_summary),
+            _cache_loop_stage(stats_summary),
+            _crunch_loop_stage(stats_summary),
+            _request_shape_loop_stage(stats_summary),
+        )
+        if stage is not None
+    ]
+    if not stages:
+        return None
+
+    stages.sort(
+        key=lambda item: (
+            _loop_state_rank(str(item.get("state") or "")),
+            -_to_float(item.get("savings_per_1000_calls_usd") or item.get("projected_saved_cost_usd") or item.get("projected_saved_usd")),
+            -_to_int(item.get("sample_count")),
+            str(item.get("lever") or ""),
+        )
+    )
+    missing_count = sum(1 for stage in stages if _loop_missing_state(str(stage.get("state") or "")))
+    progressed_count = sum(1 for stage in stages if _loop_progress_state(str(stage.get("state") or "")))
+    activation_ready_count = sum(1 for stage in stages if str(stage.get("state")) in {"activation-ready", "replay-ready"})
+    if activation_ready_count:
+        status = "activation-ready"
+    elif progressed_count:
+        status = "evidence-progress"
+    else:
+        status = "missing-evidence"
+
+    return {
+        "schema": "agentflow.evidence_to_activation_savings_loop.v1",
+        "status": status,
+        "summary": {
+            "tracked_lever_count": len(stages),
+            "missing_evidence_count": missing_count,
+            "progressed_count": progressed_count,
+            "activation_ready_count": activation_ready_count,
+            "top_lever": stages[0].get("lever"),
+            "top_state": stages[0].get("state"),
+            "top_next_action": stages[0].get("next_action"),
+        },
+        "levers": stages,
+        "privacy": _loop_privacy(),
     }
 
 
