@@ -7831,6 +7831,109 @@ class StatsFullTest(unittest.TestCase):
         self.assertNotIn("provider_prompt_cache_discount_usd", exec_savings["today_agentflow_generated_buckets"])
         self.assertIn("today_provider_prompt_cache_discount_usd", exec_savings)
 
+    def test_stats_full_exposes_cache_replay_cohort_ranking_for_research_handoff(self):
+        dependency_audit = {
+            "schema": "agentflow.cache_file_dependency_audit.v1",
+            "file_watch_enabled": True,
+            "snapshot_root_policy": "stored-local-paths",
+            "root_path_included": False,
+            "snapshot_count": 2,
+            "snapshot_count_bucket": "2_5",
+            "candidate_path_count_bucket": "2_5",
+            "raw_candidate_path_count_bucket": "2_5",
+            "distinct_candidate_path_count_bucket": "2_5",
+            "dependency_capture_reason": "complete",
+            "present_path_count": 2,
+            "missing_path_count": 0,
+            "changed_path_count": 0,
+            "deleted_path_count": 0,
+            "created_path_count": 0,
+            "safe_invalidation_evidence": True,
+            "file_dependency_evidence_available": True,
+            "paths": ["/home/lutz/private/cache-source.py"],
+            "paths_included": True,
+        }
+        for index, cost in enumerate((0.02, 0.03)):
+            server.store.log_call(
+                id=f"cache-replay-secret-call-{index}",
+                created_at=f"2026-06-10T04:0{index}:00+00:00",
+                path="/v1/messages",
+                requested_model="claude-sonnet-4-6",
+                routed_model="claude-sonnet-4-6",
+                stream=1,
+                cache_hit=0,
+                status_code=200,
+                latency_ms=100,
+                input_tokens_est=4000,
+                output_tokens_est=200,
+                actual_input_tokens=4000,
+                actual_output_tokens=200,
+                cost_est_usd=cost,
+                cost_baseline_usd=cost,
+                crunch_json=stable_json({"changed": False}),
+                routing_json=stable_json({
+                    "category": "tool-result",
+                    "workflow_phase": "tool-execution",
+                    "has_tools": True,
+                    "text_chars": 64000,
+                    "managed_pattern_features": {
+                        "source_surface": "anthropic_messages",
+                        "app_family": "claude_code",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "text_bucket": "32k_128k_chars",
+                        "pattern_hashes": ["sha256:" + "a" * 64],
+                    },
+                }),
+                cache_json=stable_json({
+                    "status": "skipped",
+                    "reason": "streaming",
+                    "policy_source": "local-default",
+                    "tool_cache_enabled": False,
+                    "replayability_level": "local-exact-response",
+                    "replay_scope": "session",
+                    "replay_scope_id_available": True,
+                    "cache_key": "raw-cache-key-secret",
+                    "file_dependency_audit": dependency_audit,
+                }),
+                error=None,
+                request_json=stable_json({"messages": [{"content": "raw replay prompt must not leak"}]}),
+                response_json=stable_json({"content": "raw replay response must not leak"}),
+                session_id="raw-replay-session-secret",
+                category="tool-result",
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                retry_count=0,
+                provider="anthropic",
+            )
+
+        result = asyncio.run(stats_views.stats_full(server.store))
+        ranking = result["cache_replay_cohort_ranking"]
+
+        self.assertEqual(ranking["schema"], "agentflow.cache_replay_plateau_cohort_ranking.v1")
+        self.assertEqual(ranking["summary"]["activation_ready_count"], 1)
+        self.assertEqual(ranking["summary"]["projected_ready_hits"], 1)
+        self.assertGreaterEqual(ranking["summary"]["projected_ready_saved_cost_usd"], 0.02)
+        self.assertEqual(ranking["cohorts"][0]["readiness"], "activation-ready")
+        self.assertEqual(ranking["cohorts"][0]["dependency_state"], "stable")
+        self.assertEqual(ranking["cohorts"][0]["projected_hits"], 1)
+        self.assertTrue(ranking["cohorts"][0]["recommended_canary"]["safe_invalidation"])
+        rendered = json.dumps(ranking, sort_keys=True)
+        for forbidden in (
+            "raw replay prompt must not leak",
+            "raw replay response must not leak",
+            "raw-replay-session-secret",
+            "raw-cache-key-secret",
+            "cache-replay-secret-call-",
+            "/home/lutz/private",
+            "sha256:" + "a" * 64,
+        ):
+            self.assertNotIn(forbidden, rendered)
+        self.assertFalse(ranking["privacy"]["raw_request_bodies_included"])
+        self.assertFalse(ranking["privacy"]["raw_session_ids_included"])
+        self.assertFalse(ranking["privacy"]["cache_keys_included"])
+        self.assertFalse(ranking["privacy"]["pattern_hashes_included"])
+
     def test_activity_stats_normalize_provider_calls_and_codex_turns(self):
         provider_id = str(uuid.uuid4())
         server.store.log_call(

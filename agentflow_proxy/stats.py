@@ -16817,6 +16817,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         scan_limit=_CACHE_BLOCKER_SCAN_LIMIT,
     )
     cache_replayability = await stats_cache_replayability(store_obj, limit=20)
+    cache_replay_cohort_ranking = await stats_cache_replay_cohort_ranking(store_obj, limit=20, row_limit=1000)
     cache_replay_confidence = await stats_cache_replay_confidence(store_obj, limit=50)
     cache_replay_readiness = await stats_cache_replay_readiness(store_obj, limit=50)
     cache_replay_activation_health = await stats_cache_replay_activation_health(store_obj, limit=50, scan_limit=1000)
@@ -16990,6 +16991,7 @@ async def stats_full(store_obj: Any) -> dict[str, Any]:
         "cache_zero_hit_blocker_ladder": cache_zero_hit_blocker_ladder,
         "cache_effectiveness": cache_effectiveness,
         "cache_replayability": cache_replayability,
+        "cache_replay_cohort_ranking": cache_replay_cohort_ranking,
         "cache_replay_confidence": cache_replay_confidence,
         "cache_replay_readiness": cache_replay_readiness,
         "cache_replay_activation_health": cache_replay_activation_health,
