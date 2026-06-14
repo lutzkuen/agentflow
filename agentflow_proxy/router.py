@@ -349,6 +349,7 @@ def _default_openai_canary_policy() -> dict[str, Any]:
         "canary_fraction": 0.05,
         "holdout_fraction": 0.05,
         "salt": "agentflow-openai-routing-canary-v1",
+        "cohort_unit": "request_features_sequence",
         "safety_stop": {
             "enabled": True,
             "window_hours": 24,
@@ -464,7 +465,7 @@ def _apply_openai_canary_yaml(policy: dict[str, Any], data: Any) -> dict[str, An
     if not isinstance(data, dict):
         return policy
     policy["enabled"] = _as_bool(data.get("enabled"), policy["enabled"])
-    for key in ("policy_id", "promotion_action_id", "target_candidate_id", "policy_source", "model_pattern", "target_model", "salt"):
+    for key in ("policy_id", "promotion_action_id", "target_candidate_id", "policy_source", "model_pattern", "target_model", "salt", "cohort_unit"):
         if data.get(key) not in (None, ""):
             policy[key] = str(data[key])
     for key in ("eligible_categories", "excluded_categories"):
@@ -1252,6 +1253,73 @@ def _openai_canary_safety_status(policy_id: str, safety: dict[str, Any]) -> dict
     return meta
 
 
+def _openai_canary_sequence_index(policy_id: str, cohort_payload: dict[str, Any], *, limit: int = 1000) -> int | None:
+    db_path = _phase_canary_db_path()
+    if not db_path:
+        return None
+    path = Path(db_path).expanduser()
+    if not path.exists():
+        return 0
+
+    count = 0
+    try:
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                select routing_json
+                from calls
+                where provider = 'openai' and routing_json is not null
+                order by created_at desc
+                limit ?
+                """,
+                (max(1, limit),),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    for row in rows:
+        try:
+            routing = json.loads(row["routing_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        canary = routing.get("openai_canary")
+        if not isinstance(canary, dict):
+            continue
+        if canary.get("policy_id") != policy_id:
+            continue
+        if canary.get("cohort_features") != cohort_payload:
+            continue
+        count += 1
+    return count
+
+
+def _sequenced_canary_score(sequence_index: int, *, holdout_fraction: float, canary_fraction: float) -> float | None:
+    if holdout_fraction >= 1.0:
+        return min(0.999999, holdout_fraction / 2.0)
+    if holdout_fraction <= 0.0 and canary_fraction >= 1.0:
+        return min(0.999999, canary_fraction / 2.0)
+
+    if holdout_fraction > 0.0:
+        holdout_period = max(1, round(1.0 / holdout_fraction))
+        if sequence_index % holdout_period == 0:
+            return max(0.0, min(0.999999, holdout_fraction / 2.0))
+
+    if canary_fraction > 0.0:
+        canary_period = max(1, round(1.0 / canary_fraction))
+        canary_offset = 1 if canary_period > 1 else 0
+        if sequence_index % canary_period == canary_offset:
+            return max(0.0, min(0.999999, holdout_fraction + (canary_fraction / 2.0)))
+
+    total_fraction = holdout_fraction + canary_fraction
+    if total_fraction >= 1.0:
+        return min(0.999999, total_fraction - 0.000001)
+    return None
+
+
 def openai_canary_decision(
     *,
     requested: str,
@@ -1341,12 +1409,29 @@ def openai_canary_decision(
     cohort_hash, score = _cohort_score(cohort_payload, str(ROUTING_OPENAI_CANARY.get("salt") or ""))
     holdout_fraction = float(ROUTING_OPENAI_CANARY.get("holdout_fraction") or 0.0)
     canary_fraction = float(ROUTING_OPENAI_CANARY.get("canary_fraction") or 0.0)
+    cohort_unit = str(ROUTING_OPENAI_CANARY.get("cohort_unit") or "request_features")
+    sequence_index: int | None = None
+    sequenced_score = None
+    if cohort_unit in {"request_features_sequence", "feature_sequence"}:
+        sequence_index = _openai_canary_sequence_index(meta["policy_id"], cohort_payload)
+        if sequence_index is not None:
+            sequenced_score = _sequenced_canary_score(
+                sequence_index,
+                holdout_fraction=holdout_fraction,
+                canary_fraction=canary_fraction,
+            )
+            if sequenced_score is not None:
+                score = sequenced_score
     meta.update({
         "cohort_hash": cohort_hash,
         "cohort_key_hash": cohort_hash,
         "cohort_score": round(score, 12),
         "cohort_features": cohort_payload,
+        "cohort_unit": cohort_unit,
     })
+    if sequence_index is not None:
+        meta["cohort_sequence_index"] = sequence_index
+        meta["cohort_score_basis"] = "local-metadata-sequence" if sequenced_score is not None else "local-metadata-sequence-not-selected"
     if score < holdout_fraction:
         meta.update({
             "status": "holdout",

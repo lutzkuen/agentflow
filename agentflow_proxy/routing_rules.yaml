@@ -98,6 +98,7 @@ openai_canary:
   canary_fraction: 0.05
   holdout_fraction: 0.05
   salt: agentflow-openai-routing-canary-v1
+  cohort_unit: request_features_sequence
   safety_stop:
     enabled: true
     window_hours: 24

@@ -13,6 +13,7 @@ from agentflow_proxy.optimization import openai_features
 from agentflow_proxy.optimization import openai_pipeline
 from agentflow_proxy import router as router_module
 from agentflow_proxy import cache as cache_module
+from agentflow_proxy.openai_routing_report import build_openai_routing_report
 import agentflow_proxy.routing_experiments as routing_experiments_module
 from agentflow_proxy.store import stable_json
 
@@ -524,6 +525,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.saved_crunch_rules = os.environ.get("AGENTFLOW_CRUNCH_RULES")
         self.saved_routing_experiments = os.environ.get("AGENTFLOW_ROUTING_EXPERIMENTS")
         self.saved_openai_summary_enabled = os.environ.get("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED")
+        self.saved_agentflow_db = os.environ.get("AGENTFLOW_DB")
         os.environ.pop("AGENTFLOW_RECOMMENDATION_ENABLED", None)
         os.environ.pop("AGENTFLOW_POLICY_DECISION_ENABLED", None)
         os.environ.pop("AGENTFLOW_POLICY_DECISION_CANARY_FRACTION", None)
@@ -578,6 +580,10 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             os.environ.pop("AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED", None)
         else:
             os.environ["AGENTFLOW_OPENAI_OLD_CONTEXT_SUMMARY_ENABLED"] = self.saved_openai_summary_enabled
+        if self.saved_agentflow_db is None:
+            os.environ.pop("AGENTFLOW_DB", None)
+        else:
+            os.environ["AGENTFLOW_DB"] = self.saved_agentflow_db
         importlib.reload(router_module)
         importlib.reload(routing_experiments_module)
         os.chdir(self.old_cwd)
@@ -599,9 +605,11 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         canary_fraction=1.0,
         holdout_fraction=0.0,
         target_model="gpt-5-mini",
+        model_pattern="gpt-5",
         allow_stream=False,
         safety_stop_enabled=False,
         eligible_categories=None,
+        cohort_unit="request_features_sequence",
     ):
         policy_file = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
         categories = eligible_categories or ["chat", "short-completion"]
@@ -611,7 +619,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             "  policy_id: test-openai-local-canary",
             "  promotion_action_id: test-openai-action",
             "  target_candidate_id: test-openai-candidate",
-            "  model_pattern: gpt-5",
+            f"  model_pattern: {model_pattern}",
             f"  target_model: {target_model}",
             "  eligible_categories:",
             *[f"    - {category}" for category in categories],
@@ -625,6 +633,7 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
             f"  canary_fraction: {canary_fraction}",
             f"  holdout_fraction: {holdout_fraction}",
             "  salt: test-openai-local-canary-salt",
+            f"  cohort_unit: {cohort_unit}",
             "  safety_stop:",
             f"    enabled: {'true' if safety_stop_enabled else 'false'}",
             "rules: []",
@@ -1699,6 +1708,58 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.assertEqual(canary["status"], "holdout")
         self.assertEqual(canary["cohort"], "canary_holdout")
         self.assertEqual(canary["actual_forwarded_model"], "gpt-5-codex")
+
+    def test_openai_gpt54_canary_sequence_restores_applied_and_holdout_report_coverage(self):
+        os.environ["AGENTFLOW_DB"] = self.tmp.name
+        self._enable_openai_canary(
+            canary_fraction=0.05,
+            holdout_fraction=0.05,
+            target_model="gpt-5.4-mini",
+            model_pattern="gpt-5.4",
+        )
+        CapturingOpenAIClient.calls = []
+
+        with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+            for idx in range(22):
+                response = TestClient(server.app).post(
+                    "/v1/responses",
+                    json={"model": "gpt-5.4", "input": f"short prompt SECRET_OPENAI_CANARY_{idx}"},
+                )
+                self.assertEqual(response.status_code, 200)
+
+        rows = server.store.conn.execute("select routed_model, routing_json from calls order by created_at").fetchall()
+        canaries = [json.loads(row["routing_json"])["openai_canary"] for row in rows]
+        applied = [canary for canary in canaries if canary["cohort"] == "canary_applied"]
+        holdout = [canary for canary in canaries if canary["cohort"] == "canary_holdout"]
+
+        self.assertGreater(len(applied), 0)
+        self.assertGreater(len(holdout), 0)
+        self.assertTrue(all(canary["requested_model"] == "gpt-5.4" for canary in canaries))
+        self.assertTrue(all(canary["target_model"] == "gpt-5.4-mini" for canary in canaries))
+        self.assertTrue(all(canary["cohort_unit"] == "request_features_sequence" for canary in canaries))
+        self.assertTrue(all("cohort_sequence_index" in canary for canary in canaries))
+        self.assertTrue(all(canary["cohort_features"]["requested_model"] == "gpt-5.4" for canary in canaries))
+        self.assertTrue(any(row["routed_model"] == "gpt-5.4-mini" for row in rows))
+        self.assertTrue(any(row["routed_model"] == "gpt-5.4" for row in rows))
+
+        report = build_openai_routing_report(server.store, limit=50)
+        candidate = next(row for row in report["candidates"] if row["requested_model"] == "gpt-5.4")
+        lifecycle = candidate["openai_canary_lifecycle_evidence"]
+
+        self.assertGreater(lifecycle["cohort_counts"]["canary_applied"], 0)
+        self.assertGreater(lifecycle["cohort_counts"]["canary_holdout"], 0)
+        self.assertEqual(lifecycle["blocker_codes"], [])
+        self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+        self.assertGreater(report["summary"]["openai_canary_applied_count"], 0)
+        self.assertGreater(report["summary"]["openai_canary_holdout_count"], 0)
+        self.assertGreater(report["summary"]["estimated_savings_per_1000_calls_usd"], 0)
+
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("SECRET_OPENAI_CANARY", rendered)
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(lifecycle["privacy"]["request_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["session_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["cache_keys_included"])
 
     def test_openai_local_canary_records_incompatible_target_noop(self):
         self._enable_openai_canary(canary_fraction=1.0, target_model="claude-haiku-4-5-20251001")
