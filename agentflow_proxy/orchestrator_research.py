@@ -907,7 +907,7 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     crunch_signal = _crunch_savings_signal(stats)
     if crunch_signal is not None:
         summary["crunch_savings_signal"] = crunch_signal
-    managed_health = _managed_recommendation_health_signal(stats)
+    managed_health = _managed_recommendation_health_signal(stats, local_summary=summary)
     if managed_health is not None:
         summary["managed_recommendation_health"] = managed_health
     shape_signal = _request_shape_rollup_signal(stats)
@@ -1391,7 +1391,64 @@ def _managed_omission_row(row: dict[str, Any], *, source: str) -> dict[str, Any]
     }
 
 
-def _managed_recommendation_health_signal(stats: dict[str, Any]) -> dict[str, Any] | None:
+def _managed_local_handoff_stage_rows(stats_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    stages = [
+        stage
+        for stage in (
+            _routing_loop_stage(stats_summary),
+            _cache_loop_stage(stats_summary),
+            _crunch_loop_stage(stats_summary),
+        )
+        if stage is not None
+    ]
+    if not stages:
+        return []
+
+    def score(stage: dict[str, Any]) -> tuple[int, float, int]:
+        savings = max(
+            _to_float(stage.get("savings_per_1000_calls_usd")),
+            _to_float(stage.get("projected_saved_usd")),
+            _to_float(stage.get("projected_saved_cost_usd")),
+            _to_float(stage.get("crunch_savings_usd")),
+            _to_float(stage.get("today_crunch_savings_usd")),
+        )
+        return (
+            _loop_state_rank(str(stage.get("state") or "")),
+            -savings,
+            -_to_int(stage.get("sample_count")),
+        )
+
+    rows: list[dict[str, Any]] = []
+    for stage in sorted(stages, key=score):
+        family = str(stage.get("local_action_family") or stage.get("lever") or "unknown")
+        representation = _local_file_backed_representation(family)
+        blockers = [str(item) for item in stage.get("blocker_codes") or [] if str(item or "").strip()]
+        reason = "managed-recommendation-health-report-missing"
+        if blockers:
+            reason = f"managed-recommendation-health-report-missing:{sanitize_value(blockers[0])}"
+        rows.append(
+            {
+                "source": "local_policy_evidence",
+                "omitted_reason": reason,
+                "count": _to_int(stage.get("sample_count") or stage.get("cache_hits") or 1, 1),
+                "local_action_family": family,
+                "local_file_backed_representation": representation,
+                "follow_up_owner": "local-policy" if representation.get("exists") else "blocked-boundary-review",
+                "next_action": sanitize_value(stage.get("next_action") or "emit-managed-recommendation-health-rollup"),
+                "local_evidence_state": sanitize_value(stage.get("state") or "unknown"),
+                "local_evidence_source": sanitize_value(stage.get("evidence_source") or "stats_summary"),
+                "blocker_codes": sanitize_value(blockers),
+                "_priority": _managed_omission_priority(reason, representation),
+            }
+        )
+    return rows
+
+
+def _managed_recommendation_health_signal(
+    stats: dict[str, Any],
+    *,
+    local_summary: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     calls = _to_int(stats.get("today_calls") or stats.get("calls"))
     report = _managed_health_report(stats)
     rows: list[dict[str, Any]] = []
@@ -1442,8 +1499,14 @@ def _managed_recommendation_health_signal(stats: dict[str, Any]) -> dict[str, An
         status = "no-omission-reasons-reported"
         missing = []
     elif calls > 0:
+        fallback_rows = _managed_local_handoff_stage_rows(local_summary or stats)
         ranked = []
-        top = {
+        for rank, row in enumerate(fallback_rows[:10], start=1):
+            clean = dict(row)
+            clean.pop("_priority", None)
+            clean["rank"] = rank
+            ranked.append(clean)
+        top = ranked[0] if ranked else {
             "rank": 1,
             "source": "missing_report",
             "omitted_reason": "managed-recommendation-health-report-missing",
@@ -1471,9 +1534,13 @@ def _managed_recommendation_health_signal(stats: dict[str, Any]) -> dict[str, An
             "received_count": _to_int(summary.get("received_count")),
             "applied_count": _to_int(summary.get("applied_count")),
             "observed_savings_usd": round(_to_float(summary.get("observed_savings_usd")), 8),
+            "omitted_count": sum(_to_int(row.get("count"), 1) for row in ranked),
             "ranked_omission_count": len(ranked),
             "local_file_backed_count": represented,
             "no_local_representation_count": unrepresented,
+            "local_policy_followup_count": len(
+                [row for row in ranked if row.get("follow_up_owner") == "local-policy"]
+            ),
             "managed_dependency": "optional",
         },
         "top_omission": top,

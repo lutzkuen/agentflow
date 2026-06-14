@@ -963,6 +963,20 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
                 "cache_hit_rate": 0.0,
                 "today_crunch_savings_usd": 0.0,
                 "crunch_savings_usd": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "c": 244,
+                    },
+                    {
+                        "provider": "openai",
+                        "requested_model": "gpt-5.4-mini",
+                        "routed_model": "gpt-5.4-mini",
+                        "c": 1255,
+                    },
+                ],
             },
             threshold=3,
             now=NOW,
@@ -970,9 +984,17 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
 
         signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
         self.assertEqual(signal["status"], "missing-managed-recommendation-health-report")
-        self.assertEqual(signal["top_omission"]["omitted_reason"], "managed-recommendation-health-report-missing")
+        self.assertTrue(signal["top_omission"]["omitted_reason"].startswith("managed-recommendation-health-report-missing"))
+        self.assertEqual(signal["top_omission"]["local_action_family"], "routing")
+        self.assertEqual(signal["top_omission"]["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
+        self.assertEqual(signal["top_omission"]["follow_up_owner"], "local-policy")
+        self.assertEqual(signal["top_omission"]["next_action"], "activate-openai-routing-canary-cohorts")
+        self.assertGreaterEqual(signal["summary"]["ranked_omission_count"], 2)
+        self.assertGreaterEqual(signal["summary"]["local_file_backed_count"], 2)
+        self.assertGreater(signal["summary"]["omitted_count"], 0)
         self.assertIn("managed_recommendations_report", signal["missing_measurements"])
-        self.assertFalse(signal["top_omission"]["local_file_backed_representation"]["exists"])
+        self.assertTrue(signal["top_omission"]["local_file_backed_representation"]["exists"])
+        self.assertIn("cache", {row["local_action_family"] for row in signal["omissions"]})
 
         managed_candidate = next(candidate for candidate in plan["evidence"]["optimization_candidates"] if candidate["lever"] == "managed-recommendation")
         self.assertEqual(managed_candidate["blocker"], "managed-recommendation-health-report-missing")
