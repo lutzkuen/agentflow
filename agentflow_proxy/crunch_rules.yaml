@@ -119,6 +119,43 @@ anthropic_thinking_history_compaction:
     max_negative_savings_rate: 0.25
     max_missing_usage_rate: 0.1
     max_error_rate_delta: 0.05
+  rules:
+    - id: local-repeated-context-thinking-tool-result-canary
+      enabled: true
+      policy_source: local-default
+      candidate_id: repeated-context-thinking-tool-result-gte-128k
+      conditions:
+        source_surface: anthropic_messages
+        category: tool-result
+        phase: tool-result
+        text_bucket: gte_128k_chars
+        model_pattern: sonnet
+        has_tools: true
+        stream: true
+        min_text_chars: 128000
+      action:
+        type: compact_thinking_history_block
+        min_text_chars: 128000
+        min_block_chars: 2000
+        similarity_threshold: 0.95
+        preserve_tool_protocol: true
+        preserve_assistant_text_fallback: true
+      block_top_level_thinking: true
+      canary:
+        enabled: true
+        canary_fraction: 0.0
+        holdout_fraction: 1.0
+        canary_salt: ""
+        canary_unit: thinking_block_local_fingerprint
+      safety_stop:
+        enabled: true
+        min_outcome_samples: 5
+        window: 500
+        max_error_rate: 0.1
+        max_retry_rate: 0.25
+        max_negative_savings_rate: 0.25
+        max_missing_usage_rate: 0.1
+        max_error_rate_delta: 0.05
 instruction_section_deduplication:
   # Policy shape only. Runtime request mutation is intentionally disabled by
   # default and implemented in later canary/planning work. Rules match only on

@@ -213,6 +213,18 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["safety_stop_count"], 1)
         self.assertGreater(payload["summary"]["tokens_saved_est"], 0)
         self.assertGreater(payload["summary"]["projected_holdout_savings_usd"], 0)
+        coverage = payload["summary"]["lifecycle_coverage"]
+        self.assertEqual(coverage["schema"], "agentflow.anthropic_thinking_compaction_lifecycle_coverage.v1")
+        self.assertEqual(coverage["observed_count"], 5)
+        self.assertEqual(coverage["applied_count"], 2)
+        self.assertEqual(coverage["holdout_count"], 1)
+        self.assertEqual(coverage["safety_stop_count"], 1)
+        self.assertEqual(coverage["applied_error_count"], 0)
+        self.assertEqual(coverage["applied_retry_count"], 0)
+        self.assertGreater(coverage["tokens_saved_est"], 0)
+        self.assertGreater(coverage["projected_holdout_savings_usd"], 0)
+        self.assertTrue(coverage["metadata_only"])
+        self.assertFalse(coverage["raw_payload_included"])
         self.assertEqual(payload["budget_governor_feedback"]["recommended_budget_action"], "suppress")
         candidate = payload["candidates"][0]
         self.assertEqual(candidate["cohorts"]["applied"]["count"], 2)

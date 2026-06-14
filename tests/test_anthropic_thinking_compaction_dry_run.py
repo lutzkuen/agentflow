@@ -188,6 +188,18 @@ class AnthropicThinkingCompactionDryRunTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["planned_candidate_count"], 2)
         self.assertGreater(payload["summary"]["projected_saved_tokens"], 0)
         self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
+        staged = payload["policy"]["staged_local_canary"]
+        self.assertEqual(staged["schema"], "agentflow.anthropic_thinking_compaction_staged_local_canary.v1")
+        self.assertFalse(staged["runtime_mutation_enabled"])
+        self.assertEqual(staged["configured_rule_count"], 1)
+        self.assertEqual(staged["rules"][0]["rule_id"], "local-repeated-context-thinking-tool-result-canary")
+        self.assertEqual(staged["rules"][0]["candidate_id"], "repeated-context-thinking-tool-result-gte-128k")
+        self.assertEqual(staged["rules"][0]["conditions"]["text_bucket"], "gte_128k_chars")
+        self.assertEqual(staged["rules"][0]["canary"]["fraction"], 0.0)
+        self.assertEqual(staged["rules"][0]["canary"]["holdout_fraction"], 1.0)
+        self.assertTrue(staged["lifecycle_metadata"]["emits_applied"])
+        self.assertTrue(staged["lifecycle_metadata"]["emits_holdout"])
+        self.assertEqual(staged["lifecycle_metadata"]["impact_report"], "agentflow.anthropic_thinking_compaction_impact.v1")
         duplicate_kinds = {
             plan["thinking_block"]["duplicate_kind"]
             for plan in payload["plans"]

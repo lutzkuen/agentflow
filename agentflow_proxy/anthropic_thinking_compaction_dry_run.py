@@ -16,7 +16,7 @@ from agentflow_proxy.anthropic_thinking_compaction_report import (
     _text_bucket,
     _token_bucket,
 )
-from agentflow_proxy.crunch import TOKEN_CHARS, normalize_text
+from agentflow_proxy.crunch import TOKEN_CHARS, anthropic_thinking_compaction_effective_policy, normalize_text
 from agentflow_proxy.pricing import estimate_blended_input_savings
 from agentflow_proxy.public_metadata import public_label
 from agentflow_proxy.store import stable_json, utc_now
@@ -26,6 +26,76 @@ SCHEMA = "agentflow.anthropic_thinking_compaction_dry_run.v1"
 PLAN_SCHEMA = "agentflow.anthropic_thinking_compaction_plan.v1"
 ACTION_FAMILY = "anthropic_thinking_history_compaction"
 _THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
+
+
+def _staged_policy_metadata() -> dict[str, Any]:
+    policy = anthropic_thinking_compaction_effective_policy()
+    rules = [
+        {
+            "rule_id": public_label(rule.get("rule_id"), "unknown"),
+            "candidate_id": public_label(rule.get("candidate_id"), "none"),
+            "enabled": bool(rule.get("enabled")),
+            "policy_source": public_label(rule.get("policy_source"), "unknown"),
+            "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
+            "min_text_chars": _as_int(rule.get("min_text_chars")),
+            "min_block_chars": _as_int(rule.get("min_block_chars")),
+            "similarity_threshold": _as_float(rule.get("similarity_threshold")),
+            "canary": {
+                "enabled": bool((rule.get("canary") or {}).get("enabled")) if isinstance(rule.get("canary"), dict) else False,
+                "fraction": _as_float((rule.get("canary") or {}).get("fraction")) if isinstance(rule.get("canary"), dict) else 0.0,
+                "holdout_fraction": _as_float((rule.get("canary") or {}).get("holdout_fraction")) if isinstance(rule.get("canary"), dict) else 0.0,
+                "salt_included": False,
+                "fingerprint_included": False,
+            },
+            "action": {
+                "type": "compact_thinking_history_block",
+                "preserve_tool_protocol": True,
+                "preserve_assistant_text_fallback": True,
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+            },
+            "privacy": {
+                "metadata_only_output": True,
+                "raw_thinking_text_included": False,
+                "thinking_block_fingerprints_included": False,
+                "raw_request_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "file_paths_included": False,
+            },
+        }
+        for rule in policy.get("rules") or []
+        if isinstance(rule, dict)
+    ]
+    return {
+        "schema": "agentflow.anthropic_thinking_compaction_staged_local_canary.v1",
+        "enabled": bool(policy.get("enabled")),
+        "runtime_mutation_enabled": bool(policy.get("enabled")),
+        "default_apply": False,
+        "policy_source": public_label(policy.get("policy_source"), "unknown"),
+        "rule_path": public_label(policy.get("rule_path"), "unknown"),
+        "rule_path_included": False,
+        "configured_rule_count": len(rules),
+        "rules": rules,
+        "next_action": "enable-local-canary-fraction-after-dry-run-review" if rules else "stage-local-canary-rule",
+        "lifecycle_metadata": {
+            "emits_applied": True,
+            "emits_holdout": True,
+            "emits_safety_stop": True,
+            "impact_report": "agentflow.anthropic_thinking_compaction_impact.v1",
+        },
+        "privacy": {
+            "metadata_only_output": True,
+            "raw_policy_file_contents_included": False,
+            "raw_thinking_text_included": False,
+            "thinking_block_fingerprints_included": False,
+            "raw_request_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "file_paths_included": False,
+            "cache_keys_included": False,
+        },
+    }
 
 
 def _hash_basis(value: Any, *, length: int = 16) -> str:
@@ -713,6 +783,7 @@ def build_anthropic_thinking_compaction_dry_run(
                 "salt_included": False,
             },
             "savings_pricing": "cache-read blended input price for the routed/requested Anthropic model",
+            "staged_local_canary": _staged_policy_metadata(),
         },
         "status_breakdown": _breakdown(status_counts, label="status"),
         "cohort_breakdown": _breakdown(cohort_counts, label="cohort"),

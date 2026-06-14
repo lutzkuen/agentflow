@@ -188,6 +188,16 @@ class AnthropicThinkingCompactionCanaryTests(unittest.TestCase):
 
         crunched, meta = manual.crunch_body(body, provider="anthropic", source_surface="anthropic_messages", endpoint="messages")
 
+        policy = manual.anthropic_thinking_compaction_effective_policy()
+        staged = policy["rules"][0]
+        self.assertFalse(policy["enabled"])
+        self.assertEqual(policy["rule_count"], 1)
+        self.assertEqual(staged["rule_id"], "local-repeated-context-thinking-tool-result-canary")
+        self.assertEqual(staged["candidate_id"], "repeated-context-thinking-tool-result-gte-128k")
+        self.assertEqual(staged["conditions"]["text_bucket"], "gte_128k_chars")
+        self.assertEqual(staged["canary"]["fraction"], 0.0)
+        self.assertEqual(staged["canary"]["holdout_fraction"], 1.0)
+        self.assertFalse(staged["canary"]["salt_included"])
         compaction = meta["anthropic_thinking_history_compaction"]
         self.assertFalse(compaction["enabled"])
         self.assertEqual(compaction["status"], "skipped")

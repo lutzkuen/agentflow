@@ -560,6 +560,48 @@ def build_anthropic_thinking_compaction_impact_report(
         )
     )
     feedback = _summary_feedback(candidates)
+    applied_count = cohort_counts.get("applied", 0)
+    holdout_count = cohort_counts.get("holdout", 0)
+    skipped_count = cohort_counts.get("skipped", 0)
+    safety_stop_count = cohort_counts.get("safety_stop", 0)
+    coverage_total = applied_count + holdout_count + skipped_count + safety_stop_count
+    applied_errors = sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("error_count")) for row in candidates)
+    holdout_errors = sum(_as_int(((row.get("cohorts") or {}).get("holdout") or {}).get("error_count")) for row in candidates)
+    applied_retries = sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("retry_rows")) for row in candidates)
+    holdout_retries = sum(_as_int(((row.get("cohorts") or {}).get("holdout") or {}).get("retry_rows")) for row in candidates)
+    applied_tokens_saved = sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("tokens_saved_est")) for row in candidates)
+    planned_saved_tokens = sum(
+        _as_int(((row.get("cohorts") or {}).get(name) or {}).get("planned_saved_tokens"))
+        for row in candidates
+        for name in ("applied", "holdout")
+    )
+    net_savings = round(sum(_as_float(((row.get("cohorts") or {}).get("applied") or {}).get("net_savings_usd")) for row in candidates), 8)
+    projected_holdout_savings = round(sum(_as_float(((row.get("cohorts") or {}).get("holdout") or {}).get("gross_savings_usd")) for row in candidates), 8)
+    lifecycle_coverage = {
+        "schema": "agentflow.anthropic_thinking_compaction_lifecycle_coverage.v1",
+        "observed_count": coverage_total,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "skipped_count": skipped_count,
+        "safety_stop_count": safety_stop_count,
+        "applied_rate": round(applied_count / coverage_total, 6) if coverage_total else 0.0,
+        "holdout_rate": round(holdout_count / coverage_total, 6) if coverage_total else 0.0,
+        "safety_stop_rate": round(safety_stop_count / coverage_total, 6) if coverage_total else 0.0,
+        "applied_error_count": applied_errors,
+        "holdout_error_count": holdout_errors,
+        "applied_error_rate": round(applied_errors / applied_count, 6) if applied_count else 0.0,
+        "holdout_error_rate": round(holdout_errors / holdout_count, 6) if holdout_count else 0.0,
+        "applied_retry_count": applied_retries,
+        "holdout_retry_count": holdout_retries,
+        "applied_retry_rate": round(applied_retries / applied_count, 6) if applied_count else 0.0,
+        "holdout_retry_rate": round(holdout_retries / holdout_count, 6) if holdout_count else 0.0,
+        "tokens_saved_est": applied_tokens_saved,
+        "planned_saved_tokens": planned_saved_tokens,
+        "net_savings_usd": net_savings,
+        "projected_holdout_savings_usd": projected_holdout_savings,
+        "metadata_only": True,
+        "raw_payload_included": False,
+    }
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -576,18 +618,15 @@ def build_anthropic_thinking_compaction_impact_report(
             "sampled_call_count": len(sampled_rows),
             "observed_thinking_compaction_metadata_row_count": observed,
             "candidate_group_count": len(candidates),
-            "applied_count": cohort_counts.get("applied", 0),
-            "holdout_count": cohort_counts.get("holdout", 0),
-            "skipped_count": cohort_counts.get("skipped", 0),
-            "safety_stop_count": cohort_counts.get("safety_stop", 0),
-            "tokens_saved_est": sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("tokens_saved_est")) for row in candidates),
-            "planned_saved_tokens": sum(
-                _as_int(((row.get("cohorts") or {}).get(name) or {}).get("planned_saved_tokens"))
-                for row in candidates
-                for name in ("applied", "holdout")
-            ),
-            "net_savings_usd": round(sum(_as_float(((row.get("cohorts") or {}).get("applied") or {}).get("net_savings_usd")) for row in candidates), 8),
-            "projected_holdout_savings_usd": round(sum(_as_float(((row.get("cohorts") or {}).get("holdout") or {}).get("gross_savings_usd")) for row in candidates), 8),
+            "applied_count": applied_count,
+            "holdout_count": holdout_count,
+            "skipped_count": skipped_count,
+            "safety_stop_count": safety_stop_count,
+            "tokens_saved_est": applied_tokens_saved,
+            "planned_saved_tokens": planned_saved_tokens,
+            "net_savings_usd": net_savings,
+            "projected_holdout_savings_usd": projected_holdout_savings,
+            "lifecycle_coverage": lifecycle_coverage,
             "thinking_output_tokens": sum(
                 _as_int(((row.get("cohorts") or {}).get(name) or {}).get("thinking_output_tokens"))
                 for row in candidates
