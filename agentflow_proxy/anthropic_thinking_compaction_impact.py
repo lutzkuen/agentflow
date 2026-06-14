@@ -138,9 +138,13 @@ def _empty_cohort() -> dict[str, Any]:
         "latency_sample_count": 0,
         "cost_est_usd": 0.0,
         "cost_baseline_usd": 0.0,
+        "before_chars": 0,
+        "saved_chars": 0,
+        "planned_saved_chars": 0,
         "tokens_saved_est": 0,
         "planned_saved_tokens": 0,
         "gross_savings_usd": 0.0,
+        "projected_savings_usd": 0.0,
         "compaction_cost_usd": 0.0,
         "net_savings_usd": 0.0,
         "thinking_output_tokens": 0,
@@ -160,6 +164,9 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
     latency_samples = _as_int(raw.get("latency_sample_count"))
     error_count = _as_int(raw.get("error_count"))
     retry_rows = _as_int(raw.get("retry_rows"))
+    before_chars = _as_int(raw.get("before_chars"))
+    saved_chars = _as_int(raw.get("saved_chars"))
+    planned_saved_chars = _as_int(raw.get("planned_saved_chars"))
     thinking_tokens = _as_int(raw.get("thinking_output_tokens"))
     cache_creation = _as_int(raw.get("prompt_cache_creation_tokens"))
     cache_read = _as_int(raw.get("prompt_cache_read_tokens"))
@@ -174,9 +181,15 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "cost_avg_usd": round(_as_float(raw.get("cost_est_usd")) / count, 8) if count else 0.0,
         "cost_est_usd": round(_as_float(raw.get("cost_est_usd")), 8),
         "cost_baseline_usd": round(_as_float(raw.get("cost_baseline_usd")), 8),
+        "before_chars": before_chars,
+        "saved_chars": saved_chars,
+        "planned_saved_chars": planned_saved_chars,
+        "avg_crunch_ratio": round(saved_chars / before_chars, 6) if before_chars and saved_chars else 0.0,
+        "projected_crunch_ratio": round(planned_saved_chars / before_chars, 6) if before_chars and planned_saved_chars else 0.0,
         "tokens_saved_est": _as_int(raw.get("tokens_saved_est")),
         "planned_saved_tokens": _as_int(raw.get("planned_saved_tokens")),
         "gross_savings_usd": round(_as_float(raw.get("gross_savings_usd")), 8),
+        "projected_savings_usd": round(_as_float(raw.get("projected_savings_usd")), 8),
         "compaction_cost_usd": round(_as_float(raw.get("compaction_cost_usd")), 8),
         "net_savings_usd": round(_as_float(raw.get("net_savings_usd")), 8),
         "net_savings_per_call_usd": round(_as_float(raw.get("net_savings_usd")) / count, 8) if count else 0.0,
@@ -292,6 +305,13 @@ def _tokens_from_meta(meta: dict[str, Any], key: str, chars_key: str) -> int:
     return tokens
 
 
+def _chars_from_meta(meta: dict[str, Any], key: str, tokens_key: str) -> int:
+    chars = _as_int(meta.get(key))
+    if chars <= 0 and _as_int(meta.get(tokens_key)) > 0:
+        chars = max(0, _as_int(meta.get(tokens_key)) * TOKEN_CHARS)
+    return chars
+
+
 def _gross_savings(row: dict[str, Any], tokens_saved: int) -> float:
     return estimate_blended_input_savings(
         str(row.get("routed_model") or row.get("requested_model") or "claude-sonnet-4-6"),
@@ -329,14 +349,23 @@ def _add_row(group: dict[str, Any], row: dict[str, Any], meta: dict[str, Any], c
 
     tokens_saved = _tokens_from_meta(meta, "tokens_saved_est", "saved_chars")
     planned_tokens = _tokens_from_meta(meta, "planned_saved_tokens", "planned_saved_chars")
+    saved_chars = _chars_from_meta(meta, "saved_chars", "tokens_saved_est")
+    planned_saved_chars = _chars_from_meta(meta, "planned_saved_chars", "planned_saved_tokens")
     if cohort_name == "applied" and planned_tokens <= 0:
         planned_tokens = tokens_saved
+    if cohort_name == "applied" and planned_saved_chars <= 0:
+        planned_saved_chars = saved_chars
     gross = _gross_savings(row, tokens_saved if cohort_name == "applied" else planned_tokens)
+    projected_gross = _gross_savings(row, planned_tokens)
     compaction_cost = _as_float(meta.get("compaction_cost_usd"))
     net = gross - compaction_cost if cohort_name == "applied" else 0.0
+    cohort["before_chars"] += _as_int(meta.get("before_chars"))
+    cohort["saved_chars"] += saved_chars
+    cohort["planned_saved_chars"] += planned_saved_chars
     cohort["tokens_saved_est"] += tokens_saved
     cohort["planned_saved_tokens"] += planned_tokens
     cohort["gross_savings_usd"] += gross
+    cohort["projected_savings_usd"] += projected_gross
     cohort["compaction_cost_usd"] += compaction_cost
     cohort["net_savings_usd"] += net
     if cohort_name == "applied" and net <= 0:
@@ -370,6 +399,9 @@ def _deltas(applied: dict[str, Any], holdout: dict[str, Any]) -> dict[str, Any]:
         "cost_avg_usd_delta": round(_as_float(applied.get("cost_avg_usd")) - _as_float(holdout.get("cost_avg_usd")), 8),
         "thinking_tokens_avg_delta": round(_as_float(applied.get("thinking_tokens_avg")) - _as_float(holdout.get("thinking_tokens_avg")), 2),
         "net_savings_per_call_usd_delta": round(_as_float(applied.get("net_savings_per_call_usd")), 8),
+        "applied_minus_holdout_error_rate": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
+        "applied_minus_holdout_retry_rate": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+        "applied_minus_holdout_latency_avg_ms": latency_delta,
     }
 
 
@@ -425,7 +457,7 @@ def _budget_feedback(candidate: dict[str, Any], thresholds: dict[str, Any]) -> d
         },
         "applied_minus_holdout": deltas,
         "observed_net_savings_usd": round(_as_float(applied.get("net_savings_usd")), 8),
-        "projected_holdout_savings_usd": round(_as_float(holdout.get("gross_savings_usd")), 8),
+        "projected_holdout_savings_usd": round(_as_float(holdout.get("projected_savings_usd")), 8),
         "thinking_token_trend": {
             "applied_avg": applied.get("thinking_tokens_avg"),
             "holdout_avg": holdout.get("thinking_tokens_avg"),
@@ -492,6 +524,37 @@ def _summary_feedback(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         "target_action_family": "anthropic_thinking_history_compaction",
         "recommended_budget_action": selected,
         "action_breakdown": _breakdown(actions),
+        "reason_code_counts": _breakdown(reasons),
+        "local_only": True,
+        "read_only": True,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": _privacy(),
+    }
+
+
+def _impact_decision_from_action(action: Any) -> str:
+    text = str(action or "").strip().lower()
+    if text in {"suppress", "stop", "rollback"}:
+        return "stop"
+    if text in {"widen", "promote"}:
+        return "widen"
+    return "remain-staged"
+
+
+def _impact_decision(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    decisions = Counter(str(item.get("canary_impact_decision") or "remain-staged") for item in candidates)
+    priority = ("stop", "remain-staged", "widen")
+    selected = next((item for item in priority if decisions.get(item)), "remain-staged")
+    reasons = Counter()
+    for item in candidates:
+        for reason in item.get("reason_codes") or []:
+            reasons[str(reason)] += 1
+    return {
+        "schema": "agentflow.anthropic_thinking_compaction_canary_impact_decision.v1",
+        "decision": selected,
+        "decision_breakdown": _breakdown(decisions),
         "reason_code_counts": _breakdown(reasons),
         "local_only": True,
         "read_only": True,
@@ -576,7 +639,23 @@ def build_anthropic_thinking_compaction_impact_report(
         for name in ("applied", "holdout")
     )
     net_savings = round(sum(_as_float(((row.get("cohorts") or {}).get("applied") or {}).get("net_savings_usd")) for row in candidates), 8)
-    projected_holdout_savings = round(sum(_as_float(((row.get("cohorts") or {}).get("holdout") or {}).get("gross_savings_usd")) for row in candidates), 8)
+    observed_gross_savings = round(sum(_as_float(((row.get("cohorts") or {}).get("applied") or {}).get("gross_savings_usd")) for row in candidates), 8)
+    projected_holdout_savings = round(sum(_as_float(((row.get("cohorts") or {}).get("holdout") or {}).get("projected_savings_usd")) for row in candidates), 8)
+    applied_saved_chars = sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("saved_chars")) for row in candidates)
+    planned_saved_chars = sum(
+        _as_int(((row.get("cohorts") or {}).get(name) or {}).get("planned_saved_chars"))
+        for row in candidates
+        for name in ("applied", "holdout")
+    )
+    projected_saved_usd = round(
+        sum(
+            _as_float(((row.get("cohorts") or {}).get(name) or {}).get("projected_savings_usd"))
+            for row in candidates
+            for name in ("applied", "holdout")
+        ),
+        8,
+    )
+    applied_before_chars = sum(_as_int(((row.get("cohorts") or {}).get("applied") or {}).get("before_chars")) for row in candidates)
     lifecycle_coverage = {
         "schema": "agentflow.anthropic_thinking_compaction_lifecycle_coverage.v1",
         "observed_count": coverage_total,
@@ -595,13 +674,45 @@ def build_anthropic_thinking_compaction_impact_report(
         "holdout_retry_count": holdout_retries,
         "applied_retry_rate": round(applied_retries / applied_count, 6) if applied_count else 0.0,
         "holdout_retry_rate": round(holdout_retries / holdout_count, 6) if holdout_count else 0.0,
+        "observed_saved_chars": applied_saved_chars,
         "tokens_saved_est": applied_tokens_saved,
+        "observed_saved_tokens": applied_tokens_saved,
+        "observed_saved_usd": observed_gross_savings,
         "planned_saved_tokens": planned_saved_tokens,
+        "projected_saved_chars": planned_saved_chars,
+        "projected_saved_tokens": planned_saved_tokens,
+        "projected_saved_usd": projected_saved_usd,
         "net_savings_usd": net_savings,
         "projected_holdout_savings_usd": projected_holdout_savings,
+        "avg_crunch_ratio": round(applied_saved_chars / applied_before_chars, 6) if applied_before_chars and applied_saved_chars else 0.0,
+        "applied_minus_holdout_error_rate": round((applied_errors / applied_count if applied_count else 0.0) - (holdout_errors / holdout_count if holdout_count else 0.0), 6),
+        "applied_minus_holdout_retry_rate": round((applied_retries / applied_count if applied_count else 0.0) - (holdout_retries / holdout_count if holdout_count else 0.0), 6),
         "metadata_only": True,
         "raw_payload_included": False,
     }
+    for candidate in candidates:
+        action = (candidate.get("budget_governor_feedback") or {}).get("recommended_budget_action")
+        candidate["canary_impact_decision"] = _impact_decision_from_action(action)
+        candidate["observed_saved_chars"] = _as_int(((candidate.get("cohorts") or {}).get("applied") or {}).get("saved_chars"))
+        candidate["observed_saved_tokens"] = _as_int(((candidate.get("cohorts") or {}).get("applied") or {}).get("tokens_saved_est"))
+        candidate["observed_saved_usd"] = _as_float(((candidate.get("cohorts") or {}).get("applied") or {}).get("gross_savings_usd"))
+        candidate["projected_saved_chars"] = sum(
+            _as_int(((candidate.get("cohorts") or {}).get(name) or {}).get("planned_saved_chars"))
+            for name in ("applied", "holdout")
+        )
+        candidate["projected_saved_tokens"] = sum(
+            _as_int(((candidate.get("cohorts") or {}).get(name) or {}).get("planned_saved_tokens"))
+            for name in ("applied", "holdout")
+        )
+        candidate["projected_saved_usd"] = round(
+            sum(
+                _as_float(((candidate.get("cohorts") or {}).get(name) or {}).get("projected_savings_usd"))
+                for name in ("applied", "holdout")
+            ),
+            8,
+        )
+        candidate["avg_crunch_ratio"] = ((candidate.get("cohorts") or {}).get("applied") or {}).get("avg_crunch_ratio", 0.0)
+    canary_impact_decision = _impact_decision(candidates)
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -622,10 +733,19 @@ def build_anthropic_thinking_compaction_impact_report(
             "holdout_count": holdout_count,
             "skipped_count": skipped_count,
             "safety_stop_count": safety_stop_count,
+            "observed_saved_chars": applied_saved_chars,
+            "observed_saved_tokens": applied_tokens_saved,
+            "observed_saved_usd": observed_gross_savings,
+            "avg_crunch_ratio": lifecycle_coverage["avg_crunch_ratio"],
             "tokens_saved_est": applied_tokens_saved,
             "planned_saved_tokens": planned_saved_tokens,
+            "projected_saved_chars": planned_saved_chars,
+            "projected_saved_tokens": planned_saved_tokens,
+            "projected_saved_usd": projected_saved_usd,
             "net_savings_usd": net_savings,
             "projected_holdout_savings_usd": projected_holdout_savings,
+            "applied_minus_holdout_error_rate": lifecycle_coverage["applied_minus_holdout_error_rate"],
+            "applied_minus_holdout_retry_rate": lifecycle_coverage["applied_minus_holdout_retry_rate"],
             "lifecycle_coverage": lifecycle_coverage,
             "thinking_output_tokens": sum(
                 _as_int(((row.get("cohorts") or {}).get(name) or {}).get("thinking_output_tokens"))
@@ -639,12 +759,14 @@ def build_anthropic_thinking_compaction_impact_report(
             ),
             "affected_session_count": sum(_as_int((row.get("session_budget_impact") or {}).get("affected_session_count")) for row in candidates),
             "budget_governor_action": feedback["recommended_budget_action"],
+            "canary_impact_decision": canary_impact_decision["decision"],
             "status_breakdown": _breakdown(status_counts),
             "cohort_breakdown": _breakdown(cohort_counts),
             "reason_code_counts": _breakdown(reason_counts),
             "blocker_reason_breakdown": _breakdown(skipped_blockers),
         },
         "budget_governor_feedback": feedback,
+        "canary_impact_decision": canary_impact_decision,
         "candidates": candidates,
         "privacy": _privacy(),
     }

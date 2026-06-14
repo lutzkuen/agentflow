@@ -211,6 +211,17 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["holdout_count"], 1)
         self.assertEqual(payload["summary"]["skipped_count"], 1)
         self.assertEqual(payload["summary"]["safety_stop_count"], 1)
+        self.assertEqual(payload["summary"]["observed_saved_chars"], 7600)
+        self.assertEqual(payload["summary"]["observed_saved_tokens"], 1900)
+        self.assertGreater(payload["summary"]["observed_saved_usd"], 0)
+        self.assertEqual(payload["summary"]["projected_saved_chars"], 11600)
+        self.assertEqual(payload["summary"]["projected_saved_tokens"], 2900)
+        self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
+        self.assertGreater(payload["summary"]["avg_crunch_ratio"], 0)
+        self.assertEqual(payload["summary"]["applied_minus_holdout_error_rate"], 0.0)
+        self.assertEqual(payload["summary"]["applied_minus_holdout_retry_rate"], 0.0)
+        self.assertEqual(payload["summary"]["canary_impact_decision"], "stop")
+        self.assertEqual(payload["canary_impact_decision"]["decision"], "stop")
         self.assertGreater(payload["summary"]["tokens_saved_est"], 0)
         self.assertGreater(payload["summary"]["projected_holdout_savings_usd"], 0)
         coverage = payload["summary"]["lifecycle_coverage"]
@@ -222,6 +233,11 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         self.assertEqual(coverage["applied_error_count"], 0)
         self.assertEqual(coverage["applied_retry_count"], 0)
         self.assertGreater(coverage["tokens_saved_est"], 0)
+        self.assertEqual(coverage["observed_saved_chars"], 7600)
+        self.assertEqual(coverage["observed_saved_tokens"], 1900)
+        self.assertEqual(coverage["projected_saved_chars"], 11600)
+        self.assertEqual(coverage["projected_saved_tokens"], 2900)
+        self.assertGreater(coverage["projected_saved_usd"], 0)
         self.assertGreater(coverage["projected_holdout_savings_usd"], 0)
         self.assertTrue(coverage["metadata_only"])
         self.assertFalse(coverage["raw_payload_included"])
@@ -229,6 +245,15 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
         candidate = payload["candidates"][0]
         self.assertEqual(candidate["cohorts"]["applied"]["count"], 2)
         self.assertEqual(candidate["cohorts"]["holdout"]["count"], 1)
+        self.assertEqual(candidate["canary_impact_decision"], "stop")
+        self.assertEqual(candidate["observed_saved_chars"], 7600)
+        self.assertEqual(candidate["observed_saved_tokens"], 1900)
+        self.assertEqual(candidate["projected_saved_chars"], 11600)
+        self.assertEqual(candidate["projected_saved_tokens"], 2900)
+        self.assertGreater(candidate["projected_saved_usd"], 0)
+        self.assertGreater(candidate["avg_crunch_ratio"], 0)
+        self.assertIn("applied_minus_holdout_error_rate", candidate["deltas"])
+        self.assertIn("applied_minus_holdout_retry_rate", candidate["deltas"])
         self.assertLess(candidate["deltas"]["cost_avg_usd_delta"], 0)
         self.assertIn("safety-stop-observed", candidate["reason_codes"])
         self.assertEqual(candidate["session_budget_impact"]["affected_session_count"], 1)
@@ -310,6 +335,53 @@ class AnthropicThinkingCompactionImpactTests(unittest.TestCase):
             self.assertNotIn(RAW_SECRET, rendered)
             self.assertNotIn("raw-session-id", rendered)
             self.assertNotIn("raw-request-id", rendered)
+
+    def test_report_recommends_widen_when_canary_has_positive_impact(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                _log_call(
+                    store,
+                    "thinking-impact-widen-applied-1",
+                    created_at="2026-06-13T00:00:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=1000,
+                    planned_tokens=1000,
+                    cost_est=0.020,
+                )
+                _log_call(
+                    store,
+                    "thinking-impact-widen-applied-2",
+                    created_at="2026-06-13T00:01:00+00:00",
+                    status="applied",
+                    reason="thinking-history-compaction-applied",
+                    applied=True,
+                    tokens_saved=900,
+                    planned_tokens=900,
+                    cost_est=0.022,
+                )
+                _log_call(
+                    store,
+                    "thinking-impact-widen-holdout",
+                    created_at="2026-06-13T00:02:00+00:00",
+                    status="holdout",
+                    reason="canary_holdout",
+                    cohort="canary_holdout",
+                    planned_tokens=1000,
+                    cost_est=0.050,
+                )
+                payload = build_anthropic_thinking_compaction_impact_report(store, limit=20)
+            finally:
+                store.conn.close()
+
+        self.assertEqual(payload["summary"]["canary_impact_decision"], "widen")
+        self.assertEqual(payload["canary_impact_decision"]["decision"], "widen")
+        self.assertEqual(payload["budget_governor_feedback"]["recommended_budget_action"], "widen")
+        self.assertEqual(payload["candidates"][0]["canary_impact_decision"], "widen")
+        self.assertGreater(payload["summary"]["observed_saved_chars"], 0)
+        self.assertGreater(payload["summary"]["projected_saved_usd"], 0)
 
 
 if __name__ == "__main__":
