@@ -14,7 +14,10 @@ import yaml
 from agentflow_proxy import cli
 from agentflow_proxy.managed_egress import assert_managed_egress_safe
 from agentflow_proxy.openai_optimization_governor import LIFECYCLE_SOURCE_SURFACE
-from agentflow_proxy.openai_routing_canary_stage import stage_openai_routing_canary_drafts
+from agentflow_proxy.openai_routing_canary_stage import (
+    apply_openai_routing_canary_draft,
+    stage_openai_routing_canary_drafts,
+)
 from agentflow_proxy.openai_routing_report import build_openai_routing_report
 from agentflow_proxy.optimization import feedback
 from agentflow_proxy.policy_files import policy_file_snapshot, utc_now
@@ -333,6 +336,128 @@ class OpenAIRoutingCanaryStageTests(unittest.TestCase):
         self.assertIn("safety-stop-observed", result["omitted"][0]["blocker_codes"])
         self.assertIn("error-observed", result["omitted"][0]["blocker_codes"])
         self.assertFalse(result["provider_calls_made"])
+
+    def test_applies_reviewed_openai_routing_canary_draft_to_local_yaml_with_holdout(self) -> None:
+        report = {
+            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "generated_at": utc_now(),
+            "buckets": [{
+                "rank": 1,
+                "provider": "openai",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4",
+                "category": "unknown",
+                "sample_count": 242,
+                "actionability": "actionable",
+                "candidate_target_model": "gpt-5.4-mini",
+                "required_local_executor": "openai-routing-canary",
+                "estimated_savings_per_1000_calls_usd": 4.375,
+                "openai_canary_lifecycle_evidence": {
+                    "schema": "agentflow.openai_routing_canary_lifecycle_evidence.v1",
+                    "status": "no-openai-canary-metadata",
+                    "cohort_counts": {
+                        "canary_applied": 0,
+                        "canary_holdout": 0,
+                        "safety_stopped": 0,
+                    },
+                    "blocker_codes": [
+                        "missing-applied-coverage",
+                        "missing-canary-lifecycle-evidence",
+                        "missing-holdout-coverage",
+                    ],
+                },
+            }],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        staged = asyncio.run(stage_openai_routing_canary_drafts(
+            report,
+            workspace=str(Path(self.tmpdir.name) / "drafts"),
+            canary_fraction=0.05,
+            holdout_fraction=0.10,
+        ))
+        bundle_path = Path(staged["staged_drafts"][0]["bundle_path"])
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        config_dir = Path(self.tmpdir.name) / "config"
+
+        applied = apply_openai_routing_canary_draft(bundle, config_dir=config_dir, dry_run=False)
+
+        self.assertTrue(applied["ok"], json.dumps(applied, indent=2, sort_keys=True))
+        self.assertTrue(applied["wrote_policy_files"])
+        self.assertFalse(applied["provider_calls_made"])
+        self.assertFalse(applied["managed_server_calls_made"])
+        self.assertEqual(applied["summary"]["projected_canary_applied_count"], 13)
+        self.assertEqual(applied["summary"]["projected_canary_holdout_count"], 25)
+        self.assertEqual(applied["summary"]["estimated_savings_per_1000_calls_usd"], 4.375)
+        self.assertEqual(applied["summary"]["error_count"], 0)
+        self.assertEqual(applied["summary"]["retry_count"], 0)
+        self.assertEqual(applied["summary"]["fallback_count"], 0)
+        self.assertEqual(applied["summary"]["stale_evidence_count"], 0)
+        self.assertEqual(applied["summary"]["safety_stopped_count"], 0)
+
+        data = yaml.safe_load((config_dir / "routing_rules.yaml").read_text(encoding="utf-8"))
+        canary = data["openai_canary"]
+        self.assertTrue(canary["enabled"])
+        self.assertFalse(canary["review_only"])
+        self.assertEqual(canary["model_pattern"], "gpt-5.4")
+        self.assertEqual(canary["target_model"], "gpt-5.4-mini")
+        self.assertEqual(canary["canary_fraction"], 0.05)
+        self.assertEqual(canary["holdout_fraction"], 0.10)
+        lifecycle = canary["promotion"]["projected_openai_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 13)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 25)
+        self.assertEqual(lifecycle["estimated_savings_per_1000_calls_usd"], 4.375)
+        self.assertEqual(lifecycle["error_count"], 0)
+        self.assertEqual(lifecycle["retry_count"], 0)
+        self.assertEqual(lifecycle["fallback_count"], 0)
+        self.assertFalse(lifecycle["stale_evidence"]["stale"])
+
+        rendered = json.dumps(applied, sort_keys=True) + json.dumps(data, sort_keys=True)
+        self.assertNotIn("raw prompt must not appear", rendered)
+        self.assertNotIn("secret-openai-session-id", rendered)
+
+    def test_apply_refuses_safety_stopped_openai_routing_canary_draft_without_writing(self) -> None:
+        report = {
+            "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+            "generated_at": utc_now(),
+            "buckets": [{
+                "rank": 1,
+                "provider": "openai",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "gpt-5.4",
+                "routed_model": "gpt-5.4",
+                "category": "unknown",
+                "sample_count": 80,
+                "actionability": "actionable",
+                "candidate_target_model": "gpt-5.4-mini",
+                "required_local_executor": "openai-routing-canary",
+                "estimated_savings_per_1000_calls_usd": 4.375,
+            }],
+            "privacy": {"metadata_only": True, "aggregate_only": True},
+        }
+        staged = asyncio.run(stage_openai_routing_canary_drafts(
+            report,
+            workspace=str(Path(self.tmpdir.name) / "drafts"),
+        ))
+        bundle = json.loads(Path(staged["staged_drafts"][0]["bundle_path"]).read_text(encoding="utf-8"))
+        canary = bundle["policies"]["routing"]["openai"]["canary"]
+        lifecycle = canary["promotion"]["projected_openai_canary_lifecycle_evidence"]
+        lifecycle["cohort_counts"]["safety_stopped"] = 1
+        lifecycle["error_count"] = 1
+        lifecycle["blocker_codes"] = ["safety-stop-observed", "error-observed"]
+        config_dir = Path(self.tmpdir.name) / "config"
+
+        applied = apply_openai_routing_canary_draft(bundle, config_dir=config_dir, dry_run=False)
+
+        self.assertFalse(applied["ok"])
+        self.assertFalse(applied["wrote_policy_files"])
+        self.assertFalse((config_dir / "routing_rules.yaml").exists())
+        self.assertEqual(applied["omitted"][0]["reason"], "safety-stop-observed")
+        self.assertEqual(applied["summary"]["safety_stopped_count"], 1)
+        self.assertEqual(applied["summary"]["error_count"], 1)
+        self.assertEqual(applied["summary"]["estimated_savings_per_1000_calls_usd"], 4.375)
 
     def test_stages_promotion_blocker_routing_recommendation_as_canary_lifecycle_plan(self) -> None:
         recommendations = {

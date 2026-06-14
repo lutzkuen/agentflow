@@ -261,6 +261,7 @@ class OpenAIRoutingReportTests(unittest.TestCase):
         self.assertEqual(result["summary"]["openai_canary_skipped_count"], 1)
         self.assertEqual(result["summary"]["openai_canary_bypassed_or_disabled_count"], 1)
         self.assertEqual(result["summary"]["openai_canary_stale_evidence_count"], 0)
+        self.assertGreater(result["summary"]["estimated_savings_per_1000_calls_usd"], 0)
 
         rendered = json.dumps(result, sort_keys=True)
         self.assertNotIn("secret-openai-session", rendered)

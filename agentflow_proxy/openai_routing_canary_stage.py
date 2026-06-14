@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from agentflow_proxy.policy_files import stage_policy_draft
 from agentflow_proxy.pricing import pricing_basis
@@ -11,6 +14,7 @@ from agentflow_proxy.store import utc_now
 
 
 SCHEMA = "agentflow.openai_routing_canary_stage.v1"
+APPLY_SCHEMA = "agentflow.openai_routing_canary_apply.v1"
 OMISSION_SCHEMA = "agentflow.openai_routing_canary_stage_omission.v1"
 STAGED_SCHEMA = "agentflow.openai_routing_canary_staged_draft.v1"
 PRIVACY = {
@@ -734,6 +738,232 @@ def _error_result(error_type: str, message: str, *, errors: list[dict[str, str]]
         "managed_server_calls_made": False,
         "privacy": PRIVACY,
         "error": {"type": error_type, "message": message, "errors": errors or []},
+    }
+
+
+def _apply_error_result(error_type: str, message: str, *, errors: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    return {
+        "schema": APPLY_SCHEMA,
+        "ok": False,
+        "generated_at": utc_now(),
+        "dry_run": True,
+        "wrote_policy_files": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "applied": [],
+        "omitted": [],
+        "files": [],
+        "summary": {
+            "applied_count": 0,
+            "omitted_count": 0,
+            "projected_canary_applied_count": 0,
+            "projected_canary_holdout_count": 0,
+            "estimated_savings_per_1000_calls_usd": 0.0,
+            "error_count": 0,
+            "retry_count": 0,
+            "fallback_count": 0,
+            "stale_evidence_count": 0,
+            "safety_stopped_count": 0,
+        },
+        "privacy": PRIVACY,
+        "error": {"type": error_type, "message": message, "errors": errors or []},
+    }
+
+
+def _routing_policy_from_draft(draft_bundle: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(draft_bundle.get("policies"), dict):
+        routing = draft_bundle["policies"].get("routing")
+        if isinstance(routing, dict):
+            return routing
+    if isinstance(draft_bundle.get("routing"), dict):
+        return draft_bundle["routing"]
+    return draft_bundle
+
+
+def _openai_canary_from_draft(draft_bundle: dict[str, Any]) -> dict[str, Any] | None:
+    routing = _routing_policy_from_draft(draft_bundle)
+    openai = routing.get("openai") if isinstance(routing.get("openai"), dict) else {}
+    canary = openai.get("canary") if isinstance(openai.get("canary"), dict) else routing.get("openai_canary")
+    return canary if isinstance(canary, dict) else None
+
+
+def _apply_noop_reason(canary: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    lifecycle = (
+        canary.get("promotion", {}).get("projected_openai_canary_lifecycle_evidence")
+        if isinstance(canary.get("promotion"), dict)
+        else None
+    )
+    lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    blockers = {str(item).strip() for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()}
+    safety_stopped = _as_int(counts.get("safety_stopped"))
+    error_count = _as_int(lifecycle.get("error_count"))
+    retry_count = _as_int(lifecycle.get("retry_count"))
+    fallback_count = _as_int(lifecycle.get("fallback_count"))
+    stale = bool((lifecycle.get("stale_evidence") or {}).get("stale")) if isinstance(lifecycle.get("stale_evidence"), dict) else False
+    if safety_stopped or "safety-stop-observed" in blockers:
+        return "safety-stop-observed", lifecycle
+    if error_count or "error-observed" in blockers:
+        return "error-observed", lifecycle
+    if retry_count or "retry-observed" in blockers:
+        return "retry-observed", lifecycle
+    if fallback_count or "fallback-observed" in blockers:
+        return "fallback-observed", lifecycle
+    if stale or "stale-evidence" in blockers:
+        return "stale-evidence", lifecycle
+    if _as_int(counts.get("canary_applied")) <= 0:
+        return "missing-projected-applied-coverage", lifecycle
+    if _as_int(counts.get("canary_holdout")) <= 0:
+        return "missing-projected-holdout-coverage", lifecycle
+    return None, lifecycle
+
+
+def _load_policy_yaml(path: Path) -> tuple[dict[str, Any], str | None]:
+    if not path.exists():
+        return {"rules": []}, None
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text) or {}
+    if isinstance(data, list):
+        data = {"rules": data}
+    if not isinstance(data, dict):
+        data = {"rules": []}
+    if not isinstance(data.get("rules"), list):
+        data["rules"] = []
+    return data, text
+
+
+def _write_policy_yaml(path: Path, text: str) -> str | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_name: str | None = None
+    if path.exists():
+        backup = path.with_name(f"{path.name}.bak-{utc_now().replace(':', '').replace('+', 'Z')}")
+        backup.write_bytes(path.read_bytes())
+        backup_name = backup.name
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return backup_name
+
+
+def apply_openai_routing_canary_draft(
+    draft_bundle: dict[str, Any],
+    *,
+    config_dir: str | Path,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Apply a reviewed OpenAI routing canary draft to local file-backed routing policy."""
+    if not isinstance(draft_bundle, dict):
+        return _apply_error_result("invalid_draft", "OpenAI routing canary draft must be a JSON object")
+    raw_errors = _privacy_errors(draft_bundle)
+    if raw_errors:
+        return _apply_error_result(
+            "raw_payload_rejected",
+            "OpenAI routing canary draft contains raw prompt, response, provider body, identifier, file path, cache key, or secret fields",
+            errors=raw_errors,
+        )
+    canary = _openai_canary_from_draft(draft_bundle)
+    if not isinstance(canary, dict):
+        return _apply_error_result("missing_openai_canary", "draft does not contain an OpenAI routing canary policy")
+
+    noop_reason, lifecycle = _apply_noop_reason(canary)
+    counts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+    savings_per_1000 = _as_float(
+        lifecycle.get("estimated_savings_per_1000_calls_usd")
+        or (canary.get("promotion") or {}).get("estimated_savings_per_1000_calls_usd")
+    )
+    summary = {
+        "applied_count": 0 if noop_reason else 1,
+        "omitted_count": 1 if noop_reason else 0,
+        "projected_canary_applied_count": _as_int(counts.get("canary_applied")),
+        "projected_canary_holdout_count": _as_int(counts.get("canary_holdout")),
+        "estimated_savings_per_1000_calls_usd": round(savings_per_1000, 6),
+        "error_count": _as_int(lifecycle.get("error_count")),
+        "retry_count": _as_int(lifecycle.get("retry_count")),
+        "fallback_count": _as_int(lifecycle.get("fallback_count")),
+        "stale_evidence_count": _as_int(lifecycle.get("observed_count")) if ((lifecycle.get("stale_evidence") or {}).get("stale") if isinstance(lifecycle.get("stale_evidence"), dict) else False) else 0,
+        "safety_stopped_count": _as_int(counts.get("safety_stopped")),
+    }
+    if noop_reason:
+        return {
+            "schema": APPLY_SCHEMA,
+            "ok": False,
+            "generated_at": utc_now(),
+            "dry_run": bool(dry_run),
+            "wrote_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "applied": [],
+            "omitted": [{
+                "schema": "agentflow.openai_routing_canary_apply_noop.v1",
+                "status": "omitted",
+                "reason": noop_reason,
+                "target_candidate_id": canary.get("target_candidate_id") or (canary.get("promotion") or {}).get("candidate_id"),
+                "policy_id": canary.get("policy_id"),
+                "lifecycle_evidence": lifecycle,
+                "privacy": PRIVACY,
+            }],
+            "files": [],
+            "summary": summary,
+            "privacy": PRIVACY,
+            "error": {"type": "unsafe_lifecycle_evidence", "message": noop_reason},
+        }
+
+    active_canary = json.loads(json.dumps(canary, sort_keys=True))
+    active_canary["enabled"] = True
+    active_canary["review_only"] = False
+    active_canary["policy_source"] = active_canary.get("policy_source") or "local-manual"
+    active_canary.setdefault("activation", {})
+    if isinstance(active_canary["activation"], dict):
+        active_canary["activation"].update({
+            "schema": "agentflow.openai_routing_canary_local_activation.v1",
+            "activated_at": utc_now(),
+            "source": "reviewed-openai-routing-canary-draft",
+            "provider_calls_made_by_apply": False,
+            "managed_server_calls_made_by_apply": False,
+        })
+
+    path = Path(config_dir).expanduser() / "routing_rules.yaml"
+    policy, old_text = _load_policy_yaml(path)
+    policy["openai_canary"] = active_canary
+    text = yaml.safe_dump(policy, sort_keys=False)
+    changed = old_text != text
+    backup_name = None
+    if changed and not dry_run:
+        backup_name = _write_policy_yaml(path, text)
+
+    return {
+        "schema": APPLY_SCHEMA,
+        "ok": True,
+        "generated_at": utc_now(),
+        "dry_run": bool(dry_run),
+        "wrote_policy_files": bool(changed and not dry_run),
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "applied": [{
+            "schema": "agentflow.openai_routing_canary_apply_action.v1",
+            "status": "planned" if dry_run else "applied",
+            "target_local_policy": "openai_canary",
+            "policy_file": "routing_rules.yaml",
+            "policy_id": active_canary.get("policy_id"),
+            "target_candidate_id": active_canary.get("target_candidate_id"),
+            "requested_model": active_canary.get("model_pattern"),
+            "target_model": active_canary.get("target_model"),
+            "canary_fraction": active_canary.get("canary_fraction"),
+            "holdout_fraction": active_canary.get("holdout_fraction"),
+            "projected_openai_canary_lifecycle_evidence": lifecycle,
+            "privacy": PRIVACY,
+        }],
+        "omitted": [],
+        "files": [{
+            "section": "routing",
+            "policy_file": "routing_rules.yaml",
+            "changed": bool(changed),
+            "backup_file": backup_name,
+            "bytes_after": len(text.encode("utf-8")),
+        }],
+        "summary": summary,
+        "privacy": PRIVACY,
+        "error": None,
     }
 
 

@@ -582,6 +582,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
     blocked_count = sum(_as_int(item.get("blocked_count")) for item in candidates)
     projected_savings = sum(_as_float(item.get("projected_savings_usd")) for item in candidates)
     estimated_baseline_cost = sum(_as_float(item.get("estimated_baseline_cost_usd")) for item in candidates)
+    estimated_savings_per_1000_calls = round((projected_savings / matched_count) * 1000.0, 6) if matched_count else 0.0
     canary_applied_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("canary_applied")) for item in candidates)
     canary_holdout_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("canary_holdout")) for item in candidates)
     canary_safety_stopped_count = sum(_as_int(((item.get("openai_canary_lifecycle_evidence") or {}).get("cohort_counts") or {}).get("safety_stopped")) for item in candidates)
@@ -616,6 +617,7 @@ def build_openai_routing_report(store_obj: Any, limit: int = 1000) -> dict[str, 
             "eligible_count": max(0, matched_count - blocked_count),
             "projected_savings_usd": round(projected_savings, 6),
             "estimated_baseline_cost_usd": round(estimated_baseline_cost, 6),
+            "estimated_savings_per_1000_calls_usd": estimated_savings_per_1000_calls,
             "suggested_canary_fraction": suggested_fraction,
             "openai_canary_applied_count": canary_applied_count,
             "openai_canary_holdout_count": canary_holdout_count,
