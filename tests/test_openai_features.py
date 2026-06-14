@@ -700,6 +700,56 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(cache_module, "CACHE_PATTERN_RULES", old_rules))
         return rules[0]
 
+    def test_openai_cache_pattern_rule_preserves_sanitized_graduation_projection(self):
+        rules = cache_module.normalize_cache_pattern_rules([
+            {
+                "id": "reviewed-openai-cache-replay",
+                "enabled": True,
+                "policy_source": "managed-recommended",
+                "candidate_id": "openai-cache-replay-candidate",
+                "conditions": {
+                    "pattern_hashes": ["sha256:" + "c" * 64],
+                    "source_surface": "openai_responses",
+                    "endpoint": "responses",
+                    "category": "chat",
+                    "has_tools": False,
+                    "stream": False,
+                },
+                "rollout": {
+                    "schema": "agentflow.pattern_policy_rollout.v1",
+                    "recommendation_mode": "canary-only",
+                    "canary_enabled": True,
+                    "canary_fraction": 1.0,
+                    "canary_salt": "openai-cache-replay-test",
+                    "canary_unit": "request_fingerprint",
+                },
+                "action": {
+                    "type": "exact_cache_pattern",
+                    "allow_tool_calls": False,
+                    "safe_invalidation": False,
+                    "scope": "session",
+                },
+                "graduation": {
+                    "schema": "agentflow.openai_cache_replay_shape_activation.v1",
+                    "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                    "source_reason": "replay-ready-exact-non-tool-shape",
+                    "projected_hits": 3,
+                    "projected_savings_usd": 0.09,
+                    "sample_count": 4,
+                    "aggregate_only": True,
+                    "raw_prompt": "raw normalized projection must not leak",
+                },
+            }
+        ])
+
+        self.assertEqual(rules[0]["graduation"]["projected_hits"], 3)
+        self.assertEqual(rules[0]["graduation"]["sample_count"], 4)
+        self.assertEqual(rules[0]["graduation"]["source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        rendered = json.dumps(rules, sort_keys=True)
+        self.assertNotIn("raw normalized projection must not leak", rendered)
+        self.assertFalse(rules[0]["graduation"]["raw_prompts_included"])
+        self.assertFalse(rules[0]["graduation"]["cache_keys_included"])
+
     def test_openai_cache_replay_canary_applied_serves_cached_responses_response(self):
         watched = os.path.join(self.cwd_tmp.name, "src", "example.py")
         os.makedirs(os.path.dirname(watched), exist_ok=True)

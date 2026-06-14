@@ -824,6 +824,173 @@ class OpenAICacheReplayReportTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, queued_rendered)
 
+    def test_openai_cache_replay_impact_measures_projected_hits_against_actual_cohorts(self) -> None:
+        def replay_meta(
+            *,
+            candidate_id: str,
+            rule_id: str,
+            canary_status: str,
+            cohort: str,
+            projected_hits: int,
+            projected_savings: float,
+            reason: str,
+        ) -> dict[str, object]:
+            graduation = {
+                "schema": "agentflow.openai_cache_replay_shape_activation.v1",
+                "source_schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                "source_reason": "replay-ready-exact-non-tool-shape",
+                "projected_hits": projected_hits,
+                "projected_savings_usd": projected_savings,
+                "sample_count": 4,
+                "aggregate_only": True,
+                "raw_prompt": "raw graduation prompt must not leak",
+            }
+            rule: dict[str, object] = {
+                "rule_id": rule_id,
+                "candidate_id": candidate_id,
+                "policy_source": "managed-recommended",
+                "scope": "session",
+                "graduation": graduation,
+                "canary": {
+                    "enabled": True,
+                    "selected": cohort == "canary_applied",
+                    "cohort": cohort,
+                    "fraction": 0.5,
+                    "unit": "request_fingerprint",
+                    "status": canary_status,
+                    "pattern_hashes": ["sha256:" + "b" * 64],
+                },
+            }
+            return {
+                "pattern_rule": rule,
+                "pattern_rules": {"configured_count": 1, "matched_count": 1, "rules": [rule]},
+                "cache_replay_canary": {
+                    "schema": "agentflow.cache_replay_canary_decision.v1",
+                    "rule_id": rule_id,
+                    "candidate_id": candidate_id,
+                    "policy_source": "managed-recommended",
+                    "status": canary_status,
+                    "reason": reason,
+                    "canary": rule["canary"],
+                    "projected_hits": projected_hits,
+                    "projected_savings_usd": projected_savings,
+                },
+            }
+
+        self._log_openai_call(
+            cache_status="hit",
+            cache_reason="exact-match",
+            cache_hit=1,
+            cost=0.0,
+            cost_baseline=0.03,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-projected-cohort",
+                rule_id="openai-cache-projected-rule",
+                canary_status="applied",
+                cohort="canary_applied",
+                projected_hits=3,
+                projected_savings=0.09,
+                reason="dependency-stable",
+            ),
+        )
+        self._log_openai_call(
+            cache_status="miss",
+            cache_reason="exact-miss",
+            cache_hit=0,
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-projected-cohort",
+                rule_id="openai-cache-projected-rule",
+                canary_status="applied",
+                cohort="canary_applied",
+                projected_hits=3,
+                projected_savings=0.09,
+                reason="dependency-stable",
+            ),
+        )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="canary_holdout",
+            cache_hit=0,
+            cost=0.03,
+            cost_baseline=0.03,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-projected-cohort",
+                rule_id="openai-cache-projected-rule",
+                canary_status="holdout",
+                cohort="canary_holdout",
+                projected_hits=3,
+                projected_savings=0.09,
+                reason="canary_holdout",
+            ),
+        )
+        self._log_openai_call(
+            cache_status="bypassed",
+            cache_reason="session-scope-missing",
+            cache_hit=0,
+            cost=0.02,
+            cost_baseline=0.02,
+            cache_extra=replay_meta(
+                candidate_id="openai-cache-skipped-cohort",
+                rule_id="openai-cache-skipped-rule",
+                canary_status="bypassed",
+                cohort="canary_applied",
+                projected_hits=1,
+                projected_savings=0.02,
+                reason="session-scope-missing",
+            ),
+        )
+
+        report = build_openai_cache_replay_impact_report(
+            self.store,
+            limit=20,
+            min_applied_samples=1,
+            min_holdout_samples=1,
+            min_savings_realization_ratio=0.0,
+        )
+
+        self.assertEqual(report["summary"]["applied_count"], 2)
+        self.assertEqual(report["summary"]["holdout_count"], 1)
+        self.assertEqual(report["summary"]["projected_hits"], 4)
+        self.assertEqual(report["summary"]["actual_hits"], 1)
+        self.assertEqual(report["summary"]["miss_count"], 1)
+        self.assertEqual(report["summary"]["bypass_skipped_count"], 2)
+        self.assertEqual(report["summary"]["replay_ready_cohort_count"], 1)
+        self.assertEqual(report["summary"]["skipped_cohort_count"], 1)
+        self.assertAlmostEqual(report["summary"]["actual_saved_cost_usd"], 0.03)
+
+        by_id = {row["candidate_id"]: row for row in report["candidates"]}
+        replay_ready = by_id["openai-cache-projected-cohort"]
+        self.assertEqual(replay_ready["readiness"], "replay-ready")
+        self.assertEqual(replay_ready["replay_source_schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(replay_ready["projected_hits"], 3)
+        self.assertEqual(replay_ready["actual_hits"], 1)
+        self.assertEqual(replay_ready["miss_count"], 1)
+        self.assertEqual(replay_ready["bypass_skipped_count"], 1)
+        self.assertAlmostEqual(replay_ready["actual_saved_cost_usd"], 0.03)
+        blockers = {row["value"]: row["count"] for row in replay_ready["remaining_blocker_breakdown"]}
+        self.assertEqual(blockers["canary-holdout"], 1)
+        self.assertEqual(blockers["exact-miss"], 1)
+
+        skipped = by_id["openai-cache-skipped-cohort"]
+        self.assertEqual(skipped["readiness"], "skipped")
+        self.assertEqual(skipped["top_remaining_blocker"], "session-scope-missing")
+
+        lifecycle = report["quality_gate"]["candidate_results"]
+        lifecycle_ready = next(row for row in lifecycle if row["candidate_id"] == "openai-cache-projected-cohort")
+        self.assertEqual(lifecycle_ready["projected_hits"], 3)
+        self.assertEqual(lifecycle_ready["actual_hits"], 1)
+        self.assertEqual(lifecycle_ready["miss_count"], 1)
+
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("raw graduation prompt must not leak", rendered)
+        self.assertNotIn("sha256:" + "b" * 64, rendered)
+        self.assertFalse(report["privacy"]["raw_prompts_included"])
+        self.assertFalse(report["privacy"]["cache_keys_included"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+
     def test_openai_cache_replay_readiness_dashboard_api_cli_privacy_fixtures(self) -> None:
         def replay_meta(
             *,

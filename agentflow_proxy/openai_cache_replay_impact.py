@@ -123,6 +123,11 @@ def _counter_rows(counter: Counter[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _top_counter_value(counter: Counter[str]) -> str | None:
+    rows = _counter_rows(counter)
+    return str(rows[0]["value"]) if rows else None
+
+
 def _source_surface(row: dict[str, Any]) -> str:
     return str(row.get("source_surface") or openai_source_surface(str(row.get("path") or "")))
 
@@ -212,7 +217,10 @@ def _empty_cohort() -> dict[str, Any]:
         "cost_baseline_usd": 0.0,
         "observed_savings_usd": 0.0,
         "projected_savings_usd": 0.0,
+        "actual_saved_cost_usd": 0.0,
         "cache_hit_count": 0,
+        "miss_count": 0,
+        "bypass_skipped_count": 0,
         "invalidation_count": 0,
         "stale_dependency_count": 0,
     }
@@ -237,9 +245,36 @@ def _finalize_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "cost_est_usd": round(_as_float(raw.get("cost_est_usd")), 8),
         "cost_baseline_usd": round(_as_float(raw.get("cost_baseline_usd")), 8),
         "observed_savings_usd": round(_as_float(raw.get("observed_savings_usd")), 8),
+        "actual_saved_cost_usd": round(_as_float(raw.get("actual_saved_cost_usd")), 8),
         "projected_savings_usd": round(_as_float(raw.get("projected_savings_usd")), 8),
+        "miss_count": _as_int(raw.get("miss_count")),
+        "bypass_skipped_count": _as_int(raw.get("bypass_skipped_count")),
         "stale_dependency_count": _as_int(raw.get("stale_dependency_count")),
     }
+
+
+def _candidate_projected_hits(rule: dict[str, Any]) -> int:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+    for source in (graduation, rule):
+        for key in ("projected_hits", "projected_hit_count", "expected_hits", "expected_hit_count"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value is not None:
+                return _as_int(value)
+    return 0
+
+
+def _candidate_projected_cohort_rows(rule: dict[str, Any]) -> int:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+    for key in ("sample_count", "row_count", "matched_count"):
+        if graduation.get(key) is not None:
+            return _as_int(graduation.get(key))
+    return 0
+
+
+def _replay_source_schema(rule: dict[str, Any]) -> str | None:
+    graduation = rule.get("graduation") if isinstance(rule.get("graduation"), dict) else {}
+    value = graduation.get("source_schema") or graduation.get("schema")
+    return public_label(value, "unknown") if value else None
 
 
 def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any], row: dict[str, Any], feature: dict[str, Any]) -> dict[str, Any]:
@@ -258,6 +293,9 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
             "invalidated": _empty_cohort(),
             "safety_stop": _empty_cohort(),
         },
+        "projected_hit_count": _candidate_projected_hits(rule),
+        "projected_cohort_row_count": _candidate_projected_cohort_rows(rule),
+        "replay_source_schema": _replay_source_schema(rule),
         "status_buckets": Counter(),
         "endpoint_buckets": Counter(),
         "category_buckets": Counter(),
@@ -267,6 +305,7 @@ def _new_candidate(candidate_id: str, rule_id: str | None, rule: dict[str, Any],
         "dependency_health_buckets": Counter(),
         "stale_dependency_buckets": Counter(),
         "reason_buckets": Counter(),
+        "remaining_blocker_buckets": Counter(),
         "provider_adoption_observations": [],
         "latest_observed_at": None,
         "oldest_observed_at": None,
@@ -296,6 +335,32 @@ def _observed_savings(cache: dict[str, Any], row: dict[str, Any], cohort: str) -
     if baseline or actual:
         return baseline - actual
     return _as_float(cache.get("estimated_saved_cost_usd"))
+
+
+def _cache_outcome_status(cache: dict[str, Any], row: dict[str, Any]) -> str:
+    status = str(cache.get("status") or "").strip().lower()
+    if status:
+        return status
+    return "hit" if _as_int(row.get("cache_hit")) else "unknown"
+
+
+def _remaining_blocker(cache: dict[str, Any], canary: dict[str, Any], cohort: str) -> str | None:
+    reason = (
+        cache.get("invalidation_reason")
+        or cache.get("reason")
+        or canary.get("reason")
+        or "unknown"
+    )
+    status = str(cache.get("status") or canary.get("status") or "").strip().lower()
+    if cohort == "safety_stop":
+        return _reason_code(reason, "local-canary-safety-stop")
+    if cohort == "invalidated":
+        return _reason_code(reason, "cache-replay-invalidated")
+    if cohort in {"blocked", "holdout"}:
+        return _reason_code(reason, "cache-replay-bypassed")
+    if status in {"miss", "bypassed", "skipped", "disabled", "blocked", "invalidated"}:
+        return _reason_code(reason, "cache-replay-not-hit")
+    return None
 
 
 def _dependency_health(cache: dict[str, Any]) -> tuple[str, list[str]]:
@@ -372,10 +437,17 @@ def _add_row(
         raw["latency_sample_count"] += 1
     raw["cost_est_usd"] += _as_float(row.get("cost_est_usd"))
     raw["cost_baseline_usd"] += _as_float(row.get("cost_baseline_usd"))
-    raw["observed_savings_usd"] += _observed_savings(cache, row, cohort)
+    observed_savings = _observed_savings(cache, row, cohort)
+    raw["observed_savings_usd"] += observed_savings
+    raw["actual_saved_cost_usd"] += observed_savings
     raw["projected_savings_usd"] += _projected_savings(cache, canary, row)
-    if _as_int(row.get("cache_hit")) or cache.get("status") == "hit":
+    cache_status = _cache_outcome_status(cache, row)
+    if _as_int(row.get("cache_hit")) or cache_status == "hit":
         raw["cache_hit_count"] += 1
+    elif cache_status == "miss":
+        raw["miss_count"] += 1
+    elif cache_status in {"bypassed", "skipped", "disabled", "blocked"} or cohort in {"blocked", "holdout"}:
+        raw["bypass_skipped_count"] += 1
     if cohort == "invalidated" or cache.get("invalidated") or cache.get("invalidation_reason"):
         raw["invalidation_count"] += 1
     dependency_status, stale_dependency_reasons = _dependency_health(cache)
@@ -391,6 +463,9 @@ def _add_row(
     for reason in stale_dependency_reasons:
         candidate["stale_dependency_buckets"][reason] += 1
     candidate["reason_buckets"][_reason_code(cache.get("reason") or canary.get("reason"), "unknown")] += 1
+    remaining_blocker = _remaining_blocker(cache, canary, cohort)
+    if remaining_blocker:
+        candidate["remaining_blocker_buckets"][remaining_blocker] += 1
     if cache.get("invalidation_reason"):
         candidate["invalidation_reason_buckets"][_reason_code(cache.get("invalidation_reason"))] += 1
     created_at = row.get("created_at")
@@ -514,6 +589,19 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
     sample_count = sum(_as_int(value.get("count")) for value in cohorts.values())
     projected = sum(_as_float(value.get("projected_savings_usd")) for value in cohorts.values())
     observed = _as_float(applied.get("observed_savings_usd"))
+    applied_count = _as_int(applied.get("count"))
+    holdout_count = _as_int(holdout.get("count"))
+    blocked_count = _as_int(cohorts["blocked"].get("count"))
+    invalidated_count = _as_int(cohorts["invalidated"].get("count"))
+    safety_stop_count = _as_int(cohorts["safety_stop"].get("count"))
+    skipped_count = (
+        sum(_as_int(value.get("bypass_skipped_count")) for value in cohorts.values())
+        + invalidated_count
+        + safety_stop_count
+    )
+    actual_hit_count = sum(_as_int(value.get("cache_hit_count")) for value in cohorts.values())
+    miss_count = sum(_as_int(value.get("miss_count")) for value in cohorts.values())
+    projected_hits = _as_int(candidate.get("projected_hit_count"))
     return {
         "schema": QUALITY_GATE_SCHEMA,
         "candidate_id": candidate["candidate_id"],
@@ -524,6 +612,23 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "category": candidate.get("category"),
         "workflow_phase": candidate.get("workflow_phase"),
         "sample_count": sample_count,
+        "replay_ready": bool(applied_count or holdout_count or actual_hit_count),
+        "readiness": "replay-ready" if applied_count or holdout_count or actual_hit_count else "skipped",
+        "replay_source_schema": candidate.get("replay_source_schema"),
+        "projected_hit_count": projected_hits,
+        "projected_hits": projected_hits,
+        "projected_cohort_row_count": _as_int(candidate.get("projected_cohort_row_count")),
+        "actual_hit_count": actual_hit_count,
+        "actual_hits": actual_hit_count,
+        "actual_saved_cost_usd": round(observed, 8),
+        "miss_count": miss_count,
+        "bypass_skipped_count": sum(_as_int(value.get("bypass_skipped_count")) for value in cohorts.values()),
+        "skipped_count": skipped_count,
+        "applied_count": applied_count,
+        "holdout_count": holdout_count,
+        "blocked_count": blocked_count,
+        "invalidated_count": invalidated_count,
+        "safety_stop_count": safety_stop_count,
         "cohort_counts": {key: value["count"] for key, value in cohorts.items()},
         "cohort_metrics": cohorts,
         "applied_vs_holdout_deltas": deltas,
@@ -538,6 +643,8 @@ def _finalize_candidate(candidate: dict[str, Any], *, now: datetime, thresholds:
         "dependency_health_breakdown": _counter_rows(candidate["dependency_health_buckets"]),
         "stale_dependency_breakdown": _counter_rows(candidate["stale_dependency_buckets"]),
         "reason_code_breakdown": _counter_rows(candidate["reason_buckets"]),
+        "remaining_blocker_breakdown": _counter_rows(candidate["remaining_blocker_buckets"]),
+        "top_remaining_blocker": _top_counter_value(candidate["remaining_blocker_buckets"]),
         "canary": candidate.get("canary") or {"pattern_hashes_included": False},
         "oldest_observed_at": candidate.get("oldest_observed_at"),
         "latest_observed_at": candidate.get("latest_observed_at"),
@@ -621,9 +728,12 @@ def build_openai_cache_replay_impact_report(
     quality_gates.sort(key=lambda item: (str(item.get("verdict")), str(item.get("candidate_id"))))
     verdict_counts = Counter(str(item.get("verdict") or "unknown") for item in quality_gates)
     reason_counts: Counter[str] = Counter()
+    remaining_blocker_counts: Counter[str] = Counter()
     for item in quality_gates:
         for reason in item.get("reason_codes") or []:
             reason_counts[str(reason)] += 1
+        for row in item.get("remaining_blocker_breakdown") or []:
+            remaining_blocker_counts[str(row.get("value") or "unknown")] += _as_int(row.get("count"))
 
     top_level_gate = {
         "schema": QUALITY_GATE_SCHEMA,
@@ -637,6 +747,12 @@ def build_openai_cache_replay_impact_report(
                 "verdict": item.get("verdict"),
                 "reason_codes": item.get("reason_codes") or [],
                 "cohort_counts": item.get("cohort_counts") or {},
+                "projected_hits": item.get("projected_hits") or 0,
+                "actual_hits": item.get("actual_hits") or 0,
+                "actual_saved_cost_usd": item.get("actual_saved_cost_usd") or 0.0,
+                "miss_count": item.get("miss_count") or 0,
+                "bypass_skipped_count": item.get("bypass_skipped_count") or 0,
+                "top_remaining_blocker": item.get("top_remaining_blocker"),
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
             }
@@ -666,10 +782,19 @@ def build_openai_cache_replay_impact_report(
             "blocked_count": cohort_counts.get("blocked", 0),
             "invalidated_count": cohort_counts.get("invalidated", 0),
             "safety_stop_count": cohort_counts.get("safety_stop", 0),
+            "replay_ready_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "replay-ready"),
+            "skipped_cohort_count": sum(1 for item in quality_gates if item.get("readiness") == "skipped"),
+            "projected_hits": sum(_as_int(item.get("projected_hits")) for item in quality_gates),
+            "actual_hits": sum(_as_int(item.get("actual_hits")) for item in quality_gates),
+            "actual_saved_cost_usd": round(sum(_as_float(item.get("actual_saved_cost_usd")) for item in quality_gates), 8),
+            "miss_count": sum(_as_int(item.get("miss_count")) for item in quality_gates),
+            "bypass_skipped_count": sum(_as_int(item.get("bypass_skipped_count")) for item in quality_gates),
+            "top_remaining_blocker": _top_counter_value(remaining_blocker_counts),
             "observed_savings_usd": round(sum(_as_float(item.get("observed_savings_usd")) for item in quality_gates), 8),
             "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in quality_gates), 8),
         },
         "cohort_breakdown": _counter_rows(cohort_counts),
+        "remaining_blocker_breakdown": _counter_rows(remaining_blocker_counts),
         "quality_gate": top_level_gate,
         "candidates": quality_gates,
         "privacy": {
@@ -699,6 +824,15 @@ def build_openai_cache_replay_lifecycle_feedback(result: dict[str, Any]) -> dict
                 "reason_codes": item.get("reason_codes") or [],
                 "warning_codes": item.get("warning_codes") or [],
                 "cohort_counts": item.get("cohort_counts") or {},
+                "readiness": item.get("readiness"),
+                "projected_hits": item.get("projected_hits") or 0,
+                "actual_hits": item.get("actual_hits") or 0,
+                "actual_saved_cost_usd": item.get("actual_saved_cost_usd") or 0.0,
+                "miss_count": item.get("miss_count") or 0,
+                "bypass_skipped_count": item.get("bypass_skipped_count") or 0,
+                "skipped_count": item.get("skipped_count") or 0,
+                "safety_stop_count": item.get("safety_stop_count") or 0,
+                "top_remaining_blocker": item.get("top_remaining_blocker"),
                 "observed_savings_usd": item.get("observed_savings_usd"),
                 "projected_savings_usd": item.get("projected_savings_usd"),
                 "endpoint": item.get("endpoint"),

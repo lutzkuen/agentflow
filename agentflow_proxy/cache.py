@@ -213,6 +213,52 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cache_pattern_graduation_meta(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    safe: dict[str, Any] = {}
+    for key in ("schema", "source_schema", "source_reason", "source_verdict"):
+        if value.get(key) is not None:
+            safe[key] = str(value.get(key))
+    for key in (
+        "projected_hits",
+        "projected_hit_count",
+        "sample_count",
+        "applied_count",
+        "holdout_count",
+    ):
+        if value.get(key) is not None:
+            safe[key] = _as_int(value.get(key), 0)
+    for key in (
+        "projected_savings_usd",
+        "observed_savings_usd",
+        "projected_saved_cost_usd",
+    ):
+        if value.get(key) is not None:
+            safe[key] = round(_as_float(value.get(key)), 9)
+    if value.get("aggregate_only") is not None:
+        safe["aggregate_only"] = bool(value.get("aggregate_only"))
+    if value.get("graduated_at") is not None:
+        safe["graduated_at"] = str(value.get("graduated_at"))
+    if not safe:
+        return None
+    safe["metadata_only"] = True
+    safe["raw_prompts_included"] = False
+    safe["cache_keys_included"] = False
+    safe["request_ids_included"] = False
+    safe["session_ids_included"] = False
+    return safe
+
+
 def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -264,6 +310,7 @@ def _load_cache_pattern_rules(value: Any) -> list[dict[str, Any]]:
                 "min_call_count": min_call_count,
             },
             "rollout": normalize_pattern_rollout(item.get("rollout")),
+            "graduation": _cache_pattern_graduation_meta(item.get("graduation")),
         })
     return rules
 
@@ -631,6 +678,7 @@ def _cache_pattern_rule_match(
                     "reason": "canary_holdout",
                     "matched_hashes": matched_hashes,
                     "canary": canary,
+                    "graduation": rule.get("graduation"),
                 })
                 continue
             safety_stop = None
@@ -655,6 +703,7 @@ def _cache_pattern_rule_match(
                     "rollout": pattern_rollout_public_meta(rule.get("rollout")),
                     "canary": canary if canary.get("enabled") else None,
                     "safety_stop": safety_stop,
+                    "graduation": rule.get("graduation"),
                 })
                 log_pattern_canary_safety_stop(safety_stop)
                 continue
@@ -670,6 +719,7 @@ def _cache_pattern_rule_match(
                 "min_call_count": max(1, _as_int(action.get("min_call_count"), 1)),
                 "rollout": pattern_rollout_public_meta(rule.get("rollout")),
                 "canary": canary if canary.get("enabled") else None,
+                "graduation": rule.get("graduation"),
             }, skip_reasons
     return None, skip_reasons
 
@@ -700,6 +750,7 @@ def _attach_cache_pattern_meta(
                 "min_call_count",
                 "rollout",
                 "canary",
+                "graduation",
             }
         }
         meta["pattern_rules"]["rules"] = [meta["pattern_rule"]]
@@ -714,7 +765,7 @@ def _attach_skipped_cache_replay_canary(meta: dict[str, Any], selected_skip: dic
         return
     meta["pattern_rule"] = {
         key: selected_skip.get(key)
-        for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop")
+        for key in ("rule_id", "candidate_id", "policy_source", "matched_hashes", "canary", "safety_stop", "graduation")
         if selected_skip.get(key) is not None
     }
     canary = selected_skip.get("canary") if isinstance(selected_skip.get("canary"), dict) else {}
