@@ -2240,6 +2240,7 @@ class DashboardImportTests(unittest.TestCase):
             client = TestClient(app)
             with patch("agentflow_proxy.optimization_eval_plan.build_optimization_eval_plan", fake_build_optimization_eval_plan):
                 response = client.get("/agentflow/stats/optimization-promotion-funnel?limit=50")
+                action_response = client.get("/agentflow/stats/optimization-promotion-actions?limit=3")
                 dashboard = client.get("/agentflow/dashboard")
 
             self.assertEqual(response.status_code, 200)
@@ -2282,8 +2283,33 @@ class DashboardImportTests(unittest.TestCase):
             self.assertIn("optimization-promotion-funnel-candidates-tbody", dashboard.text)
             self.assertIn("Readiness", dashboard.text)
             self.assertIn("Next command", dashboard.text)
+            self.assertEqual(action_response.status_code, 200)
+            action_payload = action_response.json()
+            self.assertEqual(action_payload["schema"], "agentflow.optimization_promotion_actions_dashboard.v1")
+            self.assertEqual(action_payload["limit"], 3)
+            self.assertLessEqual(len(action_payload["actions"]), 3)
+            self.assertLessEqual(len(action_payload["omission_buckets"]), 3)
+            self.assertFalse(action_payload["privacy"]["raw_prompts_included"])
+            self.assertFalse(action_payload["privacy"]["request_ids_included"])
+            self.assertFalse(action_payload["privacy"]["cache_keys_included"])
+            self.assertFalse(action_payload["privacy"]["individual_candidate_ids_included"])
+            self.assertFalse(action_payload["privacy"]["individual_action_ids_included"])
+            self.assertGreaterEqual(action_payload["summary"]["action_count"], len(action_payload["actions"]))
+            action_rows = action_payload["actions"]
+            self.assertTrue(action_rows)
+            self.assertIn("policy_section", action_rows[0])
+            self.assertIn("target_local_policy_section", action_rows[0])
+            self.assertIn("apply_preview_command", action_rows[0])
+            self.assertNotIn("target_candidate_id", action_rows[0])
+            self.assertNotIn("action_id", action_rows[0])
+            action_rendered = json.dumps(action_payload, sort_keys=True)
+            self.assertNotIn('"target_candidate_id"', action_rendered)
+            self.assertNotIn('"action_id"', action_rendered)
+            self.assertIn("Promotion-ready actions", dashboard.text)
+            self.assertIn("optimization-promotion-actions-tbody", dashboard.text)
+            self.assertIn("/agentflow/stats/optimization-promotion-actions?limit=50", dashboard.text)
 
-            rendered = json.dumps(payload, sort_keys=True) + dashboard.text
+            rendered = json.dumps(payload, sort_keys=True) + json.dumps(action_payload, sort_keys=True) + dashboard.text
             for forbidden in (
                 "raw promotion funnel prompt must stay local",
                 "promotion-funnel-request-secret",

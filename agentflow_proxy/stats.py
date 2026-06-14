@@ -12375,6 +12375,118 @@ def _promotion_executor_readiness(
     }
 
 
+def _promotion_action_dashboard_row(action: dict[str, Any], *, rank: int) -> dict[str, Any]:
+    evidence = action.get("evidence_summary") if isinstance(action.get("evidence_summary"), dict) else {}
+    cohorts = evidence.get("cohort_counts") if isinstance(evidence.get("cohort_counts"), dict) else {}
+    local_review = action.get("local_review") if isinstance(action.get("local_review"), dict) else {}
+    return {
+        "rank": rank,
+        "status": str(action.get("status") or "planned"),
+        "action_type": str(action.get("action_type") or "unknown"),
+        "verdict": str(action.get("verdict") or "unknown"),
+        "action_family": str(action.get("action_family") or "unknown"),
+        "optimization_family": str(action.get("optimization_family") or "unknown"),
+        "source_surface": str(action.get("source_surface") or "unknown"),
+        "app_family": str(action.get("app_family") or "unknown"),
+        "policy_section": str(action.get("policy_section") or "unknown"),
+        "target_local_policy_section": action.get("target_local_policy_section"),
+        "projected_savings_usd": round(_as_float(evidence.get("projected_savings_usd")), 8),
+        "sample_count": _as_int(evidence.get("sample_count")),
+        "canary_applied_count": _as_int(cohorts.get("canary_applied")),
+        "canary_holdout_count": _as_int(cohorts.get("canary_holdout")),
+        "bypassed_or_disabled_count": _as_int(cohorts.get("bypassed_or_disabled")),
+        "eval_result_count": _as_int(evidence.get("eval_result_count")),
+        "eval_pass_count": _as_int(evidence.get("eval_pass_count")),
+        "eval_fail_count": _as_int(evidence.get("eval_fail_count")),
+        "eval_blocked_count": _as_int(evidence.get("eval_blocked_count")),
+        "latest_eval_result_at": evidence.get("latest_eval_result_at"),
+        "eval_evidence_stale": bool(evidence.get("eval_evidence_stale")),
+        "current_canary_fraction": round(_as_float(action.get("current_canary_fraction")), 6),
+        "canary_fraction": round(_as_float(action.get("canary_fraction")), 6),
+        "holdout_fraction": round(_as_float(action.get("holdout_fraction")), 6),
+        "review_command": str(local_review.get("review_command") or ""),
+        "apply_preview_command": str(local_review.get("apply_preview_command") or ""),
+        "privacy": _promotion_privacy_summary(),
+    }
+
+
+def _promotion_omission_dashboard_bucket(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": _as_int(row.get("rank")),
+        "reason": str(row.get("reason") or "unknown"),
+        "action_family": str(row.get("action_family") or "unknown"),
+        "candidate_count": _as_int(row.get("candidate_count")),
+        "projected_savings_usd": round(_as_float(row.get("projected_savings_usd")), 8),
+        "next_action": str(row.get("next_action") or "unknown"),
+        "reason_codes": _optimization_eval_reason_codes(row.get("reason_codes")),
+        "privacy": _promotion_privacy_summary(),
+    }
+
+
+async def stats_optimization_promotion_actions(store_obj: Any, limit: int = 50) -> dict[str, Any]:
+    from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
+    from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
+    from agentflow_proxy.optimization_promotion_report import build_optimization_promotion_report
+
+    capped_limit = max(1, min(int(limit or 50), 100))
+    plan = await build_optimization_eval_plan(store_obj, limit=capped_limit, min_samples=1)
+    promotion = build_optimization_promotion_report(store_obj, plan=plan, limit=capped_limit)
+    promotion_actions = build_optimization_promotion_actions(promotion)
+    raw_actions = [
+        row
+        for row in promotion_actions.get("actions", [])
+        if isinstance(row, dict)
+    ][:capped_limit]
+    actions = [
+        _promotion_action_dashboard_row(row, rank=index)
+        for index, row in enumerate(raw_actions, start=1)
+    ]
+    omitted = [
+        row
+        for row in promotion_actions.get("omission_buckets", [])
+        if isinstance(row, dict)
+    ][:capped_limit]
+    omission_buckets = [_promotion_omission_dashboard_bucket(row) for row in omitted]
+    summary = promotion_actions.get("summary") if isinstance(promotion_actions.get("summary"), dict) else {}
+    return {
+        "schema": "agentflow.optimization_promotion_actions_dashboard.v1",
+        "generated_at": utc_now(),
+        "read_only": True,
+        "wrote_local_files": False,
+        "wrote_store": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "limit": capped_limit,
+        "summary": {
+            "candidate_count": _as_int(summary.get("candidate_count")),
+            "action_count": _as_int(summary.get("action_count")),
+            "displayed_action_count": len(actions),
+            "omitted_count": _as_int(summary.get("omitted_count")),
+            "displayed_omission_bucket_count": len(omission_buckets),
+            "policy_section_counts": summary.get("policy_section_counts") if isinstance(summary.get("policy_section_counts"), list) else [],
+            "action_family_counts": summary.get("action_family_counts") if isinstance(summary.get("action_family_counts"), list) else [],
+            "omission_reason_counts": summary.get("omission_reason_counts") if isinstance(summary.get("omission_reason_counts"), list) else [],
+            "top_omission_next_action": summary.get("top_omission_next_action"),
+            "projected_savings_usd": round(sum(_as_float(row.get("projected_savings_usd")) for row in actions), 8),
+            "canary_applied_count": sum(_as_int(row.get("canary_applied_count")) for row in actions),
+            "canary_holdout_count": sum(_as_int(row.get("canary_holdout_count")) for row in actions),
+            "latest_eval_result_at": max((str(row.get("latest_eval_result_at")) for row in actions if row.get("latest_eval_result_at")), default=None),
+        },
+        "actions": actions,
+        "omission_buckets": omission_buckets,
+        "source_reports": {
+            "eval_plan_schema": plan.get("schema") if isinstance(plan, dict) else None,
+            "promotion_report_schema": promotion.get("schema") if isinstance(promotion, dict) else None,
+            "promotion_actions_schema": promotion_actions.get("schema") if isinstance(promotion_actions, dict) else None,
+        },
+        "privacy": {
+            **_promotion_privacy_summary(),
+            "individual_candidate_ids_included": False,
+            "individual_action_ids_included": False,
+        },
+    }
+
+
 async def stats_optimization_promotion_funnel(store_obj: Any, limit: int = 500) -> dict[str, Any]:
     from agentflow_proxy.optimization_eval_plan import build_optimization_eval_plan
     from agentflow_proxy.optimization_promotion_actions import build_optimization_promotion_actions
@@ -19525,6 +19637,33 @@ def dashboard_html() -> str:
 
 <div class="tab-panel" id="tab-evalqueue">
 <div class="section">
+  <h2>Promotion-ready actions</h2>
+  <table data-table-id="optimization-promotion-actions-summary" data-filter-label="Filter promotion action summary">
+    <thead><tr>
+      <th data-sort-type="number">Candidates</th><th data-sort-type="number">Ready actions</th><th data-sort-type="number">Displayed</th><th data-sort-type="number">Omitted</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="money">Projected savings</th><th data-sort-type="time">Latest eval</th><th data-sort-type="text">Top omission</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-promotion-actions-summary-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Promotion action queue</h2>
+  <table class="activity-table" data-table-id="optimization-promotion-actions" data-filter-label="Filter promotion actions">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Action</th><th data-sort-type="text">Verdict</th><th data-sort-type="text">Policy section</th><th data-sort-type="text">Family</th><th data-sort-type="text">Surface</th><th data-sort-type="money">Projected</th><th data-sort-type="number">Samples</th><th data-sort-type="number">Applied</th><th data-sort-type="number">Holdout</th><th data-sort-type="percent">Canary</th><th data-sort-type="percent">Holdout fraction</th><th data-sort-type="text">Next review</th><th data-sort-type="time">Latest eval</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-promotion-actions-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
+  <h2>Promotion action blockers</h2>
+  <table data-table-id="optimization-promotion-action-blockers" data-filter-label="Filter promotion action blockers">
+    <thead><tr>
+      <th data-sort-type="number">Rank</th><th data-sort-type="text">Reason</th><th data-sort-type="text">Family</th><th data-sort-type="number">Candidates</th><th data-sort-type="money">Projected savings</th><th data-sort-type="text">Next action</th><th data-sort-type="text">Reason codes</th><th data-sort-type="text">Privacy</th>
+    </tr></thead>
+    <tbody id="optimization-promotion-action-blockers-tbody"></tbody>
+  </table>
+</div>
+<div class="section">
   <h2>Optimization promotion funnel</h2>
   <table data-table-id="optimization-promotion-funnel-summary" data-filter-label="Filter promotion funnel summary">
     <thead><tr>
@@ -22257,6 +22396,66 @@ function promotionReasonBadges(row){
   if(!combined.length)return'<span class="badge hit">none</span>';
   return combined.slice(0,5).map(item=>`<span class="badge miss">${esc(item.value||item)}${item.count!=null?' '+Number(item.count||0).toLocaleString():''}</span>`).join(' ');
 }
+function promotionActionReasonBadges(rows){
+  rows=rows||[];
+  if(!rows.length)return'<span class="badge hit">none</span>';
+  return rows.slice(0,5).map(row=>`<span class="badge miss">${esc(row.value||row.reason||row)}${row.count!=null?' '+Number(row.count||0).toLocaleString():''}</span>`).join(' ');
+}
+function promotionActionListBadges(items,emptyLabel){
+  items=items||[];
+  if(!items.length)return`<span class="badge hit">${esc(emptyLabel||'none')}</span>`;
+  return items.slice(0,5).map(item=>`<span class="badge provider">${esc(item.value||item.reason||item)}${item.count!=null?' '+Number(item.count||0).toLocaleString():''}</span>`).join(' ');
+}
+async function refreshOptimizationPromotionActions(){
+  try{
+    const r=await fetch('/agentflow/stats/optimization-promotion-actions?limit=50');
+    const d=await r.json();
+    const s=d.summary||{};
+    const privacy=d.privacy||{};
+    document.getElementById('optimization-promotion-actions-summary-tbody').innerHTML=`<tr>
+      <td class="tokens">${(s.candidate_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.displayed_action_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.omitted_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(s.canary_holdout_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(s.projected_savings_usd||0,6)}</td>
+      <td class="ts">${s.latest_eval_result_at?ago(s.latest_eval_result_at):'—'}</td>
+      <td class="flags"><span class="badge provider">${esc(s.top_omission_next_action||'none')}</span> ${promotionActionReasonBadges(s.omission_reason_counts)}</td>
+      <td class="flags">${privacy.metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} ${privacy.individual_candidate_ids_included?'<span class="badge err">candidate IDs</span>':'<span class="badge hit">candidate IDs omitted</span>'} ${privacy.individual_action_ids_included?'<span class="badge err">action IDs</span>':'<span class="badge hit">action IDs omitted</span>'} ${privacy.request_ids_included?'<span class="badge err">request IDs</span>':'<span class="badge hit">request IDs omitted</span>'} ${privacy.cache_keys_included?'<span class="badge err">cache keys</span>':'<span class="badge hit">cache keys omitted</span>'}</td>
+    </tr>`;
+    const rows=d.actions||[];
+    document.getElementById('optimization-promotion-actions-tbody').innerHTML=rows.map(row=>`<tr>
+      <td class="tokens">${(row.rank||0).toLocaleString()}</td>
+      <td><span class="badge ${evalQueueBadge(row.action_type)}">${esc(row.action_type||'unknown')}</span></td>
+      <td><span class="badge ${evalQueueBadge(row.verdict)}">${esc(row.verdict||'unknown')}</span></td>
+      <td class="flags"><span class="badge provider">${esc(row.policy_section||'unknown')}</span> <span class="badge miss">${esc(row.target_local_policy_section||'—')}</span></td>
+      <td class="flags"><span class="badge provider">${esc(row.action_family||'unknown')}</span> <span class="badge miss">${esc(row.optimization_family||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(shortSurface(row.source_surface||'unknown'))}</span></td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td class="tokens">${(row.sample_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.canary_applied_count||0).toLocaleString()}</td>
+      <td class="tokens">${(row.canary_holdout_count||0).toLocaleString()}</td>
+      <td class="tokens">${fmtPctValue(row.canary_fraction||0)}</td>
+      <td class="tokens">${fmtPctValue(row.holdout_fraction||0)}</td>
+      <td class="model">${esc(row.apply_preview_command||row.review_command||'—')}</td>
+      <td class="ts">${row.latest_eval_result_at?ago(row.latest_eval_result_at):'—'} ${row.eval_evidence_stale?'<span class="badge routed">stale</span>':''}</td>
+      <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'} <span class="badge hit">IDs omitted</span></td>
+    </tr>`).join('')||'<tr><td colspan="15" style="color:#8b949e">No promotion-ready actions in the bounded local report window</td></tr>';
+    const blockers=d.omission_buckets||[];
+    document.getElementById('optimization-promotion-action-blockers-tbody').innerHTML=blockers.map(row=>`<tr>
+      <td class="tokens">${(row.rank||0).toLocaleString()}</td>
+      <td><span class="badge miss">${esc(row.reason||'unknown')}</span></td>
+      <td><span class="badge provider">${esc(row.action_family||'unknown')}</span></td>
+      <td class="tokens">${(row.candidate_count||0).toLocaleString()}</td>
+      <td class="savings">${fmt(row.projected_savings_usd||0,6)}</td>
+      <td><span class="badge provider">${esc(row.next_action||'unknown')}</span></td>
+      <td class="flags">${promotionActionListBadges(row.reason_codes,'none')}</td>
+      <td class="flags">${(row.privacy||{}).metadata_only?'<span class="badge hit">metadata only</span>':'<span class="badge err">unknown</span>'}</td>
+    </tr>`).join('')||'<tr><td colspan="8" style="color:#8b949e">No aggregate promotion action blocker buckets in this bounded window</td></tr>';
+    applyAllDataTables();
+  }catch(e){}
+}
 function shadowPromotionBadge(status){
   if(status==='ready-to-stage'||status==='ready-to-widen'||status==='promote')return'hit';
   if(status==='rejected'||status==='reject')return'err';
@@ -23254,7 +23453,7 @@ const tabRefreshers={
   limiter:[refreshLimiter],
   policies:[refreshPolicies],
   openai:[refreshManagedOpenAIActivation,refreshOpenAIOptimizationReadiness,refreshOpenAICanaryReadiness,refreshOpenAIOldContextSummary,refreshOpenAIScoreboard],
-  evalqueue:[refreshOptimizationEvalQueue],
+  evalqueue:[refreshOptimizationPromotionActions,refreshOptimizationEvalQueue],
   coordinator:[refreshOptimizationCoordinator],
   promotionblockers:[refreshPromotionBlockerNextActions],
   managed:[refreshManaged],

@@ -479,6 +479,14 @@ def create_dashboard_router(
     async def stats_optimization_promotion_funnel(limit: int = 500) -> dict[str, Any]:
         return await stats_views.stats_optimization_promotion_funnel(_store(store_obj), limit=limit)
 
+    @router.get("/agentflow/stats/optimization-promotion-actions")
+    async def stats_optimization_promotion_actions(limit: int = 50) -> dict[str, Any]:
+        return await cached_expensive_stats(
+            "optimization-promotion-actions",
+            (int(limit),),
+            lambda: stats_views.stats_optimization_promotion_actions(_store(store_obj), limit=limit),
+        )
+
     @router.get("/agentflow/stats/promotion-blocker-next-actions")
     async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any]:
         return await stats_views.stats_promotion_blocker_next_actions(limit=limit)
