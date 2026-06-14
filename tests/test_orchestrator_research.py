@@ -1323,6 +1323,54 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(managed_candidate["blocker"], "managed-recommendation-health-report-missing")
         self.assertEqual(managed_candidate["projected_savings_signal"]["status"], "missing-managed-recommendation-health-report")
 
+    def test_managed_recommendation_handoff_reports_omitted_local_action_reason(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 2714,
+                "managed_recommendations": {
+                    "schema": "agentflow.managed_recommendations.v1",
+                    "summary": {
+                        "window_calls": 2714,
+                        "metadata_rows": 50,
+                        "received_count": 0,
+                        "applied_count": 0,
+                        "observed_savings_usd": 0.0,
+                    },
+                    "reason_breakdown": [
+                        {
+                            "value": "repeated-context-crunch-opportunity",
+                            "count": 2714,
+                            "local_action": "crunch",
+                        },
+                    ],
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        signal = plan["evidence"]["stats_summary"]["managed_recommendation_health"]
+        self.assertEqual(signal["schema"], "agentflow.managed_recommendation_handoff_health.v1")
+        self.assertEqual(signal["status"], "omission-reasons-ranked")
+
+        self.assertIn("omitted_local_action_reason", signal)
+        self.assertEqual(signal["omitted_local_action_reason"], "repeated-context-crunch-opportunity")
+
+        self.assertIn("top_local_file_backed_exists", signal)
+        self.assertTrue(signal["top_local_file_backed_exists"])
+
+        self.assertNotIn("omitted_local_action_reason", signal.get("missing_measurements") or [])
+
+        top = signal["top_omission"]
+        self.assertEqual(top["omitted_reason"], "repeated-context-crunch-opportunity")
+        self.assertTrue(top["local_file_backed_representation"]["exists"])
+        self.assertEqual(top["local_file_backed_representation"]["rule_file"], "crunch_rules.yaml")
+
+        self.assertFalse(signal["privacy"]["raw_prompts_included"])
+        self.assertFalse(signal["privacy"]["provider_bodies_included"])
+        self.assertTrue(signal["privacy"]["metadata_only"])
+
     def test_request_shape_rollup_report_ranks_repeated_context_candidate(self):
         plan = build_research_plan(
             issues=[],

@@ -1572,11 +1572,17 @@ def _managed_recommendation_health_signal(
 
     represented = sum(1 for row in ranked if row["local_file_backed_representation"].get("exists"))
     unrepresented = len(ranked) - represented
+    top_reason = str(top.get("omitted_reason") or "") if isinstance(top, dict) else ""
+    top_repr = top.get("local_file_backed_representation") if isinstance(top, dict) else None
+    omitted_local_action_reason = top_reason or None
+    top_local_file_backed_exists = bool(top_repr.get("exists")) if isinstance(top_repr, dict) else None
     return {
         "schema": "agentflow.managed_recommendation_handoff_health.v1",
         "status": status,
         "source_schema": report_schema,
         "calls": calls,
+        "omitted_local_action_reason": omitted_local_action_reason,
+        "top_local_file_backed_exists": top_local_file_backed_exists,
         "summary": {
             "window_calls": _to_int(summary.get("window_calls") or calls),
             "metadata_rows": _to_int(summary.get("metadata_rows")),
@@ -2342,7 +2348,7 @@ def _burndown_row_from_loop_stage(stage: dict[str, Any]) -> dict[str, Any]:
 def _burndown_row_from_managed_health(health: dict[str, Any]) -> dict[str, Any] | None:
     top = health.get("top_omission") if isinstance(health.get("top_omission"), dict) else {}
     missing = [str(item) for item in health.get("missing_measurements") or [] if str(item or "").strip()]
-    omitted_reason = str(top.get("omitted_reason") or "").strip()
+    omitted_reason = str(health.get("omitted_local_action_reason") or top.get("omitted_reason") or "").strip()
     blocker_codes = missing or ([omitted_reason] if omitted_reason else [])
     if not blocker_codes and _to_int(health.get("calls")) <= 0:
         return None
