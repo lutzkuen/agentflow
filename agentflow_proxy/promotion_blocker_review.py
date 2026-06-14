@@ -5,6 +5,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from agentflow_proxy.promotion_safety import classify_family_safety_stop_reason
 from agentflow_proxy.store import utc_now
 
 
@@ -201,6 +202,20 @@ def _candidate(recommendation: dict[str, Any]) -> dict[str, Any]:
         "managed_enforced": False,
         "privacy": _privacy_summary(),
     }
+    family_safety = classify_family_safety_stop_reason(
+        action_family=candidate["local_action_family"],
+        reason=candidate["blocker_family"],
+        reason_codes=candidate["blocker_reason_codes"],
+        no_op_reasons=no_op_reasons,
+        next_action=candidate["next_action"],
+        file_backed_policy_exists=bool(file_representation.get("exists")) if "exists" in file_representation else None,
+        executor_status=(candidate.get("local_executor_compatibility") or {}).get("status"),
+    )
+    if family_safety:
+        candidate["safety_stop_reason"] = family_safety
+        candidate["safety_stop_reason_code"] = family_safety["code"]
+        candidate["recommended_blocker_state"] = family_safety["blocked_state"]
+        candidate["recommended_unblock_action"] = family_safety["local_unblock_action"]
     for key in (
         "requested_model",
         "requested_model_family",
@@ -225,10 +240,15 @@ def _group_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for family, items in grouped.items():
         reason_codes: list[str] = []
         next_actions: list[str] = []
+        safety_reasons: list[str] = []
         for item in items:
             reason_codes.extend(item.get("blocker_reason_codes") if isinstance(item.get("blocker_reason_codes"), list) else [])
             next_actions.append(str(item.get("next_action") or "keep-blocked"))
+            safety = item.get("safety_stop_reason") if isinstance(item.get("safety_stop_reason"), dict) else None
+            if safety and safety.get("code"):
+                safety_reasons.append(str(safety["code"]))
         items.sort(key=lambda row: (-_as_float(row.get("projected_savings_usd")), _as_int(row.get("rank")), str(row.get("recommendation_id"))))
+        safety_reason_counts = _safe_count_rows(safety_reasons)
         rows.append(
             {
                 "schema": GROUP_SCHEMA,
@@ -238,6 +258,8 @@ def _group_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "noop_count": sum(1 for item in items if item.get("status") == "noop"),
                 "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in items), 8),
                 "top_next_action": next_actions[0] if next_actions else None,
+                "top_safety_stop_reason": safety_reason_counts[0]["value"] if safety_reason_counts else None,
+                "safety_stop_reason_counts": safety_reason_counts,
                 "blocker_reason_code_counts": _safe_count_rows(reason_codes),
                 "recommendations": items,
                 "privacy": _privacy_summary(),
@@ -265,6 +287,11 @@ def build_promotion_blocker_recommendation_review(
     ]
     groups = _group_candidates(candidates)
     all_reasons = [reason for item in candidates for reason in item.get("blocker_reason_codes", [])]
+    safety_stop_reasons = [
+        str((item.get("safety_stop_reason") or {}).get("code"))
+        for item in candidates
+        if isinstance(item.get("safety_stop_reason"), dict) and (item.get("safety_stop_reason") or {}).get("code")
+    ]
     result = {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -291,7 +318,10 @@ def build_promotion_blocker_recommendation_review(
             "projected_savings_usd": round(sum(_as_float(item.get("projected_savings_usd")) for item in candidates), 8),
             "top_local_action_family": groups[0].get("local_action_family") if groups else None,
             "top_next_action": groups[0].get("top_next_action") if groups else None,
+            "top_safety_stop_reason": safety_stop_reasons[0] if safety_stop_reasons else None,
+            "safety_stop_reason_count": len(safety_stop_reasons),
             "blocker_reason_code_counts": _safe_count_rows(all_reasons),
+            "safety_stop_reason_counts": _safe_count_rows(safety_stop_reasons),
         },
         "groups": groups,
         "candidates": candidates,

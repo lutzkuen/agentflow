@@ -503,6 +503,12 @@ class DashboardImportTests(unittest.TestCase):
                         "expected_local_executor": "openai-cache-replay-dry-run",
                         "projected_savings_usd": 2.0,
                         "no_op_reasons": ["stale-dependency-evidence"],
+                        "file_backed_policy_representation": {
+                            "exists": True,
+                            "policy_section": "cache",
+                            "policy_source": "local-manual",
+                            "rule_file": "cache_rules.yaml",
+                        },
                     },
                 ],
             }
@@ -529,10 +535,21 @@ class DashboardImportTests(unittest.TestCase):
             self.assertEqual(data["summary"]["recommended_count"], 1)
             self.assertEqual(data["summary"]["noop_count"], 1)
             self.assertEqual(data["summary"]["stale_evidence_count"], 2)
+            self.assertIn(
+                data["summary"]["top_safety_stop_reason"],
+                {"routing-stale-lifecycle-evidence", "cache-dependency-instability"},
+            )
+            self.assertEqual(data["summary"]["safety_stop_reason_count"], 2)
             self.assertEqual(data["summary"]["top_expected_local_executor"], "optimization-shadow-eval")
             self.assertEqual(data["top_blocker_reasons"][0]["value"], "dependency-freshness-missing")
+            self.assertEqual(
+                {row["value"] for row in data["top_safety_stop_reasons"]},
+                {"routing-stale-lifecycle-evidence", "cache-dependency-instability"},
+            )
             self.assertEqual(data["family_counts"][0]["value"], "cache")
             self.assertEqual(data["groups"][0]["local_action_family"], "routing")
+            self.assertEqual(data["groups"][0]["top_safety_stop_reason"], "routing-stale-lifecycle-evidence")
+            self.assertEqual(data["groups"][0]["sample_recommendations"][0]["safety_stop_reason_code"], "routing-stale-lifecycle-evidence")
             self.assertFalse(data["source"]["path_included"])
             self.assertFalse(data["privacy"]["provider_calls_made"])
             self.assertFalse(data["privacy"]["managed_server_calls_made"])

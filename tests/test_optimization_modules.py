@@ -1145,6 +1145,78 @@ class OptimizationModuleTests(unittest.TestCase):
         self.assertIn("fix-dependency-freshness", next_actions)
         self._assert_privacy_clean(result)
 
+    def test_promotion_actions_attach_family_specific_safety_stop_reasons(self):
+        report = {
+            "schema": "agentflow.optimization_promotion_report.v1",
+            "candidates": [
+                {
+                    "candidate_id": "routing-missing-holdout",
+                    "optimization_family": "openai_local_routing",
+                    "action_family": "routing",
+                    "source_surface": "openai_provider_request",
+                    "app_family": "generic_openai",
+                    "projected_savings_usd": 0.11,
+                    "sample_count": 11,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["insufficient-canary-holdout-samples"],
+                    "eval_evidence": {"result_count": 0, "pass_count": 0},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "cache-stale-dependency",
+                    "optimization_family": "cache_replayability",
+                    "action_family": "cache",
+                    "source_surface": "openai_responses",
+                    "app_family": "generic_openai",
+                    "projected_savings_usd": 0.09,
+                    "sample_count": 9,
+                    "verdict": "widen",
+                    "file_dependency_status": "invalidated",
+                    "reason_codes": ["stale-risk-blockers"],
+                    "eval_evidence": {"result_count": 1, "pass_count": 1},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+                {
+                    "candidate_id": "crunch-quality-gate",
+                    "optimization_family": "old_context_summarization",
+                    "action_family": "crunch",
+                    "source_surface": "anthropic_messages",
+                    "app_family": "claude_code",
+                    "projected_savings_usd": 0.07,
+                    "sample_count": 7,
+                    "verdict": "needs_eval",
+                    "reason_codes": ["safety-stop-observed", "summary-failure-rate"],
+                    "eval_evidence": {"result_count": 1, "fail_count": 1},
+                    "privacy": {"metadata_only": True, "raw_prompts_included": False},
+                },
+            ],
+        }
+
+        result = build_optimization_promotion_actions(report)
+
+        by_candidate = {row["target_candidate_id"]: row for row in result["omitted"]}
+        self.assertEqual(by_candidate["routing-missing-holdout"]["safety_stop_reason_code"], "routing-missing-holdout-coverage")
+        self.assertEqual(by_candidate["routing-missing-holdout"]["recommended_unblock_action"], "collect-canary-holdout")
+        self.assertEqual(by_candidate["routing-missing-holdout"]["recommended_blocker_state"], "unblockable")
+        self.assertEqual(by_candidate["cache-stale-dependency"]["safety_stop_reason_code"], "cache-dependency-instability")
+        self.assertEqual(by_candidate["cache-stale-dependency"]["recommended_unblock_action"], "refresh-cache-dependency-evidence")
+        self.assertEqual(by_candidate["crunch-quality-gate"]["safety_stop_reason_code"], "crunch-quality-gate-failed")
+        self.assertEqual(by_candidate["crunch-quality-gate"]["recommended_blocker_state"], "keep-blocked")
+        bucket_codes = {row["reason_code"] for row in result["safety_stop_reason_buckets"]}
+        self.assertEqual(
+            bucket_codes,
+            {
+                "routing-missing-holdout-coverage",
+                "cache-dependency-instability",
+                "crunch-quality-gate-failed",
+            },
+        )
+        next_actions = {row["next_action"] for row in result["omission_buckets"]}
+        self.assertIn("collect-canary-holdout", next_actions)
+        self.assertIn("fix-dependency-freshness", next_actions)
+        self.assertIn("review-crunch-quality-gate", next_actions)
+        self._assert_privacy_clean(result)
+
     def test_promotion_blocker_recommendation_review_groups_sanitized_local_candidates(self):
         payload = {
             "schema": "agentflow.promotion_blocker_next_action_recommendations.v1",

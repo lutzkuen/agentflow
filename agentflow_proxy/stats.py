@@ -1059,6 +1059,9 @@ def _promotion_blocker_public_group(group: dict[str, Any], *, candidate_limit: i
                     for reason in (candidate.get("blocker_reason_codes") if isinstance(candidate.get("blocker_reason_codes"), list) else [])[:5]
                 ],
                 "next_action": public_label(candidate.get("next_action"), "unknown"),
+                "safety_stop_reason_code": public_label(candidate.get("safety_stop_reason_code"), "none") if candidate.get("safety_stop_reason_code") else None,
+                "recommended_blocker_state": public_label(candidate.get("recommended_blocker_state"), "unknown") if candidate.get("recommended_blocker_state") else None,
+                "recommended_unblock_action": public_label(candidate.get("recommended_unblock_action"), "unknown") if candidate.get("recommended_unblock_action") else None,
                 "expected_local_executor": public_label(candidate.get("expected_local_executor"), "none"),
                 "projected_savings_usd": _money(candidate.get("projected_savings_usd")),
                 "file_backed_policy_exists": bool(file_backed.get("exists")) if isinstance(file_backed, dict) else False,
@@ -1066,7 +1069,9 @@ def _promotion_blocker_public_group(group: dict[str, Any], *, candidate_limit: i
             }
         )
     reason_counts = group.get("blocker_reason_code_counts") if isinstance(group.get("blocker_reason_code_counts"), list) else []
+    safety_reason_counts = group.get("safety_stop_reason_counts") if isinstance(group.get("safety_stop_reason_counts"), list) else []
     top_reason = reason_counts[0].get("value") if reason_counts and isinstance(reason_counts[0], dict) else None
+    top_safety_reason = safety_reason_counts[0].get("value") if safety_reason_counts and isinstance(safety_reason_counts[0], dict) else None
     return {
         "rank": _as_int(group.get("rank")),
         "local_action_family": public_label(group.get("local_action_family"), "unknown"),
@@ -1076,9 +1081,15 @@ def _promotion_blocker_public_group(group: dict[str, Any], *, candidate_limit: i
         "projected_savings_usd": _money(group.get("projected_savings_usd")),
         "top_next_action": public_label(group.get("top_next_action"), "unknown"),
         "top_blocker_reason": public_label(top_reason, "none") if top_reason else None,
+        "top_safety_stop_reason": public_label(top_safety_reason or group.get("top_safety_stop_reason"), "none") if (top_safety_reason or group.get("top_safety_stop_reason")) else None,
         "blocker_reason_code_counts": [
             {"value": public_label(row.get("value"), "unknown"), "count": _as_int(row.get("count"))}
             for row in reason_counts[:5]
+            if isinstance(row, dict)
+        ],
+        "safety_stop_reason_counts": [
+            {"value": public_label(row.get("value"), "unknown"), "count": _as_int(row.get("count"))}
+            for row in safety_reason_counts[:5]
             if isinstance(row, dict)
         ],
         "sample_recommendations": public_candidates,
@@ -1122,6 +1133,7 @@ async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any
         executor_counts[executor] = executor_counts.get(executor, 0) + 1
         next_action_counts[action] = next_action_counts.get(action, 0) + 1
     top_reasons = _breakdown_from_counts(reason_counts)[:10]
+    safety_counts = source_summary.get("safety_stop_reason_counts") if isinstance(source_summary.get("safety_stop_reason_counts"), list) else []
     top_reason = top_reasons[0]["value"] if top_reasons else None
     top_executors = _breakdown_from_counts(executor_counts)[:10]
     top_actions = _breakdown_from_counts(next_action_counts)[:10]
@@ -1153,11 +1165,18 @@ async def stats_promotion_blocker_next_actions(limit: int = 20) -> dict[str, Any
             "projected_savings_usd": _money(source_summary.get("projected_savings_usd")),
             "top_local_action_family": public_label(source_summary.get("top_local_action_family"), "none"),
             "top_blocker_reason": top_reason,
+            "top_safety_stop_reason": public_label(source_summary.get("top_safety_stop_reason"), "none") if source_summary.get("top_safety_stop_reason") else None,
+            "safety_stop_reason_count": _as_int(source_summary.get("safety_stop_reason_count")),
             "top_next_action": public_label(source_summary.get("top_next_action"), "none"),
             "top_expected_local_executor": public_label(top_candidate.get("expected_local_executor"), "none") if top_candidate else None,
         },
         "family_counts": _breakdown_from_counts(family_counts)[:10],
         "top_blocker_reasons": top_reasons,
+        "top_safety_stop_reasons": [
+            {"value": public_label(row.get("value"), "unknown"), "count": _as_int(row.get("count"))}
+            for row in safety_counts[:10]
+            if isinstance(row, dict)
+        ],
         "expected_local_executors": top_executors,
         "next_actions": top_actions,
         "groups": public_groups,

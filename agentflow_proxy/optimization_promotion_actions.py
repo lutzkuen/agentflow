@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from agentflow_proxy.promotion_safety import classify_family_safety_stop_reason
 from agentflow_proxy.store import utc_now
 
 
@@ -701,7 +702,14 @@ def _action(
 
 
 def _omission(candidate: dict[str, Any], *, reason: str) -> dict[str, Any]:
-    return {
+    reason_codes = _reason_codes(candidate.get("reason_codes"))
+    family_safety = classify_family_safety_stop_reason(
+        action_family=_action_family(candidate),
+        reason=reason,
+        reason_codes=reason_codes,
+        file_backed_policy_exists=_local_policy(candidate) is not None,
+    )
+    result = {
         "schema": OMISSION_SCHEMA,
         "status": "omitted",
         "reason": reason,
@@ -714,9 +722,22 @@ def _omission(candidate: dict[str, Any], *, reason: str) -> dict[str, Any]:
         "evidence_summary": _evidence_summary(candidate),
         "privacy": _privacy_summary(),
     }
+    if family_safety:
+        result["safety_stop_reason"] = family_safety
+        result["safety_stop_reason_code"] = family_safety["code"]
+        result["recommended_blocker_state"] = family_safety["blocked_state"]
+        result["recommended_unblock_action"] = family_safety["local_unblock_action"]
+    return result
 
 
 def _omission_bucket_next_action(reason: str, reason_codes: list[str], *, action_family: str) -> str:
+    family_safety = classify_family_safety_stop_reason(
+        action_family=action_family,
+        reason=reason,
+        reason_codes=reason_codes,
+    )
+    if family_safety:
+        return str(family_safety["next_action"])
     reasons = {str(item or "").strip().lower().replace("_", "-") for item in reason_codes if str(item or "").strip()}
     reason_l = str(reason or "").strip().lower().replace("_", "-")
     haystack = " ".join(sorted(reasons | {reason_l}))
@@ -746,7 +767,8 @@ def _omission_buckets(omitted: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         evidence = row.get("evidence_summary") if isinstance(row.get("evidence_summary"), dict) else {}
-        reason = _reason(row.get("reason")) or "unknown"
+        family_safety = row.get("safety_stop_reason") if isinstance(row.get("safety_stop_reason"), dict) else None
+        reason = _reason((family_safety or {}).get("code") or row.get("reason")) or "unknown"
         reason_codes = _reason_codes(evidence.get("reason_codes"))
         action_family = str(row.get("action_family") or "unknown").strip().lower().replace("_", "-") or "unknown"
         optimization_family = str(row.get("optimization_family") or "unknown").strip().lower().replace("_", "-") or "unknown"
@@ -766,6 +788,9 @@ def _omission_buckets(omitted: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "app_family": app_family,
                 "reason": reason,
                 "next_action": next_action,
+                "safety_stop_reason": family_safety,
+                "recommended_blocker_state": (family_safety or {}).get("blocked_state"),
+                "recommended_unblock_action": (family_safety or {}).get("local_unblock_action"),
                 "candidate_count": 0,
                 "sample_count": 0,
                 "projected_savings_usd": 0.0,
@@ -808,6 +833,42 @@ def _omission_buckets(omitted: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for index, bucket in enumerate(buckets, start=1):
         bucket["rank"] = index
     return buckets
+
+
+def _safety_stop_reason_buckets(omitted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in omitted:
+        safety = row.get("safety_stop_reason") if isinstance(row.get("safety_stop_reason"), dict) else None
+        if not safety:
+            continue
+        key = (
+            str(safety.get("action_family") or row.get("action_family") or "unknown"),
+            str(safety.get("code") or "unknown"),
+            str(safety.get("next_action") or "inspect-promotion-evidence"),
+            str(safety.get("blocked_state") or "unknown"),
+        )
+        bucket = counts.setdefault(
+            key,
+            {
+                "action_family": key[0],
+                "reason_code": key[1],
+                "next_action": key[2],
+                "recommended_blocker_state": key[3],
+                "candidate_count": 0,
+                "projected_savings_usd": 0.0,
+                "privacy": _privacy_summary(),
+            },
+        )
+        evidence = row.get("evidence_summary") if isinstance(row.get("evidence_summary"), dict) else {}
+        bucket["candidate_count"] += 1
+        bucket["projected_savings_usd"] += _as_float(evidence.get("projected_savings_usd"))
+    rows = list(counts.values())
+    for row in rows:
+        row["projected_savings_usd"] = round(_as_float(row.get("projected_savings_usd")), 8)
+    rows.sort(key=lambda row: (-_as_int(row["candidate_count"]), -_as_float(row["projected_savings_usd"]), str(row["action_family"]), str(row["reason_code"])))
+    for index, row in enumerate(rows, start=1):
+        row["rank"] = index
+    return rows
 
 
 def build_optimization_promotion_actions(
@@ -854,7 +915,9 @@ def build_optimization_promotion_actions(
     policy_sections = [str(row.get("policy_section") or "unknown") for row in actions]
     omission_reasons = [str(row.get("reason") or "unknown") for row in omitted]
     omission_buckets = _omission_buckets(omitted)
+    safety_stop_reason_buckets = _safety_stop_reason_buckets(omitted)
     top_omission_bucket = omission_buckets[0] if omission_buckets else None
+    top_safety_stop_reason = safety_stop_reason_buckets[0] if safety_stop_reason_buckets else None
     return {
         "schema": SCHEMA,
         "generated_at": utc_now(),
@@ -874,9 +937,12 @@ def build_optimization_promotion_actions(
             "omission_bucket_count": len(omission_buckets),
             "top_omission_next_action": top_omission_bucket.get("next_action") if top_omission_bucket else None,
             "top_omission_bucket": top_omission_bucket,
+            "safety_stop_reason_bucket_count": len(safety_stop_reason_buckets),
+            "top_safety_stop_reason": top_safety_stop_reason,
         },
         "actions": actions,
         "omission_buckets": omission_buckets,
+        "safety_stop_reason_buckets": safety_stop_reason_buckets,
         "omitted": omitted,
         "privacy": _privacy_summary(),
     }
