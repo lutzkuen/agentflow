@@ -15,6 +15,7 @@ import yaml
 from agentflow_proxy import activation
 from agentflow_proxy import cli
 from agentflow_proxy.cli_commands import onboarding as onboarding_cli
+from agentflow_proxy.cli_commands import optimization_reports as optimization_reports_cli
 from agentflow_proxy.cli_commands import policy_bundle as policy_bundle_cli
 from agentflow_proxy.cli_commands import policy_workbench as policy_workbench_cli
 
@@ -76,6 +77,69 @@ class AgentflowActivationCliTests(unittest.TestCase):
         self.assertIs(cli.agentflow_cli, onboarding_cli.agentflow_cli)
         self.assertIs(cli._activation_stats_result, onboarding_cli._activation_stats_result)
         self.assertIs(cli._doctor_codex_target, onboarding_cli._doctor_codex_target)
+
+    def test_agentflow_cli_reexports_optimization_report_commands(self):
+        moved_commands = [
+            "openai_optimization_draft_dry_run_cli",
+            "openai_optimization_draft_apply_cli",
+            "managed_rollout_actions_review_cli",
+            "optimization_rollout_actions_review_cli",
+            "optimization_rollout_actions_apply_cli",
+            "openai_routing_report_cli",
+            "openai_cache_replay_report_cli",
+            "optimization_eval_plan_cli",
+            "optimization_promotion_report_cli",
+            "repeated_scaffold_opportunity_cli",
+            "instruction_dedup_opportunity_cli",
+            "terminal_output_compaction_opportunity_cli",
+        ]
+
+        for command in moved_commands:
+            with self.subTest(command=command):
+                self.assertIs(getattr(cli, command), getattr(optimization_reports_cli, command))
+
+    def test_optimization_report_console_script_entrypoints_import(self):
+        script_lines = Path("pyproject.toml").read_text(encoding="utf-8").splitlines()
+        affected_tokens = ("agentflow-openai-", "agentflow-optimization-")
+        report_tokens = ("opportunity", "compaction", "report", "rollout-actions")
+        checked = []
+
+        for line in script_lines:
+            stripped = line.strip()
+            if not stripped.startswith("agentflow-") or "=" not in stripped:
+                continue
+            script_name, target = [part.strip().strip('"') for part in stripped.split("=", 1)]
+            if not (
+                script_name.startswith(affected_tokens)
+                or any(token in script_name for token in report_tokens)
+            ):
+                continue
+            module_name, attr = target.split(":", 1)
+            module = importlib.import_module(module_name)
+            self.assertTrue(callable(getattr(module, attr)), script_name)
+            checked.append(script_name)
+
+        self.assertIn("agentflow-openai-routing-report", checked)
+        self.assertIn("agentflow-optimization-eval-plan", checked)
+        self.assertIn("agentflow-repeated-scaffold-opportunity", checked)
+
+    def test_optimization_reports_module_openai_routing_report_empty_db(self):
+        from agentflow_proxy.store import Store
+
+        with TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "agentflow.sqlite3")
+            Store(db_path).conn.close()
+            stdout = io.StringIO()
+
+            code = optimization_reports_cli.openai_routing_report_cli(
+                ["--db", db_path, "--limit", "10"],
+                stdout=stdout,
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["schema"], "agentflow.openai_routing_opportunity.v1")
+        self.assertEqual(payload["summary"]["candidate_count"], 0)
 
     def test_onboarding_module_version_json_path(self):
         from agentflow_proxy import __version__
