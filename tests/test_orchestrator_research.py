@@ -255,6 +255,114 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(plan["privacy"]["request_ids_included"])
         self.assertFalse(plan["privacy"]["session_ids_included"])
 
+    def test_promotion_blocker_status_suppresses_closed_titles_and_creates_successor(self):
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    90,
+                    "Stage routing evidence for gpt-5.4 to gpt-5.4-mini",
+                    ["backlog", "status:closed", "priority:p1", "core-feature"],
+                    state="CLOSED",
+                )
+            ],
+            stats={
+                "calls": 2487,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "chat",
+                        "c": 210,
+                    }
+                ],
+                "promotion_blocker_next_actions": {
+                    "schema": "agentflow.promotion_blocker_next_actions_dashboard.v1",
+                    "status": "available",
+                    "summary": {
+                        "review_candidate_count": 2,
+                        "recommended_count": 1,
+                        "noop_count": 1,
+                        "projected_savings_usd": 18.75,
+                        "top_local_action_family": "routing",
+                        "top_blocker_reason": "ready-to-widen",
+                        "top_safety_stop_reason": None,
+                        "top_next_action": "widen_local_openai_canary",
+                        "top_expected_local_executor": "openai-routing-canary",
+                    },
+                    "next_actions": [
+                        {"value": "widen_local_openai_canary", "count": 1},
+                        {"value": "keep-blocked", "count": 1},
+                    ],
+                    "groups": [
+                        {
+                            "local_action_family": "routing",
+                            "candidate_count": 1,
+                            "projected_savings_usd": 18.75,
+                            "top_next_action": "widen_local_openai_canary",
+                            "top_blocker_reason": "ready-to-widen",
+                            "sample_recommendations": [
+                                {
+                                    "candidate_id": "promotion-blocker-candidate-secret",
+                                    "request_id": "promotion-blocker-request-secret",
+                                    "session_id": "promotion-blocker-session-secret",
+                                    "cache_key": "promotion-blocker-cache-secret",
+                                    "file_path": "/home/lutz/private/promotion_blocker_secret.py",
+                                }
+                            ],
+                        }
+                    ],
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "provider_bodies_included": False,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        titles = [item["title"] for item in plan["backlog_changes"]["create_issues"]]
+        self.assertIn("Widen promotion blocker routing canary from next-action status", titles)
+        self.assertNotIn("Stage routing evidence for gpt-5.4 to gpt-5.4-mini", titles)
+
+        status = plan["evidence"]["stats_summary"]["promotion_blocker_next_action_status"]
+        self.assertEqual(status["schema"], "agentflow.promotion_blocker_next_action_research_status.v1")
+        self.assertEqual(status["summary"]["top_next_action"], "widen_local_openai_canary")
+        self.assertEqual(status["summary"]["top_local_action_family"], "routing")
+        self.assertTrue(status["privacy"]["metadata_only"])
+        self.assertFalse(status["privacy"]["raw_prompts_included"])
+        self.assertFalse(status["privacy"]["provider_bodies_included"])
+        self.assertFalse(status["privacy"]["request_ids_included"])
+        self.assertFalse(status["privacy"]["session_ids_included"])
+        self.assertFalse(status["privacy"]["cache_keys_included"])
+        self.assertFalse(status["privacy"]["individual_candidate_ids_included"])
+
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertGreaterEqual(suppression["closed_prior_issue_count"], 1)
+        suppressed_titles = [row["title"] for row in suppression["suppressed"]]
+        self.assertIn("Stage routing evidence for gpt-5.4 to gpt-5.4-mini", suppressed_titles)
+        closed = next(row for row in suppression["suppressed"] if row["title"] == "Stage routing evidence for gpt-5.4 to gpt-5.4-mini")
+        self.assertEqual(closed["suppression_kind"], "closed-prior-issue")
+        self.assertEqual(closed["existing_issue"]["number"], 90)
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("promotion-blocker-candidate-secret", rendered)
+        self.assertNotIn("promotion-blocker-request-secret", rendered)
+        self.assertNotIn("promotion-blocker-session-secret", rendered)
+        self.assertNotIn("promotion-blocker-cache-secret", rendered)
+        self.assertNotIn("/home/lutz/private/promotion_blocker_secret.py", rendered)
+        self.assertFalse(plan["privacy"]["raw_prompts_included"])
+        self.assertFalse(plan["privacy"]["provider_bodies_included"])
+        self.assertFalse(plan["privacy"]["request_ids_included"])
+        self.assertFalse(plan["privacy"]["session_ids_included"])
+
     def test_current_pass_through_routing_summary_is_ranked_into_activation_candidates(self):
         plan = build_research_plan(
             issues=[],

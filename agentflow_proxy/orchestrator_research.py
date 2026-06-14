@@ -684,6 +684,140 @@ def _resolve_unclassified_diagnostics(
     return resolved
 
 
+def _promotion_blocker_source_report(stats: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "promotion_blocker_next_action_status",
+        "promotion_blocker_next_actions",
+        "promotion_blocker_next_actions_dashboard",
+        "promotion_blocker_recommendation_review",
+    ):
+        report = stats.get(key)
+        if isinstance(report, dict):
+            return report
+    return None
+
+
+def _promotion_blocker_privacy() -> dict[str, bool]:
+    return {
+        "metadata_only": True,
+        "feature_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "raw_provider_bodies_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "cache_keys_included": False,
+        "individual_candidate_ids_included": False,
+        "absolute_paths_included": False,
+    }
+
+
+def _promotion_blocker_action_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in report.get("next_actions") or []:
+        if isinstance(row, dict):
+            action = str(row.get("value") or row.get("next_action") or "").strip()
+            if action:
+                rows.append({"next_action": sanitize_value(action), "count": _to_int(row.get("count"), 1)})
+
+    for group in report.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        action = str(group.get("top_next_action") or "").strip()
+        if not action:
+            continue
+        rows.append(
+            {
+                "next_action": sanitize_value(action),
+                "count": _to_int(group.get("candidate_count"), 1),
+                "local_action_family": sanitize_value(group.get("local_action_family") or "unknown"),
+                "projected_savings_usd": round(_to_float(group.get("projected_savings_usd")), 8),
+                "top_blocker_reason": sanitize_value(group.get("top_blocker_reason")),
+                "top_safety_stop_reason": sanitize_value(group.get("top_safety_stop_reason")),
+            }
+        )
+
+    for candidate in report.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        action = str(candidate.get("next_action") or "").strip()
+        if not action:
+            continue
+        rows.append(
+            {
+                "next_action": sanitize_value(action),
+                "count": _to_int(candidate.get("blocker_count"), 1),
+                "local_action_family": sanitize_value(candidate.get("local_action_family") or "unknown"),
+                "projected_savings_usd": round(_to_float(candidate.get("projected_savings_usd")), 8),
+                "expected_local_executor": sanitize_value(candidate.get("expected_local_executor")),
+                "blocker_family": sanitize_value(candidate.get("blocker_family")),
+            }
+        )
+
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        action = str(row.get("next_action") or "")
+        family = str(row.get("local_action_family") or "unknown")
+        key = (action, family)
+        existing = merged.setdefault(
+            key,
+            {
+                "next_action": action,
+                "local_action_family": family,
+                "count": 0,
+                "projected_savings_usd": 0.0,
+            },
+        )
+        existing["count"] = _to_int(existing.get("count")) + max(1, _to_int(row.get("count"), 1))
+        existing["projected_savings_usd"] = round(
+            _to_float(existing.get("projected_savings_usd")) + _to_float(row.get("projected_savings_usd")),
+            8,
+        )
+        for field in ("top_blocker_reason", "top_safety_stop_reason", "expected_local_executor", "blocker_family"):
+            if row.get(field) and not existing.get(field):
+                existing[field] = row[field]
+
+    result = list(merged.values())
+    result.sort(key=lambda item: (-_to_float(item.get("projected_savings_usd")), -_to_int(item.get("count")), str(item.get("next_action"))))
+    return result[:10]
+
+
+def _promotion_blocker_next_action_status(stats: dict[str, Any]) -> dict[str, Any] | None:
+    report = _promotion_blocker_source_report(stats)
+    if report is None:
+        return None
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    action_rows = _promotion_blocker_action_rows(report)
+    top_action = str(summary.get("top_next_action") or (action_rows[0].get("next_action") if action_rows else "") or "").strip()
+    candidate_count = _to_int(
+        summary.get("review_candidate_count")
+        or summary.get("source_recommendation_count")
+        or summary.get("candidate_count")
+        or len(report.get("candidates") if isinstance(report.get("candidates"), list) else [])
+    )
+    if not top_action and candidate_count <= 0 and str(report.get("status") or "") in {"", "no-data", "unavailable"}:
+        return None
+    return {
+        "schema": "agentflow.promotion_blocker_next_action_research_status.v1",
+        "source_schema": sanitize_value(report.get("schema")),
+        "source_status": sanitize_value(report.get("status") or "available"),
+        "summary": {
+            "review_candidate_count": candidate_count,
+            "recommended_count": _to_int(summary.get("recommended_count")),
+            "noop_count": _to_int(summary.get("noop_count")),
+            "projected_savings_usd": round(_to_float(summary.get("projected_savings_usd")), 8),
+            "top_local_action_family": sanitize_value(summary.get("top_local_action_family")),
+            "top_blocker_reason": sanitize_value(summary.get("top_blocker_reason")),
+            "top_safety_stop_reason": sanitize_value(summary.get("top_safety_stop_reason")),
+            "top_next_action": sanitize_value(top_action),
+            "top_expected_local_executor": sanitize_value(summary.get("top_expected_local_executor")),
+        },
+        "next_actions": action_rows,
+        "privacy": _promotion_blocker_privacy(),
+    }
+
+
 def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     stats = sanitize_value(stats or {})
     if not isinstance(stats, dict):
@@ -778,6 +912,9 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     shape_signal = _request_shape_rollup_signal(stats)
     if shape_signal is not None:
         summary["request_shape_rollup_candidates"] = shape_signal
+    promotion_blocker = _promotion_blocker_next_action_status(stats)
+    if promotion_blocker is not None:
+        summary["promotion_blocker_next_action_status"] = promotion_blocker
     activation_loop = _evidence_to_activation_loop(summary)
     if activation_loop is not None:
         summary["evidence_to_activation_loop"] = activation_loop
@@ -2564,19 +2701,75 @@ def _dedupe_create_issue_proposals(
     existing_issues: Iterable[dict[str, Any]],
     max_count: int = 10,
 ) -> list[dict[str, Any]]:
-    existing_keys = {_issue_title_key(issue.get("title")) for issue in existing_issues}
+    return _dedupe_create_issue_proposals_with_metadata(
+        proposals,
+        existing_issues=existing_issues,
+        max_count=max_count,
+    )[0]
+
+
+def _dedupe_create_issue_proposals_with_metadata(
+    proposals: list[dict[str, Any]],
+    *,
+    existing_issues: Iterable[dict[str, Any]],
+    max_count: int = 10,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    existing_by_key: dict[str, dict[str, Any]] = {}
+    for issue in existing_issues:
+        key = _issue_title_key(issue.get("title"))
+        if key and key not in existing_by_key:
+            existing_by_key[key] = issue
+    existing_keys = set(existing_by_key)
     existing_keys.discard("")
     seen = set(existing_keys)
     deduped: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
     for proposal in proposals:
         key = _issue_title_key(proposal.get("title"))
-        if not key or key in seen:
+        if not key:
+            continue
+        if key in seen:
+            matched_issue = existing_by_key.get(key)
+            row = {
+                "title": sanitize_value(proposal.get("title")),
+                "repo": sanitize_value(proposal.get("repo") or (matched_issue or {}).get("repo") or "unknown"),
+                "proposal_key": key,
+                "reason": "exact-title-already-exists",
+            }
+            if matched_issue is not None:
+                row.update(
+                    {
+                        "existing_issue": _issue_ref(matched_issue),
+                        "existing_issue_state": sanitize_value(matched_issue.get("state") or "OPEN"),
+                        "suppression_kind": "closed-prior-issue" if not _is_open(matched_issue) else "open-existing-issue",
+                    }
+                )
+            else:
+                row["suppression_kind"] = "duplicate-generated-proposal"
+            suppressed.append(row)
             continue
         seen.add(key)
         deduped.append(proposal)
         if len(deduped) >= max_count:
             break
-    return deduped
+    metadata = {
+        "schema": "agentflow.research_issue_proposal_suppression.v1",
+        "suppressed_count": len(suppressed),
+        "closed_prior_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "closed-prior-issue"),
+        "open_existing_issue_count": sum(1 for item in suppressed if item.get("suppression_kind") == "open-existing-issue"),
+        "suppressed": suppressed[:20],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+        },
+    }
+    return deduped, metadata
 
 
 def _candidate_title(candidate: dict[str, Any]) -> str:
@@ -2727,6 +2920,81 @@ def _proposal_from_low_backlog(
                 "Privacy tests prove raw prompts, request bodies, file paths, request IDs, and session IDs are redacted.",
             ],
             sequencing="Use this as the first fallback issue when no more specific blocker dominates the local evidence.",
+        ),
+    }
+
+
+def _promotion_blocker_action_title(action: str, family: str) -> str:
+    action_l = action.lower().replace("_", "-")
+    family_l = family.lower().replace("_", "-") or "optimization"
+    if "rollback" in action_l or "disable" in action_l:
+        return f"Rollback unsafe promotion blocker {family_l} canary"
+    if "widen" in action_l:
+        return f"Widen promotion blocker {family_l} canary from next-action status"
+    if "impact" in action_l or "measure" in action_l:
+        return f"Measure promotion blocker {family_l} next-action impact"
+    if "managed" in action_l or "feedback" in action_l:
+        return f"Feed promotion blocker {family_l} outcomes into managed feedback"
+    if "apply" in action_l or "activate" in action_l or "stage" in action_l:
+        return f"Apply promotion blocker {family_l} next action"
+    if "eval" in action_l or "holdout" in action_l or "backfill" in action_l or "collect" in action_l:
+        return f"Backfill promotion blocker {family_l} evidence from next-action status"
+    return f"Advance promotion blocker {family_l} next action"
+
+
+def _proposal_from_promotion_blocker_next_action(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    status = stats_summary.get("promotion_blocker_next_action_status")
+    if not isinstance(status, dict):
+        return None
+    summary = status.get("summary") if isinstance(status.get("summary"), dict) else {}
+    rows = [row for row in status.get("next_actions") or [] if isinstance(row, dict)]
+    top = rows[0] if rows else {}
+    next_action = str(summary.get("top_next_action") or top.get("next_action") or "").strip()
+    if not next_action:
+        return None
+    family = str(summary.get("top_local_action_family") or top.get("local_action_family") or "optimization").strip() or "optimization"
+    title = _promotion_blocker_action_title(next_action, family)
+    labels = _default_issue_labels("priority:p1")
+    family_label = family.replace("_", "-")
+    if family_label in {"routing", "cache", "crunch"}:
+        labels.append(family_label)
+    labels.append("privacy")
+    return {
+        "repo": "lutzkuen/agentflow",
+        "title": title,
+        "labels": list(dict.fromkeys(labels)),
+        "body": _issue_body(
+            title=title,
+            rationale=(
+                "Research mode found a current local promotion blocker next-action status. "
+                "The backlog should advance the named local action instead of recreating stale evidence-gathering issues that already landed."
+            ),
+            evidence=[
+                f"Source metadata: {status.get('source_schema')}",
+                f"Source status: {status.get('source_status')}",
+                f"Top local action family: {family}",
+                f"Top next action: {next_action}",
+                f"Top blocker reason: {summary.get('top_blocker_reason')}",
+                f"Top safety stop reason: {summary.get('top_safety_stop_reason')}",
+                f"Expected local executor: {summary.get('top_expected_local_executor') or top.get('expected_local_executor')}",
+                f"Projected savings USD: {summary.get('projected_savings_usd') or top.get('projected_savings_usd')}",
+                f"Candidate count: {summary.get('review_candidate_count') or top.get('count')}",
+            ],
+            implementation=[
+                "Start from the persisted research plan promotion_blocker_next_action_status section and the bounded local review report.",
+                f"Implement the successor action `{next_action}` for the `{family}` family using existing local review, canary, impact, rollback, or feedback modules.",
+                "Do not inspect prompts, provider bodies, request IDs, session IDs, cache keys, file paths, or individual candidate identifiers.",
+                "Record the outcome in machine-readable promotion blocker, rollout, or lifecycle metadata so a later research plan can suppress this issue when it lands.",
+            ],
+            acceptance=[
+                f"The next promotion blocker status reports progress for next_action={next_action} or a narrower keep-blocked reason.",
+                "The research plan names the promotion blocker top next action and suppresses exact-title closed proposals instead of recreating them.",
+                "Generated and follow-up evidence remains metadata-only and excludes prompts, provider bodies, absolute paths, request IDs, session IDs, cache keys, and individual candidate IDs.",
+            ],
+            savings_path=(
+                "This removes stale backlog churn and moves the highest-ranked promotion blocker toward apply, impact, widen, rollback, or managed feedback work."
+            ),
+            sequencing="Sequence before generic telemetry-derived proposals when it is the freshest promotion blocker next-action status.",
         ),
     }
 
@@ -3297,6 +3565,23 @@ def build_research_plan(
     create_issues: list[dict[str, Any]] = []
     comment_issues: list[dict[str, Any]] = []
     close_issues: list[dict[str, Any]] = []
+    proposal_suppression = {
+        "schema": "agentflow.research_issue_proposal_suppression.v1",
+        "suppressed_count": 0,
+        "closed_prior_issue_count": 0,
+        "open_existing_issue_count": 0,
+        "suppressed": [],
+        "privacy": {
+            "metadata_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "absolute_paths_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "individual_candidate_ids_included": False,
+        },
+    }
 
     if should_run:
         create_issues.append(
@@ -3307,6 +3592,9 @@ def build_research_plan(
                 diagnostics=diagnostics,
             )
         )
+        promotion_blocker_proposal = _proposal_from_promotion_blocker_next_action(summary)
+        if promotion_blocker_proposal is not None:
+            create_issues.append(promotion_blocker_proposal)
         cache_replay_proposal = _proposal_from_cache_replay_blocker(summary)
         if cache_replay_proposal is not None:
             create_issues.append(cache_replay_proposal)
@@ -3322,12 +3610,18 @@ def build_research_plan(
             create_issues.append(_proposal_from_repeated_diagnostic(repeated_actionable_diagnostics[0]))
         for issue in blocked_stale[:3]:
             comment_issues.append(_blocked_comment(issue, diagnostics, summary))
-        create_issues = _dedupe_create_issue_proposals(create_issues, existing_issues=issue_list, max_count=10)
+        create_issues, proposal_suppression = _dedupe_create_issue_proposals_with_metadata(
+            create_issues,
+            existing_issues=issue_list,
+            max_count=10,
+        )
         create_issues = [_finalize_create_issue_proposal(proposal) for proposal in create_issues]
 
     inspected_sources = ["github_issues"]
     if summary:
         inspected_sources.append("local_stats")
+    if "promotion_blocker_next_action_status" in summary:
+        inspected_sources.append("promotion_blocker_next_action_status")
     if diagnostics:
         inspected_sources.append("orchestrator_logs")
 
@@ -3348,6 +3642,7 @@ def build_research_plan(
             "stale_blocked_issues": blocked_stale,
             "repeated_diagnostics": diagnostics,
             "optimization_candidates": optimization_candidates if should_run else [],
+            "issue_proposal_suppression": proposal_suppression,
         },
         "backlog_changes": {
             "create_issues": create_issues,
