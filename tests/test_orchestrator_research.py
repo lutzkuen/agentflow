@@ -860,6 +860,93 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("cache-secret-should-redact", rendered)
         self.assertNotIn("session-secret-should-redact", rendered)
 
+    def test_request_shape_replayability_dry_run_names_cache_blocker_before_zero_hit(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 100,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "cache_replay_cohort_ranking": {
+                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "summary": {"candidate_rows": 0},
+                    "cohorts": [],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "cache_zero_hit_blocker_ladder": {
+                    "schema": "agentflow.cache_zero_hit_blocker_ladder.v1",
+                    "summary": {"top_blocker_code": "zero-cache-hits", "scanned_rows": 100},
+                    "ladder": [{"blocker_code": "zero-cache-hits", "count": 100}],
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 12, "rollup_count": 1},
+                    "rollups": [
+                        {
+                            "provider_family": "anthropic",
+                            "source_surface": "anthropic_messages",
+                            "endpoint": "messages",
+                            "requested_model_family": "claude-sonnet",
+                            "routed_model_family": "claude-sonnet",
+                            "category": "tool-result",
+                            "workflow_phase": "tool-execution",
+                            "stream": True,
+                            "has_tools": True,
+                            "text_bucket": "32k_128k_chars",
+                            "token_bucket": "8k_32k_tokens",
+                            "cache_status": "skipped",
+                            "routing_status": "passthrough",
+                            "row_count": 12,
+                            "cost_est_usd": 0.5,
+                            "observed_savings_usd": 0.0,
+                            "candidate_work_classes": ["repeated_context", "replayability"],
+                            "candidate_families": ["cache_replay", "cache_blocker"],
+                            "blocker_codes": ["unsupported-streaming-shape"],
+                        }
+                    ],
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "status": "ranked",
+                        "summary": {
+                            "cohort_count": 1,
+                            "rows_considered": 12,
+                            "replay_ready_cohort_count": 0,
+                            "skipped_cohort_count": 1,
+                            "top_blocker_code": "invalidation-evidence-missing",
+                            "projected_hits": 0,
+                        },
+                        "cohorts": [
+                            {
+                                "readiness": "skipped",
+                                "reason": "invalidation-evidence-missing",
+                                "blockers": ["tools-present", "invalidation-evidence-missing"],
+                                "row_count": 12,
+                                "projected_hits": 0,
+                                "raw_session_id": "raw-session-secret",
+                                "cache_key": "cache-secret",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        stats_summary = plan["evidence"]["stats_summary"]
+        loop = stats_summary["evidence_to_activation_loop"]
+        cache_stage = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache_stage["evidence_source"], "agentflow.request_shape_cache_replayability_dry_run.v1")
+        self.assertEqual(cache_stage["next_action"], "resolve-cache-replayability-blocker")
+        self.assertIn("invalidation-evidence-missing", cache_stage["blocker_codes"])
+        self.assertNotIn("zero-cache-hits", cache_stage["blocker_codes"])
+        rendered = json.dumps(plan)
+        self.assertNotIn("raw-session-secret", rendered)
+        self.assertNotIn("cache-secret", rendered)
+
     def test_cache_replay_cohort_ranking_prefers_activation_ready_issue(self):
         plan = build_research_plan(
             issues=[],

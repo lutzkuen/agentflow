@@ -502,12 +502,14 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     )
     if isinstance(cohorts, dict):
         cohort_rows = cohorts.get("cohorts") if isinstance(cohorts.get("cohorts"), list) else []
-        summary["cache_replay_cohort_ranking"] = {
-            "schema": cohorts.get("schema"),
-            "summary": cohorts.get("summary") if isinstance(cohorts.get("summary"), dict) else {},
-            "cohorts": cohort_rows[:5],
-            "privacy": cohorts.get("privacy") if isinstance(cohorts.get("privacy"), dict) else {},
-        }
+        cohort_summary = cohorts.get("summary") if isinstance(cohorts.get("summary"), dict) else {}
+        if cohort_rows or _to_int(cohort_summary.get("candidate_rows")) > 0:
+            summary["cache_replay_cohort_ranking"] = {
+                "schema": cohorts.get("schema"),
+                "summary": cohort_summary,
+                "cohorts": cohort_rows[:5],
+                "privacy": cohorts.get("privacy") if isinstance(cohorts.get("privacy"), dict) else {},
+            }
     openai_canary = stats.get("openai_canary_impact") or stats.get("openai_routing_canary_impact")
     if isinstance(openai_canary, dict):
         candidate_rows = openai_canary.get("candidates") if isinstance(openai_canary.get("candidates"), list) else []
@@ -1139,8 +1141,11 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
         clean.pop("_score", None)
         clean_ranked.append(clean)
     report_summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    replay_dry_run = report.get("cache_replayability_dry_run") if isinstance(report.get("cache_replayability_dry_run"), dict) else None
+    replay_summary = replay_dry_run.get("summary") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("summary"), dict) else {}
+    replay_cohorts = replay_dry_run.get("cohorts") if isinstance(replay_dry_run, dict) and isinstance(replay_dry_run.get("cohorts"), list) else []
     status = "candidates-ranked" if clean_ranked else "no-request-shape-candidates"
-    return {
+    result = {
         "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
         "status": status,
         "source_schema": sanitize_value(source_schema),
@@ -1150,6 +1155,15 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "rollup_count": _to_int(report_summary.get("rollup_count") or len(rollups)),
             "ranked_candidate_count": len(clean_ranked),
             "top_next_action": clean_ranked[0]["next_action"] if clean_ranked else None,
+            "cache_replayability_top_blocker": sanitize_value(replay_summary.get("top_blocker_code"))
+            if replay_summary
+            else None,
+            "cache_replayability_replay_ready_cohort_count": _to_int(replay_summary.get("replay_ready_cohort_count"))
+            if replay_summary
+            else 0,
+            "cache_replayability_skipped_cohort_count": _to_int(replay_summary.get("skipped_cohort_count"))
+            if replay_summary
+            else 0,
             "class_breakdown": [
                 {"value": key, "count": value}
                 for key, value in sorted(class_counts.items(), key=lambda item: (-item[1], item[0]))
@@ -1174,6 +1188,18 @@ def _request_shape_rollup_signal(stats: dict[str, Any]) -> dict[str, Any] | None
             "absolute_paths_included": False,
         },
     }
+    if replay_dry_run is not None:
+        result["cache_replayability_dry_run"] = {
+            "schema": sanitize_value(replay_dry_run.get("schema")),
+            "status": sanitize_value(replay_dry_run.get("status")),
+            "summary": sanitize_value(replay_summary),
+            "readiness_breakdown": sanitize_value(replay_dry_run.get("readiness_breakdown") or []),
+            "skipped_reason_breakdown": sanitize_value(replay_dry_run.get("skipped_reason_breakdown") or []),
+            "blocker_breakdown": sanitize_value(replay_dry_run.get("blocker_breakdown") or []),
+            "cohorts": sanitize_value(replay_cohorts[:5]),
+            "privacy": sanitize_value(replay_dry_run.get("privacy") if isinstance(replay_dry_run.get("privacy"), dict) else {}),
+        }
+    return result
 
 
 def _loop_privacy() -> dict[str, Any]:
@@ -1278,6 +1304,27 @@ def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
             "sample_count": _to_int(top.get("count") or summary.get("candidate_rows")),
             "projected_hits": _to_int(top.get("projected_hits") or summary.get("projected_ready_hits")),
             "projected_saved_cost_usd": round(_to_float(top.get("projected_saved_cost_usd")), 8),
+        }
+
+    shape_signal = stats_summary.get("request_shape_rollup_candidates")
+    shape_replay = shape_signal.get("cache_replayability_dry_run") if isinstance(shape_signal, dict) else None
+    if isinstance(shape_replay, dict):
+        summary = shape_replay.get("summary") if isinstance(shape_replay.get("summary"), dict) else {}
+        rows = [row for row in shape_replay.get("cohorts") or [] if isinstance(row, dict)]
+        top = rows[0] if rows else {}
+        ready = _to_int(summary.get("replay_ready_cohort_count")) > 0 or top.get("readiness") == "replay-ready"
+        blockers = [str(item) for item in top.get("blockers") or [] if str(item or "").strip()]
+        top_blocker = str(summary.get("top_blocker_code") or (blockers[0] if blockers else "cache-replayability-evidence-missing"))
+        return {
+            "lever": "cache",
+            "state": "replay-ready" if ready else "missing-evidence",
+            "evidence_source": shape_replay.get("schema"),
+            "local_action_family": "cache",
+            "next_action": "stage-cache-replay-canary" if ready else "resolve-cache-replayability-blocker",
+            "blocker_codes": [] if ready else blockers or [top_blocker],
+            "sample_count": _to_int(top.get("row_count") or summary.get("rows_considered")),
+            "projected_hits": _to_int(top.get("projected_hits") or summary.get("projected_hits")),
+            "projected_saved_cost_usd": round(_to_float(top.get("projected_savings_usd") or summary.get("projected_savings_usd")), 8),
         }
 
     ladder = stats_summary.get("cache_zero_hit_blocker_ladder")

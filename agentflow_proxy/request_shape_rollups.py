@@ -11,7 +11,9 @@ from agentflow_proxy.store import stable_json, utc_now
 
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
+REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
+REPLAY_SUPPORTED_ENDPOINTS = {"messages", "responses", "chat_completions", "chat"}
 
 
 def _json_obj(value: Any) -> dict[str, Any]:
@@ -375,6 +377,187 @@ def _finalize_group(group: dict[str, Any]) -> dict[str, Any]:
     return group
 
 
+def _replayability_privacy() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "raw_messages_included": False,
+        "raw_request_bodies_included": False,
+        "provider_bodies_included": False,
+        "raw_responses_included": False,
+        "tool_payloads_included": False,
+        "file_paths_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
+        "raw_session_ids_included": False,
+        "tenant_ids_included": False,
+        "cache_keys_included": False,
+        "request_fingerprints_included": False,
+        "individual_candidate_ids_included": False,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+    }
+
+
+def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
+    row_count = _as_int(row.get("row_count") or row.get("count"))
+    endpoint = str(row.get("endpoint") or "unknown")
+    cache_status = str(row.get("cache_status") or "unknown")
+    stream = bool(row.get("stream"))
+    has_tools = bool(row.get("has_tools"))
+    blockers: set[str] = set()
+
+    if endpoint not in REPLAY_SUPPORTED_ENDPOINTS:
+        blockers.add("unsupported-endpoint")
+    if cache_status == "hit":
+        blockers.add("already-cache-hit")
+    if row_count < 2:
+        blockers.add("insufficient-repeat-evidence")
+    if stream:
+        blockers.add("streaming-replay-not-supported")
+    if has_tools:
+        blockers.add("tools-present")
+        blockers.add("invalidation-evidence-missing")
+        blockers.add("unsafe-tool-calls-without-invalidation")
+
+    if not blockers:
+        return {
+            "readiness": "replay-ready",
+            "reason": "replay-ready-exact-non-tool-shape",
+            "blockers": [],
+            "projected_hits": max(0, row_count - 1),
+        }
+
+    reason_priority = (
+        "unsupported-endpoint",
+        "already-cache-hit",
+        "streaming-replay-not-supported",
+        "invalidation-evidence-missing",
+        "unsafe-tool-calls-without-invalidation",
+        "tools-present",
+        "insufficient-repeat-evidence",
+    )
+    reason = next((item for item in reason_priority if item in blockers), sorted(blockers)[0])
+    return {
+        "readiness": "skipped",
+        "reason": reason,
+        "blockers": sorted(blockers),
+        "projected_hits": 0,
+    }
+
+
+def build_request_shape_cache_replayability_dry_run(
+    rollups: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    replay_rows = [
+        row
+        for row in rollups
+        if isinstance(row, dict)
+        and (
+            "replayability" in {str(item) for item in row.get("candidate_work_classes") or []}
+            or "cache_replay" in {str(item) for item in row.get("candidate_families") or []}
+            or "cache_blocker" in {str(item) for item in row.get("candidate_families") or []}
+        )
+    ]
+    cohorts: list[dict[str, Any]] = []
+    readiness_counts: dict[str, int] = {}
+    reason_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    replay_ready_rows = 0
+    skipped_rows = 0
+    projected_hits = 0
+    projected_savings = 0.0
+
+    for row in replay_rows:
+        decision = _shape_replayability_decision(row)
+        row_count = _as_int(row.get("row_count") or row.get("count"))
+        cost = _as_float(row.get("cost_est_usd"))
+        hits = _as_int(decision.get("projected_hits"))
+        saved = 0.0
+        if hits and row_count:
+            avg_cost = cost / row_count
+            saved = max(0.0, cost - avg_cost)
+        readiness = str(decision["readiness"])
+        reason = str(decision["reason"])
+        _increment(readiness_counts, readiness)
+        _increment(reason_counts, reason)
+        for blocker in decision.get("blockers") or []:
+            _increment(blocker_counts, blocker)
+        if readiness == "replay-ready":
+            replay_ready_rows += row_count
+            projected_hits += hits
+            projected_savings += saved
+        else:
+            skipped_rows += row_count
+        cohorts.append(
+            {
+                "schema": "agentflow.request_shape_cache_replayability_cohort.v1",
+                "readiness": readiness,
+                "reason": reason,
+                "blockers": decision.get("blockers") or [],
+                "provider_family": row.get("provider_family"),
+                "source_surface": row.get("source_surface"),
+                "endpoint": row.get("endpoint"),
+                "category": row.get("category"),
+                "workflow_phase": row.get("workflow_phase"),
+                "stream": bool(row.get("stream")),
+                "has_tools": bool(row.get("has_tools")),
+                "cache_status": row.get("cache_status"),
+                "routing_status": row.get("routing_status"),
+                "text_bucket": row.get("text_bucket"),
+                "token_bucket": row.get("token_bucket"),
+                "row_count": row_count,
+                "projected_hits": hits,
+                "projected_savings_usd": round(saved, 6),
+                "aggregate_only": True,
+                "privacy": _replayability_privacy(),
+            }
+        )
+
+    cohorts.sort(
+        key=lambda item: (
+            item.get("readiness") == "replay-ready",
+            _as_float(item.get("projected_savings_usd")),
+            _as_int(item.get("projected_hits")),
+            _as_int(item.get("row_count")),
+        ),
+        reverse=True,
+    )
+    for rank, row in enumerate(cohorts, start=1):
+        row["rank"] = rank
+
+    top_blocker = None
+    blocker_breakdown = _breakdown(blocker_counts)
+    if blocker_breakdown:
+        top_blocker = blocker_breakdown[0]["value"]
+    return {
+        "schema": REPLAYABILITY_DRY_RUN_SCHEMA,
+        "status": "ranked" if cohorts else "no-replayability-cohorts",
+        "summary": {
+            "cohort_count": len(cohorts),
+            "rows_considered": sum(_as_int(row.get("row_count") or row.get("count")) for row in replay_rows),
+            "replay_ready_cohort_count": readiness_counts.get("replay-ready", 0),
+            "replay_ready_rows": replay_ready_rows,
+            "skipped_cohort_count": readiness_counts.get("skipped", 0),
+            "skipped_rows": skipped_rows,
+            "projected_hits": projected_hits,
+            "projected_savings_usd": round(projected_savings, 6),
+            "top_blocker_code": top_blocker,
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "readiness_breakdown": _breakdown(readiness_counts),
+        "skipped_reason_breakdown": _breakdown(reason_counts),
+        "blocker_breakdown": blocker_breakdown,
+        "cohorts": cohorts[: max(1, min(_as_int(limit) or 25, 1000))],
+        "privacy": _replayability_privacy(),
+    }
+
+
 def _candidate_work_classes(
     *,
     row_count: int,
@@ -629,6 +812,7 @@ def build_request_shape_rollups_report(
         "provider_breakdown": _breakdown(provider_counts),
         "candidate_family_breakdown": _breakdown(candidate_family_counts),
         "blocker_code_breakdown": _breakdown(blocker_counts),
+        "cache_replayability_dry_run": build_request_shape_cache_replayability_dry_run(rollups, limit=25),
         "rollups": rollups,
         "privacy": {
             "metadata_only": True,
