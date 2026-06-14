@@ -44,6 +44,8 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertGreaterEqual(len(created), 1)
         self.assertIn("Acceptance Criteria", created[0]["body"])
         self.assertIn("Implementation Approach", created[0]["body"])
+        self.assertIn("## Labels", created[0]["body"])
+        self.assertIn("- status:ready", created[0]["body"])
         self.assertIn("status:ready", created[0]["labels"])
 
     def test_low_backlog_emits_ranked_metadata_only_optimization_candidates(self):
@@ -239,6 +241,9 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             self.assertIn("## Implementation Approach", body)
             self.assertIn("## Acceptance Criteria", body)
             self.assertIn("## Expected Savings Path Or Bottleneck Removed", body)
+            self.assertIn("## Labels", body)
+            for label in proposal["labels"]:
+                self.assertIn(f"- {label}", body)
             self.assertIn("## Sequencing Notes", body)
         self.assertGreaterEqual(core_feature_count, len(created) // 2)
 
@@ -850,6 +855,14 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("session-raw-secret", rendered)
         self.assertNotIn("sk-testsecret123456", rendered)
         self.assertIn("[REDACTED", rendered)
+        for proposal in plan["backlog_changes"]["create_issues"]:
+            body = proposal["body"]
+            self.assertIn("## Labels", body)
+            self.assertNotIn("private prompt text", body)
+            self.assertNotIn("private stats prompt", body)
+            self.assertNotIn("/home/lutz/private/project/file.py", body)
+            self.assertNotIn("req-raw-secret", body)
+            self.assertNotIn("session-raw-secret", body)
         self.assertFalse(plan["privacy"]["raw_prompts_included"])
         self.assertFalse(plan["privacy"]["absolute_paths_included"])
 

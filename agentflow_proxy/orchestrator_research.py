@@ -1068,8 +1068,8 @@ def _issue_body(
     savings_path: str | None = None,
 ) -> str:
     evidence_lines = "\n".join(f"- {redact_text(item)}" for item in evidence) or "- No local evidence was available."
-    implementation_lines = "\n".join(f"- {item}" for item in implementation)
-    acceptance_lines = "\n".join(f"- {item}" for item in acceptance)
+    implementation_lines = "\n".join(f"- {redact_text(item)}" for item in implementation)
+    acceptance_lines = "\n".join(f"- {redact_text(item)}" for item in acceptance)
     savings_text = savings_path or "This removes a planning or activation bottleneck using metadata-only local evidence."
     savings_section = "## Expected Savings Path Or Bottleneck Removed\n\n" f"{redact_text(savings_text)}\n\n"
     return (
@@ -1085,6 +1085,25 @@ def _issue_body(
         "## Sequencing Notes\n\n"
         f"{redact_text(sequencing)}\n"
     )
+
+
+def _finalize_create_issue_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    finalized = dict(proposal)
+    labels = [redact_text(str(label)) for label in finalized.get("labels") or []]
+    finalized["labels"] = list(dict.fromkeys(label for label in labels if label))
+    body = redact_text(str(finalized.get("body") or ""))
+    if "## Labels" not in body:
+        label_lines = "\n".join(f"- {label}" for label in finalized["labels"]) or "- none"
+        label_section = f"## Labels\n\n{label_lines}\n\n"
+        marker = "## Sequencing Notes\n\n"
+        if marker in body:
+            body = body.replace(marker, label_section + marker, 1)
+        else:
+            body = f"{body.rstrip()}\n\n{label_section.rstrip()}\n"
+    finalized["body"] = body
+    finalized["title"] = redact_text(str(finalized.get("title") or ""))
+    finalized["repo"] = redact_text(str(finalized.get("repo") or "lutzkuen/agentflow"))
+    return finalized
 
 
 def _default_issue_labels(priority: str = "priority:p1") -> list[str]:
@@ -1854,6 +1873,7 @@ def build_research_plan(
         for issue in blocked_stale[:3]:
             comment_issues.append(_blocked_comment(issue, diagnostics, summary))
         create_issues = _dedupe_create_issue_proposals(create_issues, existing_issues=issue_list, max_count=10)
+        create_issues = [_finalize_create_issue_proposal(proposal) for proposal in create_issues]
 
     inspected_sources = ["github_issues"]
     if summary:
