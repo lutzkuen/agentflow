@@ -109,6 +109,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     openai_old_context_summary_report_cli,
     openai_cache_replay_report_cli,
     openai_cache_replay_blocker_outcomes_cli,
+    crunch_blocker_outcomes_cli,
     optimization_action_ledger_cli,
     optimization_coordinator_dry_run_cli,
     provider_tool_adoption_report_cli,
@@ -587,6 +588,10 @@ def openai_cache_replay_report_main() -> None:
 
 def openai_cache_replay_blocker_outcomes_main() -> None:
     raise SystemExit(openai_cache_replay_blocker_outcomes_cli())
+
+
+def crunch_blocker_outcomes_main() -> None:
+    raise SystemExit(crunch_blocker_outcomes_cli())
 
 
 def optimization_action_ledger_main() -> None:

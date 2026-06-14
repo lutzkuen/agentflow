@@ -2438,6 +2438,41 @@ def openai_cache_replay_blocker_outcomes_cli(argv: Sequence[str] | None = None, 
     return 0
 
 
+def crunch_blocker_outcomes_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
+    parser = argparse.ArgumentParser(description="Export aggregate crunch lifecycle outcomes from local opportunity and promotion blocker data")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("AGENTFLOW_DATABASE_URL") or os.getenv("AGENTFLOW_DB", str(Path.home() / ".agentflow" / "agentflow.sqlite3")),
+        help="AgentFlow database URL or SQLite path, default: AGENTFLOW_DB or ~/.agentflow/agentflow.sqlite3",
+    )
+    parser.add_argument(
+        "--rollup-limit",
+        type=int,
+        default=1000,
+        help="Recent calls to scan for crunch opportunity rollups, default: 1000, max: 10000.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdout = stdout if stdout is not None else sys.stdout
+
+    from agentflow_proxy.crunch_blocker_outcomes import build_crunch_blocker_outcomes_report
+
+    store = _open_store_for_db(str(args.db))
+    try:
+        result = build_crunch_blocker_outcomes_report(
+            store,
+            rollup_limit=args.rollup_limit,
+        )
+    finally:
+        store.conn.close()
+    if args.pretty:
+        stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_json(stdout, result)
+    return 0
+
+
 def optimization_action_ledger_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Summarize cross-family optimization eligibility from local call metadata")
     parser.add_argument(

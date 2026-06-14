@@ -62,6 +62,7 @@ agentflow-openai-routing-canary-stage = "agentflow_proxy.cli:openai_routing_cana
 agentflow-openai-old-context-summary-report = "agentflow_proxy.cli:openai_old_context_summary_report_main"
 agentflow-openai-cache-replay-report = "agentflow_proxy.cli:openai_cache_replay_report_main"
 agentflow-openai-cache-replay-blocker-outcomes = "agentflow_proxy.cli:openai_cache_replay_blocker_outcomes_main"
+agentflow-crunch-blocker-outcomes = "agentflow_proxy.cli:crunch_blocker_outcomes_main"
 agentflow-optimization-action-ledger = "agentflow_proxy.cli:optimization_action_ledger_main"
 agentflow-optimization-coordinator-dry-run = "agentflow_proxy.cli:optimization_coordinator_dry_run_main"
 agentflow-provider-tool-adoption-report = "agentflow_proxy.cli:provider_tool_adoption_report_main"
