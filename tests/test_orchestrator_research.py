@@ -693,6 +693,102 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("session-secret-burndown", rendered)
         self.assertNotIn("/tmp/secret.py", rendered)
 
+    def test_evidence_to_activation_burndown_uses_promotion_feedback_over_stale_projected_rows(self):
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    90,
+                    "Stage routing evidence for gpt-5.4 to gpt-5.4-mini",
+                    ["backlog", "priority:p1", "core-feature"],
+                    state="CLOSED",
+                    updated="2026-06-10T08:00:00Z",
+                )
+            ],
+            stats={
+                "calls": 100,
+                "routing": [
+                    {
+                        "provider": "openai",
+                        "source_surface": "openai_responses",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.4",
+                        "routed_model": "gpt-5.4",
+                        "category": "tool-light",
+                        "c": 100,
+                    }
+                ],
+                "promotion_outcome_feedback": {
+                    "schema": "agentflow.promotion_outcome_feedback_summary.v1",
+                    "entry_count": 1,
+                    "entries": [
+                        {
+                            "schema": "agentflow.promotion_outcome_feedback_entry.v1",
+                            "created_at": "2026-06-11T08:30:00+00:00",
+                            "policy_id": "policy-secret-burndown",
+                            "candidate_id": "candidate-secret-burndown",
+                            "request_id": "req-secret-promotion-feedback",
+                            "session_id": "session-secret-promotion-feedback",
+                            "action_family": "routing",
+                            "policy_section": "routing",
+                            "status": "positive",
+                            "recommendation": "widen",
+                            "reason_codes": ["promotion-ready"],
+                            "observed_savings_usd": 0.25,
+                            "projected_savings_usd": 0.4,
+                            "applied_count": 8,
+                            "holdout_count": 7,
+                        }
+                    ],
+                    "summary": {
+                        "entry_count": 1,
+                        "status_counts": [{"value": "positive", "count": 1}],
+                        "action_family_counts": [{"value": "routing", "count": 1}],
+                        "observed_savings_usd": 0.25,
+                        "projected_savings_usd": 0.4,
+                    },
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "raw_provider_bodies_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                        "cache_keys_included": False,
+                        "file_paths_included": False,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        self.assertIn("promotion_outcome_feedback", plan["evidence"]["inspected_sources"])
+        report = build_evidence_to_activation_burndown(plan, now=NOW)
+
+        routing_rows = [row for row in report["blockers"] if row["lever"] == "routing"]
+        self.assertEqual(len(routing_rows), 1)
+        routing = routing_rows[0]
+        self.assertEqual(routing["source"], "promotion-outcome-feedback")
+        self.assertEqual(routing["state"], "measured-savings")
+        self.assertEqual(routing["next_action"], "widen-local-promotion-from-outcome-feedback")
+        self.assertEqual(routing["sample_count"], 15)
+        self.assertEqual(routing["applied_count"], 8)
+        self.assertEqual(routing["holdout_count"], 7)
+        self.assertEqual(routing["observed_savings_usd"], 0.25)
+        self.assertNotIn("activate-openai-routing-canary-cohorts", [row["next_action"] for row in routing_rows])
+        self.assertIn("routing", report["summary"]["represented_blocker_families"])
+        self.assertTrue(report["privacy"]["metadata_only"])
+        self.assertTrue(report["privacy"]["aggregate_only"])
+        self.assertFalse(report["privacy"]["request_ids_included"])
+        self.assertFalse(report["privacy"]["session_ids_included"])
+        self.assertFalse(report["privacy"]["individual_candidate_ids_included"])
+        rendered = json.dumps(report, sort_keys=True)
+        self.assertNotIn("policy-secret-burndown", rendered)
+        self.assertNotIn("candidate-secret-burndown", rendered)
+        self.assertNotIn("req-secret-promotion-feedback", rendered)
+        self.assertNotIn("session-secret-promotion-feedback", rendered)
+        self.assertNotIn("Stage routing evidence for gpt-5.4 to gpt-5.4-mini", rendered)
+
     def test_evidence_to_activation_burndown_cli_reads_plan_json(self):
         plan = build_research_plan(
             issues=[],

@@ -1001,6 +1001,21 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
     promotion_blocker = _promotion_blocker_next_action_status(stats)
     if promotion_blocker is not None:
         summary["promotion_blocker_next_action_status"] = promotion_blocker
+    promotion_feedback = stats.get("promotion_outcome_feedback")
+    if not isinstance(promotion_feedback, dict):
+        promotion_report = stats.get("promotion_report")
+        if isinstance(promotion_report, dict):
+            promotion_feedback = promotion_report.get("promotion_outcome_feedback")
+    if isinstance(promotion_feedback, dict):
+        entries = promotion_feedback.get("entries") if isinstance(promotion_feedback.get("entries"), list) else []
+        feedback_summary = promotion_feedback.get("summary") if isinstance(promotion_feedback.get("summary"), dict) else {}
+        summary["promotion_outcome_feedback"] = {
+            "schema": promotion_feedback.get("schema"),
+            "entry_count": _to_int(promotion_feedback.get("entry_count") or feedback_summary.get("entry_count")),
+            "entries": entries[:50],
+            "summary": feedback_summary,
+            "privacy": promotion_feedback.get("privacy") if isinstance(promotion_feedback.get("privacy"), dict) else {},
+        }
     activation_loop = _evidence_to_activation_loop(summary)
     if activation_loop is not None:
         summary["evidence_to_activation_loop"] = activation_loop
@@ -2746,6 +2761,150 @@ def _burndown_row_from_safety_stop_group(group: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _promotion_feedback_family(value: Any) -> str:
+    family = str(value or "unknown").strip().lower().replace("_", "-")
+    if family in {"cache-replay", "cache"}:
+        return "cache"
+    if family in {"old-context-summary", "old-context-summarization", "crunch"}:
+        return "crunch"
+    if family in {"phase-routing", "provider-routing", "routing"}:
+        return "routing"
+    return sanitize_value(family or "unknown")
+
+
+def _promotion_feedback_state(status: Any, recommendation: Any = None, rollback_needed: Any = None) -> str:
+    status_text = str(status or "").strip().lower().replace("_", "-")
+    recommendation_text = str(recommendation or "").strip().lower().replace("_", "-")
+    if rollback_needed or status_text in {"rollback-needed", "rollback-required"} or recommendation_text == "rollback":
+        return "keep-blocked"
+    if status_text in {"safety-stopped", "safety-stop", "keep-blocked", "regression-flagged"}:
+        return "keep-blocked"
+    if status_text in {"superseded", "closed-issue-seen"}:
+        return "superseded"
+    if status_text in {"needs-more-samples", "needs-more-evidence", "holdout", "applied", "needs-review"}:
+        return "ranked-evidence"
+    if status_text in {"measured", "positive", "promoted", "widened"} or recommendation_text in {"promote", "widen"}:
+        return "measured-savings"
+    return "ranked-evidence"
+
+
+def _promotion_feedback_next_action(state: str, status: Any, recommendation: Any = None) -> str:
+    status_text = str(status or "").strip().lower().replace("_", "-")
+    recommendation_text = str(recommendation or "").strip().lower().replace("_", "-")
+    if state == "keep-blocked":
+        if "safety" in status_text:
+            return "review-promotion-safety-stop-and-record-keep-blocked-reason"
+        if recommendation_text == "rollback" or "rollback" in status_text:
+            return "rollback-local-promotion-or-keep-blocked"
+        return "review-promotion-regression-and-keep-blocked"
+    if state == "superseded":
+        return "suppress-closed-promotion-predecessor"
+    if status_text in {"needs-more-samples", "needs-more-evidence", "holdout", "applied"}:
+        return "collect-promotion-outcome-holdout-evidence"
+    if recommendation_text in {"promote", "widen"}:
+        return "widen-local-promotion-from-outcome-feedback"
+    return "review-promotion-outcome-feedback"
+
+
+def _promotion_feedback_summary_count(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    counter = Counter(str(row.get(key) or "unknown") for row in rows)
+    return [{"value": value, "count": count} for value, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def _burndown_rows_from_promotion_feedback(feedback: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = [entry for entry in feedback.get("entries") or [] if isinstance(entry, dict)]
+    if not entries:
+        return []
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        family = _promotion_feedback_family(entry.get("action_family") or entry.get("policy_section"))
+        grouped.setdefault(family, []).append(entry)
+
+    rows: list[dict[str, Any]] = []
+    for family, family_entries in grouped.items():
+        state_counts = Counter(
+            _promotion_feedback_state(
+                entry.get("status"),
+                entry.get("recommendation"),
+                entry.get("rollback_needed"),
+            )
+            for entry in family_entries
+        )
+        state = sorted(
+            state_counts,
+            key=lambda value: (state_counts[value], -_burndown_state_rank(value), value),
+            reverse=True,
+        )[0]
+        representative = sorted(
+            family_entries,
+            key=lambda entry: (
+                _promotion_feedback_state(entry.get("status"), entry.get("recommendation"), entry.get("rollback_needed")) == state,
+                str(entry.get("created_at") or entry.get("impact_generated_at") or ""),
+            ),
+            reverse=True,
+        )[0]
+        applied = sum(_to_int(entry.get("applied_count")) for entry in family_entries)
+        holdout = sum(_to_int(entry.get("holdout_count")) for entry in family_entries)
+        skipped = sum(_to_int(entry.get("skipped_count")) for entry in family_entries)
+        bypassed = sum(_to_int(entry.get("bypassed_count")) for entry in family_entries)
+        safety_stops = sum(_to_int(entry.get("safety_stop_count")) for entry in family_entries)
+        observed = sum(_to_float(entry.get("observed_savings_usd")) for entry in family_entries)
+        projected = sum(_to_float(entry.get("projected_savings_usd")) for entry in family_entries)
+        blocker_codes = sorted({
+            str(code)
+            for entry in family_entries
+            for code in [*(entry.get("reason_codes") or []), *(entry.get("warning_codes") or [])]
+            if str(code or "").strip()
+        })
+        if state == "keep-blocked" and not blocker_codes:
+            blocker_codes = ["promotion-outcome-review-required"]
+        rows.append({
+            "lever": family,
+            "local_action_family": family,
+            "state": state,
+            "next_action": _promotion_feedback_next_action(state, representative.get("status"), representative.get("recommendation")),
+            "blocker_codes": sanitize_value(blocker_codes),
+            "evidence_source": sanitize_value(feedback.get("schema") or "agentflow.promotion_outcome_feedback_summary.v1"),
+            "source": "promotion-outcome-feedback",
+            "entry_count": len(family_entries),
+            "sample_count": applied + holdout + skipped + bypassed + safety_stops,
+            "applied_count": applied,
+            "holdout_count": holdout,
+            "skipped_count": skipped,
+            "bypassed_count": bypassed,
+            "safety_stop_count": safety_stops,
+            "observed_savings_usd": round(observed, 8),
+            "projected_saved_usd": round(projected, 8),
+            "status_counts": _promotion_feedback_summary_count(family_entries, "status"),
+            "recommendation_counts": _promotion_feedback_summary_count(family_entries, "recommendation"),
+            "owner": "local-policy",
+            "_score": (
+                -_burndown_state_rank(state)
+                + observed * 1000.0
+                + projected * 100.0
+                + min(applied + holdout + skipped + bypassed + safety_stops, 10000) / 100.0
+                + len(family_entries)
+            ),
+        })
+    return rows
+
+
+def _promotion_feedback_supersedes_loop_row(row: dict[str, Any], promotion_families: set[str]) -> bool:
+    if row.get("source") == "promotion-outcome-feedback":
+        return False
+    family = _promotion_feedback_family(row.get("lever") or row.get("local_action_family"))
+    if family not in promotion_families:
+        return False
+    return str(row.get("state") or "") in {
+        "activation-ready",
+        "replay-ready",
+        "projected-savings",
+        "ranked-evidence",
+        "missing-evidence",
+    }
+
+
 def build_evidence_to_activation_burndown(
     plan: dict[str, Any],
     *,
@@ -2762,6 +2921,15 @@ def build_evidence_to_activation_burndown(
     for stage in loop.get("levers") or []:
         if isinstance(stage, dict):
             rows.append(_burndown_row_from_loop_stage(stage))
+
+    promotion_feedback = stats_summary.get("promotion_outcome_feedback")
+    promotion_rows: list[dict[str, Any]] = []
+    if isinstance(promotion_feedback, dict):
+        promotion_rows = _burndown_rows_from_promotion_feedback(promotion_feedback)
+        if promotion_rows:
+            promotion_families = {str(row.get("lever")) for row in promotion_rows if row.get("lever")}
+            rows = [row for row in rows if not _promotion_feedback_supersedes_loop_row(row, promotion_families)]
+            rows.extend(promotion_rows)
 
     managed = stats_summary.get("managed_recommendation_health")
     if isinstance(managed, dict):
@@ -5228,6 +5396,8 @@ def build_research_plan(
         inspected_sources.append("promotion_blocker_next_action_status")
     if "evidence_to_activation_next_action_ledger" in summary:
         inspected_sources.append("evidence_to_activation_next_action_ledger")
+    if "promotion_outcome_feedback" in summary:
+        inspected_sources.append("promotion_outcome_feedback")
     if diagnostics:
         inspected_sources.append("orchestrator_logs")
     if isinstance(activation_safety_stop_burndown, dict) and activation_safety_stop_burndown.get("status") == "ranked":
