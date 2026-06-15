@@ -7174,3 +7174,108 @@ def post_promotion_priority_delta_review_cli(
     )
     _write_rollout_actions_result(stdout, result, pretty=args.pretty)
     return 0
+
+
+def post_promotion_policy_draft_dry_run_cli(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: Any = None,
+    stdout: Any = None,
+    stderr: Any = None,
+) -> int:
+    parser = argparse.ArgumentParser(
+        description="Dry-run local policy widen/rollback drafts from a post-promotion priority review report"
+    )
+    parser.add_argument(
+        "priority_review",
+        nargs="?",
+        help="Post-promotion priority review JSON path, or '-' to read from stdin.",
+    )
+    parser.add_argument(
+        "--widen-fraction",
+        type=float,
+        default=0.05,
+        help="Maximum activation fraction delta for widen drafts, default: 0.05.",
+    )
+    parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.10,
+        help="Minimum holdout fraction to preserve in widen drafts, default: 0.10.",
+    )
+    parser.add_argument(
+        "--max-drafts",
+        type=int,
+        default=20,
+        help="Maximum widen/rollback drafts to emit, default: 20.",
+    )
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print draft JSON instead of emitting one compact line.")
+    args = parser.parse_args(argv)
+
+    stdin = stdin if stdin is not None else sys.stdin
+    stdout = stdout if stdout is not None else sys.stdout
+    stderr = stderr if stderr is not None else sys.stderr
+
+    if not args.priority_review:
+        result = {
+            "schema": "agentflow.post_promotion_policy_draft_dry_run.v1",
+            "ok": False,
+            "status": "invalid",
+            "error": {
+                "type": "missing_input",
+                "message": "provide a post-promotion priority review JSON path or '-' for stdin",
+            },
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "wrote_local_policy_files": False,
+        }
+        _write_json(stderr, result)
+        return 1
+
+    try:
+        report = _read_json_input(str(args.priority_review), stdin=stdin)
+    except (OSError, json.JSONDecodeError) as exc:
+        _write_json(
+            stderr,
+            {
+                "ok": False,
+                "schema": "agentflow.post_promotion_policy_draft_dry_run_error.v1",
+                "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                "provider_calls_made": False,
+                "managed_server_calls_made": False,
+                "wrote_local_policy_files": False,
+            },
+        )
+        return 1
+
+    from agentflow_proxy.policy_events import log_policy_event
+    from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+    result = build_post_promotion_policy_drafts(
+        report,
+        widen_fraction=args.widen_fraction,
+        holdout_fraction=args.holdout_fraction,
+        max_drafts=args.max_drafts,
+    )
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    log_policy_event(
+        "post-promotion-policy-draft-dry-run",
+        ok=bool(result.get("ok")),
+        details={
+            "source": "cli",
+            "path": args.priority_review,
+            "candidate_count": summary.get("candidate_count"),
+            "draft_count": summary.get("draft_count"),
+            "widen_draft_count": summary.get("widen_draft_count"),
+            "rollback_draft_count": summary.get("rollback_draft_count"),
+            "omitted_count": summary.get("omitted_count"),
+            "wrote_local_policy_files": False,
+            "provider_calls_made": False,
+            "managed_server_calls_made": False,
+            "exit_code": 0 if result.get("ok") else 1,
+        },
+    )
+    _write_rollout_actions_result(stdout if result.get("ok") else stderr, result, pretty=args.pretty)
+    if (result.get("error") or {}).get("type") in {"invalid_report", "raw_payload_rejected"}:
+        return 1
+    return 0

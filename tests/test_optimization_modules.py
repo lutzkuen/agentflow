@@ -3123,5 +3123,145 @@ class TestPostPromotionPriorityDeltaReview(unittest.TestCase):
         self.assertEqual(out["fetch"]["reason"], "no-managed-url-configured")
 
 
+class TestPostPromotionPolicyDrafts(unittest.TestCase):
+    def _priority_fixture(self) -> dict:
+        return {
+            "schema": "agentflow.post_promotion_policy_priority_deltas.v1",
+            "deltas": [
+                {
+                    "delta_id": "post-promo-delta:routing:widen:tool-result",
+                    "rank": 1,
+                    "status": "recommended",
+                    "next_action": "widen-local-policy",
+                    "action_family": "routing",
+                    "source_surface": "anthropic_messages",
+                    "recommendation_type": "widen-routing-canary",
+                    "savings_delta_usd": 8.25,
+                    "confidence": 0.91,
+                    "policy_section": "routing",
+                    "evidence_summary": {
+                        "record_count": 120,
+                        "promotion_status": "promoted",
+                        "rank_score": 0.91,
+                        "savings_delta_usd": 8.25,
+                    },
+                },
+                {
+                    "delta_id": "post-promo-delta:cache:rollback:hit-regression",
+                    "rank": 2,
+                    "status": "recommended",
+                    "next_action": "rollback-local-policy",
+                    "action_family": "cache",
+                    "source_surface": "openai_responses",
+                    "recommendation_type": "rollback-cache-pattern",
+                    "savings_delta_usd": -1.20,
+                    "confidence": 0.88,
+                    "policy_section": "cache",
+                    "evidence_summary": {"record_count": 40, "promotion_status": "regression-flagged"},
+                },
+                {
+                    "delta_id": "post-promo-delta:crunch:keep:low-confidence",
+                    "rank": 3,
+                    "status": "noop",
+                    "next_action": "keep-blocked",
+                    "action_family": "crunch",
+                    "source_surface": "anthropic_messages",
+                    "recommendation_type": "noop",
+                    "savings_delta_usd": 0.0,
+                    "confidence": 0.25,
+                    "policy_section": "crunch",
+                    "no_op_reasons": ["low-confidence"],
+                    "evidence_summary": {"record_count": 7, "promotion_status": "keep-blocked"},
+                },
+            ],
+        }
+
+    def _review(self) -> dict:
+        from agentflow_proxy.post_promotion_priority_delta_review import build_post_promotion_priority_delta_review
+
+        return build_post_promotion_priority_delta_review(self._priority_fixture(), limit=10)
+
+    def test_priority_review_becomes_widen_rollback_and_noop_policy_drafts(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        result = build_post_promotion_policy_drafts(self._review(), widen_fraction=0.05, holdout_fraction=0.10)
+
+        self.assertEqual(result["schema"], "agentflow.post_promotion_policy_draft_dry_run.v1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["draft_count"], 2)
+        self.assertEqual(result["summary"]["widen_draft_count"], 1)
+        self.assertEqual(result["summary"]["rollback_draft_count"], 1)
+        self.assertEqual(result["summary"]["omitted_count"], 1)
+        self.assertFalse(result["wrote_local_policy_files"])
+        self.assertFalse(result["provider_calls_made"])
+        self.assertFalse(result["managed_server_calls_made"])
+
+        widen = next(item for item in result["drafts"] if item["draft_action"] == "widen-local-policy")
+        rollback = next(item for item in result["drafts"] if item["draft_action"] == "rollback-local-policy")
+        noop = result["omitted"][0]
+
+        self.assertEqual(widen["target_local_rule_file"], "routing_rules.yaml")
+        self.assertEqual(widen["target_local_policy_section"], "routing.rules")
+        self.assertEqual(widen["review"]["review_command"], "agentflow-post-promotion-policy-draft-dry-run")
+        self.assertEqual(widen["review"]["family_review_command"], "agentflow-routing-promotion-draft-dry-run")
+        self.assertEqual(widen["source"], "post-promotion-priority-delta-review")
+        self.assertTrue(widen["proposed_policy_patch"]["requires_existing_compatible_rule"])
+        self.assertTrue(widen["proposed_policy_patch"]["bounded_changes"]["preserve_holdout_fraction_gte"] >= 0.10)
+        self.assertTrue(widen["proposed_policy_patch"]["bounded_changes"]["preserve_requested_model_fallback"])
+        self.assertTrue(widen["privacy"]["metadata_only"])
+
+        self.assertEqual(rollback["target_local_rule_file"], "cache_rules.yaml")
+        self.assertEqual(rollback["target_local_policy_section"], "cache.pattern_rules")
+        self.assertEqual(rollback["review"]["family_review_command"], "agentflow-cache-promotion-draft-dry-run")
+        self.assertEqual(rollback["proposed_policy_patch"]["operation"], "rollback_existing_rule")
+        self.assertFalse(rollback["proposed_policy_patch"]["bounded_changes"]["delete_rule"])
+        self.assertTrue(rollback["rollback_metadata"]["preserve_operator_rule_history"])
+
+        self.assertEqual(noop["next_action"], "keep-blocked")
+        self.assertEqual(noop["target_local_rule_file"], "crunch_rules.yaml")
+        self.assertEqual(noop["target_local_policy_section"], "anthropic_thinking_history_compaction.rules")
+        self.assertEqual(noop["review"]["family_review_command"], "agentflow-crunch-promotion-draft-dry-run")
+        self.assertEqual(noop["reason"], "keep-blocked")
+        self.assertTrue(noop["privacy"]["metadata_only"])
+
+    def test_policy_draft_output_excludes_raw_identifiers(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        review = self._review()
+        result = build_post_promotion_policy_drafts(review)
+        encoded = json.dumps(result, sort_keys=True)
+
+        for forbidden in ('"request_id"', '"session_id"', '"cache_key"', '"prompt"', '"messages"', '"provider_body"'):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_rejects_raw_fields_in_direct_priority_review_input(self):
+        from agentflow_proxy.post_promotion_policy_drafts import build_post_promotion_policy_drafts
+
+        review = self._review()
+        review["candidates"][0]["prompt"] = "raw prompt must fail"
+
+        result = build_post_promotion_policy_drafts(review)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["type"], "raw_payload_rejected")
+        self.assertEqual(result["summary"]["draft_count"], 0)
+
+    def test_cli_reads_priority_review_from_stdin(self):
+        from agentflow_proxy.cli_commands.optimization_reports import post_promotion_policy_draft_dry_run_cli
+        import io
+
+        stdin = io.StringIO(json.dumps(self._review()))
+        stdout = io.StringIO()
+
+        rc = post_promotion_policy_draft_dry_run_cli(["-"], stdin=stdin, stdout=stdout)
+
+        self.assertEqual(rc, 0)
+        out = json.loads(stdout.getvalue())
+        self.assertEqual(out["schema"], "agentflow.post_promotion_policy_draft_dry_run.v1")
+        self.assertEqual(out["summary"]["widen_draft_count"], 1)
+        self.assertEqual(out["summary"]["rollback_draft_count"], 1)
+        self.assertEqual(out["summary"]["omitted_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

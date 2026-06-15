@@ -166,6 +166,7 @@ from agentflow_proxy.cli_commands.optimization_reports import (
     optimization_promotion_canary_apply_cli,
     optimization_promotion_impact_cli,
     post_promotion_priority_delta_review_cli,
+    post_promotion_policy_draft_dry_run_cli,
 )
 
 
@@ -918,3 +919,7 @@ def evidence_to_activation_burndown_main() -> None:
 
 def post_promotion_priority_delta_review_main() -> None:
     raise SystemExit(post_promotion_priority_delta_review_cli())
+
+
+def post_promotion_policy_draft_dry_run_main() -> None:
+    raise SystemExit(post_promotion_policy_draft_dry_run_cli())
