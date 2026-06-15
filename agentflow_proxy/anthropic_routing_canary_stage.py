@@ -12,6 +12,7 @@ SCHEMA = "agentflow.anthropic_routing_canary_stage.v1"
 OMISSION_SCHEMA = "agentflow.anthropic_routing_canary_stage_omission.v1"
 STAGED_SCHEMA = "agentflow.anthropic_routing_canary_staged_draft.v1"
 PROJECTED_LIFECYCLE_SCHEMA = "agentflow.anthropic_routing_canary_projected_lifecycle_coverage.v1"
+ACCEPTANCE_SCHEMA = "agentflow.anthropic_routing_canary_stage_acceptance.v1"
 PASS_THROUGH_SCHEMA = "agentflow.pass_through_routing_activation_candidates.v1"
 
 PRIVACY = {
@@ -384,6 +385,85 @@ def _stage_review_intent(canary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _acceptance_report(staged: list[dict[str, Any]], *, projected_applied: int, projected_holdout: int) -> dict[str, Any]:
+    reported_tool_result_canary = False
+    lifecycle_counts_present = False
+    safety_gates_present = False
+
+    for draft in staged:
+        routing = draft.get("policies", {}).get("routing", {}) if isinstance(draft.get("policies"), dict) else {}
+        canary = routing.get("phase_canary") if isinstance(routing, dict) else None
+        if not isinstance(canary, dict):
+            continue
+        lifecycle = (canary.get("promotion") or {}).get("projected_anthropic_canary_lifecycle_evidence")
+        counts = lifecycle.get("cohort_counts") if isinstance(lifecycle, dict) else {}
+        gates = canary.get("safety_gates") if isinstance(canary.get("safety_gates"), dict) else {}
+        requested = _string(canary.get("requested_model")).lower()
+        target = _string(canary.get("target_model")).lower()
+        reported_tool_result_canary = reported_tool_result_canary or (
+            canary.get("provider") == "anthropic"
+            and "sonnet" in requested
+            and "haiku" in target
+            and "tool-result" in _string_list(canary.get("eligible_categories"))
+            and "tool-execution" in _string_list(canary.get("eligible_workflow_phases"))
+            and canary.get("enabled") is False
+            and canary.get("review_only") is True
+        )
+        lifecycle_counts_present = lifecycle_counts_present or (
+            isinstance(lifecycle, dict)
+            and "canary_applied" in counts
+            and "canary_holdout" in counts
+            and "skipped" in counts
+            and "safety_stopped" in counts
+            and "error_count" in lifecycle
+            and "fallback_count" in lifecycle
+            and "retry_count" in lifecycle
+        )
+        safety_gates_present = safety_gates_present or (
+            bool(gates.get("block_thinking_history"))
+            and bool(gates.get("block_top_level_thinking"))
+            and bool(gates.get("block_unsafe_tool_call_context"))
+            and bool(gates.get("fallback_to_requested_on_rate_limit"))
+            and bool(gates.get("content_free"))
+        )
+
+    holdout_coverage = projected_holdout > 0
+    privacy_clean = (
+        bool(PRIVACY["metadata_only"])
+        and bool(PRIVACY["aggregate_only"])
+        and not bool(PRIVACY["raw_prompts_included"])
+        and not bool(PRIVACY["provider_bodies_included"])
+        and not bool(PRIVACY["request_ids_included"])
+        and not bool(PRIVACY["session_ids_included"])
+        and not bool(PRIVACY["provider_calls_made"])
+        and not bool(PRIVACY["managed_server_calls_made"])
+    )
+    acceptance_met = all(
+        [
+            reported_tool_result_canary,
+            holdout_coverage,
+            lifecycle_counts_present,
+            safety_gates_present,
+            privacy_clean,
+        ]
+    )
+    return {
+        "schema": ACCEPTANCE_SCHEMA,
+        "status": "met" if acceptance_met else "not_met",
+        "acceptance_met": acceptance_met,
+        "tool_result_sonnet_to_haiku_candidate_reported": reported_tool_result_canary,
+        "projected_canary_applied_count": projected_applied,
+        "projected_canary_holdout_count": projected_holdout,
+        "holdout_coverage_projected": holdout_coverage,
+        "lifecycle_counts_include_applied_holdout_skipped_safety_error_retry_fallback": lifecycle_counts_present,
+        "thinking_and_tool_safety_gates_present": safety_gates_present,
+        "metadata_only_privacy_proof": privacy_clean,
+        "provider_calls_made": False,
+        "managed_server_calls_made": False,
+        "privacy": PRIVACY,
+    }
+
+
 def _candidate_payload(
     report: dict[str, Any],
     candidate: dict[str, Any],
@@ -509,13 +589,14 @@ def _error_result(error_type: str, message: str, *, errors: list[dict[str, str]]
         "schema": SCHEMA,
         "ok": False,
         "generated_at": utc_now(),
-        "summary": {"candidate_count": 0, "eligible_candidate_count": 0, "staged_count": 0, "omitted_count": 0},
+        "summary": {"candidate_count": 0, "eligible_candidate_count": 0, "staged_count": 0, "omitted_count": 0, "acceptance_met": False},
         "staged_drafts": [],
         "omitted": [],
         "wrote_active_policy_files": False,
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "privacy": PRIVACY,
+        "acceptance": _acceptance_report([], projected_applied=0, projected_holdout=0),
         "error": {"type": error_type, "message": message, "errors": errors or []},
     }
 
@@ -598,6 +679,7 @@ def build_anthropic_routing_canary_stage_report(
         lifecycle = item.get("projected_lifecycle_evidence")
         if isinstance(lifecycle, dict):
             projected_safety += _as_int((lifecycle.get("cohort_counts") or {}).get("safety_stopped"))
+    acceptance = _acceptance_report(staged, projected_applied=projected_applied, projected_holdout=projected_holdout)
 
     return {
         "schema": SCHEMA,
@@ -611,6 +693,7 @@ def build_anthropic_routing_canary_stage_report(
             "projected_canary_applied_count": projected_applied,
             "projected_canary_holdout_count": projected_holdout,
             "projected_safety_stopped_count": projected_safety,
+            "acceptance_met": bool(acceptance["acceptance_met"]),
             "estimated_savings_per_1000_calls_usd": round(
                 max((_as_float(draft["policies"]["routing"]["phase_canary"]["promotion"].get("estimated_savings_per_1000_calls_usd")) for draft in staged), default=0.0),
                 6,
@@ -622,4 +705,5 @@ def build_anthropic_routing_canary_stage_report(
         "provider_calls_made": False,
         "managed_server_calls_made": False,
         "privacy": PRIVACY,
+        "acceptance": acceptance,
     }

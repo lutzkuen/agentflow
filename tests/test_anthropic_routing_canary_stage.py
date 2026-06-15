@@ -88,6 +88,16 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(result["summary"]["projected_canary_applied_count"], 56)
         self.assertEqual(result["summary"]["projected_canary_holdout_count"], 111)
         self.assertEqual(result["summary"]["projected_safety_stopped_count"], 32)
+        self.assertTrue(result["summary"]["acceptance_met"])
+
+        acceptance = result["acceptance"]
+        self.assertEqual(acceptance["schema"], "agentflow.anthropic_routing_canary_stage_acceptance.v1")
+        self.assertEqual(acceptance["status"], "met")
+        self.assertTrue(acceptance["tool_result_sonnet_to_haiku_candidate_reported"])
+        self.assertTrue(acceptance["holdout_coverage_projected"])
+        self.assertTrue(acceptance["lifecycle_counts_include_applied_holdout_skipped_safety_error_retry_fallback"])
+        self.assertTrue(acceptance["thinking_and_tool_safety_gates_present"])
+        self.assertTrue(acceptance["metadata_only_privacy_proof"])
 
         draft = result["staged_drafts"][0]
         self.assertFalse(draft["active_policy_changed"])
@@ -129,6 +139,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(payload["schema"], "agentflow.anthropic_routing_canary_stage.v1")
         self.assertEqual(payload["staged_drafts"][0]["draft_id"], "anthropic-stage-test")
         self.assertEqual(payload["summary"]["projected_canary_applied_count"], 56)
+        self.assertTrue(payload["acceptance"]["acceptance_met"])
         _assert_privacy_clean(self, payload)
 
     def test_rejects_raw_payload_keys(self) -> None:
@@ -139,6 +150,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["type"], "raw_payload_rejected")
+        self.assertFalse(result["acceptance"]["acceptance_met"])
         _assert_privacy_clean(self, result)
 
 
