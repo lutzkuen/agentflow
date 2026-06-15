@@ -578,6 +578,142 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("secret-holdout-session-id", rendered)
         self.assertNotIn("secret-applied-request-id", rendered)
 
+    def test_pass_through_routing_report_names_anthropic_lifecycle_blockers(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 100,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "c": 100,
+                        "session_id": "secret-anthropic-session-id",
+                        "request_id": "secret-anthropic-request-id",
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        report = plan["evidence"]["stats_summary"]["pass_through_routing_report"]
+        candidate = report["buckets"][0]
+        self.assertEqual(candidate["provider"], "anthropic")
+        self.assertEqual(candidate["actionability"], "actionable")
+        self.assertEqual(candidate["candidate_target_model"], "claude-haiku-4-5-20251001")
+        self.assertEqual(candidate["required_local_executor"], "anthropic-routing-rules")
+        self.assertGreater(candidate["estimated_savings_per_1000_calls_usd"], 0)
+
+        lifecycle = candidate["anthropic_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["schema"], "agentflow.anthropic_routing_canary_lifecycle_evidence.v1")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 0)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 0)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 100)
+        self.assertEqual(lifecycle["error_count"], 0)
+        self.assertEqual(lifecycle["retry_count"], 0)
+        self.assertEqual(lifecycle["fallback_count"], 0)
+        self.assertIn("missing-anthropic-canary-lifecycle-evidence", lifecycle["blocker_codes"])
+        self.assertIn("missing-applied-coverage", lifecycle["blocker_codes"])
+        self.assertIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+        self.assertFalse(lifecycle["privacy"]["raw_prompts_included"])
+        self.assertFalse(lifecycle["privacy"]["request_ids_included"])
+        self.assertFalse(lifecycle["privacy"]["session_ids_included"])
+        self.assertEqual(report["summary"]["anthropic_canary_applied_count"], 0)
+        self.assertEqual(report["summary"]["anthropic_canary_holdout_count"], 0)
+
+        routing_stage = next(row for row in plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]["levers"] if row["lever"] == "routing")
+        self.assertEqual(routing_stage["state"], "missing-evidence")
+        self.assertIn("missing-anthropic-canary-lifecycle-evidence", routing_stage["blocker_codes"])
+        self.assertEqual(routing_stage["next_action"], "activate-anthropic-routing-canary-cohorts")
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret-anthropic-session-id", rendered)
+        self.assertNotIn("secret-anthropic-request-id", rendered)
+
+    def test_pass_through_routing_report_merges_anthropic_canary_lifecycle_counts(self):
+        observed_at = datetime.now(timezone.utc).isoformat()
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 42,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "routing": [
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-sonnet-4-6",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "c": 40,
+                        "anthropic_canary_holdout_count": 3,
+                        "anthropic_canary_latest_observed_at": observed_at,
+                        "session_id": "secret-anthropic-holdout-session-id",
+                    },
+                    {
+                        "provider": "anthropic",
+                        "source_surface": "anthropic_messages",
+                        "endpoint": "messages",
+                        "requested_model": "claude-sonnet-4-6",
+                        "routed_model": "claude-haiku-4-5-20251001",
+                        "category": "tool-result",
+                        "workflow_phase": "tool-execution",
+                        "c": 2,
+                        "anthropic_canary_applied_count": 2,
+                        "anthropic_canary_error_count": 1,
+                        "anthropic_canary_retry_count": 1,
+                        "anthropic_canary_fallback_count": 1,
+                        "anthropic_canary_latest_observed_at": observed_at,
+                        "request_id": "secret-anthropic-applied-request-id",
+                    },
+                ],
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        report = plan["evidence"]["stats_summary"]["pass_through_routing_report"]
+        self.assertEqual(report["summary"]["pass_through_rows"], 40)
+        self.assertEqual(report["summary"]["routed_down_rows"], 2)
+        self.assertEqual(report["summary"]["anthropic_canary_applied_count"], 2)
+        self.assertEqual(report["summary"]["anthropic_canary_holdout_count"], 3)
+        self.assertEqual(report["summary"]["anthropic_canary_error_count"], 1)
+        self.assertEqual(report["summary"]["anthropic_canary_retry_count"], 1)
+        self.assertEqual(report["summary"]["anthropic_canary_fallback_count"], 1)
+
+        candidate = report["buckets"][0]
+        self.assertEqual(candidate["requested_model"], "claude-sonnet-4-6")
+        self.assertEqual(candidate["candidate_target_model"], "claude-haiku-4-5-20251001")
+        lifecycle = candidate["anthropic_canary_lifecycle_evidence"]
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 2)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 3)
+        self.assertEqual(lifecycle["coverage"]["matched_count"], 40)
+        self.assertGreater(lifecycle["coverage"]["applied_rate"], 0)
+        self.assertGreater(lifecycle["coverage"]["holdout_rate"], 0)
+        self.assertEqual(lifecycle["error_count"], 1)
+        self.assertEqual(lifecycle["retry_count"], 1)
+        self.assertEqual(lifecycle["fallback_count"], 1)
+        self.assertFalse(lifecycle["stale_evidence"]["stale"])
+        self.assertIn("error-observed", lifecycle["blocker_codes"])
+        self.assertIn("retry-observed", lifecycle["blocker_codes"])
+        self.assertIn("fallback-observed", lifecycle["blocker_codes"])
+        self.assertNotIn("missing-applied-coverage", lifecycle["blocker_codes"])
+        self.assertNotIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+
+        rendered = json.dumps(plan)
+        self.assertNotIn("secret-anthropic-holdout-session-id", rendered)
+        self.assertNotIn("secret-anthropic-applied-request-id", rendered)
+
     def test_evidence_to_activation_loop_tracks_missing_local_cohort_evidence(self):
         plan = build_research_plan(
             issues=[],

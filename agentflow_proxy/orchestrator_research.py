@@ -552,7 +552,7 @@ def _pass_through_lifecycle_context(stats_summary: dict[str, Any]) -> dict[str, 
     for bucket in report.get("buckets") or []:
         if not isinstance(bucket, dict):
             continue
-        lifecycle = bucket.get("openai_canary_lifecycle_evidence")
+        lifecycle = _routing_lifecycle_evidence(bucket)
         if not isinstance(lifecycle, dict):
             continue
         blockers = [str(item) for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()]
@@ -566,7 +566,11 @@ def _pass_through_lifecycle_context(stats_summary: dict[str, Any]) -> dict[str, 
             "lifecycle_state": sanitize_value(lifecycle.get("status") or "missing-evidence"),
             "blocker_code": sanitize_value(blockers[0]),
             "sample_count_bucket": _sample_count_bucket(bucket.get("sample_count")),
-            "next_action": "activate-openai-routing-canary-cohorts",
+            "next_action": (
+                "activate-anthropic-routing-canary-cohorts"
+                if str(bucket.get("provider") or "") == "anthropic"
+                else "activate-openai-routing-canary-cohorts"
+            ),
             "aggregate_only_replaced": True,
             "aggregate_only_cleared": False,
             "privacy": _candidate_privacy(),
@@ -2243,15 +2247,20 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
     top = (actionable or buckets or [None])[0]
     if top is None:
         return None
-    lifecycle = top.get("openai_canary_lifecycle_evidence") if isinstance(top.get("openai_canary_lifecycle_evidence"), dict) else {}
+    lifecycle = _routing_lifecycle_evidence(top) or {}
     blockers = [str(item) for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()]
     actionability = str(top.get("actionability") or "unknown")
+    provider = str(top.get("provider") or "unknown")
     if actionability == "actionable" and blockers:
         state = "missing-evidence"
-        next_action = "activate-openai-routing-canary-cohorts"
+        next_action = (
+            "activate-anthropic-routing-canary-cohorts"
+            if provider == "anthropic"
+            else "activate-openai-routing-canary-cohorts"
+        )
     elif actionability == "actionable":
         state = "ranked-evidence"
-        next_action = "stage-openai-routing-canary"
+        next_action = "stage-anthropic-routing-canary" if provider == "anthropic" else "stage-openai-routing-canary"
     else:
         state = "no-op" if actionability == "already-cheapest" else "blocked"
         next_action = "keep-routing-no-op-reason"
@@ -3180,6 +3189,141 @@ def _aggregate_openai_canary_lifecycle_evidence(row: dict[str, Any], *, sample_c
     }
 
 
+def _aggregate_anthropic_canary_lifecycle_evidence(row: dict[str, Any], *, sample_count: int) -> dict[str, Any]:
+    applied = _to_int(
+        row.get("anthropic_canary_applied_count")
+        or row.get("claude_canary_applied_count")
+        or row.get("canary_applied_count")
+    )
+    holdout = _to_int(
+        row.get("anthropic_canary_holdout_count")
+        or row.get("claude_canary_holdout_count")
+        or row.get("canary_holdout_count")
+    )
+    safety_stopped = _to_int(
+        row.get("anthropic_canary_safety_stopped_count")
+        or row.get("claude_canary_safety_stopped_count")
+        or row.get("safety_stopped_count")
+    )
+    skipped = _to_int(
+        row.get("anthropic_canary_skipped_count")
+        or row.get("claude_canary_skipped_count")
+        or row.get("canary_skipped_count")
+    )
+    bypassed = _to_int(
+        row.get("anthropic_canary_bypassed_or_disabled_count")
+        or row.get("anthropic_canary_bypassed_count")
+        or row.get("claude_canary_bypassed_or_disabled_count")
+        or row.get("claude_canary_bypassed_count")
+        or row.get("canary_bypassed_or_disabled_count")
+        or row.get("canary_bypassed_count")
+    )
+    unknown = _to_int(
+        row.get("anthropic_canary_unknown_count")
+        or row.get("claude_canary_unknown_count")
+        or row.get("canary_unknown_count")
+    )
+    error_count = _to_int(
+        row.get("anthropic_canary_error_count")
+        or row.get("claude_canary_error_count")
+        or row.get("canary_error_count")
+    )
+    retry_count = _to_int(
+        row.get("anthropic_canary_retry_count")
+        or row.get("claude_canary_retry_count")
+        or row.get("canary_retry_count")
+    )
+    fallback_count = _to_int(
+        row.get("anthropic_canary_fallback_count")
+        or row.get("claude_canary_fallback_count")
+        or row.get("canary_fallback_count")
+    )
+    observed = applied + holdout + safety_stopped + skipped + bypassed + unknown
+    stale_raw = (
+        row.get("anthropic_canary_stale_evidence")
+        if row.get("anthropic_canary_stale_evidence") is not None
+        else row.get("claude_canary_stale_evidence")
+        if row.get("claude_canary_stale_evidence") is not None
+        else row.get("stale_evidence")
+    )
+    if isinstance(stale_raw, str):
+        stale = stale_raw.strip().lower() in {"1", "true", "yes", "stale"}
+    else:
+        stale = bool(stale_raw)
+    latest_observed = (
+        row.get("anthropic_canary_latest_observed_at")
+        or row.get("claude_canary_latest_observed_at")
+        or row.get("canary_latest_observed_at")
+    )
+    latest_dt = _parse_time(latest_observed)
+    age_hours = None
+    if latest_dt is not None:
+        age_hours = round((datetime.now(timezone.utc) - latest_dt).total_seconds() / 3600.0, 3)
+        stale = stale or age_hours > 72.0
+
+    blockers: Counter[str] = Counter()
+    if observed == 0:
+        blockers["missing-anthropic-canary-lifecycle-evidence"] = sample_count
+    if applied == 0:
+        blockers["missing-applied-coverage"] = sample_count
+    if holdout == 0:
+        blockers["missing-holdout-coverage"] = sample_count
+    if error_count:
+        blockers["error-observed"] = error_count
+    if retry_count:
+        blockers["retry-observed"] = retry_count
+    if fallback_count:
+        blockers["fallback-observed"] = fallback_count
+    if safety_stopped:
+        blockers["safety-stop-observed"] = safety_stopped
+    if stale:
+        blockers["stale-evidence"] = observed or sample_count
+
+    return {
+        "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
+        "status": "matched" if observed else "no-anthropic-canary-metadata",
+        "observed_count": observed,
+        "cohort_counts": {
+            "canary_applied": applied,
+            "canary_holdout": holdout,
+            "safety_stopped": safety_stopped,
+            "skipped": skipped,
+            "bypassed_or_disabled": bypassed,
+            "unknown": unknown,
+        },
+        "coverage": {
+            "matched_count": sample_count,
+            "observed_rate": round(observed / sample_count, 6) if sample_count else 0.0,
+            "applied_rate": round(applied / sample_count, 6) if sample_count else 0.0,
+            "holdout_rate": round(holdout / sample_count, 6) if sample_count else 0.0,
+        },
+        "error_count": error_count,
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+        "latest_observed_at": sanitize_value(latest_observed),
+        "stale_evidence": {
+            "stale": stale,
+            "age_hours": age_hours,
+            "max_age_hours": 72.0,
+        },
+        "blocker_codes": sorted(blockers),
+        "blocker_reason_breakdown": [
+            {"value": key, "count": value}
+            for key, value in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "absolute_paths_included": False,
+        },
+    }
+
+
 _OPENAI_CANARY_COUNTER_FIELDS = (
     "openai_canary_applied_count",
     "openai_canary_holdout_count",
@@ -3190,6 +3334,19 @@ _OPENAI_CANARY_COUNTER_FIELDS = (
     "openai_canary_error_count",
     "openai_canary_retry_count",
     "openai_canary_fallback_count",
+)
+
+
+_ANTHROPIC_CANARY_COUNTER_FIELDS = (
+    "anthropic_canary_applied_count",
+    "anthropic_canary_holdout_count",
+    "anthropic_canary_safety_stopped_count",
+    "anthropic_canary_skipped_count",
+    "anthropic_canary_bypassed_or_disabled_count",
+    "anthropic_canary_unknown_count",
+    "anthropic_canary_error_count",
+    "anthropic_canary_retry_count",
+    "anthropic_canary_fallback_count",
 )
 
 
@@ -3215,6 +3372,51 @@ def _merge_openai_canary_lifecycle_counts(base: dict[str, Any], extra: dict[str,
     if stale or extra_stale:
         merged["openai_canary_stale_evidence"] = bool(stale or extra_stale)
     return merged
+
+
+def _merge_anthropic_canary_lifecycle_counts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key in _ANTHROPIC_CANARY_COUNTER_FIELDS:
+        merged[key] = _to_int(base.get(key)) + _to_int(extra.get(key))
+    base_latest = _routing_text(
+        base.get("anthropic_canary_latest_observed_at")
+        or base.get("claude_canary_latest_observed_at")
+        or base.get("canary_latest_observed_at")
+    )
+    extra_latest = _routing_text(
+        extra.get("anthropic_canary_latest_observed_at")
+        or extra.get("claude_canary_latest_observed_at")
+        or extra.get("canary_latest_observed_at")
+    )
+    if extra_latest and (not base_latest or extra_latest > base_latest):
+        merged["anthropic_canary_latest_observed_at"] = extra_latest
+    elif base_latest:
+        merged["anthropic_canary_latest_observed_at"] = base_latest
+    stale = (
+        base.get("anthropic_canary_stale_evidence")
+        if base.get("anthropic_canary_stale_evidence") is not None
+        else base.get("claude_canary_stale_evidence")
+        if base.get("claude_canary_stale_evidence") is not None
+        else base.get("stale_evidence")
+    )
+    extra_stale = (
+        extra.get("anthropic_canary_stale_evidence")
+        if extra.get("anthropic_canary_stale_evidence") is not None
+        else extra.get("claude_canary_stale_evidence")
+        if extra.get("claude_canary_stale_evidence") is not None
+        else extra.get("stale_evidence")
+    )
+    if stale or extra_stale:
+        merged["anthropic_canary_stale_evidence"] = bool(stale or extra_stale)
+    return merged
+
+
+def _routing_lifecycle_evidence(bucket: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("openai_canary_lifecycle_evidence", "anthropic_canary_lifecycle_evidence"):
+        lifecycle = bucket.get(key)
+        if isinstance(lifecycle, dict):
+            return lifecycle
+    return None
 
 
 def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
@@ -3286,6 +3488,9 @@ def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:
         "openai_canary_lifecycle_evidence": _aggregate_openai_canary_lifecycle_evidence(row, sample_count=count)
         if provider == "openai" and target_model
         else None,
+        "anthropic_canary_lifecycle_evidence": _aggregate_anthropic_canary_lifecycle_evidence(row, sample_count=count)
+        if provider == "anthropic" and target_model
+        else None,
     }
 
 
@@ -3309,7 +3514,8 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
     if not isinstance(routing_rows, list):
         return None
     buckets: list[dict[str, Any]] = []
-    routed_lifecycle_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    routed_openai_lifecycle_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    routed_anthropic_lifecycle_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     for raw in routing_rows:
         if not isinstance(raw, dict):
             continue
@@ -3333,11 +3539,19 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
         lifecycle_row = dict(raw)
         if _to_int(lifecycle_row.get("openai_canary_applied_count")) <= 0 and provider == "openai":
             lifecycle_row["openai_canary_applied_count"] = count
+        if _to_int(lifecycle_row.get("anthropic_canary_applied_count")) <= 0 and provider == "anthropic":
+            lifecycle_row["anthropic_canary_applied_count"] = count
         key = _pass_through_lifecycle_key(raw, target_model=target_model)
-        routed_lifecycle_by_key[key] = _merge_openai_canary_lifecycle_counts(
-            routed_lifecycle_by_key.get(key, {}),
-            lifecycle_row,
-        )
+        if provider == "openai":
+            routed_openai_lifecycle_by_key[key] = _merge_openai_canary_lifecycle_counts(
+                routed_openai_lifecycle_by_key.get(key, {}),
+                lifecycle_row,
+            )
+        elif provider == "anthropic":
+            routed_anthropic_lifecycle_by_key[key] = _merge_anthropic_canary_lifecycle_counts(
+                routed_anthropic_lifecycle_by_key.get(key, {}),
+                lifecycle_row,
+            )
 
     total_rows = 0
     pass_through_rows = 0
@@ -3362,9 +3576,13 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             _routing_text(raw.get("category")) or "unknown",
             _routing_text(raw.get("phase") or raw.get("workflow_phase")) or "unknown",
         )
-        lifecycle_extra = routed_lifecycle_by_key.get(_pass_through_lifecycle_key(raw, target_model=target_model))
-        if lifecycle_extra:
-            classified_input = _merge_openai_canary_lifecycle_counts(classified_input, lifecycle_extra)
+        key = _pass_through_lifecycle_key(raw, target_model=target_model)
+        openai_lifecycle_extra = routed_openai_lifecycle_by_key.get(key)
+        if openai_lifecycle_extra:
+            classified_input = _merge_openai_canary_lifecycle_counts(classified_input, openai_lifecycle_extra)
+        anthropic_lifecycle_extra = routed_anthropic_lifecycle_by_key.get(key)
+        if anthropic_lifecycle_extra:
+            classified_input = _merge_anthropic_canary_lifecycle_counts(classified_input, anthropic_lifecycle_extra)
         buckets.append(_classify_pass_through_bucket(classified_input))
 
     if pass_through_rows <= 0:
@@ -3384,6 +3602,15 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             lifecycle_totals["error"] += _to_int(lifecycle.get("error_count"))
             lifecycle_totals["retry"] += _to_int(lifecycle.get("retry_count"))
             lifecycle_totals["fallback"] += _to_int(lifecycle.get("fallback_count"))
+        lifecycle = bucket.get("anthropic_canary_lifecycle_evidence")
+        if isinstance(lifecycle, dict):
+            cohorts = lifecycle.get("cohort_counts") if isinstance(lifecycle.get("cohort_counts"), dict) else {}
+            lifecycle_totals["anthropic_canary_applied"] += _to_int(cohorts.get("canary_applied"))
+            lifecycle_totals["anthropic_canary_holdout"] += _to_int(cohorts.get("canary_holdout"))
+            lifecycle_totals["anthropic_safety_stopped"] += _to_int(cohorts.get("safety_stopped"))
+            lifecycle_totals["anthropic_error"] += _to_int(lifecycle.get("error_count"))
+            lifecycle_totals["anthropic_retry"] += _to_int(lifecycle.get("retry_count"))
+            lifecycle_totals["anthropic_fallback"] += _to_int(lifecycle.get("fallback_count"))
     ranked = []
     for rank, bucket in enumerate(buckets[: max(1, limit)], start=1):
         item = dict(bucket)
@@ -3406,6 +3633,12 @@ def _pass_through_routing_report(routing_rows: Any, *, limit: int = 10) -> dict[
             "openai_canary_error_count": lifecycle_totals["error"],
             "openai_canary_retry_count": lifecycle_totals["retry"],
             "openai_canary_fallback_count": lifecycle_totals["fallback"],
+            "anthropic_canary_applied_count": lifecycle_totals["anthropic_canary_applied"],
+            "anthropic_canary_holdout_count": lifecycle_totals["anthropic_canary_holdout"],
+            "anthropic_canary_safety_stopped_count": lifecycle_totals["anthropic_safety_stopped"],
+            "anthropic_canary_error_count": lifecycle_totals["anthropic_error"],
+            "anthropic_canary_retry_count": lifecycle_totals["anthropic_retry"],
+            "anthropic_canary_fallback_count": lifecycle_totals["anthropic_fallback"],
         },
         "actionability_breakdown": [
             {"class": key, "count": value}
