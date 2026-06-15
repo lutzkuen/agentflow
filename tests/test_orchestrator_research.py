@@ -133,6 +133,154 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertFalse(milestone["privacy"]["request_ids_included"])
         self.assertFalse(milestone["privacy"]["session_ids_included"])
 
+    def test_issue_533_low_backlog_milestone_is_targeted_ranked_and_private(self):
+        plan = build_research_plan(
+            issues=[
+                issue(
+                    406,
+                    "Generate next backlog milestone from local telemetry evidence",
+                    ["backlog", "status:ready", "priority:p1", "core-feature", "correctness"],
+                    state="CLOSED",
+                    closed="2026-06-10T08:00:00Z",
+                ),
+                issue(
+                    451,
+                    "Generate next backlog milestone from local telemetry evidence",
+                    ["backlog", "status:ready", "priority:p1", "core-feature", "correctness"],
+                    state="CLOSED",
+                    closed="2026-06-10T09:00:00Z",
+                ),
+            ],
+            stats={
+                "calls": 3130,
+                "cache_hits": 0,
+                "cache_hit_rate": 0.0,
+                "request_id": "req-issue-533-secret",
+                "session_id": "session-issue-533-secret",
+                "raw_prompt": "raw prompt must not leak",
+                "file_path": "/home/lutz/private/issue_533_secret.py",
+                "request_shape_rollups": {
+                    "schema": "agentflow.request_shape_rollups.v1",
+                    "summary": {"rows_considered": 1000, "rollup_count": 32},
+                    "follow_up_candidates": {
+                        "schema": "agentflow.request_shape_follow_up_candidates.v1",
+                        "status": "candidates-ranked",
+                        "summary": {
+                            "rows_considered": 1000,
+                            "ranked_candidate_count": 10,
+                            "top_next_action": "stage-repeated-context-crunch-canary",
+                            "top_local_action_family": "crunch",
+                        },
+                        "blocker_cohorts": [
+                            {
+                                "schema": "agentflow.request_shape_blocker_cohort.v1",
+                                "provider_family": "anthropic",
+                                "source_surface": "anthropic_messages",
+                                "endpoint": "messages",
+                                "category": "tool-result",
+                                "workflow_phase": "thinking",
+                                "stream": True,
+                                "has_tools": True,
+                                "cache_status": "skipped",
+                                "routing_status": "passthrough",
+                                "row_count": 388,
+                                "sample_count": 388,
+                                "cost_est_usd": 20.565063,
+                                "observed_savings_usd": 137.523788,
+                                "projected_saved_tokens": 843452,
+                                "projected_savings_usd": 2.530359,
+                                "candidate_work_classes": [
+                                    "crunch",
+                                    "repeated_context",
+                                    "replayability",
+                                    "routing",
+                                    "routing_evidence",
+                                ],
+                                "candidate_families": [
+                                    "cache_blocker",
+                                    "cache_replay",
+                                    "routing_candidate",
+                                    "routing_evidence",
+                                ],
+                                "blocker_codes": [
+                                    "thinking-routing-guard",
+                                    "tool-call-cache-disabled",
+                                    "unsupported-streaming-shape",
+                                ],
+                                "readiness_state": "activation-ready",
+                                "local_action_family": "crunch",
+                                "next_action": "stage-repeated-context-crunch-canary",
+                                "candidate_id": "raw-request-shape-candidate-secret",
+                            }
+                        ],
+                        "privacy": {"metadata_only": True, "aggregate_only": True},
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "crunch_savings_signal": {
+                    "schema": "agentflow.crunch_savings_signal.v1",
+                    "status": "projected-savings-ranked",
+                    "top_report": {
+                        "matched_count": 41,
+                        "projected_saved_usd": 0.006894,
+                        "next_action": "widen",
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+                "pass_through_routing_report": {
+                    "schema": "agentflow.pass_through_routing_activation_candidates.v1",
+                    "summary": {
+                        "top_actionability": "actionable",
+                        "top_requested_model": "claude-sonnet-4-6",
+                        "top_candidate_target_model": "claude-haiku-4-5-20251001",
+                    },
+                    "privacy": {"metadata_only": True, "aggregate_only": True},
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        created = plan["backlog_changes"]["create_issues"]
+        titles = [item["title"] for item in created]
+        self.assertIn("Rank next savings milestone from local telemetry evidence gaps", titles)
+        self.assertNotIn("Generate next backlog milestone from local telemetry evidence", titles)
+
+        milestone_issue = next(
+            item for item in created
+            if item["title"] == "Rank next savings milestone from local telemetry evidence gaps"
+        )
+        self.assertIn("## Evidence", milestone_issue["body"])
+        self.assertIn("## Implementation Approach", milestone_issue["body"])
+        self.assertIn("## Acceptance Criteria", milestone_issue["body"])
+        self.assertIn("## Labels", milestone_issue["body"])
+        self.assertIn("## Sequencing Notes", milestone_issue["body"])
+        self.assertIn("stage-repeated-context-crunch-canary", milestone_issue["body"])
+
+        milestone = plan["evidence"]["next_backlog_milestone"]
+        self.assertEqual(milestone["schema"], "agentflow.next_backlog_milestone.v1")
+        self.assertEqual(milestone["status"], "ready")
+        self.assertEqual(milestone["summary"]["proposal_count"], len(created))
+        self.assertEqual(
+            milestone["summary"]["top_next_action"],
+            "stage-repeated-context-crunch-canary",
+        )
+        self.assertEqual(milestone["summary"]["top_issue"]["rank"], 1)
+        self.assertEqual(milestone["summary"]["top_issue"]["title"], created[0]["title"])
+        self.assertEqual([item["rank"] for item in milestone["issues"]], list(range(1, len(created) + 1)))
+
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("req-issue-533-secret", rendered)
+        self.assertNotIn("session-issue-533-secret", rendered)
+        self.assertNotIn("raw prompt must not leak", rendered)
+        self.assertNotIn("/home/lutz/private/issue_533_secret.py", rendered)
+        self.assertTrue(milestone["privacy"]["metadata_only"])
+        self.assertTrue(milestone["privacy"]["aggregate_only"])
+        self.assertFalse(milestone["privacy"]["raw_prompts_included"])
+        self.assertFalse(milestone["privacy"]["provider_bodies_included"])
+        self.assertFalse(milestone["privacy"]["request_ids_included"])
+        self.assertFalse(milestone["privacy"]["session_ids_included"])
+
     def test_low_backlog_emits_ranked_metadata_only_optimization_candidates(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"

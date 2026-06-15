@@ -15,6 +15,7 @@ SCHEMA = "agentflow.orchestrator_research_plan.v1"
 EVIDENCE_TO_ACTIVATION_BURNDOWN_SCHEMA = "agentflow.evidence_to_activation_burndown.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger.v1"
 EVIDENCE_TO_ACTIVATION_LEDGER_ENTRY_SCHEMA = "agentflow.evidence_to_activation_next_action_ledger_entry.v1"
+LOW_BACKLOG_MILESTONE_TITLE = "Rank next savings milestone from local telemetry evidence gaps"
 
 SENSITIVE_VALUE = "[REDACTED]"
 SENSITIVE_ID = "[REDACTED_ID]"
@@ -5392,13 +5393,14 @@ def _proposal_from_low_backlog(
         evidence.append(f"Top repeated diagnostic is non-actionable evidence: {top['reason']} ({top['count']} observations).")
     return {
         "repo": "lutzkuen/agentflow",
-        "title": "Generate next backlog milestone from local telemetry evidence",
+        "title": LOW_BACKLOG_MILESTONE_TITLE,
         "labels": _default_issue_labels("priority:p1"),
         "body": _issue_body(
-            title="Generate next backlog milestone from local telemetry evidence",
+            title=LOW_BACKLOG_MILESTONE_TITLE,
             rationale=(
                 "Research mode needs to create implementation-ready issues from local metadata "
-                "when the ready backlog falls below the configured threshold."
+                "when the ready backlog falls below the configured threshold. This targeted milestone "
+                "replaces the older generic backlog-generation title with a ranked savings gap review."
             ),
             evidence=evidence,
             implementation=[
@@ -5493,6 +5495,7 @@ def _next_backlog_milestone(
                 ),
             }
         )
+    top_issue = issue_rows[0] if issue_rows else None
     top_lever = sanitize_value(top_candidate.get("lever")) if top_candidate is not None else None
     top_blocker = sanitize_value(top_candidate.get("blocker")) if top_candidate is not None else None
     return {
@@ -5504,6 +5507,13 @@ def _next_backlog_milestone(
             "top_lever": top_lever,
             "top_blocker": top_blocker,
             "top_next_action": _next_action_from_summary(stats_summary, top_candidate),
+            "top_issue": {
+                "rank": top_issue["rank"],
+                "title": top_issue["title"],
+                "repo": top_issue["repo"],
+                "lever": top_issue["lever"],
+                "priority": top_issue["priority"],
+            } if top_issue is not None else None,
         },
         "issues": issue_rows,
         "privacy": {
