@@ -323,6 +323,88 @@ pattern_rules: []
 #       head_chars: 800
 #       tail_chars: 600
 #       max_replacement_chars: 1800
+request_shape_repeated_context_canaries:
+  # Local-only request-shape cohort canaries promoted from aggregate metadata.
+  # Runtime metadata records applied/holdout/skipped lifecycle state without
+  # including raw prompts, provider bodies, request IDs, session IDs, cache
+  # keys, file paths, or tool payloads.
+  enabled: true
+  schema: agentflow.request_shape_repeated_context_canaries.v1
+  rules:
+    - id: local-repeated-context-crunch-canary-a8814a13d90e
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:messages:tool-result:2170d814fddee961
+      source_evidence_schema: agentflow.request_shape_rollup_row.v1
+      source_evidence_schemas:
+        - agentflow.request_shape_crunch_opportunity_dry_run.v1
+        - agentflow.request_shape_follow_up_candidates.v1
+      local_only_reason: file-backed-local-policy-no-managed-dependency
+      evidence_blocker_codes:
+        - thinking-routing-guard
+        - tool-call-cache-disabled
+        - unsupported-streaming-shape
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: messages
+        category: tool-result
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: gte_128k_chars
+        token_bucket: lt_500_tokens
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        schema: agentflow.request_shape_crunch_canary_rollout.v1
+        canary_enabled: true
+        canary_fraction: 0.10
+        holdout_fraction: 0.10
+        canary_salt: local-repeated-context-crunch-canary-a8814a13d90e
+        canary_unit: request_shape_cohort
+      projected_saved_chars: 3865760
+      projected_saved_tokens: 966440
+      projected_saved_usd: 2.899322
+      safety_gates:
+        metadata_only: true
+        aggregate_only: true
+        local_file_backed: true
+        local_only: true
+        tool_call_cache_enabled: false
+        tool_call_cache_enablement_allowed: false
+        provider_calls_made: false
+        managed_server_calls_made: false
+        raw_prompts_included: false
+        provider_bodies_included: false
+        request_ids_included: false
+        session_ids_included: false
+        cache_keys_included: false
+        file_paths_included: false
+        tool_payloads_included: false
+        holdout_required: true
+        max_rollout_fraction: 0.10
+        records_applied_holdout_skipped_safety_stopped_fallback_rollback: true
+      lifecycle_metadata:
+        schema: agentflow.request_shape_crunch_canary_stage_lifecycle_metadata.v1
+        emits_applied: true
+        emits_holdout: true
+        emits_skipped: true
+        emits_safety_stopped: true
+        emits_fallback: true
+        emits_rollback: true
+        projected_canary_applied_count: 44
+        projected_canary_holdout_count: 44
+        projected_skipped_count: 343
+        projected_safety_stopped_count: 0
+        evidence_blocker_codes:
+          - thinking-routing-guard
+          - tool-call-cache-disabled
+          - unsupported-streaming-shape
+        impact_report: agentflow.request_shape_crunch_canary_impact.v1
+        lifecycle_schema: agentflow.request_shape_crunch_canary_lifecycle.v1
+        metadata_only: true
+        aggregate_only: true
 repeated_provider_scaffolding:
   # Provider-message profile for reviewed repeated scaffolding candidates.
   # Disabled by default. When a local/manual or managed-recommended rule with

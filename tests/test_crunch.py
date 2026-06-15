@@ -296,6 +296,116 @@ prompt_cache:
             self.assertEqual(meta["long_blocks_shortened"], 1)
             self.assertIn("middle of long older text block omitted", crunched["messages"][0]["content"])
 
+    def test_request_shape_repeated_context_canary_records_applied_and_holdout_metadata(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = tmp_path / "config"
+            config.mkdir()
+            (config / "crunch_rules.yaml").write_text(
+                """
+enabled: true
+request_shape_repeated_context_canaries:
+  enabled: true
+  rules:
+    - id: local-repeated-context-crunch-canary-test
+      enabled: true
+      policy_source: local-manual
+      cohort_id: request-shape-crunch:anthropic:messages:tool-result:test
+      source_evidence_schema: agentflow.request_shape_crunch_opportunity_dry_run.v1
+      conditions:
+        provider_family: anthropic
+        source_surface: anthropic_messages
+        endpoint: messages
+        category: tool-result
+        workflow_phase: thinking
+        stream: true
+        has_tools: true
+        text_bucket: 8k_32k_chars
+        cache_status: skipped
+        routing_status: passthrough
+      rollout:
+        canary_enabled: true
+        canary_fraction: 0.5
+        holdout_fraction: 0.5
+        canary_salt: local-repeated-context-crunch-canary-test
+        canary_unit: request_shape_cohort
+""",
+                encoding="utf-8",
+            )
+            os.chdir(tmp_path)
+            manual = importlib.reload(crunch_module)
+
+            observed = {}
+            for index in range(120):
+                tool_payload = ("private tool output variant " + str(index) + " ") * 500
+                body = {
+                    "model": "claude-sonnet-4-6",
+                    "stream": True,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "raw-tool-id-must-not-leak",
+                                    "content": tool_payload,
+                                }
+                            ],
+                        }
+                    ],
+                }
+                routing_meta = {
+                    "provider": "anthropic",
+                    "source_surface": "anthropic_messages",
+                    "endpoint": "messages",
+                    "requested_model": "claude-sonnet-4-6",
+                    "routed_model": "claude-sonnet-4-6",
+                    "text_chars": len(tool_payload),
+                    "has_tools": True,
+                    "category": "tool-result",
+                    "workflow_phase": "thinking",
+                }
+                _crunched, meta = manual.crunch_body(
+                    body,
+                    routing_meta=routing_meta,
+                    provider="anthropic",
+                    source_surface="anthropic_messages",
+                    endpoint="messages",
+                )
+                lifecycle = meta.get("request_shape_repeated_context_canary")
+                if isinstance(lifecycle, dict) and lifecycle.get("status") in {"applied", "holdout"}:
+                    observed.setdefault(str(lifecycle["status"]), (lifecycle, meta["request_shape_repeated_context_canaries"]))
+                if {"applied", "holdout"} <= set(observed):
+                    break
+
+            self.assertIn("applied", observed)
+            self.assertIn("holdout", observed)
+            applied_lifecycle, applied_meta = observed["applied"]
+            holdout_lifecycle, holdout_meta = observed["holdout"]
+            self.assertEqual(applied_lifecycle["cohort"], "canary_applied")
+            self.assertEqual(holdout_lifecycle["cohort"], "canary_holdout")
+            self.assertEqual(applied_lifecycle["policy_id"], "local-repeated-context-crunch-canary-test")
+            self.assertEqual(applied_meta["applied_count"], 1)
+            self.assertEqual(holdout_meta["holdout_count"], 1)
+            self.assertEqual(applied_meta["rules"][0]["policy_source"], "local-manual")
+            rendered = json.dumps({"applied": applied_meta, "holdout": holdout_meta}, sort_keys=True)
+            self.assertNotIn("private tool output", rendered)
+            self.assertNotIn("raw-tool-id-must-not-leak", rendered)
+            self.assertNotIn('"request_fingerprint":', rendered)
+            self.assertFalse(applied_meta["privacy"]["raw_prompts_included"])
+            self.assertFalse(applied_meta["privacy"]["provider_bodies_included"])
+            self.assertFalse(applied_meta["privacy"]["request_fingerprints_included"])
+
+            mismatch_body = {"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hello"}]}
+            _mismatch_crunched, mismatch_meta = manual.crunch_body(
+                mismatch_body,
+                provider="anthropic",
+                source_surface="anthropic_messages",
+                endpoint="messages",
+            )
+            self.assertNotIn("request_shape_repeated_context_canary", mismatch_meta)
+            self.assertEqual(mismatch_meta["request_shape_repeated_context_canaries"]["reason"], "no-matching-rule")
+
     def test_enhanced_crunch_provider_reports_configured_without_leaking_endpoint(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

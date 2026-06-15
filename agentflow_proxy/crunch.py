@@ -25,6 +25,7 @@ from agentflow_proxy.pattern_safety import (
 )
 from agentflow_proxy.pattern_modules import evaluate_pattern_modules, registered_pattern_modules
 from agentflow_proxy.public_metadata import public_id, public_label
+from agentflow_proxy.request_shape_rollups import request_shape_crunch_canary_lifecycle
 from agentflow_proxy.store import stable_json
 from agentflow_proxy.terminal_compaction_dry_run import (
     DEFAULT_HEAD_LINES as TERMINAL_COMPACTION_DEFAULT_HEAD_LINES,
@@ -254,6 +255,11 @@ def _default_crunch_policy() -> dict[str, Any]:
             },
         },
         "pattern_rules": [],
+        "request_shape_repeated_context_canaries": {
+            "enabled": False,
+            "schema": "agentflow.request_shape_repeated_context_canaries.v1",
+            "rules": [],
+        },
         "repeated_provider_scaffolding": {
             "enabled": False,
             "rules": [],
@@ -390,6 +396,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-manual")
+            request_shape_canaries = data.get("request_shape_repeated_context_canaries") or {}
+            if isinstance(request_shape_canaries, dict):
+                _apply_request_shape_repeated_context_canaries_yaml(
+                    policy,
+                    request_shape_canaries,
+                    default_policy_source="local-manual",
+                )
             provider_scaffolding = data.get("repeated_provider_scaffolding") or {}
             if isinstance(provider_scaffolding, dict):
                 _apply_provider_scaffolding_policy_yaml(policy, provider_scaffolding, default_policy_source="local-manual")
@@ -459,6 +472,13 @@ def _load_crunch_policy() -> tuple[dict[str, Any], str, str]:
             pattern_rules = data.get("pattern_rules")
             if pattern_rules is not None:
                 policy["pattern_rules"] = _parse_pattern_rules_yaml(pattern_rules, default_policy_source="local-default")
+            request_shape_canaries = data.get("request_shape_repeated_context_canaries") or {}
+            if isinstance(request_shape_canaries, dict):
+                _apply_request_shape_repeated_context_canaries_yaml(
+                    policy,
+                    request_shape_canaries,
+                    default_policy_source="local-default",
+                )
             provider_scaffolding = data.get("repeated_provider_scaffolding") or {}
             if isinstance(provider_scaffolding, dict):
                 _apply_provider_scaffolding_policy_yaml(policy, provider_scaffolding, default_policy_source="local-default")
@@ -1324,6 +1344,100 @@ def _parse_pattern_rules_yaml(value: Any, *, default_policy_source: str) -> list
     return rules
 
 
+def _sanitize_request_shape_canary_conditions(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    conditions: dict[str, Any] = {}
+    string_keys = {
+        "provider_family",
+        "source_surface",
+        "endpoint",
+        "category",
+        "workflow_phase",
+        "text_bucket",
+        "token_bucket",
+        "cache_status",
+        "routing_status",
+    }
+    bool_keys = {"stream", "has_tools"}
+    for key in string_keys:
+        if value.get(key) is not None:
+            conditions[key] = public_label(value.get(key), "unknown")
+    for key in bool_keys:
+        if value.get(key) is not None:
+            conditions[key] = _as_bool(value.get(key), False)
+    return conditions
+
+
+def _parse_request_shape_repeated_context_canary_rules_yaml(
+    value: Any,
+    *,
+    default_policy_source: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rules: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        rollout = item.get("rollout") if isinstance(item.get("rollout"), dict) else {}
+        policy_id = str(item.get("id") or item.get("policy_id") or f"local-repeated-context-crunch-canary-{index + 1}")
+        try:
+            canary_fraction = max(0.0, min(1.0, float(rollout.get("canary_fraction", rollout.get("fraction", 0.0)))))
+        except (TypeError, ValueError):
+            canary_fraction = 0.0
+        try:
+            holdout_fraction = max(0.0, min(1.0, float(rollout.get("holdout_fraction", 0.0))))
+        except (TypeError, ValueError):
+            holdout_fraction = 0.0
+        if canary_fraction + holdout_fraction > 1.0:
+            holdout_fraction = max(0.0, 1.0 - canary_fraction)
+        rules.append({
+            "id": policy_id,
+            "policy_id": policy_id,
+            "enabled": _as_bool(item.get("enabled"), True),
+            "policy_source": str(item.get("policy_source") or default_policy_source),
+            "cohort_id": str(item.get("cohort_id") or policy_id),
+            "source_evidence_schema": public_label(item.get("source_evidence_schema"), "unknown"),
+            "source_evidence_schemas": _list_of_strings(item.get("source_evidence_schemas")),
+            "local_only_reason": public_label(item.get("local_only_reason"), "file-backed-local-policy-no-managed-dependency"),
+            "evidence_blocker_codes": [public_label(code, "unknown") for code in _list_of_strings(item.get("evidence_blocker_codes"))],
+            "conditions": _sanitize_request_shape_canary_conditions(item.get("conditions")),
+            "rollout": {
+                "schema": "agentflow.request_shape_crunch_canary_rollout.v1",
+                "canary_enabled": _as_bool(rollout.get("canary_enabled"), True),
+                "canary_fraction": canary_fraction,
+                "holdout_fraction": holdout_fraction,
+                "canary_salt": str(rollout.get("canary_salt") or policy_id),
+                "canary_unit": str(rollout.get("canary_unit") or "request_shape_cohort"),
+            },
+            "projected_saved_chars": _safe_int(item.get("projected_saved_chars")),
+            "projected_saved_tokens": _safe_int(item.get("projected_saved_tokens")),
+            "projected_saved_usd": float(item.get("projected_saved_usd") or 0.0),
+            "safety_gates": item.get("safety_gates") if isinstance(item.get("safety_gates"), dict) else {},
+            "lifecycle_metadata": item.get("lifecycle_metadata") if isinstance(item.get("lifecycle_metadata"), dict) else {},
+        })
+    return rules
+
+
+def _apply_request_shape_repeated_context_canaries_yaml(
+    policy: dict[str, Any],
+    raw_canaries: dict[str, Any],
+    *,
+    default_policy_source: str,
+) -> None:
+    target = policy["request_shape_repeated_context_canaries"]
+    target["enabled"] = _as_bool(raw_canaries.get("enabled"), target["enabled"])
+    if raw_canaries.get("schema") is not None:
+        target["schema"] = public_label(raw_canaries.get("schema"), target["schema"])
+    parsed = _parse_request_shape_repeated_context_canary_rules_yaml(
+        raw_canaries.get("rules"),
+        default_policy_source=default_policy_source,
+    )
+    if parsed:
+        target["rules"] = parsed
+
+
 def _apply_codex_scaffolding_policy_yaml(policy: dict[str, Any], codex_scaffolding: dict[str, Any]) -> None:
     target = policy["codex_repeated_scaffolding"]
     target["enabled"] = _as_bool(codex_scaffolding.get("enabled"), target["enabled"])
@@ -1496,6 +1610,7 @@ TERMINAL_LOG_MAX_ANNOTATIONS = int(TERMINAL_LOG_POLICY["max_annotations"])
 TERMINAL_OUTPUT_COMPACTION_POLICY = CRUNCH_POLICY["terminal_output_compaction"]
 PATTERN_MODULES_POLICY = copy.deepcopy(CRUNCH_POLICY["pattern_modules"])
 PATTERN_RULES = list(CRUNCH_POLICY["pattern_rules"])
+REQUEST_SHAPE_REPEATED_CONTEXT_CANARIES_POLICY = CRUNCH_POLICY["request_shape_repeated_context_canaries"]
 REPEATED_PROVIDER_SCAFFOLDING_POLICY = CRUNCH_POLICY["repeated_provider_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_POLICY = CRUNCH_POLICY["codex_repeated_scaffolding"]
 CODEX_REPEATED_SCAFFOLDING_ENABLED = bool(CODEX_REPEATED_SCAFFOLDING_POLICY["enabled"])
@@ -1706,6 +1821,188 @@ def _crunch_request_category(body: dict[str, Any]) -> str:
     if "```" in text:
         return "code-gen"
     return "chat"
+
+
+def _request_shape_text_bucket(chars: int) -> str:
+    if chars <= 0:
+        return "unknown"
+    if chars < 2_000:
+        return "lt_2k_chars"
+    if chars < 8_000:
+        return "2k_8k_chars"
+    if chars < 32_000:
+        return "8k_32k_chars"
+    if chars < 128_000:
+        return "32k_128k_chars"
+    return "gte_128k_chars"
+
+
+def _request_shape_routing_status(routing_meta: dict[str, Any] | None) -> str | None:
+    if not isinstance(routing_meta, dict):
+        return None
+    for key in ("routing_status", "status"):
+        value = routing_meta.get(key)
+        if isinstance(value, str) and value.strip():
+            if value == "applied":
+                return "routed"
+            if value == "skipped":
+                return "passthrough"
+            return public_label(value, "unknown")
+    requested = routing_meta.get("requested_model")
+    routed = routing_meta.get("routed_model")
+    if requested is not None and routed is not None:
+        return "passthrough" if str(requested) == str(routed) else "routed"
+    return None
+
+
+def _request_shape_repeated_context_features(
+    body: dict[str, Any],
+    *,
+    routing_meta: dict[str, Any] | None,
+    provider: str | None,
+    source_surface: str | None,
+    endpoint: str | None,
+    category: str,
+) -> dict[str, Any]:
+    routing = routing_meta if isinstance(routing_meta, dict) else {}
+    text_chars = _safe_int(routing.get("text_chars"), len(_extract_text_for_category(body)))
+    has_tools = routing.get("has_tools")
+    if not isinstance(has_tools, bool):
+        has_tools = _body_has_tools(body)
+    stream = _as_bool(body.get("stream"), False)
+    requested = routing.get("requested_model") or body.get("model")
+    routed = routing.get("routed_model") or body.get("model")
+    features = {
+        "provider_family": public_label(provider or routing.get("provider"), "unknown"),
+        "source_surface": public_label(source_surface or routing.get("source_surface"), "unknown"),
+        "endpoint": public_label(endpoint or routing.get("endpoint"), "unknown"),
+        "category": public_label(routing.get("category") or category, "unknown"),
+        "workflow_phase": public_label(routing.get("workflow_phase") or routing.get("phase"), "unknown"),
+        "stream": stream,
+        "has_tools": bool(has_tools),
+        "text_bucket": _request_shape_text_bucket(text_chars),
+        "token_bucket": public_label(routing.get("token_bucket"), "unknown"),
+        "cache_status": public_label(routing.get("cache_status") or ("skipped" if stream or has_tools else None), "unknown"),
+        "routing_status": _request_shape_routing_status({**routing, "requested_model": requested, "routed_model": routed}),
+        "request_fingerprint": "sha256:" + hashlib.sha256(stable_json(body).encode("utf-8")).hexdigest(),
+    }
+    return {key: value for key, value in features.items() if value not in (None, "unknown")}
+
+
+def _request_shape_repeated_context_canary_base_meta(enabled: bool, reason: str) -> dict[str, Any]:
+    rules = REQUEST_SHAPE_REPEATED_CONTEXT_CANARIES_POLICY.get("rules")
+    return {
+        "schema": "agentflow.request_shape_repeated_context_crunch_canary_runtime.v1",
+        "enabled": bool(enabled),
+        "status": "skipped",
+        "reason": reason,
+        "configured_count": len(rules) if isinstance(rules, list) else 0,
+        "evaluated_count": 0,
+        "applied_count": 0,
+        "holdout_count": 0,
+        "skipped_count": 0,
+        "safety_stopped_count": 0,
+        "policy_source": CRUNCH_POLICY_SOURCE,
+        "rule_path": CRUNCH_RULES_PATH,
+        "rules": [],
+        "privacy": {
+            "metadata_only": True,
+            "aggregate_only": True,
+            "raw_prompts_included": False,
+            "provider_bodies_included": False,
+            "request_ids_included": False,
+            "session_ids_included": False,
+            "cache_keys_included": False,
+            "request_fingerprints_included": False,
+        },
+    }
+
+
+def _evaluate_request_shape_repeated_context_canaries(
+    body: dict[str, Any],
+    *,
+    routing_meta: dict[str, Any] | None,
+    provider: str | None,
+    source_surface: str | None,
+    endpoint: str | None,
+    category: str,
+) -> dict[str, Any]:
+    policy = REQUEST_SHAPE_REPEATED_CONTEXT_CANARIES_POLICY
+    rules = policy.get("rules") if isinstance(policy.get("rules"), list) else []
+    enabled = _as_bool(policy.get("enabled"), False)
+    if not enabled:
+        return _request_shape_repeated_context_canary_base_meta(False, "disabled")
+    if not rules:
+        return _request_shape_repeated_context_canary_base_meta(True, "no-rules")
+
+    features = _request_shape_repeated_context_features(
+        body,
+        routing_meta=routing_meta,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        category=category,
+    )
+    meta = _request_shape_repeated_context_canary_base_meta(True, "no-matching-rule")
+    selected: dict[str, Any] | None = None
+    for rule in rules:
+        if not isinstance(rule, dict) or not _as_bool(rule.get("enabled"), True):
+            continue
+        rollout = rule.get("rollout") if isinstance(rule.get("rollout"), dict) else {}
+        if not _as_bool(rollout.get("canary_enabled"), True):
+            continue
+        action = {
+            "policy_id": rule.get("policy_id") or rule.get("id"),
+            "cohort_id": rule.get("cohort_id"),
+            "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
+            "rollout_fraction": rollout.get("canary_fraction", 0.0),
+            "holdout_fraction": rollout.get("holdout_fraction", 0.0),
+        }
+        lifecycle = request_shape_crunch_canary_lifecycle(action, features)
+        status = str(lifecycle.get("status") or "unknown")
+        rule_meta = {
+            "id": public_label(rule.get("id"), "unknown"),
+            "policy_id": public_label(rule.get("policy_id"), "unknown"),
+            "cohort_id": public_label(rule.get("cohort_id"), "unknown"),
+            "status": public_label(status, "unknown"),
+            "cohort": public_label(lifecycle.get("cohort"), "unknown"),
+            "reason": public_label(lifecycle.get("reason"), "unknown"),
+            "policy_source": public_label(rule.get("policy_source"), "unknown"),
+            "rollout_fraction": lifecycle.get("rollout_fraction"),
+            "holdout_fraction": lifecycle.get("holdout_fraction"),
+            "metadata_only": True,
+        }
+        if lifecycle.get("mismatched_conditions"):
+            rule_meta["mismatched_conditions"] = lifecycle["mismatched_conditions"]
+        meta["rules"].append(rule_meta)
+        meta["evaluated_count"] += 1
+        if status == "applied":
+            meta["applied_count"] += 1
+        elif status == "holdout":
+            meta["holdout_count"] += 1
+        elif status in {"safety-stopped", "safety_stop"}:
+            meta["safety_stopped_count"] += 1
+        else:
+            meta["skipped_count"] += 1
+        if not lifecycle.get("mismatched_conditions") and selected is None:
+            selected = {
+                **lifecycle,
+                "policy_source": rule_meta["policy_source"],
+                "source_evidence_schema": public_label(rule.get("source_evidence_schema"), "unknown"),
+                "metadata_only": True,
+                "aggregate_only": True,
+                "raw_prompts_included": False,
+                "provider_bodies_included": False,
+                "request_ids_included": False,
+                "session_ids_included": False,
+                "cache_keys_included": False,
+            }
+
+    if selected is not None:
+        meta["status"] = public_label(selected.get("status"), "unknown")
+        meta["reason"] = public_label(selected.get("reason"), "unknown")
+        meta["selected_lifecycle"] = selected
+    return meta
 
 
 def _pattern_hash_for_text(text: str) -> str:
@@ -6118,12 +6415,14 @@ def crunch_body(
 
     if not CRUNCH_ENABLED:
         category = _crunch_request_category(body) if isinstance(body, dict) else None
-        return body, {
+        request_shape_canary_meta = _request_shape_repeated_context_canary_base_meta(False, "global-crunch-disabled")
+        meta = {
             "enabled": False,
             "changed": False,
             "policy_source": policy_source,
             "rule_path": CRUNCH_RULES_PATH,
             "managed_profile": managed_profile,
+            "request_shape_repeated_context_canaries": request_shape_canary_meta,
             "anthropic_thinking_history_compaction": _anthropic_thinking_compaction_base_meta(
                 "skipped",
                 "global-crunch-disabled",
@@ -6138,10 +6437,19 @@ def crunch_body(
                 rule_path=CRUNCH_RULES_PATH,
             ),
         }
+        return body, meta
 
     new_body = copy.deepcopy(body)
     before = len(stable_json(new_body))
     category = _crunch_request_category(new_body)
+    request_shape_canary_meta = _evaluate_request_shape_repeated_context_canaries(
+        new_body,
+        routing_meta=routing_meta,
+        provider=provider,
+        source_surface=source_surface,
+        endpoint=endpoint,
+        category=category,
+    )
     thinking_history_meta = build_anthropic_thinking_history_metadata(
         body if isinstance(body, dict) else None,
         provider=provider,
@@ -6263,7 +6571,7 @@ def crunch_body(
     terminal_log_meta = _terminal_log_aggregate_meta(terminal_log_metas)
 
     after = len(stable_json(new_body))
-    return new_body, {
+    meta = {
         "enabled": True,
         "changed": after != before,
         "before_chars": before,
@@ -6289,6 +6597,7 @@ def crunch_body(
         "pattern_rule_saved_chars": pattern_rules_meta["saved_chars"],
         "pattern_rules": pattern_rules_meta,
         "repeated_provider_scaffolding": provider_scaffolding_meta,
+        "request_shape_repeated_context_canaries": request_shape_canary_meta,
         "anthropic_thinking_history": thinking_history_meta,
         "policy_source": policy_source,
         "rule_path": CRUNCH_RULES_PATH,
@@ -6301,6 +6610,10 @@ def crunch_body(
             "skip_latest_assistant": THINKING_DEDUP_SKIP_LATEST_ASSISTANT,
         },
     }
+    selected_lifecycle = request_shape_canary_meta.get("selected_lifecycle")
+    if isinstance(selected_lifecycle, dict):
+        meta["request_shape_repeated_context_canary"] = selected_lifecycle
+    return new_body, meta
 
 
 def inject_prompt_cache(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
