@@ -491,6 +491,8 @@ def _empty_crunch_impact_cohort() -> dict[str, Any]:
         "saved_chars": 0,
         "saved_tokens": 0,
         "saved_usd": 0.0,
+        "latency_ms_total": 0,
+        "latency_sample_count": 0,
         "error_count": 0,
         "retry_count": 0,
         "fallback_count": 0,
@@ -557,6 +559,10 @@ def _add_crunch_impact_row(candidate: dict[str, Any], row: dict[str, Any], crunc
     cohort["saved_chars"] += saved_chars
     cohort["saved_tokens"] += saved_tokens
     cohort["saved_usd"] += saved_usd
+    latency_ms = _as_int(row.get("latency_ms"), -1)
+    if latency_ms >= 0:
+        cohort["latency_ms_total"] += latency_ms
+        cohort["latency_sample_count"] += 1
     if _status_bucket(row.get("status_code")) in {"4xx", "5xx"}:
         cohort["error_count"] += 1
     cohort["retry_count"] += _as_int(row.get("retry_count"))
@@ -580,6 +586,7 @@ def _finalize_crunch_impact_cohort(raw: dict[str, Any]) -> dict[str, Any]:
     count = _as_int(raw.get("count"))
     errors = _as_int(raw.get("error_count"))
     retries = _as_int(raw.get("retry_count"))
+    latency_samples = _as_int(raw.get("latency_sample_count"))
     return {
         "count": count,
         "before_chars": _as_int(raw.get("before_chars")),
@@ -587,6 +594,7 @@ def _finalize_crunch_impact_cohort(raw: dict[str, Any]) -> dict[str, Any]:
         "saved_chars": _as_int(raw.get("saved_chars")),
         "saved_tokens": _as_int(raw.get("saved_tokens")),
         "saved_usd": round(_as_float(raw.get("saved_usd")), 8),
+        "latency_avg_ms": round(_as_int(raw.get("latency_ms_total")) / latency_samples, 2) if latency_samples else None,
         "error_count": errors,
         "retry_count": retries,
         "fallback_count": _as_int(raw.get("fallback_count")),
@@ -638,6 +646,31 @@ def _crunch_impact_verdict(
     if reasons:
         return "no-widen", sorted(set(reasons), key=reasons.index), reasons[0]
     return "widen-ready", ["applied-savings-with-holdout-no-regression"], "ready-to-widen-repeated-context-crunch-canary"
+
+
+def _crunch_impact_recommendation(
+    *,
+    verdict: str,
+    reasons: list[str],
+    applied: dict[str, Any],
+    holdout: dict[str, Any],
+) -> tuple[str, str]:
+    reason_set = set(reasons)
+    if verdict == "widen-ready":
+        return "promotion-ready", "widen-repeated-context-crunch-canary"
+    if reason_set & {
+        "rollback-observed",
+        "canary-safety-stopped",
+        "error-rate-regression",
+        "retry-rate-regression",
+        "fallback-observed",
+    }:
+        return "rollback", "rollback-repeated-context-crunch-canary"
+    if reason_set & {"missing-applied-coverage", "missing-holdout-coverage", "stale-canary-impact-evidence"}:
+        return "collect-more-evidence", "collect-repeated-context-crunch-canary-impact-evidence"
+    if _as_int(applied.get("count")) > 0 and _as_int(holdout.get("count")) > 0:
+        return "keep-blocked", "keep-repeated-context-crunch-canary-blocked"
+    return "collect-more-evidence", "collect-repeated-context-crunch-canary-impact-evidence"
 
 
 def _crunch_impact_activation_lifecycle_feedback(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -734,10 +767,19 @@ def build_request_shape_crunch_canary_impact_report(
             rollback=rollback,
             stale=stale,
         )
+        impact_recommendation, recommended_next_action = _crunch_impact_recommendation(
+            verdict=verdict,
+            reasons=reasons,
+            applied=applied,
+            holdout=holdout,
+        )
         _increment(verdict_counts, verdict)
         if verdict != "widen-ready":
             for reason in reasons:
                 _increment(blocker_counts, reason)
+        latency_delta = None
+        if applied.get("latency_avg_ms") is not None and holdout.get("latency_avg_ms") is not None:
+            latency_delta = round(_as_float(applied.get("latency_avg_ms")) - _as_float(holdout.get("latency_avg_ms")), 2)
         finalized.append(
             {
                 "schema": "agentflow.request_shape_crunch_canary_impact_candidate.v1",
@@ -760,6 +802,7 @@ def build_request_shape_crunch_canary_impact_report(
                 "holdout_retry_count": _as_int(holdout.get("retry_count")),
                 "error_rate_delta": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
                 "retry_rate_delta": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+                "latency_avg_delta_ms": latency_delta,
                 "fallback_rate_delta": round(
                     (_as_int(fallback.get("count")) / max(1, _as_int(applied.get("count"))))
                     - 0.0,
@@ -772,8 +815,32 @@ def build_request_shape_crunch_canary_impact_report(
                 "first_observed_at": raw.get("first_observed_at"),
                 "latest_observed_at": raw.get("latest_observed_at"),
                 "verdict": verdict,
+                "impact_recommendation": impact_recommendation,
+                "promotion_recommendation": impact_recommendation,
+                "recommended_next_action": recommended_next_action,
+                "next_action": recommended_next_action,
                 "top_blocker": top_blocker if verdict != "widen-ready" else None,
                 "reason_codes": reasons,
+                "promotion_metadata": {
+                    "schema": "agentflow.request_shape_crunch_canary_promotion_recommendation.v1",
+                    "action_family": "crunch",
+                    "local_action_family": "crunch",
+                    "target_local_policy": "crunch_rules",
+                    "impact_recommendation": impact_recommendation,
+                    "recommended_next_action": recommended_next_action,
+                    "reason_codes": reasons,
+                    "applied_count": _as_int(applied.get("count")),
+                    "holdout_count": _as_int(holdout.get("count")),
+                    "safety_stop_count": _as_int(safety.get("count")),
+                    "fallback_count": _as_int(fallback.get("count")),
+                    "rollback_count": _as_int(rollback.get("count")),
+                    "observed_saved_tokens": _as_int(applied.get("saved_tokens")),
+                    "observed_saved_usd": round(_as_float(applied.get("saved_usd")), 8),
+                    "error_rate_delta": round(_as_float(applied.get("error_rate")) - _as_float(holdout.get("error_rate")), 6),
+                    "retry_rate_delta": round(_as_float(applied.get("retry_rate")) - _as_float(holdout.get("retry_rate")), 6),
+                    "latency_avg_delta_ms": latency_delta,
+                    "privacy": _crunch_opportunity_privacy(),
+                },
                 "status_breakdown": _breakdown(raw.get("status_counts", {})),
                 "reason_breakdown": _breakdown(raw.get("reason_counts", {})),
                 "cohorts": cohorts,
@@ -796,6 +863,14 @@ def build_request_shape_crunch_canary_impact_report(
     status = "no-crunch-canary-impact-metadata"
     if finalized:
         status = "widen-ready" if any(item.get("verdict") == "widen-ready" for item in finalized) else "no-widen"
+    recommendation_counts: dict[str, int] = {}
+    for item in finalized:
+        _increment(recommendation_counts, item.get("impact_recommendation") or "unknown")
+    recommendation_breakdown = _breakdown(recommendation_counts)
+    top_recommendation = recommendation_breakdown[0]["value"] if recommendation_breakdown else None
+    top_next_action = None
+    if finalized:
+        top_next_action = str(finalized[0].get("recommended_next_action") or "")
     return {
         "schema": CRUNCH_CANARY_IMPACT_SCHEMA,
         "status": status,
@@ -812,18 +887,35 @@ def build_request_shape_crunch_canary_impact_report(
             "projected_saved_usd": round(sum(_as_float(item.get("saved_usd")) for item in finalized), 8),
             "error_rate_delta": round(max((_as_float(item.get("error_rate_delta")) for item in finalized), default=0.0), 6),
             "retry_rate_delta": round(max((_as_float(item.get("retry_rate_delta")) for item in finalized), default=0.0), 6),
+            "latency_avg_delta_ms": max(
+                (
+                    _as_float(item.get("latency_avg_delta_ms"))
+                    for item in finalized
+                    if item.get("latency_avg_delta_ms") is not None
+                ),
+                default=None,
+            ),
             "fallback_count": sum(_as_int(item.get("fallback_count")) for item in finalized),
             "safety_stop_count": sum(_as_int(item.get("safety_stop_count")) for item in finalized),
             "rollback_count": sum(_as_int(item.get("rollback_count")) for item in finalized),
             "widen_ready_count": sum(1 for item in finalized if item.get("verdict") == "widen-ready"),
             "no_widen_count": sum(1 for item in finalized if item.get("verdict") != "widen-ready"),
+            "promotion_ready_count": sum(1 for item in finalized if item.get("impact_recommendation") == "promotion-ready"),
+            "rollback_recommended_count": sum(1 for item in finalized if item.get("impact_recommendation") == "rollback"),
+            "keep_blocked_count": sum(1 for item in finalized if item.get("impact_recommendation") == "keep-blocked"),
+            "collect_more_evidence_count": sum(
+                1 for item in finalized if item.get("impact_recommendation") == "collect-more-evidence"
+            ),
+            "top_impact_recommendation": top_recommendation,
             "top_blocker_code": blocker_breakdown[0]["value"] if blocker_breakdown else None,
-            "next_action": "widen-repeated-context-crunch-canary" if status == "widen-ready" else "review-repeated-context-crunch-canary-impact-blocker",
+            "next_action": top_next_action
+            or ("widen-repeated-context-crunch-canary" if status == "widen-ready" else "review-repeated-context-crunch-canary-impact-blocker"),
             "provider_calls_made": 0,
             "managed_server_calls_made": 0,
             "policy_files_written": False,
         },
         "verdict_breakdown": _breakdown(verdict_counts),
+        "impact_recommendation_breakdown": recommendation_breakdown,
         "blocker_reason_breakdown": blocker_breakdown,
         "candidates": finalized,
         "activation_lifecycle_feedback": _crunch_impact_activation_lifecycle_feedback(finalized),

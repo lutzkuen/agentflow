@@ -13,6 +13,7 @@ from agentflow_proxy import cli
 from agentflow_proxy.request_shape_rollups import (
     apply_request_shape_crunch_canary_action,
     build_request_shape_cache_replay_canary_stage_report,
+    build_request_shape_crunch_canary_impact_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
     request_shape_crunch_canary_lifecycle,
@@ -52,6 +53,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         cost: float = 0.02,
         baseline: float = 0.03,
         status_code: int = 200,
+        latency_ms: int = 125,
         retry_count: int = 0,
         routing_reason: str = "keep requested model",
         routing_extra: dict[str, object] | None = None,
@@ -93,7 +95,7 @@ class RequestShapeRollupTests(unittest.TestCase):
             stream=stream,
             cache_hit=cache_hit,
             status_code=status_code,
-            latency_ms=125,
+            latency_ms=latency_ms,
             input_tokens_est=input_tokens,
             output_tokens_est=50,
             actual_input_tokens=input_tokens,
@@ -1040,13 +1042,24 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertGreater(impact_report["summary"]["saved_usd"], 0)
         self.assertEqual(impact_report["summary"]["error_rate_delta"], 0.0)
         self.assertEqual(impact_report["summary"]["retry_rate_delta"], 0.0)
+        self.assertEqual(impact_report["summary"]["latency_avg_delta_ms"], 0.0)
         self.assertEqual(impact_report["summary"]["fallback_count"], 0)
         self.assertEqual(impact_report["summary"]["safety_stop_count"], 0)
+        self.assertEqual(impact_report["summary"]["top_impact_recommendation"], "promotion-ready")
+        self.assertEqual(impact_report["summary"]["promotion_ready_count"], 1)
+        self.assertEqual(impact_report["summary"]["next_action"], "widen-repeated-context-crunch-canary")
         candidate = impact_report["candidates"][0]
         self.assertEqual(candidate["verdict"], "widen-ready")
+        self.assertEqual(candidate["impact_recommendation"], "promotion-ready")
+        self.assertEqual(candidate["promotion_recommendation"], "promotion-ready")
+        self.assertEqual(candidate["recommended_next_action"], "widen-repeated-context-crunch-canary")
         self.assertIsNone(candidate["top_blocker"])
         self.assertEqual(candidate["cohorts"]["canary_applied"]["saved_chars"], 8_000)
         self.assertEqual(candidate["cohorts"]["canary_holdout"]["saved_chars"], 0)
+        self.assertEqual(candidate["cohorts"]["canary_applied"]["latency_avg_ms"], 125.0)
+        self.assertEqual(candidate["latency_avg_delta_ms"], 0.0)
+        self.assertEqual(candidate["promotion_metadata"]["impact_recommendation"], "promotion-ready")
+        self.assertEqual(candidate["promotion_metadata"]["observed_saved_tokens"], 2_000)
         feedback = impact_report["activation_lifecycle_feedback"]
         self.assertEqual(feedback["schema"], "agentflow.activation_staged_lifecycle_feedback_summary.v1")
         self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["action_family"], "crunch")
@@ -1120,15 +1133,181 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(impact_report["summary"]["holdout_count"], 0)
         self.assertEqual(impact_report["summary"]["safety_stop_count"], 1)
         self.assertEqual(impact_report["summary"]["top_blocker_code"], "canary-safety-stopped")
+        self.assertEqual(impact_report["summary"]["top_impact_recommendation"], "rollback")
+        self.assertEqual(impact_report["summary"]["rollback_recommended_count"], 1)
+        self.assertEqual(impact_report["summary"]["next_action"], "rollback-repeated-context-crunch-canary")
         candidate = impact_report["candidates"][0]
         self.assertEqual(candidate["verdict"], "no-widen")
+        self.assertEqual(candidate["impact_recommendation"], "rollback")
+        self.assertEqual(candidate["recommended_next_action"], "rollback-repeated-context-crunch-canary")
         self.assertIn("canary-safety-stopped", candidate["reason_codes"])
         self.assertIn("missing-applied-coverage", candidate["reason_codes"])
         self.assertIn("missing-holdout-coverage", candidate["reason_codes"])
         self.assertEqual(candidate["top_blocker"], "canary-safety-stopped")
+        self.assertEqual(candidate["promotion_metadata"]["impact_recommendation"], "rollback")
         feedback = impact_report["activation_lifecycle_feedback"]
         self.assertEqual(feedback["cohort_lifecycle_metadata"][0]["safety_stop_count"], 1)
         self.assertIn("canary-safety-stopped", feedback["cohort_lifecycle_metadata"][0]["reason_codes"])
+
+    def test_crunch_canary_impact_recommends_rollback_on_regressed_applied_cohort(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=80_000,
+                cost=cost,
+                baseline=cost,
+            )
+        report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-regression-stage")
+        action = report["crunch_opportunity_dry_run"]["recommended_actions"][0]
+        features = dict(action["conditions"])
+        selected: dict[str, dict[str, object]] = {}
+        for index in range(5000):
+            lifecycle = request_shape_crunch_canary_lifecycle(action, {**features, "cohort_sample_id": f"sample-{index}"})
+            if lifecycle["status"] in {"applied", "holdout"}:
+                selected.setdefault(str(lifecycle["status"]), lifecycle)
+            if {"applied", "holdout"} <= set(selected):
+                break
+        self.assertIn("applied", selected)
+        self.assertIn("holdout", selected)
+
+        self.store.conn.execute("delete from calls")
+        self.store.conn.commit()
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.08,
+            baseline=0.08,
+            status_code=500,
+            latency_ms=900,
+            retry_count=2,
+            crunch_extra={
+                "changed": True,
+                "before_chars": 80_000,
+                "after_chars": 72_000,
+                "saved_chars": 8_000,
+                "tokens_saved_est": 2_000,
+                "request_shape_repeated_context_canary": selected["applied"],
+            },
+        )
+        self._log_call(
+            stream=1,
+            has_tools=True,
+            cache_status="skipped",
+            cache_reason="streaming",
+            text_chars=80_000,
+            cost=0.08,
+            baseline=0.08,
+            latency_ms=100,
+            crunch_extra={"request_shape_repeated_context_canary": selected["holdout"]},
+        )
+
+        impact_report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="crunch-regression-impact")[
+            "crunch_canary_impact"
+        ]
+        self.assertEqual(impact_report["status"], "no-widen")
+        self.assertEqual(impact_report["summary"]["top_impact_recommendation"], "rollback")
+        self.assertEqual(impact_report["summary"]["rollback_recommended_count"], 1)
+        self.assertEqual(impact_report["summary"]["next_action"], "rollback-repeated-context-crunch-canary")
+        self.assertEqual(impact_report["summary"]["error_rate_delta"], 1.0)
+        self.assertEqual(impact_report["summary"]["retry_rate_delta"], 2.0)
+        self.assertEqual(impact_report["summary"]["latency_avg_delta_ms"], 800.0)
+
+        candidate = impact_report["candidates"][0]
+        self.assertEqual(candidate["verdict"], "no-widen")
+        self.assertEqual(candidate["impact_recommendation"], "rollback")
+        self.assertEqual(candidate["recommended_next_action"], "rollback-repeated-context-crunch-canary")
+        self.assertEqual(candidate["latency_avg_delta_ms"], 800.0)
+        self.assertIn("error-rate-regression", candidate["reason_codes"])
+        self.assertIn("retry-rate-regression", candidate["reason_codes"])
+        self.assertEqual(candidate["promotion_metadata"]["impact_recommendation"], "rollback")
+        self.assertEqual(candidate["promotion_metadata"]["error_rate_delta"], 1.0)
+        self.assertEqual(candidate["promotion_metadata"]["retry_rate_delta"], 2.0)
+        self.assertEqual(candidate["promotion_metadata"]["latency_avg_delta_ms"], 800.0)
+
+    def test_crunch_canary_impact_emits_collect_and_keep_blocked_recommendations(self) -> None:
+        def impact_row(
+            *,
+            policy_id: str,
+            cohort_id: str,
+            status: str,
+            saved_tokens: int = 0,
+            saved_chars: int = 0,
+        ) -> dict[str, object]:
+            lifecycle = {
+                "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
+                "policy_id": policy_id,
+                "cohort_id": cohort_id,
+                "status": status,
+                "cohort": "canary_applied" if status == "applied" else "canary_holdout",
+                "reason": status,
+                "metadata_only": True,
+            }
+            return {
+                "created_at": utc_now(),
+                "provider_family": "anthropic",
+                "provider": "anthropic",
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "tool-result",
+                "workflow_phase": "thinking",
+                "stream": True,
+                "has_tools": True,
+                "text_bucket": "gte_128k_chars",
+                "token_bucket": "lt_500_tokens",
+                "cache_status": "skipped",
+                "routing_status": "passthrough",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": "claude-sonnet-4-6",
+                "actual_input_tokens": 20_000,
+                "input_tokens_est": 20_000,
+                "text_chars": 80_000,
+                "cost_est_usd": 0.08,
+                "status_code": 200,
+                "retry_count": 0,
+                "latency_ms": 125,
+                "crunch_json": stable_json(
+                    {
+                        "changed": saved_tokens > 0,
+                        "before_chars": 80_000,
+                        "after_chars": max(0, 80_000 - saved_chars),
+                        "saved_chars": saved_chars,
+                        "tokens_saved_est": saved_tokens,
+                        "request_shape_repeated_context_canary": lifecycle,
+                    }
+                ),
+            }
+
+        report = build_request_shape_crunch_canary_impact_report(
+            [
+                impact_row(policy_id="collect-policy", cohort_id="collect-cohort", status="applied", saved_tokens=2_000, saved_chars=8_000),
+                impact_row(policy_id="blocked-policy", cohort_id="blocked-cohort", status="applied"),
+                impact_row(policy_id="blocked-policy", cohort_id="blocked-cohort", status="holdout"),
+            ]
+        )
+
+        by_policy = {candidate["policy_id"]: candidate for candidate in report["candidates"]}
+        self.assertEqual(by_policy["collect-policy"]["impact_recommendation"], "collect-more-evidence")
+        self.assertEqual(
+            by_policy["collect-policy"]["recommended_next_action"],
+            "collect-repeated-context-crunch-canary-impact-evidence",
+        )
+        self.assertIn("missing-holdout-coverage", by_policy["collect-policy"]["reason_codes"])
+
+        self.assertEqual(by_policy["blocked-policy"]["impact_recommendation"], "keep-blocked")
+        self.assertEqual(
+            by_policy["blocked-policy"]["recommended_next_action"],
+            "keep-repeated-context-crunch-canary-blocked",
+        )
+        self.assertIn("no-applied-savings", by_policy["blocked-policy"]["reason_codes"])
+        self.assertEqual(report["summary"]["collect_more_evidence_count"], 1)
+        self.assertEqual(report["summary"]["keep_blocked_count"], 1)
+        self.assertFalse(report["privacy"]["provider_bodies_included"])
 
     def test_cli_persists_rollups_by_default_and_dry_run_skips_write(self) -> None:
         self._log_call()
