@@ -923,6 +923,133 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-loop-policy-secret", rendered)
         self.assertNotIn("raw-loop-cache-cohort", rendered)
 
+    def test_cache_replay_ledger_prefers_observed_local_replay_evidence(self):
+        plan = build_research_plan(
+            issues=[],
+            stats={
+                "calls": 50,
+                "cache_replay_cohort_ranking": {
+                    "schema": "agentflow.cache_replay_plateau_cohort_ranking.v1",
+                    "summary": {"candidate_rows": 1, "activation_ready_count": 1, "projected_ready_hits": 108},
+                    "cohorts": [
+                        {
+                            "readiness": "activation-ready",
+                            "count": 116,
+                            "projected_hits": 108,
+                            "projected_saved_cost_usd": 0.235509,
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "category": "chat",
+                            "cohort_id": "raw-projected-cache-cohort",
+                        }
+                    ],
+                },
+                "request_shape_rollup_candidates": {
+                    "schema": "agentflow.request_shape_rollup_candidate_signal.v1",
+                    "cache_replayability_dry_run": {
+                        "schema": "agentflow.request_shape_cache_replayability_dry_run.v1",
+                        "summary": {
+                            "replay_ready_cohort_count": 1,
+                            "projected_hits": 108,
+                            "projected_savings_usd": 0.235509,
+                        },
+                        "cohorts": [
+                            {
+                                "readiness": "replay-ready",
+                                "row_count": 116,
+                                "projected_hits": 108,
+                                "projected_savings_usd": 0.235509,
+                                "source_surface": "openai_responses",
+                                "endpoint": "responses",
+                                "category": "chat",
+                                "candidate_id": "raw-request-shape-cache-candidate",
+                            }
+                        ],
+                    },
+                },
+                "openai_cache_replay_impact": {
+                    "schema": "agentflow.openai_cache_replay_impact.v1",
+                    "status": "matched",
+                    "summary": {
+                        "observed_openai_cache_replay_metadata_row_count": 4,
+                        "applied_count": 2,
+                        "holdout_count": 1,
+                        "projected_hits": 3,
+                        "projected_saved_usd": 0.09,
+                        "actual_hits": 1,
+                        "actual_saved_cost_usd": 0.03,
+                        "miss_count": 1,
+                        "bypass_skipped_count": 1,
+                    },
+                    "candidates": [
+                        {
+                            "candidate_id": "raw-observed-cache-candidate",
+                            "rule_id": "raw-observed-cache-rule",
+                            "readiness": "replay-ready",
+                            "source_surface": "openai_responses",
+                            "endpoint": "responses",
+                            "category": "chat",
+                            "verdict": "hold",
+                            "next_action": "collect_more_applied_and_holdout_cache_replay_evidence",
+                            "sample_count": 4,
+                            "applied_count": 2,
+                            "holdout_count": 1,
+                            "actual_hits": 1,
+                            "actual_saved_cost_usd": 0.03,
+                            "miss_count": 1,
+                            "bypass_skipped_count": 1,
+                            "projected_hits": 3,
+                            "projected_saved_usd": 0.09,
+                            "reason_codes": ["target-savings-met"],
+                            "canary_hit_measurement": {
+                                "schema": "agentflow.openai_cache_replay_canary_hit_measurement.v1",
+                                "observed_hits": 1,
+                                "holdout_count": 1,
+                                "raw_request_id": "req-observed-cache-secret",
+                            },
+                        }
+                    ],
+                    "privacy": {
+                        "metadata_only": True,
+                        "aggregate_only": True,
+                        "raw_prompts_included": False,
+                        "request_ids_included": False,
+                        "session_ids_included": False,
+                        "cache_keys_included": False,
+                    },
+                },
+            },
+            threshold=3,
+            now=NOW,
+        )
+
+        loop = plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]
+        cache = next(row for row in loop["levers"] if row["lever"] == "cache")
+        self.assertEqual(cache["state"], "measured-savings")
+        self.assertEqual(cache["evidence_source"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(cache["applied_count"], 2)
+        self.assertEqual(cache["holdout_count"], 1)
+        self.assertEqual(cache["actual_hits"], 1)
+        self.assertAlmostEqual(cache["actual_saved_cost_usd"], 0.03)
+        self.assertEqual(cache["projected_hits"], 3)
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        cache_entry = next(entry for entry in ledger["entries"] if entry["lever"] == "cache")
+        self.assertEqual(cache_entry["evidence_schema"], "agentflow.openai_cache_replay_impact.v1")
+        self.assertEqual(cache_entry["current_status"], "holdout")
+        self.assertEqual(cache_entry["next_action"], "collect_more_applied_and_holdout_cache_replay_evidence")
+        self.assertEqual(cache_entry["actual_hits"], 1)
+        self.assertAlmostEqual(cache_entry["actual_saved_cost_usd"], 0.03)
+        self.assertEqual(cache_entry["miss_count"], 1)
+        self.assertEqual(cache_entry["bypass_skipped_count"], 1)
+        self.assertEqual(cache_entry["projected_hits"], 3)
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("raw-observed-cache-candidate", rendered)
+        self.assertNotIn("raw-observed-cache-rule", rendered)
+        self.assertNotIn("req-observed-cache-secret", rendered)
+        self.assertNotIn("raw-projected-cache-cohort", rendered)
+        self.assertNotIn("raw-request-shape-cache-candidate", rendered)
+
     def test_crunch_candidate_ranks_projected_savings_report(self):
         plan = build_research_plan(
             issues=[],

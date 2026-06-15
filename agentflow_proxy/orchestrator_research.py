@@ -944,6 +944,51 @@ def _stats_summary(stats: dict[str, Any] | None) -> dict[str, Any]:
             "activation_lifecycle_feedback": lifecycle_feedback,
             "privacy": openai_canary.get("privacy") if isinstance(openai_canary.get("privacy"), dict) else {},
         }
+    openai_cache_impact = stats.get("openai_cache_replay_impact") or stats.get("cache_replay_impact")
+    if isinstance(openai_cache_impact, dict):
+        candidate_rows = (
+            openai_cache_impact.get("candidates")
+            if isinstance(openai_cache_impact.get("candidates"), list)
+            else []
+        )
+        summary["openai_cache_replay_impact"] = {
+            "schema": openai_cache_impact.get("schema"),
+            "status": openai_cache_impact.get("status"),
+            "summary": openai_cache_impact.get("summary") if isinstance(openai_cache_impact.get("summary"), dict) else {},
+            "cohort_breakdown": openai_cache_impact.get("cohort_breakdown")
+            if isinstance(openai_cache_impact.get("cohort_breakdown"), list)
+            else [],
+            "remaining_blocker_breakdown": openai_cache_impact.get("remaining_blocker_breakdown")
+            if isinstance(openai_cache_impact.get("remaining_blocker_breakdown"), list)
+            else [],
+            "candidates": candidate_rows[:5],
+            "quality_gate": openai_cache_impact.get("quality_gate")
+            if isinstance(openai_cache_impact.get("quality_gate"), dict)
+            else {},
+            "privacy": openai_cache_impact.get("privacy") if isinstance(openai_cache_impact.get("privacy"), dict) else {},
+        }
+    openai_cache_readiness = stats.get("openai_cache_replay_readiness")
+    if isinstance(openai_cache_readiness, dict):
+        candidate_rows = (
+            openai_cache_readiness.get("candidates")
+            if isinstance(openai_cache_readiness.get("candidates"), list)
+            else []
+        )
+        summary["openai_cache_replay_readiness"] = {
+            "schema": openai_cache_readiness.get("schema"),
+            "state": openai_cache_readiness.get("state"),
+            "state_reason": openai_cache_readiness.get("state_reason"),
+            "summary": openai_cache_readiness.get("summary")
+            if isinstance(openai_cache_readiness.get("summary"), dict)
+            else {},
+            "lifecycle_diagnostics": openai_cache_readiness.get("lifecycle_diagnostics")
+            if isinstance(openai_cache_readiness.get("lifecycle_diagnostics"), dict)
+            else {},
+            "candidates": candidate_rows[:5],
+            "privacy": openai_cache_readiness.get("privacy")
+            if isinstance(openai_cache_readiness.get("privacy"), dict)
+            else {},
+        }
     crunch_signal = _crunch_savings_signal(stats)
     if crunch_signal is not None:
         summary["crunch_savings_signal"] = crunch_signal
@@ -2047,6 +2092,10 @@ def build_evidence_to_activation_next_action_ledger(
             "applied_count": _to_int(stage.get("applied_count")),
             "holdout_count": _to_int(stage.get("holdout_count")),
             "projected_hits": _to_int(stage.get("projected_hits")),
+            "actual_hits": _to_int(stage.get("actual_hits")),
+            "actual_saved_cost_usd": round(_to_float(stage.get("actual_saved_cost_usd")), 8),
+            "miss_count": _to_int(stage.get("miss_count")),
+            "bypass_skipped_count": _to_int(stage.get("bypass_skipped_count")),
             "savings_per_1000_calls_usd": round(_to_float(stage.get("savings_per_1000_calls_usd")), 8),
             "projected_saved_usd": round(_to_float(stage.get("projected_saved_usd") or stage.get("projected_saved_cost_usd")), 8),
             "expected_savings_path": _ledger_expected_savings_path(stage),
@@ -2179,6 +2228,13 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    impact_stage = _openai_cache_replay_impact_loop_stage(stats_summary)
+    if impact_stage is not None:
+        return impact_stage
+    readiness_stage = _openai_cache_replay_readiness_loop_stage(stats_summary)
+    if readiness_stage is not None:
+        return readiness_stage
+
     cohorts = stats_summary.get("cache_replay_cohort_ranking")
     if isinstance(cohorts, dict):
         summary = cohorts.get("summary") if isinstance(cohorts.get("summary"), dict) else {}
@@ -2251,6 +2307,148 @@ def _cache_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         "blocker_codes": [] if cache_hits > 0 else ["zero-cache-hits"],
         "sample_count": calls,
         "cache_hits": cache_hits,
+    }
+
+
+def _first_cache_replay_candidate(report: dict[str, Any]) -> dict[str, Any]:
+    rows = [row for row in report.get("candidates") or [] if isinstance(row, dict)]
+    if not rows:
+        return {}
+    def key(row: dict[str, Any]) -> tuple[int, int, int, float]:
+        readiness = str(row.get("readiness") or "")
+        verdict = str(row.get("verdict") or "")
+        return (
+            0 if readiness == "replay-ready" else 1,
+            0 if verdict in {"widen", "promote"} else 1,
+            -_to_int(row.get("actual_hits") or row.get("actual_hit_count")),
+            -_to_float(row.get("actual_saved_cost_usd") or row.get("observed_savings_usd")),
+        )
+    rows.sort(key=key)
+    return rows[0]
+
+
+def _cache_replay_blockers_from_candidate(candidate: dict[str, Any], report: dict[str, Any]) -> list[str]:
+    blockers = [str(item) for item in candidate.get("reason_codes") or [] if str(item or "").strip()]
+    top_remaining = str(candidate.get("top_remaining_blocker") or "").strip()
+    if top_remaining and top_remaining not in blockers:
+        blockers.append(top_remaining)
+    if blockers:
+        return blockers
+    for row in report.get("remaining_blocker_breakdown") or []:
+        if isinstance(row, dict) and row.get("value"):
+            return [str(row.get("value"))]
+    return []
+
+
+def _cache_replay_observed_state(*, actual_hits: int, observed_savings: float, applied: int, holdout: int, blockers: list[str]) -> str:
+    if any("safety" in blocker for blocker in blockers):
+        return "blocked"
+    if actual_hits > 0 or observed_savings > 0:
+        return "measured-savings"
+    if applied > 0 or holdout > 0:
+        return "replay-ready"
+    return "missing-evidence"
+
+
+def _openai_cache_replay_impact_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    impact = stats_summary.get("openai_cache_replay_impact")
+    if not isinstance(impact, dict):
+        return None
+    summary = impact.get("summary") if isinstance(impact.get("summary"), dict) else {}
+    observed_rows = _to_int(summary.get("observed_openai_cache_replay_metadata_row_count"))
+    if observed_rows <= 0:
+        return None
+
+    candidate = _first_cache_replay_candidate(impact)
+    applied = _to_int(candidate.get("applied_count") or summary.get("applied_count"))
+    holdout = _to_int(candidate.get("holdout_count") or summary.get("holdout_count"))
+    actual_hits = _to_int(candidate.get("actual_hits") or candidate.get("actual_hit_count") or summary.get("actual_hits"))
+    actual_saved = _to_float(candidate.get("actual_saved_cost_usd") or summary.get("actual_saved_cost_usd"))
+    blockers = _cache_replay_blockers_from_candidate(candidate, impact)
+    state = _cache_replay_observed_state(
+        actual_hits=actual_hits,
+        observed_savings=actual_saved,
+        applied=applied,
+        holdout=holdout,
+        blockers=blockers,
+    )
+    next_action = str(candidate.get("next_action") or "").strip()
+    if not next_action:
+        if state == "measured-savings":
+            next_action = "promote-or-widen-cache-replay-canary"
+        elif state == "replay-ready":
+            next_action = "collect-more-cache-replay-evidence"
+        elif state == "blocked":
+            next_action = "resolve-cache-replay-impact-blocker"
+        else:
+            next_action = "stage-cache-replay-canary"
+
+    return {
+        "lever": "cache",
+        "state": state,
+        "evidence_source": impact.get("schema"),
+        "local_action_family": "cache",
+        "next_action": next_action,
+        "blocker_codes": [] if state == "measured-savings" else blockers,
+        "sample_count": _to_int(candidate.get("sample_count") or observed_rows),
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "actual_hits": actual_hits,
+        "actual_saved_cost_usd": round(actual_saved, 8),
+        "miss_count": _to_int(candidate.get("miss_count") or summary.get("miss_count")),
+        "bypass_skipped_count": _to_int(candidate.get("bypass_skipped_count") or summary.get("bypass_skipped_count")),
+        "projected_hits": _to_int(candidate.get("projected_hits") or summary.get("projected_hits")),
+        "projected_saved_usd": round(_to_float(candidate.get("projected_saved_usd") or summary.get("projected_saved_usd")), 8),
+        "cohort_bucket": sanitize_value(
+            "/".join(
+                str(part)
+                for part in (candidate.get("source_surface"), candidate.get("endpoint"), candidate.get("category"))
+                if part
+            )
+            or "openai-cache-replay"
+        ),
+    }
+
+
+def _openai_cache_replay_readiness_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
+    readiness = stats_summary.get("openai_cache_replay_readiness")
+    if not isinstance(readiness, dict):
+        return None
+    summary = readiness.get("summary") if isinstance(readiness.get("summary"), dict) else {}
+    observed_rows = _to_int(summary.get("observed_replay_metadata_rows"))
+    if observed_rows <= 0:
+        return None
+    candidates = [row for row in readiness.get("candidates") or [] if isinstance(row, dict)]
+    top = candidates[0] if candidates else {}
+    applied = _to_int(top.get("applied_count") or summary.get("applied_count"))
+    holdout = _to_int(top.get("holdout_count") or summary.get("holdout_count"))
+    actual_saved = _to_float(top.get("observed_savings_usd") or summary.get("observed_savings_usd"))
+    blockers = [str(item) for item in top.get("reason_codes") or [] if str(item or "").strip()]
+    if not blockers and readiness.get("state_reason"):
+        blockers = [str(readiness.get("state_reason"))]
+    state = _cache_replay_observed_state(
+        actual_hits=0,
+        observed_savings=actual_saved,
+        applied=applied,
+        holdout=holdout,
+        blockers=blockers,
+    )
+    return {
+        "lever": "cache",
+        "state": state,
+        "evidence_source": readiness.get("schema"),
+        "local_action_family": "cache",
+        "next_action": str(top.get("next_action") or "inspect-openai-cache-replay-readiness"),
+        "blocker_codes": [] if state == "measured-savings" else blockers,
+        "sample_count": _to_int(top.get("sample_count") or observed_rows),
+        "applied_count": applied,
+        "holdout_count": holdout,
+        "actual_saved_cost_usd": round(actual_saved, 8),
+        "projected_saved_usd": round(_to_float(top.get("projected_savings_usd") or summary.get("projected_savings_usd")), 8),
+        "cohort_bucket": sanitize_value(
+            "/".join(str(part) for part in (top.get("endpoint"), top.get("category")) if part)
+            or "openai-cache-replay-readiness"
+        ),
     }
 
 
