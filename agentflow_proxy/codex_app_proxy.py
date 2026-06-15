@@ -49,6 +49,7 @@ from agentflow_proxy.recommendations import (
     build_codex_app_canary_lifecycle_feedback,
     build_codex_turn_optimization_unit,
     build_codex_turn_outcome_feedback,
+    apply_recommendation_to_body,
     fetch_policy_decision,
     fetch_recommendation,
     pattern_feature_diagnostics,
@@ -2565,17 +2566,16 @@ async def _attach_codex_managed_recommendation(
     cache = local["cache"]
     unit = local["unit"]
     managed = await (fetch_policy_decision(unit) if policy_decisions_enabled() else fetch_recommendation(unit))
+    forwarded = raw
     managed.setdefault("applied", False)
     if managed.get("status") == "received":
         managed["applied"] = False
         if managed.get("policy_decision_schema"):
-            mode = str(managed.get("recommended_mode") or "observe").lower()
-            managed["apply_reason"] = (
-                f"{mode}-only" if mode in {"observe", "shadow"} else "codex-app-policy-decision-observed-only"
+            forwarded, managed = _apply_codex_policy_decision_routing(
+                raw=raw,
+                routing_meta=routing,
+                recommendation_meta=managed,
             )
-            managed["local_action_taken"] = mode if mode in {"observe", "shadow"} else "noop"
-            if managed.get("target_model"):
-                managed["would_route_model"] = managed.get("target_model")
         else:
             managed["apply_reason"] = "codex-app-managed-recommendation-observed-only"
             managed["local_action_taken"] = "observe"
@@ -2588,7 +2588,103 @@ async def _attach_codex_managed_recommendation(
         "cache": cache,
         "managed": managed,
         "input_text_chars": local["input_text_chars"],
+        "forwarded": forwarded,
     }
+
+
+def _apply_codex_policy_decision_routing(
+    *,
+    raw: str | bytes,
+    routing_meta: dict[str, Any],
+    recommendation_meta: dict[str, Any],
+) -> tuple[str | bytes, dict[str, Any]]:
+    msg = _jsonrpc_message(raw)
+    if not isinstance(msg, dict) or msg.get("method") != "turn/start":
+        meta = dict(recommendation_meta)
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "codex-app-policy-decision-observed-only",
+            "local_action_taken": "noop",
+            "codex_app_frame_mutated": False,
+        })
+        return raw, meta
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        meta = dict(recommendation_meta)
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "codex-turn-start-params-absent",
+            "local_action_taken": "noop",
+            "codex_app_frame_mutated": False,
+        })
+        return raw, meta
+    model_field, requested_model = _model_field(params)
+    if not model_field or not requested_model:
+        meta = dict(recommendation_meta)
+        meta.update({
+            "applied": False,
+            "changed_model": False,
+            "apply_reason": "codex-turn-start-model-field-absent",
+            "local_action_taken": "noop",
+            "codex_app_frame_mutated": False,
+        })
+        return raw, meta
+
+    body = {"model": requested_model}
+    gate_routing_meta = {
+        "routed_model": requested_model,
+        "reason": routing_meta.get("reason") or "codex app policy-decision gate",
+    }
+    applied = apply_recommendation_to_body(
+        provider="openai",
+        body=body,
+        routing_meta=gate_routing_meta,
+        recommendation_meta=recommendation_meta,
+    )
+    applied["source_surface"] = "codex_turn"
+    applied["codex_app_frame_mutated"] = False
+    applied["model_field"] = model_field
+    applied["requested_model"] = requested_model
+    local_canary = applied.get("local_canary")
+    if isinstance(local_canary, dict):
+        applied["canary"] = "codex-app-managed-policy-decision"
+        applied["canary_cohort"] = local_canary.get("cohort")
+        routing_meta["canary"] = "codex-app-managed-policy-decision"
+        routing_meta["canary_cohort"] = local_canary.get("cohort")
+        routing_meta["canary_sample"] = local_canary
+    if not applied.get("applied"):
+        if applied.get("would_route_model"):
+            routing_meta["managed_route_candidate_model"] = applied.get("would_route_model")
+        routing_meta["managed_route_recommended_mode"] = applied.get("local_policy_decision_mode")
+        return raw, applied
+
+    target_model = str(body.get("model") or "")
+    if not target_model or target_model == requested_model:
+        return raw, applied
+
+    routed = copy.deepcopy(msg)
+    routed_params = routed.setdefault("params", {})
+    if not isinstance(routed_params, dict):
+        return raw, applied
+    routed_params[model_field] = target_model
+    routing_meta.update({
+        "status": "applied",
+        "applied": True,
+        "requested_model": requested_model,
+        "routed_model": target_model,
+        "final_policy_source": "managed-recommended",
+        "managed_policy_id": applied.get("policy_id"),
+        "managed_reason": applied.get("reason"),
+        "managed_route_recommended_mode": applied.get("local_policy_decision_mode"),
+        "policy_source": "managed-recommended",
+    })
+    applied["codex_app_frame_mutated"] = True
+    text = json.dumps(routed, separators=(",", ":"))
+    if isinstance(raw, bytes):
+        return text.encode("utf-8"), applied
+    return text, applied
 
 
 def _codex_rule_cache_lookup_or_record(
@@ -3725,7 +3821,7 @@ def _attach_codex_canary_lifecycle_pending(
     crunch = metadata.get("crunch") if isinstance(metadata.get("crunch"), dict) else {}
     cache = metadata.get("cache") if isinstance(metadata.get("cache"), dict) else {}
     actions: list[str] = []
-    if routing.get("canary") in {"codex-app-summary-model-hint", "codex-app-rule"}:
+    if routing.get("canary") in {"codex-app-summary-model-hint", "codex-app-rule", "codex-app-managed-policy-decision"}:
         actions.append("routing")
     if cache.get("canary") in {"codex-app-exact-cache", "codex-app-rule"} or isinstance(cache.get("canary_sample"), dict):
         actions.append("cache")
@@ -3887,6 +3983,8 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                     if msg.get("text") is not None:
                         forwarded, optimization_metadata = _optimize_client_message(msg["text"])
                         managed_pending = await _attach_codex_managed_recommendation(forwarded, optimization_metadata)
+                        if managed_pending and managed_pending.get("forwarded") is not None:
+                            forwarded = managed_pending["forwarded"]
                         cache_meta = (optimization_metadata or {}).get("cache") or {}
                         start_event_id = _record_message(
                             forwarded,
@@ -3959,6 +4057,8 @@ async def relay(websocket: WebSocket, path: str = "") -> None:
                     elif msg.get("bytes") is not None:
                         forwarded, optimization_metadata = _optimize_client_message(msg["bytes"])
                         managed_pending = await _attach_codex_managed_recommendation(forwarded, optimization_metadata)
+                        if managed_pending and managed_pending.get("forwarded") is not None:
+                            forwarded = managed_pending["forwarded"]
                         start_event_id = _record_message(
                             forwarded,
                             direction="client_to_server",

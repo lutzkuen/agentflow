@@ -243,19 +243,6 @@ async def fetch_openai_recommendation_decision(
         })
         return decision
 
-    if policy_decisions_enabled() and mode == "observe-only":
-        decision.update({
-            "enabled": False,
-            "status": "observe",
-            "apply_reason": "observe-only",
-            "would_change_model": isinstance(_managed_target_model(fetched), str)
-            and _managed_target_model(fetched) != current_model,
-            "would_route_model": _managed_target_model(fetched) if isinstance(_managed_target_model(fetched), str) else None,
-            "local_action_taken": "observe",
-            "lifecycle_event": "observe",
-        })
-        return decision
-
     target_model, target_error = _safe_openai_target(_managed_target_model(fetched))
     decision["projection"] = _projection(
         current_model=current_model,
@@ -307,8 +294,10 @@ async def fetch_openai_recommendation_decision(
             return decision
         recommended_mode = str(fetched.get("recommended_mode") or "observe").lower()
         decision["local_policy_decision_mode"] = recommended_mode
+        decision["mode"] = f"policy-decision-{recommended_mode}"
         if recommended_mode in {"observe", "shadow"}:
             decision.update({
+                "enabled": False,
                 "status": recommended_mode,
                 "apply_reason": f"{recommended_mode}-only",
                 "would_change_model": target_model is not None and target_model != current_model,
@@ -366,6 +355,8 @@ async def fetch_openai_recommendation_decision(
         else _cohort(recommendation_unit, fetched, fraction)
     )
     decision["canary"] = canary
+    if fetched.get("policy_decision_schema"):
+        decision["enabled"] = bool(canary.get("enabled"))
     if not canary["selected"]:
         decision["local_actions"] = evaluate_managed_local_actions(
             fetched,

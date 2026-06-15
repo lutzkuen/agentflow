@@ -1275,12 +1275,114 @@ class OpenAIFeatureRouteTests(unittest.TestCase):
         routing = json.loads(row["routing_json"])
         managed = routing["managed_recommendation"]
         self.assertEqual(row["routed_model"], "gpt-5-codex")
-        self.assertEqual(managed["status"], "observe")
-        self.assertEqual(managed["apply_reason"], "observe-only")
+        self.assertEqual(managed["status"], "shadow")
+        self.assertEqual(managed["apply_reason"], "shadow-only")
         self.assertEqual(managed["would_route_model"], "gpt-5-mini")
         self.assertFalse(managed["applied"])
         self.assertIn("unit", seen)
         self.assertNotIn("raw openai prompt secret", row["routing_json"])
+
+    def test_openai_policy_decision_canary_applies_without_legacy_recommendation_mode(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "raw canary prompt secret",
+        }
+        seen = {}
+
+        async def fake_policy_decision(unit):
+            seen["unit"] = copy.deepcopy(unit)
+            rendered = json.dumps(unit, sort_keys=True)
+            self.assertEqual(unit["schema"], "agentflow.openai_preflight_feature_unit.v1")
+            self.assertNotIn("raw canary prompt secret", rendered)
+            return {
+                "enabled": True,
+                "status": "received",
+                "policy_decision_schema": "agentflow.policy_decision.v1",
+                "routing_status": "recommended",
+                "target_model": "gpt-5-mini",
+                "confidence": 0.91,
+                "route_down_probability": 0.9,
+                "recommended_mode": "canary",
+                "model_artifact_version": "routing-predictor-v1-openai",
+                "model_evidence_hash": "sha256:evidence",
+                "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
+                "policy_id": "openai-predictor-policy",
+                "reason": "active predictor",
+                "policy_source": "managed-recommended",
+            }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
+            "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION": "1",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_policy_decision",
+                side_effect=fake_policy_decision,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-mini")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+        self.assertEqual(row["routed_model"], "gpt-5-mini")
+        self.assertEqual(managed["mode"], "policy-decision-canary")
+        self.assertEqual(managed["status"], "applied")
+        self.assertTrue(managed["applied"])
+        self.assertEqual(managed["canary"]["cohort"], "canary_applied")
+        self.assertEqual(routing["final_policy_source"], "managed-recommended")
+        self.assertIn("unit", seen)
+        self.assertNotIn("raw canary prompt secret", row["routing_json"])
+
+    def test_openai_policy_decision_canary_holdout_preserves_local_model(self):
+        request_body = {
+            "model": "gpt-5-codex",
+            "input": "holdout prompt",
+        }
+
+        async def fake_policy_decision(_unit):
+            return {
+                "enabled": True,
+                "status": "received",
+                "policy_decision_schema": "agentflow.policy_decision.v1",
+                "routing_status": "recommended",
+                "target_model": "gpt-5-mini",
+                "confidence": 0.91,
+                "route_down_probability": 0.9,
+                "recommended_mode": "canary",
+                "model_artifact_version": "routing-predictor-v1-openai",
+                "model_evidence_hash": "sha256:evidence",
+                "predictor_rule_id": "routing-evidence:openai:gpt5->mini",
+                "policy_id": "openai-predictor-policy",
+                "reason": "active predictor",
+                "policy_source": "managed-recommended",
+            }
+
+        with patch.dict(os.environ, {
+            "AGENTFLOW_RECOMMENDATION_ENABLED": "1",
+            "AGENTFLOW_POLICY_DECISION_ENABLED": "1",
+            "AGENTFLOW_POLICY_DECISION_CANARY_FRACTION": "0",
+        }):
+            with patch(
+                "agentflow_proxy.optimization.openai_recommendations.fetch_policy_decision",
+                side_effect=fake_policy_decision,
+            ):
+                with patch.object(openai_proxy.httpx, "AsyncClient", CapturingOpenAIClient):
+                    response = TestClient(server.app).post("/v1/responses", json=request_body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(CapturingOpenAIClient.calls[0]["json"]["model"], "gpt-5-codex")
+        [row] = server.store.conn.execute("select routed_model, routing_json from calls").fetchall()
+        routing = json.loads(row["routing_json"])
+        managed = routing["managed_recommendation"]
+        self.assertEqual(row["routed_model"], "gpt-5-codex")
+        self.assertEqual(managed["status"], "holdout")
+        self.assertEqual(managed["apply_reason"], "canary-holdout")
+        self.assertEqual(managed["canary"]["cohort"], "canary_holdout")
+        self.assertFalse(managed["applied"])
 
     def test_openai_dry_run_recommendation_records_projection_without_changing_request(self):
         request_body = {
