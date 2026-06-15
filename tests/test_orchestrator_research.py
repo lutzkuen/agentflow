@@ -1210,6 +1210,81 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertNotIn("raw-ledger-policy-secret", rendered)
         self.assertNotIn("req-ledger-secret", rendered)
 
+    def test_repeated_activation_feedback_blockers_become_durable_ledger_entries(self):
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "routing skipped blocker=missing-anthropic-canary-lifecycle-evidence request_id=req-ledger-secret",
+                        "routing skipped blocker=missing-applied-coverage session_id=session-ledger-secret",
+                        "routing skipped blocker=missing-holdout-coverage candidate_id=candidate-ledger-secret",
+                        "crunch omitted reason=repeated-context-crunch-opportunity request_id=req-crunch-secret",
+                        "cache skipped blocker=invalidation-evidence-missing cache_key=cache-ledger-secret",
+                        "cache skipped blocker=unsupported-streaming-shape request_id=req-stream-secret",
+                        "activation feedback omitted by unknown gate with no machine reason request_id=req-unclassified-secret",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            plan = build_research_plan(
+                issues=[],
+                log_sources=[log_path],
+                threshold=1,
+                now=NOW,
+            )
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        self.assertEqual(ledger["schema"], "agentflow.evidence_to_activation_next_action_ledger.v1")
+        self.assertTrue(ledger["privacy"]["metadata_only"])
+        self.assertTrue(ledger["privacy"]["aggregate_only"])
+        self.assertFalse(ledger["privacy"]["raw_prompts_included"])
+        self.assertFalse(ledger["privacy"]["provider_bodies_included"])
+        self.assertFalse(ledger["privacy"]["request_ids_included"])
+        self.assertFalse(ledger["privacy"]["session_ids_included"])
+        self.assertFalse(ledger["privacy"]["cache_keys_included"])
+
+        by_blocker = {
+            blocker: entry
+            for entry in ledger["entries"]
+            for blocker in entry.get("blocker_codes") or []
+        }
+        self.assertEqual(
+            by_blocker["missing-anthropic-canary-lifecycle-evidence"]["next_action"],
+            "activate-anthropic-routing-canary-cohorts",
+        )
+        self.assertEqual(by_blocker["missing-anthropic-canary-lifecycle-evidence"]["lever"], "routing")
+        self.assertEqual(by_blocker["missing-applied-coverage"]["local_action_family"], "routing")
+        self.assertEqual(by_blocker["missing-holdout-coverage"]["current_status"], "blocked")
+        self.assertEqual(by_blocker["repeated-context-crunch-opportunity"]["lever"], "crunch")
+        self.assertEqual(
+            by_blocker["repeated-context-crunch-opportunity"]["next_action"],
+            "stage-repeated-context-crunch-canary",
+        )
+        self.assertEqual(by_blocker["invalidation-evidence-missing"]["lever"], "cache")
+        self.assertEqual(
+            by_blocker["invalidation-evidence-missing"]["next_action"],
+            "collect-cache-invalidation-evidence",
+        )
+        self.assertEqual(by_blocker["unsupported-streaming-shape"]["lever"], "cache")
+        self.assertEqual(
+            by_blocker["unsupported-streaming-shape"]["next_action"],
+            "add-streaming-cache-replay-support-or-route-to-crunch-canary",
+        )
+        self.assertEqual(by_blocker["unclassified-skip-or-blocker"]["lever"], "activation-feedback")
+        self.assertEqual(
+            by_blocker["unclassified-skip-or-blocker"]["next_action"],
+            "classify-activation-feedback-blocker-for-local-action-ledger",
+        )
+        self.assertTrue(all(entry.get("issue_worthy_status") for entry in ledger["entries"]))
+        rendered = json.dumps(plan, sort_keys=True)
+        self.assertNotIn("req-ledger-secret", rendered)
+        self.assertNotIn("session-ledger-secret", rendered)
+        self.assertNotIn("candidate-ledger-secret", rendered)
+        self.assertNotIn("cache-ledger-secret", rendered)
+        self.assertNotIn("req-unclassified-secret", rendered)
+
     def test_closed_prior_issue_with_advanced_ledger_status_generates_next_stage_issue(self):
         stale_title = "Stage cache replay canary for activation-ready on openai/openai_responses/responses"
         plan = build_research_plan(

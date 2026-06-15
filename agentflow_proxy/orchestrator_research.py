@@ -27,7 +27,7 @@ _SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 _ID_ASSIGNMENT_RE = re.compile(
-    r"\b((?:request|session|thread|tenant|cache|candidate|run|trace)[_-]?id)\s*[:=]\s*[\"']?([A-Za-z0-9_.:/@-]{6,})",
+    r"\b((?:(?:request|session|thread|tenant|candidate|run|trace)[_-]?id)|(?:cache[_-]?(?:id|key)))\s*[:=]\s*[\"']?([A-Za-z0-9_.:/@-]{6,})",
     re.IGNORECASE,
 )
 _RAW_FIELD_NAMES = {
@@ -774,6 +774,178 @@ def _resolve_unclassified_diagnostics(
             replacement["diagnostic_class"] = classification["diagnostic_class"]
         resolved.append(replacement)
     return resolved
+
+
+def _normal_diagnostic_token(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return re.sub(
+        r"-(?:(?:request|session|thread|tenant|candidate|run|trace)-?id|cache-?(?:id|key))$",
+        "",
+        text,
+    )
+
+
+def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | None:
+    reason = _normal_diagnostic_token(diagnostic.get("reason"))
+    diagnostic_class = _normal_diagnostic_token(diagnostic.get("diagnostic_class") or reason)
+    if not reason or reason in _PASS_DIAGNOSTIC_REASONS or diagnostic_class in _PASS_DIAGNOSTIC_REASONS:
+        return None
+
+    lifecycle_context = diagnostic.get("lifecycle_context") if isinstance(diagnostic.get("lifecycle_context"), dict) else {}
+    text = " ".join(
+        str(part or "")
+        for part in (
+            reason,
+            diagnostic_class,
+            diagnostic.get("example"),
+            lifecycle_context.get("blocker_code"),
+            lifecycle_context.get("next_action"),
+            lifecycle_context.get("action_family"),
+        )
+    ).lower()
+    count = _to_int(diagnostic.get("count") or diagnostic.get("observations"))
+    source_lever = str(diagnostic.get("source_lever") or _diagnostic_source_lever(reason, diagnostic_class))
+
+    stage: dict[str, Any] = {
+        "lever": source_lever,
+        "state": "blocked",
+        "evidence_source": "orchestrator_logs",
+        "local_action_family": source_lever if source_lever in {"routing", "cache", "crunch"} else "activation-feedback",
+        "next_action": "classify-activation-feedback-blocker-for-local-action-ledger",
+        "blocker_codes": [reason],
+        "sample_count": count,
+        "projected_saved_usd": 0.0,
+        "diagnostic_class": diagnostic_class,
+        "diagnostic_reason": reason,
+        "issue_worthy_status": (
+            "ready" if count > 1 and str(diagnostic.get("backlog_action") or "") != "needs-human-review" else "review"
+        ),
+        "source": "repeated-diagnostic",
+    }
+
+    if "missing-anthropic-canary-lifecycle-evidence" in text:
+        stage.update(
+            {
+                "lever": "routing",
+                "local_action_family": "routing",
+                "state": "missing-evidence",
+                "next_action": "activate-anthropic-routing-canary-cohorts",
+            }
+        )
+    elif "missing-applied-coverage" in text or "missing-holdout-coverage" in text or "missing-lifecycle-feedback" in text:
+        stage.update(
+            {
+                "lever": "routing",
+                "local_action_family": "routing",
+                "state": "missing-evidence",
+                "next_action": "collect-routing-applied-and-holdout-lifecycle-evidence",
+            }
+        )
+    elif "repeated-context-crunch-opportunity" in text:
+        stage.update(
+            {
+                "lever": "crunch",
+                "local_action_family": "crunch",
+                "state": "activation-ready",
+                "next_action": "stage-repeated-context-crunch-canary",
+            }
+        )
+    elif "invalidation-evidence-missing" in text:
+        stage.update(
+            {
+                "lever": "cache",
+                "local_action_family": "cache",
+                "state": "missing-evidence",
+                "next_action": "collect-cache-invalidation-evidence",
+            }
+        )
+    elif "unsupported-streaming-shape" in text or "streaming-replay-not-supported" in text:
+        stage.update(
+            {
+                "lever": "cache",
+                "local_action_family": "cache",
+                "state": "blocked",
+                "next_action": "add-streaming-cache-replay-support-or-route-to-crunch-canary",
+            }
+        )
+    elif "tool-call-cache-disabled" in text or "unsafe-tool-calls-without-invalidation" in text:
+        stage.update(
+            {
+                "lever": "cache",
+                "local_action_family": "cache",
+                "state": "missing-evidence",
+                "next_action": "collect-tool-cache-invalidation-evidence",
+            }
+        )
+    elif "thinking-routing-guard" in text:
+        stage.update(
+            {
+                "lever": "routing",
+                "local_action_family": "routing",
+                "state": "missing-evidence",
+                "next_action": "collect-thinking-routing-lifecycle-evidence",
+            }
+        )
+    elif diagnostic_class == "unsupported-provider-action":
+        stage.update(
+            {
+                "lever": "managed-recommendation",
+                "local_action_family": "unknown",
+                "state": "missing-evidence",
+                "next_action": "map-recommendation-to-supported-local-executor",
+            }
+        )
+    elif diagnostic_class in {"missing-dependency-evidence", "stale-evidence"}:
+        stage.update(
+            {
+                "state": "missing-evidence",
+                "next_action": "collect-missing-activation-dependency-evidence",
+            }
+        )
+
+    if lifecycle_context:
+        action_family = str(lifecycle_context.get("action_family") or "").strip()
+        if action_family in {"routing", "cache", "crunch"}:
+            stage["local_action_family"] = action_family
+            if stage.get("lever") == "activation-feedback":
+                stage["lever"] = action_family
+        if lifecycle_context.get("report_schema"):
+            stage["evidence_source"] = lifecycle_context.get("report_schema")
+        if lifecycle_context.get("next_action"):
+            stage["next_action"] = lifecycle_context.get("next_action")
+        blocker = str(lifecycle_context.get("blocker_code") or "").strip()
+        if blocker and reason in {"missing-lifecycle-feedback", "aggregate-only"}:
+            stage["blocker_codes"] = [blocker]
+        sample_bucket = str(lifecycle_context.get("sample_count_bucket") or "").strip()
+        if sample_bucket and sample_bucket != "unknown":
+            stage["cohort_bucket"] = f"{stage.get('lever')}:{sample_bucket}"
+        lifecycle_state = _normal_diagnostic_token(lifecycle_context.get("lifecycle_state"))
+        if lifecycle_state in {"missing-evidence", "blocked", "activation-ready", "replay-ready", "measured-savings", "projected-savings", "ranked-evidence"}:
+            stage["state"] = lifecycle_state
+
+    return stage
+
+
+def _diagnostic_ledger_stages(diagnostics: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    stages: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict):
+            continue
+        stage = _diagnostic_ledger_stage(diagnostic)
+        if stage is None:
+            continue
+        key = (
+            str(stage.get("lever") or ""),
+            str(stage.get("local_action_family") or ""),
+            str(stage.get("next_action") or ""),
+            ",".join(str(item) for item in stage.get("blocker_codes") or []),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        stages.append(stage)
+    return stages
 
 
 def _promotion_blocker_source_report(stats: dict[str, Any]) -> dict[str, Any] | None:
@@ -2383,9 +2555,11 @@ def build_evidence_to_activation_next_action_ledger(
     stats_summary: dict[str, Any],
     *,
     existing_issues: Iterable[dict[str, Any]] = (),
+    diagnostics: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any] | None:
     loop = stats_summary.get("evidence_to_activation_loop") if isinstance(stats_summary.get("evidence_to_activation_loop"), dict) else {}
     stages = [stage for stage in loop.get("levers") or [] if isinstance(stage, dict)]
+    stages.extend(_diagnostic_ledger_stages(diagnostics))
     if not stages:
         return None
 
@@ -2430,6 +2604,25 @@ def build_evidence_to_activation_next_action_ledger(
             "expected_savings_path": _ledger_expected_savings_path(stage),
             "legacy_issue_title": _legacy_issue_title_for_ledger_entry(stage),
         }
+        current_status = str(entry.get("current_status") or "")
+        entry["issue_worthy_status"] = sanitize_value(
+            stage.get("issue_worthy_status")
+            or (
+                "blocked"
+                if current_status in {"blocked", "safety-stopped"}
+                else "ready"
+                if current_status in {"staged", "projected", "measured", "closed-issue-seen"}
+                else "evidence-ready"
+                if current_status in {"applied", "holdout"}
+                else "review"
+            )
+        )
+        if stage.get("diagnostic_class"):
+            entry["diagnostic_class"] = sanitize_value(stage.get("diagnostic_class"))
+        if stage.get("diagnostic_reason"):
+            entry["diagnostic_reason"] = sanitize_value(stage.get("diagnostic_reason"))
+        if stage.get("source"):
+            entry["source"] = sanitize_value(stage.get("source"))
         if stage.get("requested_model"):
             entry["requested_model"] = sanitize_value(stage.get("requested_model"))
         if stage.get("candidate_target_model"):
@@ -2454,7 +2647,7 @@ def build_evidence_to_activation_next_action_ledger(
             entry["prior_issue"] = matched
             if not any(_issue_number(issue) == matched.get("number") and _is_open(issue) for issue in existing_issues):
                 entry["issue_status"] = "closed-issue-seen"
-        entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in {"sample_count", "applied_count", "holdout_count"}})
+        entries.append({key: value for key, value in entry.items() if value not in (None, "", [], 0) or key in {"sample_count", "applied_count", "holdout_count", "projected_saved_usd"}})
 
     entries.sort(
         key=lambda item: (
@@ -5921,13 +6114,17 @@ def build_research_plan(
     ready_issues = [issue for issue in issue_list if _is_actionable_ready(issue, trusted_author)]
     blocked_stale = _stale_blocked_issues(issue_list, trusted_author=trusted_author, now=now, stale_days=stale_days)
     summary = _stats_summary(stats)
-    activation_ledger = build_evidence_to_activation_next_action_ledger(summary, existing_issues=issue_list)
-    if activation_ledger is not None:
-        summary["evidence_to_activation_next_action_ledger"] = activation_ledger
     diagnostics = _resolve_unclassified_diagnostics(
         _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary),
         summary,
     )
+    activation_ledger = build_evidence_to_activation_next_action_ledger(
+        summary,
+        existing_issues=issue_list,
+        diagnostics=diagnostics,
+    )
+    if activation_ledger is not None:
+        summary["evidence_to_activation_next_action_ledger"] = activation_ledger
     activation_safety_stop_burndown = None
     if diagnostics:
         from agentflow_proxy.activation_lifecycle_feedback import build_activation_safety_stop_burndown
