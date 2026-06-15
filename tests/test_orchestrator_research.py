@@ -1116,11 +1116,43 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertIn("safety-stop-observed", lifecycle["blocker_codes"])
         self.assertIn("missing-applied-coverage", lifecycle["blocker_codes"])
         self.assertIn("missing-holdout-coverage", lifecycle["blocker_codes"])
+        safety_breakdown = lifecycle["safety_stop_breakdown"]
+        self.assertEqual(safety_breakdown[0]["reason_code"], "thinking-routing-guard")
+        self.assertEqual(safety_breakdown[0]["count"], 51)
+        self.assertEqual(safety_breakdown[0]["category"], "tool-result")
+        self.assertEqual(safety_breakdown[0]["source_surface"], "anthropic_messages")
+        self.assertFalse(safety_breakdown[0]["executor_compatible"])
+        self.assertTrue(safety_breakdown[0]["missing_applied_coverage"])
+        self.assertTrue(safety_breakdown[0]["missing_holdout_coverage"])
+        self.assertEqual(
+            safety_breakdown[0]["durable_blocked_reason"],
+            "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+        )
         safety_bucket = next(bucket for bucket in report["buckets"] if bucket["source_surface"] == "anthropic_messages")
         self.assertEqual(
             safety_bucket["anthropic_canary_lifecycle_evidence"]["cohort_counts"]["safety_stopped"],
             51,
         )
+        routing_stage = next(row for row in plan["evidence"]["stats_summary"]["evidence_to_activation_loop"]["levers"] if row["lever"] == "routing")
+        self.assertEqual(routing_stage["state"], "keep-blocked")
+        self.assertEqual(routing_stage["next_action"], "keep-anthropic-routing-blocked-until-safety-stop-burndown")
+        self.assertEqual(
+            routing_stage["keep_blocked_reason"],
+            "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+        )
+        self.assertEqual(routing_stage["safety_stop_count"], 51)
+        self.assertIn("safety_stop_reason_review", routing_stage["needed_resolution"])
+        self.assertIn("applied_coverage", routing_stage["needed_resolution"])
+        self.assertNotEqual(routing_stage["state"], "missing-evidence")
+
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        routing_entry = next(row for row in ledger["entries"] if row["lever"] == "routing")
+        self.assertEqual(routing_entry["current_status"], "keep-blocked")
+        self.assertEqual(
+            routing_entry["keep_blocked_reason"],
+            "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+        )
+        self.assertEqual(routing_entry["safety_stop_breakdown"][0]["reason_code"], "thinking-routing-guard")
 
         rendered = json.dumps(plan)
         self.assertNotIn("secret-anthropic-safety-session-id", rendered)

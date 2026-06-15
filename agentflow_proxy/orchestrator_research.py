@@ -2933,6 +2933,8 @@ def build_evidence_to_activation_next_action_ledger(
             entry["next_state_reason"] = sanitize_value(stage.get("next_state_reason"))
         if stage.get("safety_stop_count"):
             entry["safety_stop_count"] = _to_int(stage.get("safety_stop_count"))
+        if stage.get("safety_stop_breakdown"):
+            entry["safety_stop_breakdown"] = sanitize_value(stage.get("safety_stop_breakdown"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         if stage.get("requested_model"):
@@ -3050,9 +3052,20 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         return None
     lifecycle = _routing_lifecycle_evidence(top) or {}
     blockers = [str(item) for item in lifecycle.get("blocker_codes") or [] if str(item or "").strip()]
+    safety_breakdown = [
+        row for row in lifecycle.get("safety_stop_breakdown") or []
+        if isinstance(row, dict) and _to_int(row.get("count")) > 0
+    ]
     actionability = str(top.get("actionability") or "unknown")
     provider = str(top.get("provider") or "unknown")
-    if actionability == "actionable" and blockers:
+    if actionability == "actionable" and safety_breakdown:
+        state = "keep-blocked"
+        next_action = str(
+            lifecycle.get("next_action")
+            or safety_breakdown[0].get("next_action")
+            or "keep-anthropic-routing-blocked-until-safety-stop-burndown"
+        )
+    elif actionability == "actionable" and blockers:
         state = "missing-evidence"
         next_action = (
             "activate-anthropic-routing-canary-cohorts"
@@ -3077,6 +3090,31 @@ def _routing_loop_stage(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
         "requested_model": top.get("requested_model"),
         "candidate_target_model": top.get("candidate_target_model"),
         "savings_per_1000_calls_usd": _to_float(top.get("estimated_savings_per_1000_calls_usd")),
+        "safety_stop_count": sum(_to_int(row.get("count")) for row in safety_breakdown),
+        "safety_stop_breakdown": sanitize_value(safety_breakdown),
+        "keep_blocked_reason": sanitize_value(
+            lifecycle.get("durable_blocked_reason")
+            or (safety_breakdown[0].get("durable_blocked_reason") if safety_breakdown else None)
+        ),
+        "needed_resolution": sanitize_value(
+            [
+                "safety_stop_reason_review",
+                "safer_threshold_or_executor_guard",
+                "rollback_proof",
+                *(
+                    ["applied_coverage"]
+                    if any(row.get("missing_applied_coverage") for row in safety_breakdown)
+                    else []
+                ),
+                *(
+                    ["holdout_coverage"]
+                    if any(row.get("missing_holdout_coverage") for row in safety_breakdown)
+                    else []
+                ),
+            ]
+            if safety_breakdown
+            else []
+        ),
     }
 
 
@@ -4172,6 +4210,15 @@ def _aggregate_anthropic_canary_lifecycle_evidence(row: dict[str, Any], *, sampl
         blockers["safety-stop-observed"] = safety_stopped
     if stale:
         blockers["stale-evidence"] = observed or sample_count
+    safety_stop_breakdown = (
+        [item for item in row.get("anthropic_canary_safety_stop_breakdown") or [] if isinstance(item, dict)]
+        or _anthropic_canary_safety_stop_breakdown(row)
+    )
+    durable_blocked_reason = None
+    safety_next_action = None
+    if safety_stop_breakdown:
+        durable_blocked_reason = str(safety_stop_breakdown[0].get("durable_blocked_reason") or "").strip() or None
+        safety_next_action = str(safety_stop_breakdown[0].get("next_action") or "").strip() or None
 
     return {
         "schema": "agentflow.anthropic_routing_canary_lifecycle_evidence.v1",
@@ -4205,6 +4252,9 @@ def _aggregate_anthropic_canary_lifecycle_evidence(row: dict[str, Any], *, sampl
             {"value": key, "count": value}
             for key, value in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))
         ],
+        "safety_stop_breakdown": sanitize_value(safety_stop_breakdown),
+        "durable_blocked_reason": sanitize_value(durable_blocked_reason),
+        "next_action": sanitize_value(safety_next_action),
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -4272,6 +4322,45 @@ def _merge_anthropic_canary_lifecycle_counts(base: dict[str, Any], extra: dict[s
     merged = dict(base)
     for key in _ANTHROPIC_CANARY_COUNTER_FIELDS:
         merged[key] = _to_int(base.get(key)) + _to_int(extra.get(key))
+    breakdown: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    for row in (
+        *(
+            item
+            for item in base.get("anthropic_canary_safety_stop_breakdown") or []
+            if isinstance(item, dict)
+        ),
+        *(
+            item
+            for item in extra.get("anthropic_canary_safety_stop_breakdown") or []
+            if isinstance(item, dict)
+        ),
+        *(
+            []
+            if isinstance(extra.get("anthropic_canary_safety_stop_breakdown"), list)
+            else _anthropic_canary_safety_stop_breakdown(extra)
+        ),
+    ):
+        key = (
+            str(row.get("reason_code") or "unknown-safety-stop"),
+            str(row.get("source_surface") or "unknown"),
+            str(row.get("endpoint") or "unknown"),
+            str(row.get("category") or "unknown"),
+            str(row.get("workflow_phase") or "unknown"),
+            str(row.get("expected_local_executor") or "anthropic-routing-rules"),
+        )
+        if key not in breakdown:
+            breakdown[key] = dict(row)
+        else:
+            current = breakdown[key]
+            current["count"] = _to_int(current.get("count")) + _to_int(row.get("count"))
+            current["missing_applied_coverage"] = bool(current.get("missing_applied_coverage")) or bool(row.get("missing_applied_coverage"))
+            current["missing_holdout_coverage"] = bool(current.get("missing_holdout_coverage")) or bool(row.get("missing_holdout_coverage"))
+            current["executor_compatible"] = bool(current.get("executor_compatible")) and bool(row.get("executor_compatible"))
+    if breakdown:
+        merged["anthropic_canary_safety_stop_breakdown"] = sorted(
+            breakdown.values(),
+            key=lambda item: (-_to_int(item.get("count")), str(item.get("reason_code") or "")),
+        )
     base_latest = _routing_text(
         base.get("anthropic_canary_latest_observed_at")
         or base.get("claude_canary_latest_observed_at")
@@ -4317,6 +4406,13 @@ def _subtract_anthropic_canary_lifecycle_counts(total: dict[str, Any], own: dict
     remaining = dict(total)
     for key in _ANTHROPIC_CANARY_COUNTER_FIELDS:
         remaining[key] = max(0, _to_int(total.get(key)) - _to_int(own.get(key)))
+    own_safety = _to_int(
+        own.get("anthropic_canary_safety_stopped_count")
+        or own.get("claude_canary_safety_stopped_count")
+        or own.get("safety_stopped_count")
+    )
+    if own_safety > 0 and _to_int(remaining.get("anthropic_canary_safety_stopped_count")) <= 0:
+        remaining["anthropic_canary_safety_stop_breakdown"] = []
     return remaining
 
 
@@ -4326,6 +4422,68 @@ def _routing_lifecycle_evidence(bucket: dict[str, Any]) -> dict[str, Any] | None
         if isinstance(lifecycle, dict):
             return lifecycle
     return None
+
+
+def _anthropic_canary_safety_stop_reason(row: dict[str, Any]) -> str:
+    skip_reason = _routing_skip_reason(row).lower()
+    category = _routing_text(row.get("category")).lower()
+    phase = _routing_text(row.get("phase") or row.get("workflow_phase")).lower()
+    source_surface = _routing_text(row.get("source_surface") or row.get("surface")).lower()
+    endpoint = _routing_text(row.get("endpoint")).lower()
+    if "thinking" in skip_reason or phase == "thinking":
+        return "thinking-routing-guard"
+    if "stream" in skip_reason:
+        return "unsupported-streaming-shape"
+    if "tool-protocol" in skip_reason or "unsafe" in skip_reason:
+        return "unsafe-tool-call-context"
+    if source_surface in {"", "unknown"} or endpoint in {"", "unknown"}:
+        return "aggregate-cohort-needs-narrower-surface"
+    if category not in {"tool-result", "tool-light", "short-completion", "summary"}:
+        return "category-not-enabled"
+    return "local-canary-safety-stop"
+
+
+def _anthropic_canary_safety_stop_breakdown(row: dict[str, Any]) -> list[dict[str, Any]]:
+    safety_stopped = _to_int(
+        row.get("anthropic_canary_safety_stopped_count")
+        or row.get("claude_canary_safety_stopped_count")
+        or row.get("safety_stopped_count")
+    )
+    if safety_stopped <= 0:
+        return []
+    applied = _to_int(
+        row.get("anthropic_canary_applied_count")
+        or row.get("claude_canary_applied_count")
+        or row.get("canary_applied_count")
+    )
+    holdout = _to_int(
+        row.get("anthropic_canary_holdout_count")
+        or row.get("claude_canary_holdout_count")
+        or row.get("canary_holdout_count")
+    )
+    reason = _anthropic_canary_safety_stop_reason(row)
+    executor_compatible = reason in {"local-canary-safety-stop"}
+    source_surface = _routing_text(row.get("source_surface") or row.get("surface")) or "unknown"
+    endpoint = _routing_text(row.get("endpoint")) or "unknown"
+    category = _routing_text(row.get("category")) or "unknown"
+    phase = _routing_text(row.get("phase") or row.get("workflow_phase")) or "unknown"
+    durable_reason = f"anthropic-routing-safety-stop-{reason}-keep-blocked"
+    return [
+        {
+            "reason_code": sanitize_value(reason),
+            "count": safety_stopped,
+            "source_surface": sanitize_value(source_surface),
+            "endpoint": sanitize_value(endpoint),
+            "category": sanitize_value(category),
+            "workflow_phase": sanitize_value(phase),
+            "expected_local_executor": "anthropic-routing-rules",
+            "executor_compatible": executor_compatible,
+            "missing_applied_coverage": applied <= 0,
+            "missing_holdout_coverage": holdout <= 0,
+            "durable_blocked_reason": sanitize_value(durable_reason),
+            "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+        }
+    ]
 
 
 def _classify_pass_through_bucket(row: dict[str, Any]) -> dict[str, Any]:

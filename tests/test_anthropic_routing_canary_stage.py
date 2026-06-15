@@ -97,6 +97,28 @@ def _pass_through_report_with_blocked_lifecycle() -> dict:
         "latest_observed_at": "2026-06-15T10:01:52.308969+00:00",
         "stale_evidence": {"stale": False, "age_hours": 3.222, "max_age_hours": 72.0},
         "blocker_codes": ["missing-applied-coverage", "missing-holdout-coverage", "safety-stop-observed"],
+        "blocker_reason_breakdown": [
+            {"value": "missing-applied-coverage", "count": 1250},
+            {"value": "missing-holdout-coverage", "count": 1250},
+            {"value": "safety-stop-observed", "count": 51},
+        ],
+        "safety_stop_breakdown": [
+            {
+                "reason_code": "thinking-routing-guard",
+                "count": 51,
+                "source_surface": "anthropic_messages",
+                "endpoint": "messages",
+                "category": "tool-result",
+                "workflow_phase": "thinking",
+                "expected_local_executor": "anthropic-routing-rules",
+                "executor_compatible": False,
+                "missing_applied_coverage": True,
+                "missing_holdout_coverage": True,
+                "durable_blocked_reason": "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+                "next_action": "keep-anthropic-routing-blocked-until-safety-stop-burndown",
+            }
+        ],
+        "durable_blocked_reason": "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
         "privacy": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -254,6 +276,8 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertIn("missing-applied-coverage", blocked["blocker_codes"])
         self.assertIn("missing-holdout-coverage", blocked["blocker_codes"])
         self.assertIn("safety-stop-observed", blocked["blocker_codes"])
+        self.assertEqual(blocked["safety_stop_breakdown"][0]["reason_code"], "thinking-routing-guard")
+        self.assertFalse(blocked["safety_stop_breakdown"][0]["executor_compatible"])
         self.assertEqual(blocked["local_file_backed_representation"]["rule_file"], "routing_rules.yaml")
         self.assertEqual(blocked["target_local_rule_file"], "routing_rules.yaml")
         self.assertEqual(blocked["next_action"], "review-anthropic-routing-safety-stop-before-canary")
@@ -266,6 +290,10 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         omitted = result["omitted"][0]
         self.assertEqual(omitted["status"], "blocked-review")
         self.assertEqual(omitted["projected_lifecycle_evidence"]["cohort_counts"]["safety_stopped"], 51)
+        self.assertEqual(
+            omitted["projected_lifecycle_evidence"]["safety_stop_breakdown"][0]["durable_blocked_reason"],
+            "anthropic-routing-safety-stop-thinking-routing-guard-keep-blocked",
+        )
         self.assertEqual(omitted["blocked_review"]["target_local_rule_file"], "routing_rules.yaml")
         _assert_privacy_clean(self, result)
 
