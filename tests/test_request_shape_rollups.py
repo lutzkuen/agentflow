@@ -541,6 +541,46 @@ class RequestShapeRollupTests(unittest.TestCase):
                 cost=cost,
                 baseline=cost,
             )
+        for cost in (0.04, 0.03):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="short-completion",
+                workflow_phase="summary",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
+        for cost in (0.012, 0.018):
+            self._log_call(
+                provider="openai",
+                path="/v1/embeddings",
+                source_surface="openai_embeddings",
+                endpoint="embeddings",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=0,
+                has_tools=False,
+                cache_status="miss",
+                cache_reason="exact-miss",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
 
         report = build_request_shape_cache_replay_canary_stage_report(
             self.store,
@@ -563,8 +603,10 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["writes_no_cache_entries"])
         self.assertTrue(report["acceptance"]["has_holdout_metadata"])
         self.assertTrue(report["acceptance"]["has_lifecycle_metadata"])
+        self.assertTrue(report["acceptance"]["has_applied_and_holdout_eligibility"])
         self.assertTrue(report["acceptance"]["records_hit_miss_bypass_invalidation_and_stale_risk"])
         self.assertTrue(report["acceptance"]["preserves_tool_and_streaming_guards"])
+        self.assertTrue(report["acceptance"]["stages_only_openai_responses_chat"])
         self.assertTrue(report["acceptance"]["tool_streaming_and_invalidation_missing_cohorts_skipped"])
 
         action = report["top_stage_action"]
@@ -583,6 +625,13 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertGreater(action["projected_savings_usd"], 0)
         self.assertEqual(action["rollout_fraction"], 0.05)
         self.assertEqual(action["holdout_fraction"], 0.2)
+        self.assertTrue(action["canary_applied_eligible"])
+        self.assertTrue(action["canary_holdout_eligible"])
+        self.assertEqual(action["projected_lifecycle"]["schema"], "agentflow.request_shape_cache_replay_canary_projected_lifecycle.v1")
+        self.assertGreater(action["projected_lifecycle"]["projected_canary_applied_count"], 0)
+        self.assertGreater(action["projected_lifecycle"]["projected_canary_holdout_count"], 0)
+        self.assertGreater(action["projected_lifecycle"]["projected_applied_hits"], 0)
+        self.assertGreater(action["projected_lifecycle"]["projected_holdout_hits"], 0)
         self.assertTrue(action["safety_gates"]["metadata_only"])
         self.assertTrue(action["safety_gates"]["aggregate_only"])
         self.assertTrue(action["safety_gates"]["exact_non_tool_only"])
@@ -593,6 +642,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(action["cache_decision_metadata"]["records_skipped"])
         self.assertTrue(action["cache_decision_metadata"]["records_bypass"])
         self.assertTrue(action["cache_decision_metadata"]["records_bypassed"])
+        self.assertTrue(action["cache_decision_metadata"]["records_invalidated"])
         self.assertTrue(action["cache_decision_metadata"]["records_invalidation_blocked"])
         self.assertTrue(action["cache_decision_metadata"]["records_stale_risk"])
         self.assertTrue(action["cache_decision_metadata"]["records_cache_hit"])
@@ -601,8 +651,14 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(action["lifecycle_metadata"]["emits_holdout"])
         self.assertTrue(action["lifecycle_metadata"]["emits_skipped"])
         self.assertTrue(action["lifecycle_metadata"]["emits_bypass"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_bypassed"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_invalidated"])
         self.assertTrue(action["lifecycle_metadata"]["emits_invalidation_blocked"])
         self.assertTrue(action["lifecycle_metadata"]["emits_stale_risk"])
+        self.assertTrue(action["lifecycle_metadata"]["canary_applied_eligible"])
+        self.assertTrue(action["lifecycle_metadata"]["canary_holdout_eligible"])
+        self.assertGreater(action["lifecycle_metadata"]["projected_canary_applied_count"], 0)
+        self.assertGreater(action["lifecycle_metadata"]["projected_canary_holdout_count"], 0)
         self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.openai_cache_replay_impact.v1")
         skipped_guards = report["skipped_cohort_guards"]
         self.assertEqual(skipped_guards["schema"], "agentflow.request_shape_cache_replay_canary_skipped_guards.v1")
@@ -614,7 +670,8 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertIn("tools-present", blocker_values)
         self.assertIn("invalidation-evidence-missing", blocker_values)
         self.assertIn("streaming-replay-not-supported", blocker_values)
-        self.assertEqual(report["source_report"]["cache_replayability_summary"]["replay_ready_cohort_count"], 1)
+        self.assertIn("unsupported-endpoint", blocker_values)
+        self.assertEqual(report["source_report"]["cache_replayability_summary"]["replay_ready_cohort_count"], 2)
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])
 

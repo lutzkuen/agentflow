@@ -2031,6 +2031,71 @@ def _cache_replay_canary_policy_id(cohort_id: str) -> str:
     return f"local-openai-cache-replay-canary:{digest}"
 
 
+def _request_shape_cache_replay_canary_lifecycle_projection(
+    cohort: dict[str, Any],
+    *,
+    rollout_fraction: float,
+    holdout_fraction: float,
+) -> dict[str, Any]:
+    matched = _as_int(cohort.get("row_count") or cohort.get("cohort_row_count"))
+    projected_hits = _as_int(cohort.get("projected_hits"))
+    projected_savings = _as_float(cohort.get("projected_savings_usd"))
+    rollout = _bounded_fraction(rollout_fraction, DEFAULT_CACHE_REPLAY_CANARY_ROLLOUT_FRACTION)
+    holdout = _bounded_fraction(holdout_fraction, DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION)
+    if rollout + holdout > 1.0:
+        holdout = max(0.0, 1.0 - rollout)
+
+    readiness = public_label(cohort.get("readiness"), "unknown")
+    reason = public_label(cohort.get("reason"), "unknown")
+    blockers = [
+        public_label(item, "unknown")
+        for item in cohort.get("blockers") or []
+        if public_label(item, "unknown") != "unknown"
+    ]
+    applied = holdout_count = skipped = 0
+    lifecycle_status = "skipped"
+    explicit_reason = reason
+
+    if readiness == "replay-ready" and matched > 0:
+        holdout_count = min(matched, int(math.ceil(matched * holdout))) if holdout > 0 else 0
+        remaining = max(0, matched - holdout_count)
+        applied = min(remaining, int(math.ceil(matched * rollout))) if rollout > 0 else 0
+        skipped = max(0, matched - applied - holdout_count)
+        lifecycle_status = "projected-applied-holdout" if applied > 0 and holdout_count > 0 else "projected-partial"
+        explicit_reason = "projected-cache-replay-applied-and-holdout" if applied > 0 and holdout_count > 0 else "projected-cache-replay-partial"
+    else:
+        skipped = matched
+        lifecycle_status = "skipped"
+        explicit_reason = reason or (blockers[0] if blockers else "not-stageable")
+
+    return {
+        "schema": "agentflow.request_shape_cache_replay_canary_projected_lifecycle.v1",
+        "status": lifecycle_status,
+        "reason": explicit_reason,
+        "readiness": readiness,
+        "matched_count": matched,
+        "rollout_fraction": round(rollout, 6),
+        "holdout_fraction": round(holdout, 6),
+        "canary_applied_eligible": applied > 0,
+        "canary_holdout_eligible": holdout_count > 0,
+        "projected_canary_applied_count": applied,
+        "projected_canary_holdout_count": holdout_count,
+        "projected_skipped_count": skipped,
+        "projected_invalidated_count": 0,
+        "projected_bypassed_count": 0,
+        "projected_hits": projected_hits,
+        "projected_savings_usd": round(projected_savings, 6),
+        "projected_applied_hits": _scaled_projection(projected_hits, applied, matched),
+        "projected_applied_savings_usd": round(projected_savings * (applied / float(matched)), 6) if matched and applied else 0.0,
+        "projected_holdout_hits": _scaled_projection(projected_hits, holdout_count, matched),
+        "projected_holdout_savings_usd": round(projected_savings * (holdout_count / float(matched)), 6) if matched and holdout_count else 0.0,
+        "blocker_reasons": blockers,
+        "metadata_only": True,
+        "aggregate_only": True,
+        "privacy": _replayability_privacy(),
+    }
+
+
 def _request_shape_cache_replay_canary_action(
     cohort: dict[str, Any],
     *,
@@ -2044,6 +2109,11 @@ def _request_shape_cache_replay_canary_action(
     holdout = _bounded_fraction(holdout_fraction, DEFAULT_CACHE_REPLAY_CANARY_HOLDOUT_FRACTION)
     if rollout + holdout > 1.0:
         holdout = max(0.0, 1.0 - rollout)
+    lifecycle_projection = _request_shape_cache_replay_canary_lifecycle_projection(
+        cohort,
+        rollout_fraction=rollout,
+        holdout_fraction=holdout,
+    )
     return {
         "schema": REPLAY_CACHE_CANARY_ACTION_SCHEMA,
         "action_type": "stage-local-openai-cache-replay-canary",
@@ -2074,6 +2144,9 @@ def _request_shape_cache_replay_canary_action(
         },
         "projected_hits": _as_int(cohort.get("projected_hits")),
         "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
+        "projected_lifecycle": lifecycle_projection,
+        "canary_applied_eligible": lifecycle_projection["canary_applied_eligible"],
+        "canary_holdout_eligible": lifecycle_projection["canary_holdout_eligible"],
         "safety_gates": {
             "metadata_only": True,
             "aggregate_only": True,
@@ -2093,6 +2166,7 @@ def _request_shape_cache_replay_canary_action(
             "streaming_replay_enabled": False,
             "holdout_required": holdout > 0,
             "records_applied_holdout_skipped_invalidation_blocked": True,
+            "records_applied_holdout_skipped_bypassed_invalidated_hit_miss": True,
             "records_applied_holdout_hit_miss_bypass_invalidation_blocked_stale_risk": True,
         },
         "cache_decision_metadata": {
@@ -2104,6 +2178,7 @@ def _request_shape_cache_replay_canary_action(
                 "skipped",
                 "bypass",
                 "bypassed",
+                "invalidated",
                 "invalidation_blocked",
                 "stale_risk",
                 "cache_hit",
@@ -2114,6 +2189,7 @@ def _request_shape_cache_replay_canary_action(
             "records_skipped": True,
             "records_bypass": True,
             "records_bypassed": True,
+            "records_invalidated": True,
             "records_invalidation_blocked": True,
             "records_stale_risk": True,
             "records_cache_hit": True,
@@ -2127,10 +2203,19 @@ def _request_shape_cache_replay_canary_action(
             "emits_holdout": True,
             "emits_skipped": True,
             "emits_bypass": True,
+            "emits_bypassed": True,
+            "emits_invalidated": True,
             "emits_invalidation_blocked": True,
             "emits_stale_risk": True,
             "emits_cache_hit": True,
             "emits_cache_miss": True,
+            "canary_applied_eligible": lifecycle_projection["canary_applied_eligible"],
+            "canary_holdout_eligible": lifecycle_projection["canary_holdout_eligible"],
+            "projected_canary_applied_count": lifecycle_projection["projected_canary_applied_count"],
+            "projected_canary_holdout_count": lifecycle_projection["projected_canary_holdout_count"],
+            "projected_skipped_count": lifecycle_projection["projected_skipped_count"],
+            "projected_invalidated_count": lifecycle_projection["projected_invalidated_count"],
+            "projected_bypassed_count": lifecycle_projection["projected_bypassed_count"],
             "impact_report": "agentflow.openai_cache_replay_impact.v1",
             "lifecycle_feedback_schema": "agentflow.openai_cache_replay_lifecycle_feedback.v1",
             "metadata_only": True,
@@ -2247,6 +2332,7 @@ def build_request_shape_cache_replay_canary_stage_report(
         and cohort.get("provider_family") == "openai"
         and cohort.get("source_surface") == "openai_responses"
         and cohort.get("endpoint") == "responses"
+        and cohort.get("category") == "chat"
         and not bool(cohort.get("has_tools"))
         and not bool(cohort.get("stream"))
         and _as_int(cohort.get("projected_hits")) > 0
@@ -2316,8 +2402,17 @@ def build_request_shape_cache_replay_canary_stage_report(
                 and bool(top_action["lifecycle_metadata"].get("emits_holdout"))
                 and bool(top_action["lifecycle_metadata"].get("emits_skipped"))
                 and bool(top_action["lifecycle_metadata"].get("emits_bypass"))
+                and bool(top_action["lifecycle_metadata"].get("emits_invalidated"))
                 and bool(top_action["lifecycle_metadata"].get("emits_invalidation_blocked"))
                 and bool(top_action["lifecycle_metadata"].get("emits_stale_risk"))
+            ),
+            "has_applied_and_holdout_eligibility": bool(
+                top_action
+                and bool(top_action.get("canary_applied_eligible"))
+                and bool(top_action.get("canary_holdout_eligible"))
+                and isinstance(top_action.get("projected_lifecycle"), dict)
+                and _as_int(top_action["projected_lifecycle"].get("projected_canary_applied_count")) > 0
+                and _as_int(top_action["projected_lifecycle"].get("projected_canary_holdout_count")) > 0
             ),
             "records_hit_miss_bypass_invalidation_and_stale_risk": bool(
                 top_action
@@ -2325,11 +2420,19 @@ def build_request_shape_cache_replay_canary_stage_report(
                 and bool(top_action["cache_decision_metadata"].get("records_cache_hit"))
                 and bool(top_action["cache_decision_metadata"].get("records_cache_miss"))
                 and bool(top_action["cache_decision_metadata"].get("records_bypass"))
+                and bool(top_action["cache_decision_metadata"].get("records_invalidated"))
                 and bool(top_action["cache_decision_metadata"].get("records_invalidation_blocked"))
                 and bool(top_action["cache_decision_metadata"].get("records_stale_risk"))
             ),
             "preserves_tool_and_streaming_guards": all(
                 not bool(action.get("conditions", {}).get("has_tools")) and not bool(action.get("conditions", {}).get("stream"))
+                for action in actions
+            ),
+            "stages_only_openai_responses_chat": all(
+                action.get("conditions", {}).get("provider_family") == "openai"
+                and action.get("conditions", {}).get("source_surface") == "openai_responses"
+                and action.get("conditions", {}).get("endpoint") == "responses"
+                and action.get("conditions", {}).get("category") == "chat"
                 for action in actions
             ),
             "tool_streaming_and_invalidation_missing_cohorts_skipped": bool(
