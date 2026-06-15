@@ -17,9 +17,11 @@ from agentflow_proxy.request_shape_rollups import (
     build_request_shape_cache_replay_evidence_report,
     build_request_shape_cache_replay_policy_decision_report,
     build_request_shape_crunch_canary_impact_report,
+    build_request_shape_crunch_policy_decision_ledger,
     build_request_shape_crunch_policy_decision_report,
     build_request_shape_crunch_canary_stage_report,
     build_request_shape_rollups_report,
+    record_request_shape_crunch_policy_decision_ledger,
     request_shape_crunch_canary_lifecycle,
 )
 from agentflow_proxy.store import SQLiteStore, stable_json, utc_now
@@ -2243,6 +2245,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertEqual(report["summary"]["holdout_count"], 0)
         self.assertEqual(report["summary"]["estimated_saved_tokens"], 0)
         self.assertFalse(report["summary"]["applied_vs_holdout_coverage"]["has_applied_coverage"])
+        self.assertIn("missing-applied-or-holdout-coverage", report["missing_measurements"])
         self.assertIn("applied-crunch-canary-coverage", report["missing_measurements"])
         self.assertIn("crunch-canary-lifecycle-metadata", report["missing_measurements"])
         self.assertFalse(report["privacy"]["raw_prompts_included"])
@@ -2555,7 +2558,9 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         self.assertEqual(decision["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
         self.assertEqual(decision["decision"], "promote")
+        self.assertEqual(decision["graduation_decision"], "widen")
         self.assertEqual(decision["summary"]["decision"], "promote")
+        self.assertEqual(decision["summary"]["graduation_decision"], "widen")
         self.assertTrue(decision["summary"]["promotion_allowed"])
         self.assertEqual(decision["summary"]["applied_count"], 1)
         self.assertEqual(decision["summary"]["holdout_count"], 1)
@@ -2573,6 +2578,30 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(top["rollback_metadata"]["required_for_promotion"])
         self.assertTrue(top["coverage"]["has_applied_coverage"])
         self.assertTrue(top["coverage"]["has_holdout_coverage"])
+        ledger = build_request_shape_crunch_policy_decision_ledger(
+            decision,
+            recorded_at="2026-06-15T18:00:00+00:00",
+        )
+        self.assertEqual(ledger["schema"], "agentflow.request_shape_crunch_policy_decision_ledger.v1")
+        self.assertEqual(ledger["status"], "recordable")
+        self.assertEqual(ledger["entries"][0]["status"], "positive")
+        self.assertEqual(ledger["entries"][0]["recommendation"], "widen")
+        self.assertEqual(ledger["entries"][0]["applied_count"], 1)
+        self.assertEqual(ledger["entries"][0]["holdout_count"], 1)
+        first = record_request_shape_crunch_policy_decision_ledger(
+            decision,
+            store_obj=self.store,
+            recorded_at="2026-06-15T18:00:01+00:00",
+        )
+        rows = self.store.promotion_outcome_feedback_rows(action_family="crunch", limit=10)
+        self.assertTrue(first["wrote_store"])
+        self.assertEqual(first["summary"]["rows_written"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_evidence_schema"], "agentflow.request_shape_crunch_policy_decision.v1")
+        self.assertEqual(rows[0]["status"], "positive")
+        self.assertEqual(rows[0]["recommendation"], "widen")
+        self.assertEqual(rows[0]["applied_count"], 1)
+        self.assertEqual(rows[0]["holdout_count"], 1)
         self.assertTrue(decision["privacy"]["metadata_only"])
         self.assertTrue(decision["privacy"]["aggregate_only"])
         self.assertFalse(decision["privacy"]["raw_prompts_included"])
@@ -2623,6 +2652,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         decision = build_request_shape_crunch_policy_decision_report(impact_report)
 
         self.assertEqual(decision["decision"], "rollback")
+        self.assertEqual(decision["graduation_decision"], "rollback")
         self.assertTrue(decision["summary"]["rollback_required"])
         self.assertEqual(decision["summary"]["safety_stop_state"], "observed")
         self.assertEqual(decision["top_decision"]["reason"], "canary-safety-stopped")
@@ -2644,10 +2674,17 @@ class RequestShapeRollupTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema"], "agentflow.request_shape_crunch_policy_decision.v1")
         self.assertEqual(payload["decision"], "keep-blocked")
+        self.assertEqual(payload["graduation_decision"], "blocked")
         self.assertTrue(payload["summary"]["keep_blocked"])
         self.assertEqual(payload["summary"]["applied_count"], 0)
         self.assertEqual(payload["summary"]["holdout_count"], 0)
-        self.assertEqual(payload["top_decision"]["reason"], "missing-crunch-canary-impact-evidence")
+        self.assertEqual(payload["top_decision"]["reason"], "missing-applied-or-holdout-coverage")
+        self.assertEqual(payload["ledger_update"]["schema"], "agentflow.request_shape_crunch_policy_decision_ledger.v1")
+        self.assertEqual(payload["ledger_update"]["status"], "recorded")
+        self.assertEqual(payload["ledger_update"]["summary"]["rows_written"], 1)
+        rows = self.store.promotion_outcome_feedback_rows(action_family="crunch", limit=10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "needs-more-samples")
         self.assertFalse(payload["privacy"]["raw_prompts_included"])
         self.assertTrue(payload["source_rollups"]["privacy"]["metadata_only"])
         self.assertNotIn("raw prompt must not leak", stdout.getvalue())

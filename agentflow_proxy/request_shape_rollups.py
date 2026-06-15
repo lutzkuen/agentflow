@@ -30,6 +30,8 @@ CRUNCH_CANARY_APPLY_SCHEMA = "agentflow.request_shape_crunch_canary_apply.v1"
 CRUNCH_CANARY_LIFECYCLE_SCHEMA = "agentflow.request_shape_crunch_canary_lifecycle.v1"
 CRUNCH_CANARY_IMPACT_SCHEMA = "agentflow.request_shape_crunch_canary_impact.v1"
 CRUNCH_POLICY_DECISION_SCHEMA = "agentflow.request_shape_crunch_policy_decision.v1"
+CRUNCH_POLICY_DECISION_LEDGER_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger.v1"
+CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA = "agentflow.request_shape_crunch_policy_decision_ledger_entry.v1"
 FOLLOW_UP_CANDIDATES_SCHEMA = "agentflow.request_shape_follow_up_candidates.v1"
 FOLLOW_UP_BLOCKER_COHORT_SCHEMA = "agentflow.request_shape_blocker_cohort.v1"
 REPEATED_CONTEXT_TEXT_BUCKETS = {"8k_32k_chars", "32k_128k_chars", "gte_128k_chars"}
@@ -990,6 +992,8 @@ def build_request_shape_crunch_canary_impact_report(
         status = "no-applied-coverage"
         top_next_action = "stage-canary-first"
     missing_measurements = []
+    if total_applied <= 0 or (finalized and total_holdout <= 0) or not finalized:
+        missing_measurements.append("missing-applied-or-holdout-coverage")
     if total_applied <= 0:
         missing_measurements.append("applied-crunch-canary-coverage")
     if finalized and total_holdout <= 0:
@@ -1096,7 +1100,7 @@ def _crunch_policy_decision_value(candidate: dict[str, Any] | None) -> str:
 
 def _crunch_policy_decision_reason(candidate: dict[str, Any] | None, decision: str) -> str:
     if not candidate:
-        return "missing-crunch-canary-impact-evidence"
+        return "missing-applied-or-holdout-coverage"
     reasons = candidate.get("reason_codes") if isinstance(candidate.get("reason_codes"), list) else []
     if reasons:
         return public_label(reasons[0], "unknown")
@@ -1105,6 +1109,16 @@ def _crunch_policy_decision_reason(candidate: dict[str, Any] | None, decision: s
     if decision == "rollback":
         return "rollback-recommended"
     return public_label(candidate.get("top_blocker") or "keep-blocked", "keep-blocked")
+
+
+def _crunch_policy_graduation_decision(decision: str, reason_codes: list[str]) -> str:
+    if decision == "promote":
+        return "widen"
+    if decision == "rollback":
+        return "rollback"
+    if any(reason in {"missing-applied-or-holdout-coverage", "missing-applied-coverage", "missing-holdout-coverage"} for reason in reason_codes):
+        return "blocked"
+    return "keep-observing"
 
 
 def _crunch_policy_decision_rollback_metadata(candidate: dict[str, Any] | None, decision: str) -> dict[str, Any]:
@@ -1209,6 +1223,7 @@ def _crunch_policy_decision_from_candidate(candidate: dict[str, Any] | None) -> 
         "schema": "agentflow.request_shape_crunch_policy_decision_entry.v1",
         "decision_id": decision_id,
         "decision": decision,
+        "graduation_decision": _crunch_policy_graduation_decision(decision, candidate.get("reason_codes") or [reason]),
         "status": "decided",
         "reason": reason,
         "reason_codes": candidate.get("reason_codes") or [reason],
@@ -1265,18 +1280,20 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
     for item in decision_entries:
         _increment(decision_counts, item.get("decision"))
     metrics = top["metrics"] if isinstance(top.get("metrics"), dict) else _crunch_policy_decision_metrics(None)
-    return {
+    report = {
         "schema": CRUNCH_POLICY_DECISION_SCHEMA,
         "ok": True,
         "status": "decided",
         "read_only": True,
         "generated_at": utc_now(),
         "decision": top["decision"],
+        "graduation_decision": top["graduation_decision"],
         "decision_id": top["decision_id"],
         "top_decision": top,
         "decisions": decision_entries,
         "summary": {
             "decision": top["decision"],
+            "graduation_decision": top["graduation_decision"],
             "decision_id": top["decision_id"],
             "decision_count": len(decision_entries),
             "decision_breakdown": _breakdown(decision_counts),
@@ -1308,6 +1325,151 @@ def build_request_shape_crunch_policy_decision_report(impact_report: dict[str, A
         },
         "privacy": _crunch_opportunity_privacy(),
     }
+    report["ledger_update"] = build_request_shape_crunch_policy_decision_ledger(report)
+    return report
+
+
+def _crunch_policy_decision_ledger_status(top: dict[str, Any]) -> tuple[str, bool]:
+    decision = str(top.get("decision") or "")
+    reason_codes = set(str(item) for item in (top.get("reason_codes") or []))
+    if decision == "promote":
+        return "positive", False
+    if decision == "rollback":
+        return "rollback-needed", True
+    if reason_codes & {"missing-applied-or-holdout-coverage", "missing-applied-coverage", "missing-holdout-coverage"}:
+        return "needs-more-samples", False
+    if reason_codes & {"no-applied-savings", "stale-canary-impact-evidence"}:
+        return "needs-review", False
+    return "regression-flagged" if reason_codes else "needs-review", False
+
+
+def build_request_shape_crunch_policy_decision_ledger(
+    decision_report: dict[str, Any],
+    *,
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    recorded = recorded_at or str(decision_report.get("generated_at") or utc_now())
+    top = decision_report.get("top_decision") if isinstance(decision_report.get("top_decision"), dict) else {}
+    metrics = top.get("metrics") if isinstance(top.get("metrics"), dict) else {}
+    status, rollback_needed = _crunch_policy_decision_ledger_status(top)
+    policy_id = str(top.get("policy_id") or "unknown")
+    decision_id = str(top.get("decision_id") or "")
+    reason_codes = [public_label(reason, "unknown") for reason in (top.get("reason_codes") or [])]
+    entry_id = "request-shape-crunch-decision:" + hashlib.sha256(
+        stable_json(
+            {
+                "schema": CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA,
+                "recorded_at": recorded,
+                "decision_id": decision_id,
+                "policy_id": policy_id,
+                "decision": top.get("decision"),
+                "reason_codes": reason_codes,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    entry = {
+        "schema": CRUNCH_POLICY_DECISION_LEDGER_ENTRY_SCHEMA,
+        "id": entry_id,
+        "created_at": recorded,
+        "impact_generated_at": decision_report.get("generated_at"),
+        "policy_id": policy_id,
+        "action_family": "crunch",
+        "policy_section": "crunch.rules",
+        "rule_source": public_label(top.get("policy_source") or "local-manual", "local-manual"),
+        "rule_id": top.get("policy_id"),
+        "candidate_id": top.get("cohort_id"),
+        "action_id": decision_id,
+        "source_evidence_schema": CRUNCH_POLICY_DECISION_SCHEMA,
+        "status": status,
+        "recommendation": top.get("graduation_decision") or decision_report.get("graduation_decision"),
+        "rollback_needed": rollback_needed,
+        "reason_codes": reason_codes,
+        "observed_savings_usd": round(_as_float(metrics.get("observed_saved_usd")), 8),
+        "projected_savings_usd": round(_as_float(metrics.get("observed_saved_usd")), 8),
+        "projection_realization_ratio": 1.0 if _as_float(metrics.get("observed_saved_usd")) > 0 else None,
+        "applied_count": _as_int(metrics.get("applied_count")),
+        "holdout_count": _as_int(metrics.get("holdout_count")),
+        "skipped_count": _as_int((metrics.get("coverage") or {}).get("skipped_count")) if isinstance(metrics.get("coverage"), dict) else 0,
+        "bypassed_count": 0,
+        "safety_stop_count": _as_int(metrics.get("safety_stop_count")),
+        "error_rate_delta": round(_as_float(metrics.get("error_rate_delta")), 6),
+        "retry_rate_delta": round(_as_float(metrics.get("retry_rate_delta")), 6),
+        "latency_delta_ms": metrics.get("latency_avg_delta_ms"),
+        "cohort_metrics": {
+            "coverage": metrics.get("coverage") if isinstance(metrics.get("coverage"), dict) else {},
+            "observed_saved_tokens": _as_int(metrics.get("observed_saved_tokens")),
+            "observed_saved_usd": round(_as_float(metrics.get("observed_saved_usd")), 8),
+            "safety_stop_state": top.get("safety_stop_state"),
+            "graduation_decision": top.get("graduation_decision") or decision_report.get("graduation_decision"),
+        },
+        "privacy": _crunch_opportunity_privacy(),
+    }
+    entry = {key: value for key, value in entry.items() if value not in (None, "", [], {})}
+    return {
+        "schema": CRUNCH_POLICY_DECISION_LEDGER_SCHEMA,
+        "ok": True,
+        "status": "recordable",
+        "append_only": True,
+        "wrote_store": False,
+        "entry_count": 1,
+        "entries": [entry],
+        "summary": {
+            "entry_count": 1,
+            "rows_written": 0,
+            "status": status,
+            "rollback_needed_count": 1 if rollback_needed else 0,
+            "observed_savings_usd": entry.get("observed_savings_usd", 0.0),
+            "applied_count": entry.get("applied_count", 0),
+            "holdout_count": entry.get("holdout_count", 0),
+        },
+        "privacy": _crunch_opportunity_privacy(),
+    }
+
+
+def record_request_shape_crunch_policy_decision_ledger(
+    decision_report: dict[str, Any],
+    *,
+    store_obj: Any,
+    recorded_at: str | None = None,
+) -> dict[str, Any]:
+    ledger = build_request_shape_crunch_policy_decision_ledger(decision_report, recorded_at=recorded_at)
+    rows_written = 0
+    for entry in ledger.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        store_obj.log_promotion_outcome_feedback(
+            id=entry.get("id"),
+            created_at=entry.get("created_at"),
+            impact_generated_at=entry.get("impact_generated_at"),
+            policy_id=entry.get("policy_id"),
+            action_family=entry.get("action_family"),
+            policy_section=entry.get("policy_section"),
+            rule_source=entry.get("rule_source"),
+            rule_id=entry.get("rule_id"),
+            candidate_id=entry.get("candidate_id"),
+            action_id=entry.get("action_id"),
+            source_evidence_schema=entry.get("source_evidence_schema"),
+            status=entry.get("status"),
+            recommendation=entry.get("recommendation"),
+            rollback_needed=1 if entry.get("rollback_needed") else 0,
+            observed_savings_usd=entry.get("observed_savings_usd"),
+            projected_savings_usd=entry.get("projected_savings_usd"),
+            projection_realization_ratio=entry.get("projection_realization_ratio"),
+            applied_count=entry.get("applied_count"),
+            holdout_count=entry.get("holdout_count"),
+            skipped_count=entry.get("skipped_count"),
+            bypassed_count=entry.get("bypassed_count"),
+            safety_stop_count=entry.get("safety_stop_count"),
+            error_rate_delta=entry.get("error_rate_delta"),
+            retry_rate_delta=entry.get("retry_rate_delta"),
+            latency_delta_ms=entry.get("latency_delta_ms"),
+            feedback_json=stable_json(entry),
+        )
+        rows_written += 1
+    ledger["wrote_store"] = rows_written > 0
+    ledger["status"] = "recorded" if rows_written else ledger.get("status")
+    ledger["summary"]["rows_written"] = rows_written
+    return ledger
 
 
 def _new_group(basis: dict[str, Any], *, candidate_id: str, rollup_key: str) -> dict[str, Any]:

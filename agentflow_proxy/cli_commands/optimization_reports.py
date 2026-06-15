@@ -5307,6 +5307,11 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
         action="store_true",
         help="Pretty-print JSON instead of emitting one compact line.",
     )
+    parser.add_argument(
+        "--no-record-outcome-feedback",
+        action="store_true",
+        help="Do not append the metadata-only repeated-context crunch decision to the local outcome ledger.",
+    )
     args = parser.parse_args(argv)
 
     stdout = stdout if stdout is not None else sys.stdout
@@ -5315,6 +5320,7 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
         build_request_shape_crunch_canary_impact_report,
         build_request_shape_crunch_policy_decision_report,
         build_request_shape_rollups_report,
+        record_request_shape_crunch_policy_decision_ledger,
     )
 
     store = _open_store_for_db(str(args.db))
@@ -5325,18 +5331,22 @@ def request_shape_crunch_policy_decision_cli(argv: Sequence[str] | None = None, 
             persist=False,
             max_crunch_canary_evidence_age_hours=args.max_evidence_age_hours,
         )
+        impact = rollups.get("crunch_canary_impact")
+        if not isinstance(impact, dict):
+            impact = build_request_shape_crunch_canary_impact_report(
+                [],
+                max_evidence_age_hours=args.max_evidence_age_hours,
+            )
+        else:
+            impact = dict(impact)
+            impact["max_evidence_age_hours"] = max(0.0, float(args.max_evidence_age_hours))
+        result = build_request_shape_crunch_policy_decision_report(impact)
+        if result.get("ok") and not args.no_record_outcome_feedback:
+            ledger = record_request_shape_crunch_policy_decision_ledger(result, store_obj=store)
+            result["ledger_update"] = ledger
+            result["wrote_store"] = bool(ledger.get("wrote_store"))
     finally:
         store.conn.close()
-    impact = rollups.get("crunch_canary_impact")
-    if not isinstance(impact, dict):
-        impact = build_request_shape_crunch_canary_impact_report(
-            [],
-            max_evidence_age_hours=args.max_evidence_age_hours,
-        )
-    else:
-        impact = dict(impact)
-        impact["max_evidence_age_hours"] = max(0.0, float(args.max_evidence_age_hours))
-    result = build_request_shape_crunch_policy_decision_report(impact)
     result["source_rollups"] = {
         "schema": rollups.get("schema"),
         "summary": {
