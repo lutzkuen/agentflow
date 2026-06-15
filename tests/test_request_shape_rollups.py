@@ -411,6 +411,7 @@ class RequestShapeRollupTests(unittest.TestCase):
         report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="replay-dry-run")
         dry_run = report["cache_replayability_dry_run"]
         classification = report["cache_replay_blocker_classification"]
+        invalidation_evidence = dry_run["cache_invalidation_evidence"]
 
         self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 1)
@@ -445,6 +446,52 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
         self.assertFalse(dry_run["privacy"]["request_fingerprints_included"])
         self.assertFalse(dry_run["privacy"]["individual_candidate_ids_included"])
+        self.assertTrue(dry_run["acceptance"]["emits_durable_invalidation_evidence"])
+        self.assertTrue(dry_run["acceptance"]["has_ranked_blocker_cohorts"])
+        self.assertTrue(dry_run["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        self.assertTrue(dry_run["acceptance"]["has_local_file_backed_policy_compatibility"])
+
+        self.assertEqual(invalidation_evidence["schema"], "agentflow.request_shape_cache_invalidation_evidence.v1")
+        self.assertEqual(invalidation_evidence["status"], "ranked")
+        self.assertTrue(invalidation_evidence["read_only"])
+        self.assertEqual(invalidation_evidence["summary"]["ranked_blocker_cohort_count"], 3)
+        self.assertEqual(invalidation_evidence["summary"]["policy_files_written"], False)
+        self.assertEqual(invalidation_evidence["summary"]["cache_entries_written"], 0)
+        self.assertTrue(invalidation_evidence["acceptance"]["has_ranked_blocker_cohorts"])
+        self.assertTrue(invalidation_evidence["acceptance"]["has_next_action"])
+        self.assertTrue(invalidation_evidence["acceptance"]["has_local_file_backed_policy_compatibility"])
+        self.assertTrue(invalidation_evidence["acceptance"]["tool_cohorts_require_invalidation_evidence"])
+        self.assertTrue(invalidation_evidence["acceptance"]["tool_and_streaming_replay_remain_disabled"])
+        self.assertTrue(invalidation_evidence["acceptance"]["no_cache_entries_written"])
+        self.assertFalse(invalidation_evidence["acceptance"]["policy_files_written"])
+        self.assertTrue(invalidation_evidence["privacy"]["metadata_only"])
+        self.assertTrue(invalidation_evidence["privacy"]["aggregate_only"])
+        self.assertFalse(invalidation_evidence["privacy"]["tool_payloads_included"])
+        self.assertFalse(invalidation_evidence["privacy"]["file_paths_included"])
+        self.assertFalse(invalidation_evidence["privacy"]["cache_keys_included"])
+        self.assertFalse(invalidation_evidence["privacy"]["request_fingerprints_included"])
+        policy_compat = invalidation_evidence["local_file_backed_policy_compatibility"]
+        self.assertTrue(policy_compat["compatible"])
+        self.assertEqual(policy_compat["policy_source"], "local-file-backed")
+        self.assertEqual(policy_compat["rule_file"], "cache_rules.yaml")
+        self.assertEqual(policy_compat["policy_section"], "cache")
+        self.assertFalse(policy_compat["tool_call_cache_enabled"])
+        self.assertFalse(policy_compat["streaming_replay_enabled"])
+        evidence_actions = {item["value"] for item in invalidation_evidence["next_action_breakdown"]}
+        self.assertIn("collect-file-invalidation-evidence", evidence_actions)
+        self.assertIn("stage-streaming-replay-buffer-fixture", evidence_actions)
+        self.assertIn("exact-non-tool-only", evidence_actions)
+        tool_evidence = next(row for row in invalidation_evidence["cohorts"] if row["has_tools"])
+        self.assertEqual(tool_evidence["next_action"], "collect-file-invalidation-evidence")
+        self.assertIn("keep-tool-cache-blocked", tool_evidence["secondary_next_actions"])
+        self.assertTrue(tool_evidence["requires_explicit_invalidation_safety_evidence"])
+        self.assertFalse(tool_evidence["safe_invalidation_evidence"])
+        self.assertFalse(tool_evidence["tool_cache_replay_enabled"])
+        self.assertFalse(tool_evidence["streaming_replay_enabled"])
+        streaming_evidence = next(row for row in invalidation_evidence["cohorts"] if row["stream"])
+        self.assertEqual(streaming_evidence["next_action"], "stage-streaming-replay-buffer-fixture")
+        self.assertFalse(streaming_evidence["tool_cache_replay_enabled"])
+        self.assertFalse(streaming_evidence["streaming_replay_enabled"])
 
         self.assertEqual(classification["schema"], "agentflow.request_shape_cache_replay_blocker_classification.v1")
         self.assertEqual(classification["status"], "classified")
@@ -486,6 +533,17 @@ class RequestShapeRollupTests(unittest.TestCase):
             "/tmp/private/source.py",
         ):
             self.assertNotIn(forbidden, rendered_classification)
+        rendered_invalidation = json.dumps(invalidation_evidence, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered_invalidation)
 
     def test_cache_replay_canary_stage_report_targets_openai_responses_replay_ready_cohort(self) -> None:
         for cost in (0.01, 0.03, 0.02):

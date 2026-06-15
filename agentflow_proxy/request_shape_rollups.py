@@ -16,6 +16,8 @@ from agentflow_proxy.store import stable_json, utc_now
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
+REPLAY_INVALIDATION_EVIDENCE_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence.v1"
+REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA = "agentflow.request_shape_cache_invalidation_evidence_cohort.v1"
 REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification.v1"
 REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
@@ -3892,6 +3894,213 @@ def _shape_replayability_decision(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _cache_invalidation_next_actions(cohort: dict[str, Any]) -> tuple[str, list[str], str, bool]:
+    blockers = {
+        public_label(item, "unknown")
+        for item in cohort.get("blockers") or []
+        if public_label(item, "unknown") != "unknown"
+    }
+    reason = public_label(cohort.get("reason"), "unknown")
+    if reason != "unknown":
+        blockers.add(reason)
+    has_tools = bool(cohort.get("has_tools"))
+    stream = bool(cohort.get("stream"))
+    readiness = public_label(cohort.get("readiness"), "unknown")
+    secondary: list[str] = []
+
+    if readiness == "replay-ready":
+        return "exact-non-tool-only", secondary, "ready-exact-non-tool", False
+    if "invalidation-evidence-missing" in blockers or "unsafe-tool-calls-without-invalidation" in blockers:
+        if has_tools:
+            secondary.append("keep-tool-cache-blocked")
+        if stream:
+            secondary.append("stage-streaming-replay-buffer-fixture")
+        return "collect-file-invalidation-evidence", secondary, "missing-safe-invalidation-evidence", True
+    if has_tools or "tools-present" in blockers or "tool-call-cache-disabled" in blockers:
+        return "keep-tool-cache-blocked", secondary, "tool-cache-disabled-without-invalidation-proof", True
+    if stream or "streaming-replay-not-supported" in blockers or "unsupported-streaming-shape" in blockers:
+        return "stage-streaming-replay-buffer-fixture", secondary, "streaming-replay-buffer-fixture-needed", False
+    if "insufficient-repeat-evidence" in blockers:
+        return "collect-repeat-evidence", secondary, "insufficient-repeat-evidence", False
+    return "keep-cache-replay-noop", secondary, public_label(reason, "unsupported-cache-replay-shape"), False
+
+
+def build_request_shape_cache_invalidation_evidence_report(
+    cohorts: list[dict[str, Any]],
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    next_action_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    readiness_counts: dict[str, int] = {}
+    row_count_total = 0
+    tool_blocked_rows = 0
+    streaming_blocked_rows = 0
+    invalidation_missing_rows = 0
+    exact_non_tool_rows = 0
+
+    for cohort in cohorts:
+        if not isinstance(cohort, dict):
+            continue
+        row_count = _as_int(cohort.get("row_count"))
+        if row_count <= 0:
+            continue
+        readiness = public_label(cohort.get("readiness"), "unknown")
+        reason = public_label(cohort.get("reason"), "unknown")
+        blockers = sorted(
+            {
+                public_label(item, "unknown")
+                for item in cohort.get("blockers") or []
+                if public_label(item, "unknown") != "unknown"
+            }
+        )
+        next_action, secondary_actions, evidence_status, requires_invalidation = _cache_invalidation_next_actions(cohort)
+        has_tools = bool(cohort.get("has_tools"))
+        stream = bool(cohort.get("stream"))
+        exact_non_tool_only = readiness == "replay-ready" and not has_tools and not stream
+
+        row_count_total += row_count
+        _increment(readiness_counts, readiness, row_count)
+        _increment(next_action_counts, next_action, row_count)
+        for blocker in blockers or [reason]:
+            _increment(blocker_counts, blocker, row_count)
+        if has_tools:
+            tool_blocked_rows += row_count
+        if stream:
+            streaming_blocked_rows += row_count
+        if requires_invalidation:
+            invalidation_missing_rows += row_count
+        if exact_non_tool_only:
+            exact_non_tool_rows += row_count
+
+        rows.append(
+            {
+                "schema": REPLAY_INVALIDATION_EVIDENCE_COHORT_SCHEMA,
+                "rank": 0,
+                "provider_family": public_label(cohort.get("provider_family"), "unknown"),
+                "source_surface": public_label(cohort.get("source_surface"), "unknown"),
+                "endpoint": public_label(cohort.get("endpoint"), "unknown"),
+                "category": public_label(cohort.get("category"), "unknown"),
+                "workflow_phase": public_label(cohort.get("workflow_phase"), "unknown"),
+                "stream": stream,
+                "has_tools": has_tools,
+                "cache_status": public_label(cohort.get("cache_status"), "unknown"),
+                "routing_status": public_label(cohort.get("routing_status"), "unknown"),
+                "text_bucket": public_label(cohort.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(cohort.get("token_bucket"), "unknown"),
+                "row_count": row_count,
+                "readiness": readiness,
+                "evidence_status": evidence_status,
+                "reason": reason,
+                "blocker_codes": blockers,
+                "next_action": next_action,
+                "secondary_next_actions": sorted(set(secondary_actions)),
+                "projected_hits": _as_int(cohort.get("projected_hits")),
+                "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
+                "requires_explicit_invalidation_safety_evidence": requires_invalidation,
+                "safe_invalidation_evidence": False,
+                "tool_cache_replay_enabled": False,
+                "streaming_replay_enabled": False,
+                "cache_entries_written": 0,
+                "policy_files_written": False,
+                "local_file_backed_policy_compatibility": {
+                    "schema": "agentflow.request_shape_cache_invalidation_policy_compatibility.v1",
+                    "compatible": True,
+                    "policy_source": "local-file-backed",
+                    "policy_section": "cache",
+                    "rule_file": "cache_rules.yaml",
+                    "managed_dependency": "optional",
+                    "tool_call_cache_enabled": False,
+                    "streaming_replay_enabled": False,
+                    "requires_operator_apply": True,
+                    "reason": "file-backed-local-cache-policy",
+                },
+                "aggregate_only": True,
+                "metadata_only": True,
+                "privacy": _replayability_privacy(),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            {
+                "collect-file-invalidation-evidence": 5,
+                "keep-tool-cache-blocked": 4,
+                "stage-streaming-replay-buffer-fixture": 3,
+                "exact-non-tool-only": 2,
+                "collect-repeat-evidence": 1,
+            }.get(str(item.get("next_action")), 0),
+            _as_int(item.get("row_count")),
+            str(item.get("provider_family")),
+            str(item.get("endpoint")),
+            str(item.get("category")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    for rank, row in enumerate(rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    next_action_breakdown = _breakdown(next_action_counts)
+    return {
+        "schema": REPLAY_INVALIDATION_EVIDENCE_SCHEMA,
+        "status": "ranked" if rows else "no-cache-invalidation-evidence",
+        "read_only": True,
+        "next_action": next_action_breakdown[0]["value"] if next_action_breakdown else "keep-cache-replay-observing",
+        "summary": {
+            "cohort_count": len(rows),
+            "row_count": row_count_total,
+            "ranked_blocker_cohort_count": sum(1 for row in rows if row.get("readiness") != "replay-ready"),
+            "tool_blocked_rows": tool_blocked_rows,
+            "streaming_blocked_rows": streaming_blocked_rows,
+            "invalidation_missing_rows": invalidation_missing_rows,
+            "exact_non_tool_rows": exact_non_tool_rows,
+            "top_next_action": next_action_breakdown[0]["value"] if next_action_breakdown else None,
+            "provider_calls_made": 0,
+            "managed_server_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "next_action_breakdown": next_action_breakdown,
+        "readiness_breakdown": _breakdown(readiness_counts),
+        "blocker_breakdown": _breakdown(blocker_counts),
+        "local_file_backed_policy_compatibility": {
+            "schema": "agentflow.request_shape_cache_invalidation_policy_compatibility.v1",
+            "compatible": True,
+            "policy_source": "local-file-backed",
+            "policy_section": "cache",
+            "rule_file": "cache_rules.yaml",
+            "managed_dependency": "optional",
+            "tool_call_cache_enabled": False,
+            "streaming_replay_enabled": False,
+            "requires_operator_apply": True,
+            "reason": "file-backed-local-cache-policy",
+        },
+        "cohorts": rows[:capped_limit],
+        "acceptance": {
+            "has_ranked_blocker_cohorts": any(row.get("readiness") != "replay-ready" for row in rows),
+            "has_next_action": bool(next_action_breakdown),
+            "has_local_file_backed_policy_compatibility": True,
+            "tool_cohorts_require_invalidation_evidence": all(
+                bool(row.get("requires_explicit_invalidation_safety_evidence"))
+                for row in rows
+                if bool(row.get("has_tools"))
+            ),
+            "tool_and_streaming_replay_remain_disabled": all(
+                not bool(row.get("tool_cache_replay_enabled")) and not bool(row.get("streaming_replay_enabled"))
+                for row in rows
+                if bool(row.get("has_tools")) or bool(row.get("stream"))
+            ),
+            "no_cache_entries_written": True,
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _replayability_privacy(),
+    }
+
+
 def build_request_shape_cache_replayability_dry_run(
     rollups: list[dict[str, Any]],
     *,
@@ -3978,6 +4187,11 @@ def build_request_shape_cache_replayability_dry_run(
     blocker_breakdown = _breakdown(blocker_counts)
     if blocker_breakdown:
         top_blocker = blocker_breakdown[0]["value"]
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    invalidation_evidence = build_request_shape_cache_invalidation_evidence_report(
+        cohorts,
+        limit=capped_limit,
+    )
     return {
         "schema": REPLAYABILITY_DRY_RUN_SCHEMA,
         "status": "ranked" if cohorts else "no-replayability-cohorts",
@@ -3998,7 +4212,24 @@ def build_request_shape_cache_replayability_dry_run(
         "readiness_breakdown": _breakdown(readiness_counts),
         "skipped_reason_breakdown": _breakdown(reason_counts),
         "blocker_breakdown": blocker_breakdown,
-        "cohorts": cohorts[: max(1, min(_as_int(limit) or 25, 1000))],
+        "cache_invalidation_evidence": invalidation_evidence,
+        "acceptance": {
+            "emits_durable_invalidation_evidence": invalidation_evidence["schema"] == REPLAY_INVALIDATION_EVIDENCE_SCHEMA,
+            "has_ranked_blocker_cohorts": bool(
+                invalidation_evidence.get("acceptance", {}).get("has_ranked_blocker_cohorts")
+            ),
+            "tool_and_streaming_replay_remain_disabled": bool(
+                invalidation_evidence.get("acceptance", {}).get("tool_and_streaming_replay_remain_disabled")
+            ),
+            "has_local_file_backed_policy_compatibility": bool(
+                invalidation_evidence.get("acceptance", {}).get("has_local_file_backed_policy_compatibility")
+            ),
+            "no_cache_entries_written": True,
+            "policy_files_written": False,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "cohorts": cohorts[:capped_limit],
         "privacy": _replayability_privacy(),
     }
 
