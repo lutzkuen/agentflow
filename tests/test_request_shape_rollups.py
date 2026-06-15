@@ -479,6 +479,26 @@ class RequestShapeRollupTests(unittest.TestCase):
             cost=0.02,
             baseline=0.02,
         )
+        for cost in (0.015, 0.025):
+            self._log_call(
+                provider="openai",
+                path="/v1/responses",
+                source_surface="openai_responses",
+                endpoint="responses",
+                requested_model="gpt-5.4-mini",
+                routed_model="gpt-5.4-mini",
+                requested_model_family="gpt-5",
+                routed_model_family="gpt-5",
+                category="chat",
+                workflow_phase="chat",
+                stream=1,
+                has_tools=False,
+                cache_status="skipped",
+                cache_reason="streaming",
+                text_chars=6_000,
+                cost=cost,
+                baseline=cost,
+            )
 
         report = build_request_shape_cache_replay_canary_stage_report(
             self.store,
@@ -501,7 +521,9 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(report["acceptance"]["writes_no_cache_entries"])
         self.assertTrue(report["acceptance"]["has_holdout_metadata"])
         self.assertTrue(report["acceptance"]["has_lifecycle_metadata"])
+        self.assertTrue(report["acceptance"]["records_hit_miss_bypass_invalidation_and_stale_risk"])
         self.assertTrue(report["acceptance"]["preserves_tool_and_streaming_guards"])
+        self.assertTrue(report["acceptance"]["tool_streaming_and_invalidation_missing_cohorts_skipped"])
 
         action = report["top_stage_action"]
         self.assertEqual(action["schema"], "agentflow.request_shape_cache_replay_canary_action.v1")
@@ -527,12 +549,29 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(action["cache_decision_metadata"]["records_applied"])
         self.assertTrue(action["cache_decision_metadata"]["records_holdout"])
         self.assertTrue(action["cache_decision_metadata"]["records_skipped"])
+        self.assertTrue(action["cache_decision_metadata"]["records_bypass"])
+        self.assertTrue(action["cache_decision_metadata"]["records_bypassed"])
         self.assertTrue(action["cache_decision_metadata"]["records_invalidation_blocked"])
+        self.assertTrue(action["cache_decision_metadata"]["records_stale_risk"])
+        self.assertTrue(action["cache_decision_metadata"]["records_cache_hit"])
+        self.assertTrue(action["cache_decision_metadata"]["records_cache_miss"])
         self.assertTrue(action["lifecycle_metadata"]["emits_applied"])
         self.assertTrue(action["lifecycle_metadata"]["emits_holdout"])
         self.assertTrue(action["lifecycle_metadata"]["emits_skipped"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_bypass"])
         self.assertTrue(action["lifecycle_metadata"]["emits_invalidation_blocked"])
+        self.assertTrue(action["lifecycle_metadata"]["emits_stale_risk"])
         self.assertEqual(action["lifecycle_metadata"]["impact_report"], "agentflow.openai_cache_replay_impact.v1")
+        skipped_guards = report["skipped_cohort_guards"]
+        self.assertEqual(skipped_guards["schema"], "agentflow.request_shape_cache_replay_canary_skipped_guards.v1")
+        self.assertGreaterEqual(skipped_guards["tool_cohort_count"], 1)
+        self.assertGreaterEqual(skipped_guards["streaming_cohort_count"], 1)
+        self.assertGreaterEqual(skipped_guards["invalidation_missing_cohort_count"], 1)
+        self.assertTrue(skipped_guards["tool_streaming_and_invalidation_missing_remain_skipped"])
+        blocker_values = {item["value"] for item in skipped_guards["blocker_breakdown"]}
+        self.assertIn("tools-present", blocker_values)
+        self.assertIn("invalidation-evidence-missing", blocker_values)
+        self.assertIn("streaming-replay-not-supported", blocker_values)
         self.assertEqual(report["source_report"]["cache_replayability_summary"]["replay_ready_cohort_count"], 1)
         self.assertTrue(report["privacy"]["metadata_only"])
         self.assertTrue(report["privacy"]["aggregate_only"])

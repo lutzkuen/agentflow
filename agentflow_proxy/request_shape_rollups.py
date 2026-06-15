@@ -1966,6 +1966,7 @@ def _request_shape_cache_replay_canary_action(
             "streaming_replay_enabled": False,
             "holdout_required": holdout > 0,
             "records_applied_holdout_skipped_invalidation_blocked": True,
+            "records_applied_holdout_hit_miss_bypass_invalidation_blocked_stale_risk": True,
         },
         "cache_decision_metadata": {
             "schema": "agentflow.request_shape_cache_replay_decision_metadata.v1",
@@ -1974,14 +1975,20 @@ def _request_shape_cache_replay_canary_action(
                 "applied",
                 "holdout",
                 "skipped",
+                "bypass",
+                "bypassed",
                 "invalidation_blocked",
+                "stale_risk",
                 "cache_hit",
                 "cache_miss",
             ],
             "records_applied": True,
             "records_holdout": True,
             "records_skipped": True,
+            "records_bypass": True,
+            "records_bypassed": True,
             "records_invalidation_blocked": True,
+            "records_stale_risk": True,
             "records_cache_hit": True,
             "records_cache_miss": True,
             "metadata_only": True,
@@ -1992,7 +1999,9 @@ def _request_shape_cache_replay_canary_action(
             "emits_applied": True,
             "emits_holdout": True,
             "emits_skipped": True,
+            "emits_bypass": True,
             "emits_invalidation_blocked": True,
+            "emits_stale_risk": True,
             "emits_cache_hit": True,
             "emits_cache_miss": True,
             "impact_report": "agentflow.openai_cache_replay_impact.v1",
@@ -2002,6 +2011,84 @@ def _request_shape_cache_replay_canary_action(
         },
         "next_action": "apply-local-cache-replay-canary-after-review",
         "privacy": _replayability_privacy(),
+    }
+
+
+def _cache_replay_stage_skipped_guard_summary(cohorts: list[dict[str, Any]]) -> dict[str, Any]:
+    skipped = [
+        cohort
+        for cohort in cohorts
+        if isinstance(cohort, dict) and cohort.get("readiness") == "skipped"
+    ]
+    blocker_counts: dict[str, int] = {}
+    skipped_rows = 0
+    tool_count = 0
+    streaming_count = 0
+    invalidation_missing_count = 0
+    stale_risk_count = 0
+    examples: list[dict[str, Any]] = []
+
+    for cohort in skipped:
+        row_count = _as_int(cohort.get("row_count"))
+        skipped_rows += row_count
+        blockers = [public_label(item, "unknown") for item in cohort.get("blockers") or [] if item]
+        reason = public_label(cohort.get("reason"), "unknown")
+        if not blockers and reason != "unknown":
+            blockers = [reason]
+        for blocker in blockers:
+            _increment(blocker_counts, blocker)
+        has_tools = bool(cohort.get("has_tools")) or any("tool" in blocker for blocker in blockers)
+        is_streaming = bool(cohort.get("stream")) or "streaming-replay-not-supported" in blockers
+        invalidation_missing = "invalidation-evidence-missing" in blockers
+        stale_risk = any("stale" in blocker for blocker in blockers)
+        if has_tools:
+            tool_count += 1
+        if is_streaming:
+            streaming_count += 1
+        if invalidation_missing:
+            invalidation_missing_count += 1
+        if stale_risk:
+            stale_risk_count += 1
+        if len(examples) < 5:
+            examples.append(
+                {
+                    "rank": _as_int(cohort.get("rank")),
+                    "reason": reason,
+                    "blockers": blockers,
+                    "provider_family": cohort.get("provider_family"),
+                    "source_surface": cohort.get("source_surface"),
+                    "endpoint": cohort.get("endpoint"),
+                    "category": cohort.get("category"),
+                    "stream": bool(cohort.get("stream")),
+                    "has_tools": bool(cohort.get("has_tools")),
+                    "row_count": row_count,
+                    "projected_hits": _as_int(cohort.get("projected_hits")),
+                }
+            )
+
+    return {
+        "schema": "agentflow.request_shape_cache_replay_canary_skipped_guards.v1",
+        "skipped_cohort_count": len(skipped),
+        "skipped_rows": skipped_rows,
+        "tool_cohort_count": tool_count,
+        "streaming_cohort_count": streaming_count,
+        "invalidation_missing_cohort_count": invalidation_missing_count,
+        "stale_risk_cohort_count": stale_risk_count,
+        "blocker_breakdown": _breakdown(blocker_counts),
+        "examples": examples,
+        "tool_streaming_and_invalidation_missing_remain_skipped": (
+            all(cohort.get("readiness") == "skipped" for cohort in skipped)
+            and tool_count > 0
+            and streaming_count > 0
+            and invalidation_missing_count > 0
+        ),
+        "metadata_only": True,
+        "aggregate_only": True,
+        "raw_prompts_included": False,
+        "provider_bodies_included": False,
+        "cache_keys_included": False,
+        "request_ids_included": False,
+        "session_ids_included": False,
     }
 
 
@@ -2047,6 +2134,9 @@ def build_request_shape_cache_replay_canary_stage_report(
         )
         for cohort in cohorts
     ]
+    skipped_guards = _cache_replay_stage_skipped_guard_summary(
+        [cohort for cohort in dry_run.get("cohorts") or [] if isinstance(cohort, dict)]
+    )
     top_action = actions[0] if actions else None
     top_cohort = cohorts[0] if cohorts else None
     if actions:
@@ -2071,6 +2161,7 @@ def build_request_shape_cache_replay_canary_stage_report(
         "stage_actions": actions,
         "top_stage_action": top_action,
         "top_cohort": top_cohort,
+        "skipped_cohort_guards": skipped_guards,
         "source_report": {
             "schema": rollup_report.get("schema"),
             "window": rollup_report.get("window"),
@@ -2097,11 +2188,25 @@ def build_request_shape_cache_replay_canary_stage_report(
                 and bool(top_action["lifecycle_metadata"].get("emits_applied"))
                 and bool(top_action["lifecycle_metadata"].get("emits_holdout"))
                 and bool(top_action["lifecycle_metadata"].get("emits_skipped"))
+                and bool(top_action["lifecycle_metadata"].get("emits_bypass"))
                 and bool(top_action["lifecycle_metadata"].get("emits_invalidation_blocked"))
+                and bool(top_action["lifecycle_metadata"].get("emits_stale_risk"))
+            ),
+            "records_hit_miss_bypass_invalidation_and_stale_risk": bool(
+                top_action
+                and isinstance(top_action.get("cache_decision_metadata"), dict)
+                and bool(top_action["cache_decision_metadata"].get("records_cache_hit"))
+                and bool(top_action["cache_decision_metadata"].get("records_cache_miss"))
+                and bool(top_action["cache_decision_metadata"].get("records_bypass"))
+                and bool(top_action["cache_decision_metadata"].get("records_invalidation_blocked"))
+                and bool(top_action["cache_decision_metadata"].get("records_stale_risk"))
             ),
             "preserves_tool_and_streaming_guards": all(
                 not bool(action.get("conditions", {}).get("has_tools")) and not bool(action.get("conditions", {}).get("stream"))
                 for action in actions
+            ),
+            "tool_streaming_and_invalidation_missing_cohorts_skipped": bool(
+                skipped_guards.get("tool_streaming_and_invalidation_missing_remain_skipped")
             ),
         },
         "privacy": _replayability_privacy(),
