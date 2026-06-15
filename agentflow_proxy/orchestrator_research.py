@@ -969,6 +969,112 @@ def _diagnostic_ledger_stages(diagnostics: Iterable[dict[str, Any]]) -> list[dic
     return stages
 
 
+def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
+    reason = str(group.get("keep_blocked_reason") or group.get("blocker_code") or group.get("safety_stop_reason") or "").strip()
+    count = _to_int(group.get("safety_stop_count") or group.get("event_count"))
+    if not reason or count <= 0:
+        return None
+    next_state = str(group.get("next_state") or "keep-blocked").strip().replace("_", "-")
+    if next_state not in {"keep-blocked", "retry-later", "superseded"}:
+        next_state = "keep-blocked"
+    needed = [str(item) for item in group.get("needed_resolution") or [] if str(item or "").strip()]
+    action_family = str(group.get("action_family") or "activation-feedback").strip() or "activation-feedback"
+    stage = {
+        "lever": "activation-feedback",
+        "local_action_family": action_family,
+        "state": next_state,
+        "evidence_source": "agentflow.activation_safety_stop_burndown.v1",
+        "next_action": group.get("next_action") or "review-activation-feedback-safety-stop-and-record-keep-blocked-reason",
+        "blocker_codes": [reason],
+        "sample_count": count,
+        "projected_saved_usd": round(_to_float(group.get("savings_estimate_usd")), 8),
+        "issue_worthy_status": "blocked" if next_state == "keep-blocked" else "review",
+        "source": "activation-safety-stop-burndown",
+        "keep_blocked_reason": reason,
+        "needed_resolution": needed,
+        "next_state": next_state,
+        "next_state_reason": group.get("next_state_reason") or reason,
+        "safety_stop_count": count,
+        "safety_stopped_count": count,
+    }
+    policy_ref = str(group.get("policy_ref") or "").strip()
+    if policy_ref and policy_ref != "unknown":
+        stage["policy_ref"] = policy_ref
+    return stage
+
+
+def _safety_stop_ledger_stages(safety_stop_burndown: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(safety_stop_burndown, dict):
+        return []
+    stages: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in safety_stop_burndown.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        stage = _safety_stop_ledger_stage(group)
+        if stage is None:
+            continue
+        key = (
+            str(stage.get("local_action_family") or ""),
+            str(stage.get("keep_blocked_reason") or ""),
+            str(stage.get("next_state") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        stages.append(stage)
+    return stages
+
+
+def _has_current_safety_stop_keep_blocked(safety_stop_burndown: dict[str, Any] | None) -> bool:
+    if not isinstance(safety_stop_burndown, dict):
+        return False
+    for group in safety_stop_burndown.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        if str(group.get("next_state") or "").replace("_", "-") != "keep-blocked":
+            continue
+        reason = str(group.get("keep_blocked_reason") or "").strip()
+        needed = {str(item) for item in group.get("needed_resolution") or []}
+        if reason and (needed & {"human_review", "safer_threshold", "rollback_proof"}):
+            return True
+    return False
+
+
+def _without_suppressed_safety_stop_diagnostics(
+    diagnostics: list[dict[str, Any]],
+    safety_stop_burndown: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not _has_current_safety_stop_keep_blocked(safety_stop_burndown):
+        return diagnostics, []
+    filtered: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+    suppressed_fingerprints: set[str] = set()
+    for diagnostic in diagnostics:
+        diagnostic_class = _normal_diagnostic_token(diagnostic.get("diagnostic_class") or diagnostic.get("reason"))
+        reason = _normal_diagnostic_token(diagnostic.get("reason"))
+        if diagnostic_class == "safety-stop" or reason in {"safety-stop", "safety-stopped", "safety-stop-tripped"}:
+            fingerprint = _diagnostic_fingerprint(diagnostic_class or reason or "safety-stop")
+            if fingerprint not in suppressed_fingerprints:
+                suppressed_fingerprints.add(fingerprint)
+                suppressed.append(
+                    {
+                        "diagnostic_class": diagnostic_class or reason,
+                        "reason": reason or diagnostic_class,
+                        "fingerprint": fingerprint,
+                        "suppression_kind": "current-keep-blocked-ledger-record",
+                        "keep_blocked_reason": sanitize_value(
+                            (safety_stop_burndown.get("summary") or {}).get("top_keep_blocked_reason")
+                            if isinstance(safety_stop_burndown.get("summary"), dict)
+                            else "safety-stop-keep-blocked"
+                        ),
+                    }
+                )
+            continue
+        filtered.append(diagnostic)
+    return filtered, suppressed
+
+
 def _promotion_blocker_source_report(stats: dict[str, Any]) -> dict[str, Any] | None:
     for key in (
         "promotion_blocker_next_action_status",
@@ -2598,6 +2704,8 @@ def _loop_progress_state(state: str) -> bool:
 def _ledger_status_from_stage(stage: dict[str, Any]) -> str:
     state = str(stage.get("state") or "").strip().lower().replace("_", "-")
     blockers = [str(item).lower().replace("_", "-") for item in stage.get("blocker_codes") or []]
+    if state in {"keep-blocked", "retry-later", "superseded"}:
+        return state
     if _to_int(stage.get("safety_stopped_count")) > 0 or any("safety" in blocker for blocker in blockers):
         return "safety-stopped"
     if state in {"blocked", "missing-evidence"}:
@@ -2695,9 +2803,11 @@ def build_evidence_to_activation_next_action_ledger(
     *,
     existing_issues: Iterable[dict[str, Any]] = (),
     diagnostics: Iterable[dict[str, Any]] = (),
+    safety_stop_burndown: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     loop = stats_summary.get("evidence_to_activation_loop") if isinstance(stats_summary.get("evidence_to_activation_loop"), dict) else {}
     stages = [stage for stage in loop.get("levers") or [] if isinstance(stage, dict)]
+    stages.extend(_safety_stop_ledger_stages(safety_stop_burndown))
     stages.extend(_diagnostic_ledger_stages(diagnostics))
     if not stages:
         return None
@@ -2762,6 +2872,16 @@ def build_evidence_to_activation_next_action_ledger(
             entry["diagnostic_reason"] = sanitize_value(stage.get("diagnostic_reason"))
         if stage.get("diagnostic_fingerprint"):
             entry["diagnostic_fingerprint"] = sanitize_value(stage.get("diagnostic_fingerprint"))
+        if stage.get("keep_blocked_reason"):
+            entry["keep_blocked_reason"] = sanitize_value(stage.get("keep_blocked_reason"))
+        if stage.get("needed_resolution"):
+            entry["needed_resolution"] = sanitize_value(stage.get("needed_resolution"))
+        if stage.get("next_state"):
+            entry["next_state"] = sanitize_value(stage.get("next_state"))
+        if stage.get("next_state_reason"):
+            entry["next_state_reason"] = sanitize_value(stage.get("next_state_reason"))
+        if stage.get("safety_stop_count"):
+            entry["safety_stop_count"] = _to_int(stage.get("safety_stop_count"))
         if stage.get("source"):
             entry["source"] = sanitize_value(stage.get("source"))
         if stage.get("requested_model"):
@@ -6259,13 +6379,6 @@ def build_research_plan(
         _resolve_aggregate_only_diagnostics(_diagnostics_from_logs(log_sources), summary),
         summary,
     )
-    activation_ledger = build_evidence_to_activation_next_action_ledger(
-        summary,
-        existing_issues=issue_list,
-        diagnostics=diagnostics,
-    )
-    if activation_ledger is not None:
-        summary["evidence_to_activation_next_action_ledger"] = activation_ledger
     activation_safety_stop_burndown = None
     if diagnostics:
         from agentflow_proxy.activation_lifecycle_feedback import build_activation_safety_stop_burndown
@@ -6278,7 +6391,19 @@ def build_research_plan(
                 },
             }
         )
-    optimization_candidates = _optimization_candidates(stats_summary=summary, diagnostics=diagnostics)
+    activation_ledger = build_evidence_to_activation_next_action_ledger(
+        summary,
+        existing_issues=issue_list,
+        diagnostics=diagnostics,
+        safety_stop_burndown=activation_safety_stop_burndown,
+    )
+    if activation_ledger is not None:
+        summary["evidence_to_activation_next_action_ledger"] = activation_ledger
+    candidate_diagnostics, safety_stop_suppressed_diagnostics = _without_suppressed_safety_stop_diagnostics(
+        diagnostics,
+        activation_safety_stop_burndown,
+    )
+    optimization_candidates = _optimization_candidates(stats_summary=summary, diagnostics=candidate_diagnostics)
 
     ready_count = len(ready_issues)
     should_run = threshold > 0 and ready_count < threshold
@@ -6332,7 +6457,7 @@ def build_research_plan(
             create_issues.append(openai_routing_proposal)
         create_issues.extend(_proposals_from_optimization_candidates(optimization_candidates))
         repeated_actionable_diagnostics = [
-            item for item in _actionable_diagnostics(diagnostics)
+            item for item in _actionable_diagnostics(candidate_diagnostics)
             if _to_int(item.get("count")) > 1 and item.get("backlog_action") != "needs-human-review"
         ]
         if repeated_actionable_diagnostics:
@@ -6361,6 +6486,12 @@ def build_research_plan(
             existing_issues=issue_list,
             max_count=10,
         )
+        if safety_stop_suppressed_diagnostics:
+            proposal_suppression["suppressed"].extend(safety_stop_suppressed_diagnostics[:20])
+            proposal_suppression["suppressed_count"] = _to_int(proposal_suppression.get("suppressed_count")) + len(
+                safety_stop_suppressed_diagnostics
+            )
+            proposal_suppression["keep_blocked_ledger_suppressed_count"] = len(safety_stop_suppressed_diagnostics)
         create_issues = [_finalize_create_issue_proposal(proposal) for proposal in create_issues]
         next_backlog_milestone = _next_backlog_milestone(
             create_issues=create_issues,

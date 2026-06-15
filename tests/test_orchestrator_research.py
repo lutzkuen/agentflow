@@ -3760,7 +3760,7 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         self.assertNotIn("req-secret-stop-a", rendered)
         self.assertNotIn("req-secret-stop-b", rendered)
 
-    def test_repeated_safety_stop_creates_issue_when_no_existing_match(self):
+    def test_repeated_safety_stop_keep_blocked_ledger_suppresses_ready_issue(self):
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "run.log"
             log_path.write_text(
@@ -3784,23 +3784,34 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             item for item in plan["backlog_changes"]["create_issues"]
             if "repeated" in item["title"].lower() and "safety stop" in item["title"].lower()
         ]
-        self.assertTrue(repeated_diag_proposals, "expected a repeated-diagnostic create proposal for safety-stop")
-        comment_issues = [
-            c for c in plan["backlog_changes"]["comment_issues"]
-            if "safety" in (c.get("body") or "").lower() and c.get("action") == "comment"
+        self.assertFalse(repeated_diag_proposals, "current keep-blocked safety-stop ledger should suppress duplicate ready issue")
+        ledger = plan["evidence"]["stats_summary"]["evidence_to_activation_next_action_ledger"]
+        keep_blocked = [
+            entry for entry in ledger["entries"]
+            if entry.get("evidence_schema") == "agentflow.activation_safety_stop_burndown.v1"
         ]
-        self.assertFalse(any(c.get("number") for c in comment_issues), "should not comment when no existing issue")
+        self.assertTrue(keep_blocked)
+        self.assertEqual(keep_blocked[0]["current_status"], "keep-blocked")
+        self.assertEqual(keep_blocked[0]["issue_worthy_status"], "blocked")
+        self.assertEqual(
+            keep_blocked[0]["keep_blocked_reason"],
+            "activation-feedback-safety-stop-needs-human-review-safer-threshold-rollback-proof",
+        )
+        self.assertEqual(
+            keep_blocked[0]["next_state_reason"],
+            "safety-stop-requires-safer-threshold-or-rollback-proof",
+        )
+        self.assertIn("human_review", keep_blocked[0]["needed_resolution"])
+        self.assertIn("safer_threshold", keep_blocked[0]["needed_resolution"])
+        self.assertIn("rollback_proof", keep_blocked[0]["needed_resolution"])
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["keep_blocked_ledger_suppressed_count"], 1)
+        self.assertEqual(suppression["suppressed"][-1]["suppression_kind"], "current-keep-blocked-ledger-record")
 
-        body = repeated_diag_proposals[0]["body"]
-        self.assertIn("agentflow.repeated-diagnostic.safety-stop.v1", body)
-        self.assertIn("Evidence count:", body)
-        self.assertIn("Proposed owner:", body)
-        self.assertIn("Action: create", body)
-
-    def test_repeated_safety_stop_comments_on_existing_open_issue_not_duplicate_create(self):
+    def test_repeated_diagnostic_comments_on_existing_open_issue_not_duplicate_create(self):
         existing_issue = issue(
             444,
-            "Turn repeated safety stop diagnostics into an actionable optimization issue",
+            "Turn repeated missing dependency evidence diagnostics into an actionable optimization issue",
             ["status:ready", "priority:p2", "backlog", "core-feature", "correctness"],
         )
         with TemporaryDirectory() as tmp:
@@ -3808,8 +3819,8 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             log_path.write_text(
                 "\n".join(
                     [
-                        "routing blocker=safety-stop request_id=req-secret-dup1",
-                        "routing blocker=safety-stop request_id=req-secret-dup2",
+                        "routing blocker=missing-dependency-evidence request_id=req-secret-dup1",
+                        "routing blocker=missing-dependency-evidence request_id=req-secret-dup2",
                     ]
                 ),
                 encoding="utf-8",
@@ -3824,15 +3835,15 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
 
         created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
         self.assertFalse(
-            any("repeated" in t and "safety stop" in t for t in created_titles),
+            any("repeated" in t and "missing dependency evidence" in t for t in created_titles),
             "should not create a new issue when fingerprint matches open issue #444",
         )
 
         comment_issues = plan["backlog_changes"]["comment_issues"]
         safety_stop_comments = [c for c in comment_issues if c.get("number") == 444]
-        self.assertTrue(safety_stop_comments, "expected a comment action on issue #444")
+        self.assertTrue(safety_stop_comments, "expected a repeated diagnostic comment action on issue #444")
         comment_body = safety_stop_comments[0]["body"]
-        self.assertIn("agentflow.repeated-diagnostic.safety-stop.v1", comment_body)
+        self.assertIn("agentflow.repeated-diagnostic.missing-dependency-evidence.v1", comment_body)
         self.assertIn("Action: update", comment_body)
         self.assertIn("Duplicate of open issue: #444", comment_body)
         rendered = json.dumps(plan)
@@ -3858,8 +3869,8 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         plan = build_research_plan(
             issues=[],
             log_sources=[
-                "routing blocker=safety-stop x",
-                "routing blocker=safety-stop y",
+                "routing blocker=missing-dependency-evidence x",
+                "routing blocker=missing-dependency-evidence y",
             ],
             threshold=1,
             now=NOW,
@@ -3867,9 +3878,9 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         created = plan["backlog_changes"]["create_issues"]
         repeated_proposals = [
             p for p in created
-            if "repeated" in p.get("title", "").lower() and "safety stop" in p.get("title", "").lower()
+            if "repeated" in p.get("title", "").lower() and "missing dependency evidence" in p.get("title", "").lower()
         ]
-        self.assertTrue(repeated_proposals, "expected a repeated-diagnostic proposal with safety-stop")
+        self.assertTrue(repeated_proposals, "expected a repeated-diagnostic proposal with missing dependency evidence")
         body = repeated_proposals[0]["body"]
         self.assertIn("Evidence count:", body)
         self.assertIn("Example excerpt:", body)
