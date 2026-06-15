@@ -3689,11 +3689,47 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
             ledger_entries[0]["diagnostic_fingerprint"],
             "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
+        self.assertTrue(ledger_entries[0]["durable_action_ledger_entry"])
+        self.assertEqual(ledger_entries[0]["review_status"], "review-required")
+        self.assertEqual(
+            ledger_entries[0]["verification_check"],
+            "The next research plan emits a durable activation-feedback ledger entry with a concrete next action, stable fingerprint, and metadata-only privacy flags.",
+        )
+        self.assertTrue(ledger_entries[0]["privacy"]["metadata_only"])
+        self.assertTrue(ledger_entries[0]["privacy"]["aggregate_only"])
+        self.assertFalse(ledger_entries[0]["privacy"]["raw_prompts_included"])
+        self.assertFalse(ledger_entries[0]["privacy"]["provider_bodies_included"])
+        self.assertFalse(ledger_entries[0]["privacy"]["absolute_paths_included"])
+        self.assertFalse(ledger_entries[0]["privacy"]["request_ids_included"])
+        self.assertFalse(ledger_entries[0]["privacy"]["session_ids_included"])
+        self.assertFalse(ledger_entries[0]["privacy"]["cache_keys_included"])
+        self.assertFalse(ledger_entries[0]["privacy"]["individual_candidate_ids_included"])
         self.assertTrue(ledger["privacy"]["metadata_only"])
         self.assertTrue(ledger["privacy"]["aggregate_only"])
+        optimization_candidates = plan["evidence"]["optimization_candidates"]
+        feedback_candidate = next(
+            item
+            for item in optimization_candidates
+            if item["lever"] == "activation-feedback"
+            and item["blocker"] == "repeated-activation-feedback-blocker-review"
+        )
+        signal = feedback_candidate["projected_savings_signal"]
+        self.assertEqual(signal["ledger_fingerprint"], ledger_entries[0]["diagnostic_fingerprint"])
+        self.assertEqual(signal["ledger_next_action"], ledger_entries[0]["next_action"])
+        self.assertEqual(signal["ledger_current_status"], ledger_entries[0]["current_status"])
+        self.assertEqual(signal["verification_check"], ledger_entries[0]["verification_check"])
+        self.assertFalse(signal["privacy"]["cache_keys_included"])
         created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
         bounded_proposals = [t for t in created_titles if "unclassified activation skip or blocker" in t]
         self.assertEqual(len(bounded_proposals), 1, "exactly one bounded human-review proposal should be created")
+        feedback_proposal = next(
+            item
+            for item in plan["backlog_changes"]["create_issues"]
+            if item["title"] == "Resolve repeated-activation-feedback-blocker-review activation feedback blocker"
+        )
+        self.assertIn(signal["ledger_fingerprint"], feedback_proposal["body"])
+        self.assertIn(signal["ledger_next_action"], feedback_proposal["body"])
+        self.assertIn(signal["verification_check"], feedback_proposal["body"])
         proposal_body = next(
             item["body"] for item in plan["backlog_changes"]["create_issues"]
             if "unclassified activation skip or blocker" in item["title"].lower()

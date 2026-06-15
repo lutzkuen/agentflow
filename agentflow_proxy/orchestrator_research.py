@@ -854,6 +854,16 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
         ),
         "source": "repeated-diagnostic",
     }
+    taxonomy = _diagnostic_taxonomy(diagnostic_class)
+    acceptance_check = str(
+        diagnostic.get("acceptance_check")
+        or (taxonomy or {}).get("acceptance_check")
+        or ""
+    ).strip()
+    if acceptance_check:
+        stage["verification_check"] = acceptance_check
+    if diagnostic_class:
+        stage["privacy"] = _candidate_privacy()
 
     if "missing-anthropic-canary-lifecycle-evidence" in text:
         stage.update(
@@ -941,6 +951,8 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
                 "local_action_family": "activation-feedback",
                 "state": "blocked",
                 "next_action": "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
+                "review_status": "review-required",
+                "durable_action_ledger_entry": True,
             }
         )
 
@@ -2892,6 +2904,14 @@ def build_evidence_to_activation_next_action_ledger(
             entry["diagnostic_reason"] = sanitize_value(stage.get("diagnostic_reason"))
         if stage.get("diagnostic_fingerprint"):
             entry["diagnostic_fingerprint"] = sanitize_value(stage.get("diagnostic_fingerprint"))
+        if stage.get("verification_check"):
+            entry["verification_check"] = sanitize_value(stage.get("verification_check"))
+        if stage.get("review_status"):
+            entry["review_status"] = sanitize_value(stage.get("review_status"))
+        if stage.get("durable_action_ledger_entry"):
+            entry["durable_action_ledger_entry"] = bool(stage.get("durable_action_ledger_entry"))
+        if isinstance(stage.get("privacy"), dict):
+            entry["privacy"] = sanitize_value(stage.get("privacy"))
         if stage.get("keep_blocked_reason"):
             entry["keep_blocked_reason"] = sanitize_value(stage.get("keep_blocked_reason"))
         if stage.get("needed_resolution"):
@@ -3799,6 +3819,7 @@ def _candidate_privacy() -> dict[str, Any]:
         "absolute_paths_included": False,
         "request_ids_included": False,
         "session_ids_included": False,
+        "cache_keys_included": False,
         "individual_candidate_ids_included": False,
     }
 
@@ -4782,6 +4803,7 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
     reason = str(top.get("reason") or "unknown-diagnostic")
     count = _to_int(top.get("count"))
     lifecycle_context = top.get("lifecycle_context") if isinstance(top.get("lifecycle_context"), dict) else {}
+    ledger_stage = _diagnostic_ledger_stage(top) or {}
     return _candidate(
         lever=str(top.get("source_lever") or "activation-feedback"),
         provider_surface_bucket="mixed",
@@ -4797,6 +4819,11 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
             "backlog_action": top.get("backlog_action"),
             "acceptance_check": top.get("acceptance_check"),
             "lifecycle_context": lifecycle_context,
+            "ledger_fingerprint": ledger_stage.get("diagnostic_fingerprint"),
+            "ledger_next_action": ledger_stage.get("next_action"),
+            "ledger_current_status": _ledger_status_from_stage(ledger_stage) if ledger_stage else None,
+            "verification_check": ledger_stage.get("verification_check"),
+            "privacy": _candidate_privacy(),
         },
         confidence="medium" if count > 1 else "low",
         sequencing="File after direct cache/routing/crunch candidates unless the diagnostic is a safety stop or privacy blocker.",
