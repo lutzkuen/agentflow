@@ -195,6 +195,12 @@ def _candidate_from_pass_through_bucket(bucket: dict[str, Any]) -> dict[str, Any
             blockers.append("thinking-routing-guard")
         elif "stream" in reason:
             blockers.append("unsupported-streaming-shape")
+        elif "routed-model" in reason and "missing" in reason:
+            blockers.append("missing-routed-model")
+        elif "routed-model-metadata" in reason:
+            blockers.append("missing-routed-model")
+    if bucket.get("routed_model") in (None, "") and _string(bucket.get("no_op_reason")):
+        blockers.append("missing-routed-model")
     return {
         "candidate_id": _candidate_id(bucket),
         "provider": "anthropic",
@@ -507,7 +513,7 @@ def _candidate_payload(
         "canary_fraction": bounded_canary_fraction,
         "holdout_fraction": bounded_holdout_fraction,
         "salt": _stable_id("anthropic-routing-canary-salt", candidate_id, candidate.get("requested_model"), candidate.get("target_model")),
-        "cohort_unit": "request_features",
+        "cohort_unit": "session",
         "safety_gates": {
             "block_thinking_history": True,
             "block_top_level_thinking": True,

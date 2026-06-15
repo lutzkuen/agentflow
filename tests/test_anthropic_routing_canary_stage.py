@@ -41,6 +41,21 @@ def _pass_through_report() -> dict:
                 "required_local_executor": "anthropic-routing-rules",
                 "estimated_savings_per_1000_calls_usd": 4.5,
             },
+            {
+                "rank": 3,
+                "provider": "anthropic",
+                "source_surface": "unknown",
+                "endpoint": "unknown",
+                "requested_model": "claude-sonnet-4-6",
+                "routed_model": None,
+                "candidate_target_model": "claude-haiku-4-5-20251001",
+                "category": "tool-result",
+                "sample_count": 38,
+                "actionability": "unsupported-provider-action",
+                "no_op_reason": "routed model metadata is missing for this bucket",
+                "required_local_executor": None,
+                "estimated_savings_per_1000_calls_usd": 0.0,
+            },
         ],
         "privacy": {
             "metadata_only": True,
@@ -81,10 +96,10 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["schema"], "agentflow.anthropic_routing_canary_stage.v1")
-        self.assertEqual(result["summary"]["candidate_count"], 2)
+        self.assertEqual(result["summary"]["candidate_count"], 3)
         self.assertEqual(result["summary"]["eligible_candidate_count"], 1)
         self.assertEqual(result["summary"]["staged_count"], 1)
-        self.assertEqual(result["summary"]["omitted_count"], 1)
+        self.assertEqual(result["summary"]["omitted_count"], 2)
         self.assertEqual(result["summary"]["projected_canary_applied_count"], 56)
         self.assertEqual(result["summary"]["projected_canary_holdout_count"], 111)
         self.assertEqual(result["summary"]["projected_safety_stopped_count"], 32)
@@ -111,6 +126,7 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(canary["target_model"], "claude-haiku-4-5-20251001")
         self.assertEqual(canary["eligible_categories"], ["tool-result"])
         self.assertEqual(canary["eligible_workflow_phases"], ["tool-execution"])
+        self.assertEqual(canary["cohort_unit"], "session")
         self.assertTrue(canary["stream"])
         self.assertEqual(canary["max_text_chars"], 0)
         self.assertTrue(canary["safety_gates"]["block_thinking_history"])
@@ -122,10 +138,17 @@ class AnthropicRoutingCanaryStageTests(unittest.TestCase):
         self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 0)
         self.assertEqual(lifecycle["estimated_savings_per_1000_calls_usd"], 4.5)
 
-        omitted = result["omitted"][0]
-        self.assertEqual(omitted["status"], "safety_stopped")
-        self.assertIn(omitted["reason"], {"needs-lifecycle-evidence", "thinking-routing-guard"})
-        self.assertIn("thinking-routing-guard", omitted["projected_lifecycle_evidence"]["blocker_codes"])
+        omitted_by_reason = {item["reason"]: item for item in result["omitted"]}
+        thinking_omission = next(
+            item
+            for item in result["omitted"]
+            if isinstance(item.get("projected_lifecycle_evidence"), dict)
+            and "thinking-routing-guard" in item["projected_lifecycle_evidence"].get("blocker_codes", [])
+        )
+        self.assertEqual(thinking_omission["status"], "safety_stopped")
+        self.assertIn("thinking-routing-guard", thinking_omission["projected_lifecycle_evidence"]["blocker_codes"])
+        self.assertEqual(omitted_by_reason["missing-routed-model"]["status"], "omitted")
+        self.assertEqual(omitted_by_reason["missing-routed-model"]["target_model"], "claude-haiku-4-5-20251001")
         _assert_privacy_clean(self, result)
 
     def test_cli_extracts_nested_research_plan_report(self) -> None:

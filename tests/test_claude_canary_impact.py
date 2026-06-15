@@ -8,10 +8,12 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
 from agentflow_proxy import cli
+import agentflow_proxy.router as router
 from agentflow_proxy.claude_canary_actions import apply_claude_canary_actions, build_claude_canary_actions
 from agentflow_proxy.claude_canary_impact import build_anthropic_routing_canary_lifecycle_report, build_claude_canary_impact_report
 from agentflow_proxy.routing_canary_promote import build_routing_canary_promotion_plan
@@ -55,6 +57,124 @@ def _assert_privacy_clean(testcase: unittest.TestCase, payload: dict) -> None:
 
 
 class ClaudeCanaryImpactTests(unittest.TestCase):
+    def _tool_result_body(self, *, thinking_history: bool = False) -> dict:
+        messages = []
+        if thinking_history:
+            messages.append({
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "metadata-only fixture reasoning"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}},
+                ],
+            })
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}],
+            })
+        messages.append({
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "fixture output"}],
+        })
+        return {
+            "model": "claude-sonnet-4-6",
+            "stream": True,
+            "messages": messages,
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}],
+        }
+
+    def _log_routed_fixture_call(self, store: Store, *, suffix: str, routed_model: str, routing_meta: dict, status_code: int = 200) -> None:
+        canary = routing_meta["phase_canary"]
+        store.log_call(
+            id=f"anthropic-routing-activation-{suffix}",
+            created_at="2026-06-15T09:00:00+00:00",
+            path="/v1/messages",
+            requested_model="claude-sonnet-4-6",
+            routed_model=routed_model,
+            stream=1,
+            cache_hit=0,
+            status_code=status_code,
+            latency_ms=1000,
+            input_tokens_est=500,
+            output_tokens_est=100,
+            actual_input_tokens=500,
+            actual_output_tokens=100,
+            cost_est_usd=0.001 if canary.get("cohort") == "canary_applied" else 0.003,
+            cost_baseline_usd=0.003,
+            crunch_json=stable_json({"changed": False}),
+            routing_json=stable_json(routing_meta),
+            cache_json=stable_json({"status": "skipped", "reason": "streaming"}),
+            error=None if status_code < 400 else "fixture error",
+            request_json=None,
+            response_json=None,
+            session_id=f"session-{suffix}",
+            category="tool-result",
+            retry_count=0,
+            provider="anthropic",
+            source_surface="anthropic_messages",
+            endpoint="messages",
+            requested_model_family="sonnet",
+            routed_model_family="haiku" if "haiku" in str(routed_model) else "sonnet",
+        )
+
+    def test_route_model_activates_anthropic_tool_result_canary_with_holdout_lifecycle(self) -> None:
+        policy = router._default_phase_canary_policy()
+        policy.update({
+            "enabled": True,
+            "policy_id": "test-active-anthropic-tool-result-canary",
+            "target_candidate_id": "candidate-sonnet-haiku-tool-result",
+            "canary_fraction": 0.50,
+            "holdout_fraction": 0.50,
+            "cohort_unit": "session",
+            "safety_stop": {"enabled": False},
+        })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(str(Path(tmp) / "agentflow.sqlite3"))
+            try:
+                seen: set[str] = set()
+                with patch.object(router, "ROUTING_PHASE_CANARY", policy), patch.object(router, "ROUTING_RULES_SOURCE", "local-default"):
+                    for index in range(200):
+                        routed, routing_meta = router.route_model(self._tool_result_body(), session_id=f"session-{index}")
+                        canary = routing_meta["phase_canary"]
+                        cohort = str(canary.get("cohort"))
+                        if cohort in {"canary_applied", "canary_holdout"} and cohort not in seen:
+                            self._log_routed_fixture_call(store, suffix=f"{cohort}-{index}", routed_model=routed, routing_meta=routing_meta)
+                            seen.add(cohort)
+                        if {"canary_applied", "canary_holdout"}.issubset(seen):
+                            break
+
+                    routed, routing_meta = router.route_model(self._tool_result_body(thinking_history=True), session_id="session-thinking")
+                    self.assertEqual(routed, "claude-sonnet-4-6")
+                    self.assertEqual(routing_meta["phase_canary"]["status"], "safety_stopped")
+                    self._log_routed_fixture_call(store, suffix="safety-stopped", routed_model=routed, routing_meta=routing_meta)
+
+                self.assertEqual(seen, {"canary_applied", "canary_holdout"})
+                report = build_anthropic_routing_canary_lifecycle_report(
+                    store,
+                    limit=10,
+                    max_evidence_age_hours=72,
+                    now=datetime(2026, 6, 15, 10, tzinfo=timezone.utc),
+                )
+            finally:
+                store.conn.close()
+
+        self.assertEqual(report["schema"], "agentflow.anthropic_routing_canary_lifecycle_report.v1")
+        self.assertEqual(report["summary"]["canary_applied_count"], 1)
+        self.assertEqual(report["summary"]["canary_holdout_count"], 1)
+        self.assertEqual(report["summary"]["safety_stopped_count"], 1)
+        candidate = report["candidates"][0]
+        lifecycle = candidate["anthropic_canary_lifecycle_evidence"]
+        self.assertEqual(candidate["candidate_id"], "candidate-sonnet-haiku-tool-result")
+        self.assertEqual(lifecycle["cohort_counts"]["canary_applied"], 1)
+        self.assertEqual(lifecycle["cohort_counts"]["canary_holdout"], 1)
+        self.assertEqual(lifecycle["cohort_counts"]["safety_stopped"], 1)
+        self.assertGreater(lifecycle["coverage"]["applied_rate"], 0)
+        self.assertGreater(lifecycle["coverage"]["holdout_rate"], 0)
+        self.assertIn("thinking-routing-guard", lifecycle["blocker_codes"])
+        self.assertIn("thinking-history-blocked", lifecycle["blocker_codes"])
+        _assert_privacy_clean(self, report)
+
     def _log_claude_canary_call(
         self,
         store: Store,

@@ -501,6 +501,14 @@ def _load_routing_yaml(path: Path) -> dict[str, Any] | None:
     return {"rules": []}
 
 
+def _phase_canary_from_yaml(data: dict[str, Any], *, missing_enabled: bool) -> dict[str, Any]:
+    policy = _default_phase_canary_policy()
+    if "phase_canary" in data:
+        return _apply_phase_canary_yaml(policy, data.get("phase_canary"))
+    policy["enabled"] = bool(missing_enabled)
+    return policy
+
+
 def _rules_list(data: Any) -> list[dict[str, Any]]:
     if not isinstance(data, dict):
         return []
@@ -518,18 +526,18 @@ def _load_routing_rules() -> tuple[list[dict], dict[str, Any], dict[str, Any], s
         p = safe_expanduser(env_path)
         data = _load_routing_yaml(p)
         if data is not None:
-            canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), data.get("phase_canary"))
+            canary = _phase_canary_from_yaml(data, missing_enabled=False)
             openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), data.get("openai_canary"))
             return _rules_list(data), canary, openai_canary, "local-manual", str(p)
 
     local_path = agentflow_config_path("routing_rules.yaml")
     local = _load_routing_yaml(local_path)
     if local is not None:
-        canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), local.get("phase_canary"))
+        canary = _phase_canary_from_yaml(local, missing_enabled=False)
         openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), local.get("openai_canary"))
         return _rules_list(local) + _rules_list(defaults), canary, openai_canary, "local-manual", str(local_path)
 
-    canary = _apply_phase_canary_yaml(_default_phase_canary_policy(), defaults.get("phase_canary"))
+    canary = _phase_canary_from_yaml(defaults, missing_enabled=False)
     openai_canary = _apply_openai_canary_yaml(_default_openai_canary_policy(), defaults.get("openai_canary"))
     return _rules_list(defaults), canary, openai_canary, "local-default", str(defaults_path)
 
@@ -1099,6 +1107,23 @@ def phase_canary_decision(
     return requested, meta
 
 
+def _phase_canary_in_scope(*, requested: str, category: str, stream: bool) -> bool:
+    if not ROUTING_PHASE_CANARY.get("enabled"):
+        return False
+    requested_l = requested.lower()
+    model_pattern = str(ROUTING_PHASE_CANARY.get("model_pattern") or "sonnet").lower()
+    if model_pattern and model_pattern not in requested_l:
+        return False
+    if ROUTING_RULES_SOURCE != "local-default":
+        return True
+    if ROUTING_PHASE_CANARY.get("stream") is not None and bool(ROUTING_PHASE_CANARY.get("stream")) != bool(stream):
+        return False
+    eligible_categories = set(_string_list(ROUTING_PHASE_CANARY.get("eligible_categories")))
+    if eligible_categories and category not in eligible_categories:
+        return False
+    return True
+
+
 def _openai_canary_base_meta(
     *,
     requested: str,
@@ -1643,7 +1668,7 @@ def route_model(body: dict[str, Any], *, session_id: str | None = None) -> tuple
             meta["thinking_gate"] = thinking_gate
             return routed, meta
 
-    if ROUTING_PHASE_CANARY.get("enabled"):
+    if _phase_canary_in_scope(requested=requested, category=category, stream=stream):
         canary_routed, canary_meta = phase_canary_decision(
             requested=requested,
             text_chars=text_chars,
