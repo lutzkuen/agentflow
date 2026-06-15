@@ -5140,6 +5140,15 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
         help="Candidate holdout fraction to encode in the staged action, default: 0.10",
     )
     parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the staged canary action to a local crunch rules YAML file. Default is read-only.",
+    )
+    parser.add_argument(
+        "--rules-path",
+        help="Crunch rules YAML file to update when --apply is used. Defaults to AGENTFLOW_CRUNCH_RULES or ~/.agentflow/crunch_rules.yaml.",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON instead of emitting one compact line.",
@@ -5148,7 +5157,11 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
 
     stdout = stdout if stdout is not None else sys.stdout
 
-    from agentflow_proxy.request_shape_rollups import build_request_shape_crunch_canary_stage_report
+    from agentflow_proxy.paths import agentflow_config_path
+    from agentflow_proxy.request_shape_rollups import (
+        apply_request_shape_crunch_canary_action,
+        build_request_shape_crunch_canary_stage_report,
+    )
 
     store = _open_store_for_db(str(args.db))
     try:
@@ -5162,11 +5175,33 @@ def request_shape_crunch_canary_stage_cli(argv: Sequence[str] | None = None, *, 
         )
     finally:
         store.conn.close()
+    if args.apply:
+        rules_path = Path(args.rules_path or os.getenv("AGENTFLOW_CRUNCH_RULES") or agentflow_config_path("crunch_rules.yaml"))
+        action = result.get("top_stage_action") if isinstance(result.get("top_stage_action"), dict) else None
+        if action is None:
+            apply_result = {
+                "schema": "agentflow.request_shape_crunch_canary_apply.v1",
+                "ok": False,
+                "dry_run": False,
+                "wrote_policy_files": False,
+                "rules_path_included": False,
+                "errors": [{"path": "$.top_stage_action", "message": "no stageable request-shape crunch canary action"}],
+            }
+        else:
+            apply_result = apply_request_shape_crunch_canary_action(action, rules_path=rules_path)
+        result["apply_result"] = apply_result
+        result["read_only"] = False
+        result["dry_run"] = False
+        result["ok"] = bool(result.get("ok")) and bool(apply_result.get("ok"))
+        if apply_result.get("ok"):
+            result["status"] = "staged-and-applied"
+            result["reason"] = "applied-local-repeated-context-crunch-canary"
+            result["next_action"] = "measure-repeated-context-crunch-canary-impact"
     if args.pretty:
         stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
         _write_json(stdout, result)
-    return 0
+    return 0 if result.get("ok") else 1
 
 
 def request_shape_cache_replay_canary_stage_cli(argv: Sequence[str] | None = None, *, stdout: Any = None) -> int:

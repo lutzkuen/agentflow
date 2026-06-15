@@ -919,6 +919,78 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertTrue(payload["privacy"]["aggregate_only"])
         self.assertNotIn("raw prompt must not leak", stdout.getvalue())
 
+    def test_crunch_canary_stage_cli_apply_writes_file_backed_local_rule(self) -> None:
+        for cost in (0.08, 0.07, 0.09):
+            self._log_call(
+                stream=1,
+                has_tools=True,
+                cache_status="skipped",
+                cache_reason="streaming tools-disabled",
+                routing_reason="keep requested model for thinking request",
+                workflow_phase="thinking",
+                text_chars=132_000,
+                cost=cost,
+                baseline=cost,
+            )
+
+        rules_path = Path(self.tmpdir.name) / "config" / "crunch_rules.yaml"
+        stdout = io.StringIO()
+        code = cli.request_shape_crunch_canary_stage_cli(
+            [
+                "--db",
+                self.db_path,
+                "--limit",
+                "20",
+                "--run-id",
+                "cli-2026-06-15-stage-apply",
+                "--rollout-fraction",
+                "0.05",
+                "--holdout-fraction",
+                "0.20",
+                "--apply",
+                "--rules-path",
+                str(rules_path),
+            ],
+            stdout=stdout,
+        )
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "staged-and-applied")
+        self.assertFalse(payload["dry_run"])
+        self.assertFalse(payload["read_only"])
+        self.assertEqual(payload["next_action"], "measure-repeated-context-crunch-canary-impact")
+        self.assertEqual(payload["staged_canary_count"], 1)
+        self.assertTrue(payload["acceptance"]["stages_one_repeated_context_crunch_canary"])
+        self.assertTrue(payload["acceptance"]["has_projected_lifecycle_split"])
+        apply_result = payload["apply_result"]
+        self.assertTrue(apply_result["ok"])
+        self.assertTrue(apply_result["wrote_policy_files"])
+        self.assertFalse(apply_result["rules_path_included"])
+        self.assertEqual(apply_result["target_local_policy"], "crunch_rules")
+        rules = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
+        canary = rules["request_shape_repeated_context_canaries"]["rules"][0]
+        self.assertEqual(canary["id"], payload["top_stage_action"]["policy_id"])
+        self.assertEqual(canary["cohort_id"], payload["top_stage_action"]["cohort_id"])
+        self.assertEqual(canary["conditions"]["provider_family"], "anthropic")
+        self.assertEqual(canary["conditions"]["category"], "tool-result")
+        self.assertEqual(canary["conditions"]["workflow_phase"], "thinking")
+        self.assertEqual(canary["conditions"]["text_bucket"], "gte_128k_chars")
+        self.assertEqual(canary["rollout"]["canary_fraction"], 0.05)
+        self.assertEqual(canary["rollout"]["holdout_fraction"], 0.2)
+
+        rendered = stdout.getvalue()
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            str(rules_path),
+        ):
+            self.assertNotIn(forbidden, rendered)
+
     def test_crunch_canary_stage_keeps_safety_stopped_cohort_out_of_applied_holdout_split(self) -> None:
         safety_lifecycle = {
             "schema": "agentflow.request_shape_crunch_canary_lifecycle.v1",
