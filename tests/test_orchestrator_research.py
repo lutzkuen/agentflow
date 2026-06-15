@@ -1520,7 +1520,13 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(by_blocker["activation-feedback-blocker-review"]["local_action_family"], "activation-feedback")
         self.assertEqual(
             by_blocker["activation-feedback-blocker-review"]["next_action"],
-            "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
+            "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+        )
+        self.assertEqual(by_blocker["activation-feedback-blocker-review"]["current_status"], "keep-blocked")
+        self.assertEqual(by_blocker["activation-feedback-blocker-review"]["issue_worthy_status"], "blocked")
+        self.assertEqual(
+            by_blocker["activation-feedback-blocker-review"]["keep_blocked_reason"],
+            "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger",
         )
         self.assertEqual(
             by_blocker["activation-feedback-blocker-review"]["diagnostic_fingerprint"],
@@ -4234,17 +4240,22 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertEqual(len(ledger_entries), 1)
         self.assertEqual(
             ledger_entries[0]["next_action"],
-            "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
+            "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
         )
         self.assertEqual(ledger_entries[0]["local_action_family"], "activation-feedback")
         self.assertEqual(ledger_entries[0]["sample_count"], 2)
-        self.assertEqual(ledger_entries[0]["issue_worthy_status"], "ready")
+        self.assertEqual(ledger_entries[0]["current_status"], "keep-blocked")
+        self.assertEqual(ledger_entries[0]["issue_worthy_status"], "blocked")
+        self.assertEqual(
+            ledger_entries[0]["keep_blocked_reason"],
+            "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger",
+        )
         self.assertEqual(
             ledger_entries[0]["diagnostic_fingerprint"],
             "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
         self.assertTrue(ledger_entries[0]["durable_action_ledger_entry"])
-        self.assertEqual(ledger_entries[0]["review_status"], "review-required")
+        self.assertEqual(ledger_entries[0]["review_status"], "resolved-to-keep-blocked")
         self.assertEqual(
             ledger_entries[0]["verification_check"],
             "The next research plan emits a durable activation-feedback ledger entry with a concrete next action, stable fingerprint, and metadata-only privacy flags.",
@@ -4261,43 +4272,32 @@ class OrchestratorResearchPlanTests(unittest.TestCase):
         self.assertTrue(ledger["privacy"]["metadata_only"])
         self.assertTrue(ledger["privacy"]["aggregate_only"])
         optimization_candidates = plan["evidence"]["optimization_candidates"]
-        feedback_candidate = next(
-            item
-            for item in optimization_candidates
-            if item["lever"] == "activation-feedback"
-            and item["blocker"] == "repeated-activation-feedback-blocker-review"
+        self.assertFalse(
+            [
+                item for item in optimization_candidates
+                if item["lever"] == "activation-feedback"
+                and item["blocker"] == "repeated-activation-feedback-blocker-review"
+            ],
+            "resolved activation-feedback blocker-review diagnostics should not become optimization proposals",
         )
-        signal = feedback_candidate["projected_savings_signal"]
-        self.assertEqual(signal["ledger_fingerprint"], ledger_entries[0]["diagnostic_fingerprint"])
-        self.assertEqual(signal["ledger_next_action"], ledger_entries[0]["next_action"])
-        self.assertEqual(signal["ledger_current_status"], ledger_entries[0]["current_status"])
-        self.assertEqual(signal["verification_check"], ledger_entries[0]["verification_check"])
-        self.assertFalse(signal["privacy"]["cache_keys_included"])
         created_titles = [item["title"].lower() for item in plan["backlog_changes"]["create_issues"]]
         bounded_proposals = [t for t in created_titles if "unclassified activation skip or blocker" in t]
-        self.assertEqual(len(bounded_proposals), 1, "exactly one bounded human-review proposal should be created")
-        feedback_proposal = next(
-            item
-            for item in plan["backlog_changes"]["create_issues"]
-            if item["title"] == "Resolve repeated-activation-feedback-blocker-review activation feedback blocker"
+        self.assertFalse(
+            bounded_proposals,
+            "durable keep-blocked activation-feedback blocker-review ledger should suppress duplicate ready proposals",
         )
-        self.assertIn(signal["ledger_fingerprint"], feedback_proposal["body"])
-        self.assertIn(signal["ledger_next_action"], feedback_proposal["body"])
-        self.assertIn(signal["verification_check"], feedback_proposal["body"])
-        proposal_body = next(
-            item["body"] for item in plan["backlog_changes"]["create_issues"]
-            if "unclassified activation skip or blocker" in item["title"].lower()
+        self.assertFalse(
+            [
+                item for item in plan["backlog_changes"]["create_issues"]
+                if item["title"] == "Resolve repeated-activation-feedback-blocker-review activation feedback blocker"
+            ],
+            "durable keep-blocked activation-feedback blocker-review ledger should suppress candidate proposals",
         )
-        self.assertIn("Source schema:", proposal_body)
-        self.assertIn("Report key:", proposal_body)
-        self.assertIn("Privacy:", proposal_body)
-        self.assertIn("metadata-only", proposal_body)
-        self.assertIn("Ledger next action: cut-ready-activation-feedback-issue-from-bounded-diagnostic", proposal_body)
-        self.assertIn("Ledger current status: blocked", proposal_body)
-        self.assertIn("Ledger local action family: activation-feedback", proposal_body)
-        self.assertIn(
-            "Ledger verification check: The next research plan emits a durable activation-feedback ledger entry with a concrete next action, stable fingerprint, and metadata-only privacy flags.",
-            proposal_body,
+        suppression = plan["evidence"]["issue_proposal_suppression"]
+        self.assertEqual(suppression["activation_feedback_keep_blocked_suppressed_count"], 1)
+        self.assertEqual(
+            suppression["suppressed"][-1]["keep_blocked_reason"],
+            "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger",
         )
         repeated_plan = build_research_plan(
             issues=[],
@@ -4927,11 +4927,20 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
             af_entry["diagnostic_fingerprint"],
             "agentflow.repeated-diagnostic.activation-feedback-blocker-review.v1",
         )
-        self.assertEqual(af_entry["next_action"], "cut-ready-activation-feedback-issue-from-bounded-diagnostic")
+        self.assertEqual(
+            af_entry["next_action"],
+            "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence",
+        )
         self.assertEqual(af_entry["local_action_family"], "activation-feedback")
         self.assertEqual(af_entry["evidence_schema"], "agentflow.orchestrator_research_log_diagnostics.v1")
         self.assertTrue(af_entry.get("fingerprint"), "durable stable fingerprint must be non-empty")
-        self.assertIn(af_entry.get("state") or "", {"blocked", "missing-evidence"})
+        self.assertEqual(af_entry.get("state"), "keep-blocked")
+        self.assertEqual(af_entry.get("current_status"), "keep-blocked")
+        self.assertEqual(af_entry.get("issue_worthy_status"), "blocked")
+        self.assertEqual(
+            af_entry.get("keep_blocked_reason"),
+            "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger",
+        )
 
         # Keep-blocked safety-stop ledger entry with keep_blocked_reason.
         safety_entries = [
@@ -4952,17 +4961,12 @@ class RepeatedSafetyStopDiagnosticTests(unittest.TestCase):
         ]
         self.assertFalse(repeated_safety_proposals, "keep-blocked safety-stop must suppress its ready issue proposal")
 
-        # At most one bounded ready proposal per unresolved diagnostic class.
+        # The resolved activation-feedback blocker-review ledger suppresses bounded ready proposals.
         af_proposals = [
             item for item in plan["backlog_changes"]["create_issues"]
             if "unclassified activation skip or blocker" in item["title"].lower()
         ]
-        self.assertEqual(len(af_proposals), 1, "exactly one bounded proposal for unresolved activation-feedback-blocker-review")
-        proposal_body = af_proposals[0]["body"]
-        self.assertIn("Source schema:", proposal_body)
-        self.assertIn("Report key:", proposal_body)
-        self.assertIn("Privacy:", proposal_body)
-        self.assertIn("metadata-only", proposal_body)
+        self.assertFalse(af_proposals, "resolved activation-feedback blocker-review must not generate another ready proposal")
 
         # Pass diagnostics produce no proposals.
         pass_proposals = [

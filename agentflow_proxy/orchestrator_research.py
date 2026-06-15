@@ -304,6 +304,13 @@ _LOCAL_POLICY_REPRESENTATIONS = {
     "codex-app": ("codex_app", "codex_app_rules.yaml"),
 }
 
+_ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON = (
+    "activation-feedback-blocker-review-already-resolved-to-bounded-local-action-ledger"
+)
+_ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION = (
+    "keep-activation-feedback-blocker-review-blocked-until-new-sanitized-local-evidence"
+)
+
 _UNSUPPORTED_LOCAL_ACTION_FAMILIES = {
     "server-content-processing",
     "prompt-replacement",
@@ -949,9 +956,14 @@ def _diagnostic_ledger_stage(diagnostic: dict[str, Any]) -> dict[str, Any] | Non
             {
                 "lever": "activation-feedback",
                 "local_action_family": "activation-feedback",
-                "state": "blocked",
-                "next_action": "cut-ready-activation-feedback-issue-from-bounded-diagnostic",
-                "review_status": "review-required",
+                "state": "keep-blocked",
+                "next_action": _ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION,
+                "review_status": "resolved-to-keep-blocked",
+                "issue_worthy_status": "blocked",
+                "keep_blocked_reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
+                "next_state": "keep-blocked",
+                "next_state_reason": _ACTIVATION_FEEDBACK_BLOCKER_KEEP_BLOCKED_REASON,
+                "needed_resolution": ["new_sanitized_evidence", "bounded_local_action_issue"],
                 "durable_action_ledger_entry": True,
             }
         )
@@ -999,6 +1011,44 @@ def _diagnostic_ledger_stages(diagnostics: Iterable[dict[str, Any]]) -> list[dic
         seen.add(key)
         stages.append(stage)
     return stages
+
+
+def _activation_feedback_blocker_review_suppression(diagnostic: dict[str, Any]) -> dict[str, Any] | None:
+    stage = _diagnostic_ledger_stage(diagnostic)
+    if not stage:
+        return None
+    diagnostic_class = _normal_diagnostic_token(stage.get("diagnostic_class") or diagnostic.get("diagnostic_class"))
+    if diagnostic_class != "activation-feedback-blocker-review":
+        return None
+    keep_blocked_reason = str(stage.get("keep_blocked_reason") or "").strip()
+    if not keep_blocked_reason:
+        return None
+    return {
+        "diagnostic_class": diagnostic_class,
+        "reason": sanitize_value(stage.get("diagnostic_reason") or diagnostic.get("reason") or diagnostic_class),
+        "fingerprint": sanitize_value(stage.get("diagnostic_fingerprint") or _diagnostic_fingerprint(diagnostic_class)),
+        "suppression_kind": "durable-keep-blocked-ledger-record",
+        "keep_blocked_reason": sanitize_value(keep_blocked_reason),
+        "next_action": sanitize_value(stage.get("next_action") or _ACTIVATION_FEEDBACK_BLOCKER_NEXT_ACTION),
+    }
+
+
+def _without_suppressed_activation_feedback_blocker_review_diagnostics(
+    diagnostics: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    filtered: list[dict[str, Any]] = []
+    suppressed: list[dict[str, Any]] = []
+    suppressed_fingerprints: set[str] = set()
+    for diagnostic in diagnostics:
+        suppression = _activation_feedback_blocker_review_suppression(diagnostic)
+        if suppression is None:
+            filtered.append(diagnostic)
+            continue
+        fingerprint = str(suppression.get("fingerprint") or "")
+        if fingerprint not in suppressed_fingerprints:
+            suppressed_fingerprints.add(fingerprint)
+            suppressed.append(suppression)
+    return filtered, suppressed
 
 
 def _safety_stop_ledger_stage(group: dict[str, Any]) -> dict[str, Any] | None:
@@ -5359,7 +5409,7 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
     count = _to_int(top.get("count"))
     lifecycle_context = top.get("lifecycle_context") if isinstance(top.get("lifecycle_context"), dict) else {}
     ledger_stage = _diagnostic_ledger_stage(top) or {}
-    return _candidate(
+    candidate = _candidate(
         lever=str(top.get("source_lever") or "activation-feedback"),
         provider_surface_bucket="mixed",
         blocker=f"repeated-{top.get('diagnostic_class') or reason}",
@@ -5382,8 +5432,14 @@ def _diagnostic_candidate(diagnostics: list[dict[str, Any]]) -> dict[str, Any] |
         },
         confidence="medium" if count > 1 else "low",
         sequencing="File after direct cache/routing/crunch candidates unless the diagnostic is a safety stop or privacy blocker.",
+        safety_status="blocked" if ledger_stage.get("keep_blocked_reason") else "review-required",
         score=float(count) * 10.0,
     )
+    suppression = _activation_feedback_blocker_review_suppression(top)
+    if suppression is not None:
+        candidate["issue_generation_status"] = "suppressed-durable-keep-blocked-ledger-record"
+        candidate["issue_generation_suppression_reason"] = suppression["keep_blocked_reason"]
+    return candidate
 
 
 def _managed_recommendation_candidate(stats_summary: dict[str, Any]) -> dict[str, Any] | None:
@@ -7130,6 +7186,9 @@ def build_research_plan(
         diagnostics,
         activation_safety_stop_burndown,
     )
+    candidate_diagnostics, activation_feedback_suppressed_diagnostics = (
+        _without_suppressed_activation_feedback_blocker_review_diagnostics(candidate_diagnostics)
+    )
     optimization_candidates = _optimization_candidates(stats_summary=summary, diagnostics=candidate_diagnostics)
 
     ready_count = len(ready_issues)
@@ -7221,6 +7280,14 @@ def build_research_plan(
                 safety_stop_suppressed_diagnostics
             )
             proposal_suppression["keep_blocked_ledger_suppressed_count"] = len(safety_stop_suppressed_diagnostics)
+        if activation_feedback_suppressed_diagnostics:
+            proposal_suppression["suppressed"].extend(activation_feedback_suppressed_diagnostics[:20])
+            proposal_suppression["suppressed_count"] = _to_int(proposal_suppression.get("suppressed_count")) + len(
+                activation_feedback_suppressed_diagnostics
+            )
+            proposal_suppression["activation_feedback_keep_blocked_suppressed_count"] = len(
+                activation_feedback_suppressed_diagnostics
+            )
         create_issues = [_finalize_create_issue_proposal(proposal) for proposal in create_issues]
         next_backlog_milestone = _next_backlog_milestone(
             create_issues=create_issues,
