@@ -16,6 +16,8 @@ from agentflow_proxy.store import stable_json, utc_now
 SCHEMA = "agentflow.request_shape_rollups.v1"
 ROLLUP_ROW_SCHEMA = "agentflow.request_shape_rollup_row.v1"
 REPLAYABILITY_DRY_RUN_SCHEMA = "agentflow.request_shape_cache_replayability_dry_run.v1"
+REPLAY_BLOCKER_CLASSIFICATION_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification.v1"
+REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA = "agentflow.request_shape_cache_replay_blocker_classification_row.v1"
 REPLAY_CACHE_CANARY_ACTION_SCHEMA = "agentflow.request_shape_cache_replay_canary_action.v1"
 REPLAY_CACHE_CANARY_STAGE_SCHEMA = "agentflow.request_shape_cache_replay_canary_stage.v1"
 CRUNCH_OPPORTUNITY_DRY_RUN_SCHEMA = "agentflow.request_shape_crunch_opportunity_dry_run.v1"
@@ -2371,6 +2373,235 @@ def build_request_shape_cache_replayability_dry_run(
     }
 
 
+def _cache_replay_blocker_classification(blocker: str) -> tuple[str, str, str, str]:
+    code = public_label(blocker, "unknown")
+    if code in {"invalidation-evidence-missing", "unsafe-tool-calls-without-invalidation"}:
+        return (
+            "collect-invalidation-evidence",
+            "collect-cache-invalidation-evidence",
+            "blocked",
+            "cache",
+        )
+    if code in {"tools-present", "tool-call-cache-disabled"}:
+        return (
+            "keep-tool-cache-disabled",
+            "keep-tool-cache-disabled",
+            "blocked",
+            "cache",
+        )
+    if code in {"streaming-replay-not-supported", "unsupported-streaming-shape"}:
+        return (
+            "streaming-replay-support-needed",
+            "design-streaming-cache-replay-support",
+            "blocked",
+            "cache",
+        )
+    if code == "insufficient-repeat-evidence":
+        return (
+            "insufficient-repeat-evidence",
+            "collect-more-repeat-evidence",
+            "needs-evidence",
+            "cache",
+        )
+    return (
+        "unsupported-safety-shape",
+        "keep-cache-replay-noop",
+        "blocked",
+        "cache",
+    )
+
+
+def build_request_shape_cache_replay_blocker_classification_report(
+    cache_replayability_dry_run: dict[str, Any],
+    *,
+    limit: int = 25,
+) -> dict[str, Any]:
+    cohorts = [
+        cohort
+        for cohort in cache_replayability_dry_run.get("cohorts") or []
+        if isinstance(cohort, dict) and cohort.get("readiness") == "skipped"
+    ]
+    class_counts: dict[str, int] = {}
+    next_action_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    family_counts: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+
+    for cohort in cohorts:
+        row_count = _as_int(cohort.get("row_count"))
+        blockers = [
+            public_label(item, "unknown")
+            for item in cohort.get("blockers") or []
+            if public_label(item, "unknown") != "unknown"
+        ]
+        reason = public_label(cohort.get("reason"), "unknown")
+        if not blockers and reason != "unknown":
+            blockers = [reason]
+        classes: dict[str, dict[str, Any]] = {}
+        for blocker in blockers:
+            blocker_class, next_action, status, family = _cache_replay_blocker_classification(blocker)
+            _increment(blocker_counts, blocker, row_count)
+            _increment(class_counts, blocker_class, row_count)
+            _increment(next_action_counts, next_action, row_count)
+            _increment(status_counts, status, row_count)
+            _increment(family_counts, family, row_count)
+            classified = classes.setdefault(
+                blocker_class,
+                {
+                    "class": blocker_class,
+                    "next_action": next_action,
+                    "status": status,
+                    "local_action_family": family,
+                    "blockers": [],
+                },
+            )
+            classified["blockers"].append(blocker)
+
+        if not classes:
+            blocker_class, next_action, status, family = _cache_replay_blocker_classification(reason)
+            _increment(class_counts, blocker_class, row_count)
+            _increment(next_action_counts, next_action, row_count)
+            _increment(status_counts, status, row_count)
+            _increment(family_counts, family, row_count)
+            classes[blocker_class] = {
+                "class": blocker_class,
+                "next_action": next_action,
+                "status": status,
+                "local_action_family": family,
+                "blockers": [reason],
+            }
+
+        primary = sorted(
+            classes.values(),
+            key=lambda item: (
+                {
+                    "collect-invalidation-evidence": 0,
+                    "keep-tool-cache-disabled": 1,
+                    "streaming-replay-support-needed": 2,
+                    "insufficient-repeat-evidence": 3,
+                    "unsupported-safety-shape": 4,
+                }.get(str(item.get("class")), 99),
+                str(item.get("class")),
+            ),
+        )[0]
+        classified_blockers = [
+            {
+                **item,
+                "blockers": sorted(set(public_label(blocker, "unknown") for blocker in item.get("blockers") or [])),
+                "emits_cache_apply_action": False,
+                "requires_explicit_invalidation_safety_evidence": item.get("class") == "collect-invalidation-evidence",
+            }
+            for item in sorted(classes.values(), key=lambda item: str(item.get("class")))
+        ]
+        rows.append(
+            {
+                "schema": REPLAY_BLOCKER_CLASSIFICATION_ROW_SCHEMA,
+                "rank": 0,
+                "provider_family": public_label(cohort.get("provider_family"), "unknown"),
+                "source_surface": public_label(cohort.get("source_surface"), "unknown"),
+                "endpoint": public_label(cohort.get("endpoint"), "unknown"),
+                "category": public_label(cohort.get("category"), "unknown"),
+                "workflow_phase": public_label(cohort.get("workflow_phase"), "unknown"),
+                "stream": bool(cohort.get("stream")),
+                "has_tools": bool(cohort.get("has_tools")),
+                "cache_status": public_label(cohort.get("cache_status"), "unknown"),
+                "routing_status": public_label(cohort.get("routing_status"), "unknown"),
+                "text_bucket": public_label(cohort.get("text_bucket"), "unknown"),
+                "token_bucket": public_label(cohort.get("token_bucket"), "unknown"),
+                "row_count": row_count,
+                "projected_hits": _as_int(cohort.get("projected_hits")),
+                "projected_savings_usd": round(_as_float(cohort.get("projected_savings_usd")), 6),
+                "readiness": "blocked",
+                "reason": reason,
+                "blocker_codes": sorted(set(blockers)),
+                "blocker_class": primary.get("class"),
+                "next_action": primary.get("next_action"),
+                "local_action_family": primary.get("local_action_family"),
+                "classified_blockers": classified_blockers,
+                "emits_cache_apply_action": False,
+                "requires_explicit_invalidation_safety_evidence": any(
+                    item.get("requires_explicit_invalidation_safety_evidence")
+                    for item in classified_blockers
+                ),
+                "aggregate_only": True,
+                "privacy": _replayability_privacy(),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            {
+                "collect-invalidation-evidence": 5,
+                "keep-tool-cache-disabled": 4,
+                "streaming-replay-support-needed": 3,
+                "insufficient-repeat-evidence": 2,
+                "unsupported-safety-shape": 1,
+            }.get(str(item.get("blocker_class")), 0),
+            _as_int(item.get("row_count")),
+            str(item.get("endpoint")),
+            str(item.get("category")),
+        ),
+        reverse=True,
+    )
+    capped_limit = max(1, min(_as_int(limit) or 25, 1000))
+    for rank, row in enumerate(rows[:capped_limit], start=1):
+        row["rank"] = rank
+
+    action_rows = [row for row in rows if bool(row.get("emits_cache_apply_action"))]
+    unsafe_apply_rows = [
+        row
+        for row in action_rows
+        if not bool(row.get("requires_explicit_invalidation_safety_evidence"))
+    ]
+    class_breakdown = _breakdown(class_counts)
+    top_class = class_breakdown[0]["value"] if class_breakdown else None
+    next_action_breakdown = _breakdown(next_action_counts)
+    top_next_action = next_action_breakdown[0]["value"] if next_action_breakdown else None
+    return {
+        "schema": REPLAY_BLOCKER_CLASSIFICATION_SCHEMA,
+        "status": "classified" if rows else "no-skipped-cache-replay-cohorts",
+        "summary": {
+            "skipped_cohort_count": len(rows),
+            "skipped_rows": sum(_as_int(row.get("row_count")) for row in rows),
+            "classified_blocker_count": sum(
+                len(row.get("classified_blockers") or [])
+                for row in rows
+            ),
+            "collect_invalidation_evidence_rows": class_counts.get("collect-invalidation-evidence", 0),
+            "keep_tool_cache_disabled_rows": class_counts.get("keep-tool-cache-disabled", 0),
+            "streaming_replay_support_needed_rows": class_counts.get("streaming-replay-support-needed", 0),
+            "insufficient_repeat_evidence_rows": class_counts.get("insufficient-repeat-evidence", 0),
+            "unsupported_safety_shape_rows": class_counts.get("unsupported-safety-shape", 0),
+            "top_blocker_class": top_class,
+            "top_next_action": top_next_action,
+            "cache_apply_action_count": len(action_rows),
+            "unsafe_cache_apply_action_count": len(unsafe_apply_rows),
+            "provider_calls_made": 0,
+            "cache_entries_written": 0,
+            "policy_files_written": False,
+        },
+        "class_breakdown": class_breakdown,
+        "next_action_breakdown": next_action_breakdown,
+        "status_breakdown": _breakdown(status_counts),
+        "local_action_family_breakdown": _breakdown(family_counts),
+        "blocker_breakdown": _breakdown(blocker_counts),
+        "classifications": rows[:capped_limit],
+        "acceptance": {
+            "has_tool_blocker_class": class_counts.get("keep-tool-cache-disabled", 0) > 0,
+            "has_invalidation_evidence_class": class_counts.get("collect-invalidation-evidence", 0) > 0,
+            "has_streaming_support_class": class_counts.get("streaming-replay-support-needed", 0) > 0,
+            "has_insufficient_repeat_class": class_counts.get("insufficient-repeat-evidence", 0) > 0,
+            "has_unsupported_safety_shape_class": class_counts.get("unsupported-safety-shape", 0) > 0,
+            "no_cache_apply_without_invalidation_safety_evidence": len(unsafe_apply_rows) == 0,
+            "emits_no_cache_apply_actions": len(action_rows) == 0,
+            "metadata_only": True,
+            "aggregate_only": True,
+        },
+        "privacy": _replayability_privacy(),
+    }
+
+
 def _candidate_work_classes(
     *,
     row_count: int,
@@ -2967,6 +3198,10 @@ def build_request_shape_rollups_report(
             rows=persistable,
         )
     cache_replayability_dry_run = build_request_shape_cache_replayability_dry_run(rollups, limit=25)
+    cache_replay_blocker_classification = build_request_shape_cache_replay_blocker_classification_report(
+        cache_replayability_dry_run,
+        limit=25,
+    )
     crunch_opportunity_dry_run = build_request_shape_crunch_opportunity_dry_run(rollups, limit=25)
     crunch_canary_impact = build_request_shape_crunch_canary_impact_report(impact_rows)
     follow_up_candidates = build_request_shape_follow_up_candidates(rollups, limit=10)
@@ -3000,6 +3235,7 @@ def build_request_shape_rollups_report(
         "blocker_code_breakdown": _breakdown(blocker_counts),
         "follow_up_candidates": follow_up_candidates,
         "cache_replayability_dry_run": cache_replayability_dry_run,
+        "cache_replay_blocker_classification": cache_replay_blocker_classification,
         "crunch_opportunity_dry_run": crunch_opportunity_dry_run,
         "crunch_canary_impact": crunch_canary_impact,
         "rollups": rollups,

@@ -404,6 +404,7 @@ class RequestShapeRollupTests(unittest.TestCase):
 
         report = build_request_shape_rollups_report(self.store, limit=20, persist=False, run_id="replay-dry-run")
         dry_run = report["cache_replayability_dry_run"]
+        classification = report["cache_replay_blocker_classification"]
 
         self.assertEqual(dry_run["schema"], "agentflow.request_shape_cache_replayability_dry_run.v1")
         self.assertEqual(dry_run["summary"]["replay_ready_cohort_count"], 1)
@@ -438,6 +439,47 @@ class RequestShapeRollupTests(unittest.TestCase):
         self.assertFalse(dry_run["privacy"]["cache_keys_included"])
         self.assertFalse(dry_run["privacy"]["request_fingerprints_included"])
         self.assertFalse(dry_run["privacy"]["individual_candidate_ids_included"])
+
+        self.assertEqual(classification["schema"], "agentflow.request_shape_cache_replay_blocker_classification.v1")
+        self.assertEqual(classification["status"], "classified")
+        self.assertEqual(classification["summary"]["skipped_cohort_count"], 3)
+        classes = {item["value"]: item["count"] for item in classification["class_breakdown"]}
+        self.assertGreater(classes["collect-invalidation-evidence"], 0)
+        self.assertGreater(classes["keep-tool-cache-disabled"], 0)
+        self.assertGreater(classes["streaming-replay-support-needed"], 0)
+        self.assertGreater(classes["insufficient-repeat-evidence"], 0)
+        self.assertGreater(classes["unsupported-safety-shape"], 0)
+        next_actions = {item["value"] for item in classification["next_action_breakdown"]}
+        self.assertIn("collect-cache-invalidation-evidence", next_actions)
+        self.assertIn("keep-tool-cache-disabled", next_actions)
+        self.assertIn("design-streaming-cache-replay-support", next_actions)
+        self.assertIn("collect-more-repeat-evidence", next_actions)
+        self.assertIn("keep-cache-replay-noop", next_actions)
+        self.assertEqual(classification["summary"]["cache_apply_action_count"], 0)
+        self.assertEqual(classification["summary"]["unsafe_cache_apply_action_count"], 0)
+        self.assertTrue(classification["acceptance"]["has_tool_blocker_class"])
+        self.assertTrue(classification["acceptance"]["has_invalidation_evidence_class"])
+        self.assertTrue(classification["acceptance"]["has_streaming_support_class"])
+        self.assertTrue(classification["acceptance"]["has_insufficient_repeat_class"])
+        self.assertTrue(classification["acceptance"]["has_unsupported_safety_shape_class"])
+        self.assertTrue(classification["acceptance"]["no_cache_apply_without_invalidation_safety_evidence"])
+        self.assertTrue(classification["acceptance"]["emits_no_cache_apply_actions"])
+        self.assertTrue(classification["privacy"]["metadata_only"])
+        self.assertTrue(classification["privacy"]["aggregate_only"])
+        self.assertFalse(classification["privacy"]["cache_keys_included"])
+        self.assertFalse(classification["privacy"]["request_fingerprints_included"])
+        self.assertFalse(classification["privacy"]["individual_candidate_ids_included"])
+        rendered_classification = json.dumps(classification, sort_keys=True)
+        for forbidden in (
+            "raw prompt must not leak",
+            "provider body must not leak",
+            "raw response must not leak",
+            "raw-session-id-must-not-leak",
+            "raw-cache-key-must-not-leak",
+            "raw-request-fingerprint-must-not-leak",
+            "/tmp/private/source.py",
+        ):
+            self.assertNotIn(forbidden, rendered_classification)
 
     def test_cache_replay_canary_stage_report_targets_openai_responses_replay_ready_cohort(self) -> None:
         for cost in (0.01, 0.03, 0.02):
